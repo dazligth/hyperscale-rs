@@ -391,6 +391,33 @@ fn cross_shard_compound_provisions_and_exec_cert_fetch_fallback() {
     );
 }
 
+/// Time-bounded fault: `provisions.broadcast` drops during a 5s window
+/// shortly after the cross-shard tx is submitted, then the fault lifts.
+/// The cross-shard tx falls inside the fault window and must recover via
+/// the fetch fallback. Once the fault lifts, subsequent provision
+/// broadcasts flow normally.
+///
+/// Exercises the `during(range)` matcher on `FaultInjector` (untested in
+/// integration prior to this) and confirms the system gracefully resumes
+/// normal flow after a transient gossip outage.
+#[test]
+fn cross_shard_provisions_recovers_after_transient_broadcast_outage() {
+    run_cross_shard_fault_scenario(
+        |runner| {
+            let now = runner.now();
+            vec![
+                runner
+                    .network_mut()
+                    .fault()
+                    .drop_type("provisions.broadcast")
+                    .during(now..now + Duration::from_secs(5))
+                    .install(),
+            ]
+        },
+        &["provision"],
+    );
+}
+
 /// Cross-shard provisions fetch under unreliable RPC: `provisions.broadcast`
 /// is dropped 100% (forcing fetch as the only recovery path) AND
 /// `provision.request` is dropped 50% (so each fetch attempt has a
