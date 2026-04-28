@@ -41,7 +41,7 @@ pub enum EventPriority {
 ///   (sync, fetch, validation pipeline) before potentially converting them
 ///   into `ProtocolEvent`s.
 #[allow(clippy::large_enum_variant)] // TODO: Box ProtocolEvent
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, strum::IntoStaticStr)]
 pub enum NodeInput {
     /// Pass-through to state machine. `IoLoop` extracts the `ProtocolEvent` and
     /// passes it to `state.handle()` directly.
@@ -288,30 +288,15 @@ impl NodeInput {
     }
 
     /// Get the event type name for telemetry.
+    ///
+    /// Variant names come from the `IntoStaticStr` derive; `Protocol` delegates
+    /// to the inner `ProtocolEvent::type_name` so protocol telemetry is
+    /// attributable per inner variant.
     #[must_use]
     pub fn type_name(&self) -> &'static str {
         match self {
             Self::Protocol(pe) => pe.type_name(),
-            Self::SubmitTransaction { .. } => "SubmitTransaction",
-            Self::SyncBlockResponseReceived { .. } => "SyncBlockResponseReceived",
-            Self::SyncBlockFetchFailed { .. } => "SyncBlockFetchFailed",
-            Self::SyncBlockTopUpReceived { .. } => "SyncBlockTopUpReceived",
-            Self::SyncBlockTopUpFailed { .. } => "SyncBlockTopUpFailed",
-            Self::FetchTick => "FetchTick",
-            Self::FetchTransactionsFailed { .. } => "FetchTransactionsFailed",
-            Self::TransactionReceived { .. } => "TransactionReceived",
-            Self::TransactionValidated { .. } => "TransactionValidated",
-            Self::TransactionValidationsFailed { .. } => "TransactionValidationsFailed",
-            Self::CommittedHeaderValidated { .. } => "CommittedHeaderValidated",
-            Self::CommittedBlockGossipReceived { .. } => "CommittedBlockGossipReceived",
-            Self::ProvisionsFetchFailed { .. } => "ProvisionsFetchFailed",
-            Self::ExecutionCertsReceived { .. } => "ExecutionCertsReceived",
-            Self::ExecCertFetchFailed { .. } => "ExecCertFetchFailed",
-            Self::HeaderFetchFailed { .. } => "HeaderFetchFailed",
-            Self::LocalProvisionReceived { .. } => "LocalProvisionReceived",
-            Self::LocalProvisionsFetchFailed { .. } => "LocalProvisionsFetchFailed",
-            Self::FinalizedWaveReceived { .. } => "FinalizedWaveReceived",
-            Self::FinalizedWaveFetchFailed { .. } => "FinalizedWaveFetchFailed",
+            other => other.into(),
         }
     }
 }
