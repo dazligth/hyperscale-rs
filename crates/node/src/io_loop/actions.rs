@@ -3,9 +3,12 @@
 use super::IoLoop;
 use super::TimerOp;
 use super::block_commit::{AccumulateDecision, PendingCommit};
-use crate::protocol::fetch::FetchInput;
-use crate::protocol::fetch_instances;
-use crate::protocol::sync::SyncInput;
+use crate::io_loop::protocol::binding::{
+    ExecCertBinding, FinalizedWaveBinding, HeaderBinding, LocalProvisionBinding, ProvisionBinding,
+    TransactionBinding,
+};
+use crate::io_loop::protocol::fetch::FetchInput;
+use crate::io_loop::protocol::sync::SyncInput;
 use hyperscale_core::{
     Action, ActionContext, CommitSource, FetchRequest, NodeInput, PreparedBlock, ProtocolEvent,
     StateMachine,
@@ -146,15 +149,7 @@ where
     // arm, with no architectural payoff.
 
     fn handle_continuation(&mut self, pe: ProtocolEvent) {
-        // Each fetch instance owns its own admission predicate; the
-        // arm just dispatches the event through them. Adding a new
-        // payload is one new helper + one line here.
-        fetch_instances::apply_transactions_admission(&mut self.transaction_fetch, &pe);
-        fetch_instances::apply_local_provisions_admission(&mut self.local_provision_fetch, &pe);
-        fetch_instances::apply_finalized_waves_admission(&mut self.finalized_wave_fetch, &pe);
-        fetch_instances::apply_provisions_admission(&mut self.provision_fetch, &pe);
-        fetch_instances::apply_exec_certs_admission(&mut self.exec_cert_fetch, &pe);
-        fetch_instances::apply_headers_admission(&mut self.header_fetch, &pe);
+        self.protocols.apply_admission(&pe);
 
         // Serving-cache insertion is io_loop's own state, not an
         // instance concern — keep it here.
@@ -388,7 +383,8 @@ where
             AccumulateDecision::Accepted { height, notify_now } => {
                 debug!(height = height.0, "Block committed");
                 let outputs = self
-                    .sync_protocol
+                    .protocols
+                    .sync
                     .handle(SyncInput::BlockCommitted { height });
                 self.process_sync_outputs(outputs);
                 if let Some((block, qc)) = notify_now {
@@ -414,7 +410,7 @@ where
                 target_height,
                 target_hash,
             } => {
-                let outputs = self.sync_protocol.handle(SyncInput::StartSync {
+                let outputs = self.protocols.sync.handle(SyncInput::StartSync {
                     target_height,
                     target_hash,
                 });
@@ -425,89 +421,45 @@ where
         }
     }
 
-    /// Dispatch a typed fetch request to the corresponding instance binding.
+    /// Dispatch a typed fetch request to the corresponding binding.
     ///
-    /// `Request` never emits `Send`s on its own — it only adds the ids to the
-    /// pending set; chunks fan out under the per-tick cap. Each arm therefore
-    /// feeds `Request`, then drives `Tick` and dispatches its outputs through
-    /// the per-instance processor. The tick timer is refreshed once at the end.
-    #[allow(clippy::too_many_lines)] // single dispatch, one arm per FetchRequest variant
+    /// `Request` never emits `Send`s on its own — it only adds the ids to
+    /// the pending set; chunks fan out under the per-tick cap. Each arm
+    /// translates the variant payload into ids+peers and delegates to
+    /// `drive_fetch::<B>`. The tick timer is refreshed once at the end.
     fn process_fetch_request(&mut self, req: FetchRequest) {
         match req {
             FetchRequest::Transactions { ids, peers } => {
-                self.transaction_fetch
-                    .handle(FetchInput::Request { ids, peers });
-                let outputs = self.transaction_fetch.handle(FetchInput::Tick);
-                self.process_transaction_fetch_outputs(outputs);
+                self.drive_fetch::<TransactionBinding>(FetchInput::Request { ids, peers });
             }
             FetchRequest::LocalProvisions { ids, peers } => {
-                self.local_provision_fetch
-                    .handle(FetchInput::Request { ids, peers });
-                let outputs = self.local_provision_fetch.handle(FetchInput::Tick);
-                self.process_local_provision_fetch_outputs(outputs);
+                self.drive_fetch::<LocalProvisionBinding>(FetchInput::Request { ids, peers });
             }
             FetchRequest::FinalizedWaves { ids, peers } => {
-                self.finalized_wave_fetch
-                    .handle(FetchInput::Request { ids, peers });
-                let outputs = self.finalized_wave_fetch.handle(FetchInput::Tick);
-                self.process_finalized_wave_fetch_outputs(outputs);
+                self.drive_fetch::<FinalizedWaveBinding>(FetchInput::Request { ids, peers });
             }
             FetchRequest::RemoteProvisions {
                 source_shard,
                 block_height,
                 peers,
-            } => {
-                debug_assert!(
-                    peers.preferred.is_some() || !peers.peers.is_empty(),
-                    "RemoteProvisions for shard {} height {} has no peers — \
-                     was the action enriched by NodeStateMachine?",
-                    source_shard.0,
-                    block_height.0,
-                );
-                debug!(
-                    source_shard = source_shard.0,
-                    block_height = block_height.0,
-                    peer_count = peers.peers.len() + usize::from(peers.preferred.is_some()),
-                    "Requesting missing provisions from source shard"
-                );
-                self.provision_fetch.handle(FetchInput::Request {
-                    ids: vec![(source_shard, block_height)],
-                    peers,
-                });
-                let outputs = self.provision_fetch.handle(FetchInput::Tick);
-                self.process_provision_fetch_outputs(outputs);
-            }
+            } => self.drive_fetch::<ProvisionBinding>(FetchInput::Request {
+                ids: vec![(source_shard, block_height)],
+                peers,
+            }),
             FetchRequest::ExecutionCerts { wave_id, peers } => {
-                debug!(
-                    wave = %wave_id,
-                    peer_count = peers.peers.len() + usize::from(peers.preferred.is_some()),
-                    "Requesting missing execution cert from source shard"
-                );
-                self.exec_cert_fetch.handle(FetchInput::Request {
+                self.drive_fetch::<ExecCertBinding>(FetchInput::Request {
                     ids: vec![wave_id],
                     peers,
                 });
-                let outputs = self.exec_cert_fetch.handle(FetchInput::Tick);
-                self.process_exec_cert_fetch_outputs(outputs);
             }
             FetchRequest::RemoteHeader {
                 source_shard,
                 from_height,
                 peers,
-            } => {
-                debug!(
-                    source_shard = source_shard.0,
-                    from_height = from_height.0,
-                    peer_count = peers.peers.len() + usize::from(peers.preferred.is_some()),
-                    "Requesting missing committed block header from source shard"
-                );
-                self.header_fetch.handle(FetchInput::Request {
-                    ids: vec![(source_shard, from_height)],
-                    peers,
-                });
-                let outputs = self.header_fetch.handle(FetchInput::Tick);
-                self.process_header_fetch_outputs(outputs);
-            }
+            } => self.drive_fetch::<HeaderBinding>(FetchInput::Request {
+                ids: vec![(source_shard, from_height)],
+                peers,
+            }),
         }
 
         self.update_fetch_tick_timer();

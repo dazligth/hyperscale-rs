@@ -24,6 +24,7 @@ mod block_commit;
 mod caches;
 mod network_handlers;
 mod phase_times;
+pub mod protocol;
 mod protocols;
 mod verify;
 
@@ -32,12 +33,13 @@ use crate::batch_accumulator::BatchAccumulator;
 use crate::config::NodeConfig;
 use crate::io_loop::block_commit::BlockCommitCoordinator;
 use crate::io_loop::caches::SharedCaches;
-use crate::protocol::fetch::{FetchConfig, FetchInput};
-use crate::protocol::fetch_instances::{
-    ExecCertFetch, FinalizedWaveFetch, HeaderFetch, LocalProvisionFetch, ProvisionFetch,
-    TransactionFetch,
+use crate::io_loop::protocol::binding::{
+    ExecCertBinding, FinalizedWaveBinding, HeaderBinding, LocalProvisionBinding, ProvisionBinding,
+    TransactionBinding,
 };
-use crate::protocol::sync::{SyncInput, SyncProtocol, SyncStatus};
+use crate::io_loop::protocol::fetch::FetchInput;
+use crate::io_loop::protocol::host::ProtocolHost;
+use crate::io_loop::protocol::sync::{SyncInput, SyncStatus};
 use arc_swap::ArcSwap;
 use hyperscale_core::{Action, NodeInput, ProtocolEvent, StateMachine, TimerId};
 use hyperscale_dispatch::{Dispatch, DispatchPool};
@@ -243,33 +245,8 @@ where
     /// shared with external RPC consumers.
     caches: SharedCaches,
 
-    // Sync protocol
-    sync_protocol: SyncProtocol,
-
-    /// Elided sync responses awaiting a top-up. Keyed by block height.
-    /// Populated when rehydration misses; drained on topup response or
-    /// topup failure. Bodies captured by the closure we queue to the
-    /// network are looked up here.
-    pending_block_topups:
-        HashMap<BlockHeight, Box<hyperscale_messages::response::ElidedCertifiedBlock>>,
-
-    // Per-block transaction fetch (intra-shard, pinned to proposer).
-    transaction_fetch: TransactionFetch,
-
-    // Per-block local-provision fetch (intra-shard, pinned to proposer).
-    local_provision_fetch: LocalProvisionFetch,
-
-    // Per-block finalized-wave fetch (intra-shard, rotates through committee).
-    finalized_wave_fetch: FinalizedWaveFetch,
-
-    // Cross-shard provision fetch (rotates through source committee).
-    provision_fetch: ProvisionFetch,
-
-    // Cross-shard execution-cert fetch (rotates through source committee).
-    exec_cert_fetch: ExecCertFetch,
-
-    // Cross-shard committed-block-header fetch (rotates through source committee).
-    header_fetch: HeaderFetch,
+    /// Sync + per-payload fetch protocols.
+    protocols: ProtocolHost,
 
     // Transaction validation
     tx_validator: Arc<TransactionValidation>,
@@ -324,36 +301,7 @@ where
         let validator_id = topo.local_validator_id();
         let initial_persisted_height = state.bft().committed_height();
         let b = &config.batch;
-        let sync_protocol = SyncProtocol::new(config.sync.clone());
-        let transaction_fetch =
-            TransactionFetch::new("transaction", config.transaction_fetch.clone());
-        let local_provision_fetch = LocalProvisionFetch::new(
-            "local_provision",
-            FetchConfig {
-                max_in_flight: 64,
-                max_ids_per_request: 16,
-                parallel_chunks_per_tick: 2,
-            },
-        );
-        let finalized_wave_fetch = FinalizedWaveFetch::new(
-            "finalized_wave",
-            FetchConfig {
-                max_in_flight: 8,
-                max_ids_per_request: 4,
-                parallel_chunks_per_tick: 1,
-            },
-        );
-        let provision_fetch = ProvisionFetch::new("provision", config.provision_fetch.clone());
-        let exec_cert_fetch = ExecCertFetch::new("exec_cert", config.exec_cert_fetch.clone());
-        // Header fetches are scope-id (one per height); single-id chunks suffice.
-        let header_fetch = HeaderFetch::new(
-            "header",
-            FetchConfig {
-                max_in_flight: 16,
-                max_ids_per_request: 1,
-                parallel_chunks_per_tick: 4,
-            },
-        );
+        let protocols = ProtocolHost::new(&config);
         let storage = Arc::new(storage);
         let pending_chain = Arc::new(hyperscale_storage::PendingChain::new(Arc::clone(&storage)));
         let caches = SharedCaches::new(Arc::clone(state.provisions().store()));
@@ -376,13 +324,7 @@ where
             tx_validator,
             pending_validation: HashSet::new(),
             locally_submitted: HashSet::new(),
-            sync_protocol,
-            transaction_fetch,
-            local_provision_fetch,
-            finalized_wave_fetch,
-            provision_fetch,
-            exec_cert_fetch,
-            header_fetch,
+            protocols,
             validation_batch: BatchAccumulator::new(b.tx_validation_max, b.tx_validation_window),
             committed_header_batch: BatchAccumulator::new(
                 b.committed_header_max,
@@ -393,7 +335,6 @@ where
             emitted_statuses: Vec::new(),
             actions_generated: 0,
             pending_timer_ops: Vec::new(),
-            pending_block_topups: HashMap::new(),
         }
     }
 
@@ -614,8 +555,8 @@ where
                 // Evict any buffered topup state keyed on this height —
                 // the outer fetch is being re-attempted, and the topup
                 // round we scheduled for it is no longer relevant.
-                self.pending_block_topups.remove(&height);
-                let outputs = self.sync_protocol.handle(SyncInput::BlockFetchFailed {
+                self.protocols.pending_block_topups.remove(&height);
+                let outputs = self.protocols.sync.handle(SyncInput::BlockFetchFailed {
                     height,
                     now: std::time::Instant::now(),
                 });
@@ -624,7 +565,7 @@ where
             }
 
             NodeInput::SyncBlockTopUpReceived { height, response } => {
-                let Some(elided) = self.pending_block_topups.remove(&height) else {
+                let Some(elided) = self.protocols.pending_block_topups.remove(&height) else {
                     // Topup arrived after the pending state was already
                     // evicted (e.g. the outer fetch was retried and
                     // delivered first). Silently drop.
@@ -651,7 +592,7 @@ where
             }
 
             NodeInput::SyncBlockTopUpFailed { height } => {
-                self.pending_block_topups.remove(&height);
+                self.protocols.pending_block_topups.remove(&height);
                 tracing::warn!(
                     height = height.0,
                     "Sync: topup request failed, refetching block"
@@ -672,45 +613,28 @@ where
             }
 
             NodeInput::FetchTransactionsFailed { hashes } => {
-                self.transaction_fetch
-                    .handle(FetchInput::Failed { ids: hashes });
-                // Tick to retry pending fetches.
-                let tick_outputs = self.transaction_fetch.handle(FetchInput::Tick);
-                self.process_transaction_fetch_outputs(tick_outputs);
+                self.drive_fetch::<TransactionBinding>(FetchInput::Failed { ids: hashes });
             }
 
             NodeInput::FetchTick => {
                 // Tick every fetch protocol. Per-payload bindings drain via
-                // `apply_admission` on canonical admission events; the scope
-                // protocols still evict abandoned scopes via predicates.
+                // `apply_admission` on canonical admission events; cross-shard
+                // provisions also evict abandoned scopes via a predicate.
                 let now = std::time::Instant::now();
-
-                // Promote any sync heights whose backoff has elapsed.
-                let outputs = self.sync_protocol.handle(SyncInput::Tick { now });
+                let outputs = self.protocols.sync_tick(now);
                 self.process_sync_outputs(outputs);
 
-                let outputs = self.transaction_fetch.handle(FetchInput::Tick);
-                self.process_transaction_fetch_outputs(outputs);
+                self.drive_fetch::<TransactionBinding>(FetchInput::Tick);
+                self.drive_fetch::<LocalProvisionBinding>(FetchInput::Tick);
+                self.drive_fetch::<FinalizedWaveBinding>(FetchInput::Tick);
 
-                let outputs = self.local_provision_fetch.handle(FetchInput::Tick);
-                self.process_local_provision_fetch_outputs(outputs);
-
-                let outputs = self.finalized_wave_fetch.handle(FetchInput::Tick);
-                self.process_finalized_wave_fetch_outputs(outputs);
-
-                self.provision_fetch.evict_abandoned(|id| {
-                    crate::protocol::fetch_instances::provisions_is_abandoned(&self.state, id)
+                self.protocols.provision.evict_abandoned(|id| {
+                    crate::io_loop::protocol::binding::provisions_is_abandoned(&self.state, id)
                 });
-                let outputs = self.provision_fetch.handle(FetchInput::Tick);
-                self.process_provision_fetch_outputs(outputs);
+                self.drive_fetch::<ProvisionBinding>(FetchInput::Tick);
 
-                let outputs = self.exec_cert_fetch.handle(FetchInput::Tick);
-                self.process_exec_cert_fetch_outputs(outputs);
-
-                // Header fetch drains via `Continuation(RemoteHeaderAdmitted)`
-                // through `apply_admission`.
-                let outputs = self.header_fetch.handle(FetchInput::Tick);
-                self.process_header_fetch_outputs(outputs);
+                self.drive_fetch::<ExecCertBinding>(FetchInput::Tick);
+                self.drive_fetch::<HeaderBinding>(FetchInput::Tick);
 
                 self.update_fetch_tick_timer();
             }
@@ -720,12 +644,9 @@ where
                 source_shard,
                 block_height,
             } => {
-                self.provision_fetch.handle(FetchInput::Failed {
+                self.drive_fetch::<ProvisionBinding>(FetchInput::Failed {
                     ids: vec![(source_shard, block_height)],
                 });
-                // Tick to re-issue immediately; network handles peer rotation.
-                let tick_outputs = self.provision_fetch.handle(FetchInput::Tick);
-                self.process_provision_fetch_outputs(tick_outputs);
                 self.update_fetch_tick_timer();
             }
 
@@ -741,10 +662,7 @@ where
             }
 
             NodeInput::ExecCertFetchFailed { hashes } => {
-                self.exec_cert_fetch
-                    .handle(FetchInput::Failed { ids: hashes });
-                let tick_outputs = self.exec_cert_fetch.handle(FetchInput::Tick);
-                self.process_exec_cert_fetch_outputs(tick_outputs);
+                self.drive_fetch::<ExecCertBinding>(FetchInput::Failed { ids: hashes });
                 self.update_fetch_tick_timer();
             }
 
@@ -753,12 +671,9 @@ where
                 source_shard,
                 from_height,
             } => {
-                self.header_fetch.handle(FetchInput::Failed {
+                self.drive_fetch::<HeaderBinding>(FetchInput::Failed {
                     ids: vec![(source_shard, from_height)],
                 });
-                // Tick to re-issue immediately; network handles peer rotation.
-                let tick_outputs = self.header_fetch.handle(FetchInput::Tick);
-                self.process_header_fetch_outputs(tick_outputs);
                 self.update_fetch_tick_timer();
             }
 
@@ -803,7 +718,7 @@ where
                 missing_hashes,
             } => {
                 if !missing_hashes.is_empty() {
-                    self.local_provision_fetch.handle(FetchInput::Failed {
+                    self.protocols.local_provision.handle(FetchInput::Failed {
                         ids: missing_hashes,
                     });
                 }
@@ -816,10 +731,7 @@ where
             }
 
             NodeInput::LocalProvisionsFetchFailed { hashes } => {
-                self.local_provision_fetch
-                    .handle(FetchInput::Failed { ids: hashes });
-                let tick_outputs = self.local_provision_fetch.handle(FetchInput::Tick);
-                self.process_local_provision_fetch_outputs(tick_outputs);
+                self.drive_fetch::<LocalProvisionBinding>(FetchInput::Failed { ids: hashes });
                 self.update_fetch_tick_timer();
             }
 
@@ -857,10 +769,7 @@ where
             }
 
             NodeInput::FinalizedWaveFetchFailed { hashes } => {
-                self.finalized_wave_fetch
-                    .handle(FetchInput::Failed { ids: hashes });
-                let tick_outputs = self.finalized_wave_fetch.handle(FetchInput::Tick);
-                self.process_finalized_wave_fetch_outputs(tick_outputs);
+                self.drive_fetch::<FinalizedWaveBinding>(FetchInput::Failed { ids: hashes });
                 self.update_fetch_tick_timer();
             }
 
@@ -989,9 +898,8 @@ where
         let bft_stats = self.state.bft().stats();
         let mempool = self.state.mempool();
         let contention = mempool.lock_contention_stats();
-        let fetch_in_flight = self.transaction_fetch.in_flight_count();
-        let fetch_pending_blocks = self.transaction_fetch.pending_count();
-        let sync_status = self.sync_protocol.status();
+        let proto = self.protocols.metrics();
+        let sync_status = &proto.sync_status;
 
         let bft_mem = self.state.bft().memory_stats();
         let exec_mem = self.state.execution().memory_stats();
@@ -1007,14 +915,14 @@ where
             contention_ratio: contention.contention_ratio(),
             in_flight: mempool.in_flight(),
             backpressure_active: mempool.at_in_flight_limit(),
-            blocks_behind: self.sync_protocol.blocks_behind(),
-            is_syncing: self.sync_protocol.is_syncing(),
-            fetch_transaction: fetch_in_flight,
-            fetch_provision: self.provision_fetch.in_flight_count(),
-            fetch_local_provision: self.local_provision_fetch.in_flight_count(),
-            fetch_exec_cert: self.exec_cert_fetch.in_flight_count(),
-            fetch_header: self.header_fetch.in_flight_count(),
-            fetch_finalized_wave: self.finalized_wave_fetch.in_flight_count(),
+            blocks_behind: self.protocols.sync.blocks_behind(),
+            is_syncing: self.protocols.sync.is_syncing(),
+            fetch_transaction: proto.transaction_in_flight,
+            fetch_provision: proto.provision_in_flight,
+            fetch_local_provision: proto.local_provision_in_flight,
+            fetch_exec_cert: proto.exec_cert_in_flight,
+            fetch_header: proto.header_in_flight,
+            fetch_finalized_wave: proto.finalized_wave_in_flight,
             memory: metrics::MemoryMetrics {
                 // BFT
                 bft_pending_blocks: bft_mem.pending_blocks,
@@ -1084,12 +992,12 @@ where
                 node_committed_header_batch: self.committed_header_batch.len(),
                 node_sync_queued_heights: sync_status.queued_heights,
                 node_sync_in_flight_fetches: sync_status.pending_fetches,
-                node_tx_fetch_blocks: fetch_pending_blocks,
-                node_local_provision_fetch_pending: self.local_provision_fetch.pending_count(),
-                node_finalized_wave_fetch_pending: self.finalized_wave_fetch.pending_count(),
-                node_provision_fetch_pending: self.provision_fetch.pending_count(),
-                node_exec_cert_fetch_pending: self.exec_cert_fetch.pending_count(),
-                node_header_fetch_pending: self.header_fetch.pending_count(),
+                node_tx_fetch_blocks: proto.transaction_pending,
+                node_local_provision_fetch_pending: proto.local_provision_pending,
+                node_finalized_wave_fetch_pending: proto.finalized_wave_pending,
+                node_provision_fetch_pending: proto.provision_pending,
+                node_exec_cert_fetch_pending: proto.exec_cert_pending,
+                node_header_fetch_pending: proto.header_pending,
                 // Storage — filled in by record_metrics off-thread.
                 rocksdb_block_cache_usage_bytes: 0,
                 rocksdb_memtable_usage_bytes: 0,
@@ -1122,7 +1030,7 @@ where
             committed_height: self.state.bft().committed_height(),
             view: self.state.bft().view().0,
             state_root,
-            sync: self.sync_protocol.status(),
+            sync: self.protocols.sync.status(),
             mempool_pending: pending,
             mempool_in_flight: in_flight,
             mempool_total: mempool.len(),
