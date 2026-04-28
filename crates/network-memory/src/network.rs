@@ -6,6 +6,7 @@
 #![allow(clippy::cast_possible_truncation)]
 
 use crate::NodeIndex;
+use crate::fault::{Decision, FaultBuilder, FaultInjector, MessageContext, Tier};
 use crate::sim_network::{
     BroadcastTarget, OutboxEntry, PendingNotification, PendingRequest, SimNetworkAdapter,
 };
@@ -62,6 +63,8 @@ pub struct FulfillmentStats {
     pub messages_dropped_partition: u64,
     /// Messages dropped to model packet loss.
     pub messages_dropped_loss: u64,
+    /// Messages dropped by an installed fault rule.
+    pub messages_dropped_fault: u64,
     /// Messages suppressed because the recipient already received that gossip ID.
     pub messages_deduplicated: u64,
 }
@@ -189,6 +192,8 @@ pub struct SimulatedNetwork {
     /// Per-node gossip dedup: tracks message IDs already delivered to each node.
     /// Matches production gossipsub's content-based deduplication (hash of data + topic).
     gossip_seen: Vec<HashSet<u64>>,
+    /// Per-message-type fault rules layered on top of partition + packet loss.
+    faults: FaultInjector,
 }
 
 impl std::fmt::Debug for SimulatedNetwork {
@@ -224,7 +229,23 @@ impl SimulatedNetwork {
             response_sequence: 0,
             traffic_analyzer: None,
             gossip_seen: (0..num_nodes).map(|_| HashSet::new()).collect(),
+            faults: FaultInjector::default(),
         }
+    }
+
+    /// Builder for installing or removing per-message-type fault rules.
+    ///
+    /// Rules are layered on top of partition + packet-loss decisions: the
+    /// network first checks partitions, then global packet loss, then
+    /// fault rules.
+    pub const fn fault(&mut self) -> FaultBuilder<'_> {
+        FaultBuilder::new(&mut self.faults)
+    }
+
+    /// Read-only access to the fault injector for inspection.
+    #[must_use]
+    pub const fn faults(&self) -> &FaultInjector {
+        &self.faults
     }
 
     /// Set the traffic analyzer for bandwidth metrics recording.
@@ -413,6 +434,7 @@ impl SimulatedNetwork {
     /// 4. On success: invoke handler to get response bytes, sample two
     ///    independent latencies (request + response legs), schedule callback
     ///    delivery at `now + latency_request + latency_response`
+    #[allow(clippy::too_many_lines)] // single dispatch loop with many short error-return branches
     pub fn accept_requests(
         &mut self,
         requester: NodeIndex,
@@ -479,6 +501,52 @@ impl SimulatedNetwork {
                 continue;
             }
 
+            // Fault rules (request leg).
+            let request_extra = match self.faults.decide(
+                &MessageContext {
+                    sender: requester,
+                    recipient: peer,
+                    type_id,
+                    tier: Tier::Request,
+                },
+                now,
+                rng,
+            ) {
+                Decision::Drop => {
+                    stats.messages_dropped_fault += 1;
+                    trace!(requester, peer, type_id, "Request dropped: fault rule");
+                    let _ = on_response(Err(RequestError::PeerUnreachable(ValidatorId(
+                        u64::from(peer),
+                    ))));
+                    continue;
+                }
+                Decision::Pass => Duration::ZERO,
+                Decision::DelayExtra(d) => d,
+            };
+
+            // Fault rules (response leg). Direction flips: peer → requester.
+            let response_extra = match self.faults.decide(
+                &MessageContext {
+                    sender: peer,
+                    recipient: requester,
+                    type_id,
+                    tier: Tier::Response,
+                },
+                now,
+                rng,
+            ) {
+                Decision::Drop => {
+                    stats.messages_dropped_fault += 1;
+                    trace!(requester, peer, type_id, "Response dropped: fault rule");
+                    let _ = on_response(Err(RequestError::PeerUnreachable(ValidatorId(
+                        u64::from(peer),
+                    ))));
+                    continue;
+                }
+                Decision::Pass => Duration::ZERO,
+                Decision::DelayExtra(d) => d,
+            };
+
             stats.messages_sent += 2; // request + response
 
             if let Some(ref analyzer) = self.traffic_analyzer {
@@ -517,7 +585,7 @@ impl SimulatedNetwork {
             // Sample round-trip latency: two independent one-way latencies.
             let request_latency = self.sample_latency(requester, peer, rng);
             let response_latency = self.sample_latency(peer, requester, rng);
-            let round_trip = request_latency + response_latency;
+            let round_trip = request_latency + response_latency + request_extra + response_extra;
 
             if let Some(ref analyzer) = self.traffic_analyzer {
                 // Record response message (peer → requester)
@@ -594,6 +662,23 @@ impl SimulatedNetwork {
                         }
                     }
                     Some(latency) => {
+                        let extra = match self.faults.decide(
+                            &MessageContext {
+                                sender,
+                                recipient: to,
+                                type_id,
+                                tier: Tier::Notification,
+                            },
+                            now,
+                            rng,
+                        ) {
+                            Decision::Drop => {
+                                stats.messages_dropped_fault += 1;
+                                continue;
+                            }
+                            Decision::Pass => Duration::ZERO,
+                            Decision::DelayExtra(d) => d,
+                        };
                         stats.messages_sent += 1;
                         if let Some(ref analyzer) = self.traffic_analyzer {
                             analyzer.record_message(type_id, payload.len(), data.len(), sender, to);
@@ -601,7 +686,7 @@ impl SimulatedNetwork {
                         self.notification_sequence += 1;
                         self.pending_notifications
                             .push(Reverse(ScheduledNotification {
-                                delivery_time: now + latency,
+                                delivery_time: now + latency + extra,
                                 sequence: self.notification_sequence,
                                 target_node: to,
                                 message_type: type_id,
@@ -689,6 +774,23 @@ impl SimulatedNetwork {
                     }
                 }
                 Some(latency) => {
+                    let extra = match self.faults.decide(
+                        &MessageContext {
+                            sender: from,
+                            recipient: to,
+                            type_id: message_type,
+                            tier: Tier::Gossip,
+                        },
+                        now,
+                        rng,
+                    ) {
+                        Decision::Drop => {
+                            stats.messages_dropped_fault += 1;
+                            continue;
+                        }
+                        Decision::Pass => Duration::ZERO,
+                        Decision::DelayExtra(d) => d,
+                    };
                     stats.messages_sent += 1;
                     if let Some(ref analyzer) = self.traffic_analyzer {
                         analyzer.record_message(
@@ -701,7 +803,7 @@ impl SimulatedNetwork {
                     }
                     self.gossip_sequence += 1;
                     self.pending_gossip.push(Reverse(ScheduledGossip {
-                        delivery_time: now + latency,
+                        delivery_time: now + latency + extra,
                         sequence: self.gossip_sequence,
                         target_node: to,
                         message_type,

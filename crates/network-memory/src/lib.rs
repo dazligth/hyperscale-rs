@@ -6,10 +6,15 @@
 //! [`NetworkTrafficAnalyzer`] tracks per-message-type and per-node bandwidth
 //! statistics for real-world deployment estimates.
 
+mod fault;
 mod network;
 mod sim_network;
 mod traffic;
 
+pub use fault::{
+    Decision, FaultAction, FaultBuilder, FaultInjector, MessageContext, RuleBuilder, RuleHandle,
+    Tier,
+};
 pub use network::{FulfillmentStats, NetworkConfig, SimulatedNetwork};
 pub use sim_network::{OutboxEntry, PendingNotification, SimNetworkAdapter};
 pub use traffic::{BandwidthReport, NetworkTrafficAnalyzer};
