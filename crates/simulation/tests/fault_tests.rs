@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use hyperscale_core::NodeInput;
 use hyperscale_metrics_memory::MemoryRecorder;
-use hyperscale_network_memory::NetworkConfig;
+use hyperscale_network_memory::{NetworkConfig, RuleHandle};
 use hyperscale_simulation::SimulationRunner;
 use hyperscale_types::test_utils::test_validity_range;
 use hyperscale_types::{
@@ -209,17 +209,23 @@ fn transaction_fetch_fallback_when_gossip_dropped() {
     );
 }
 
-/// Cross-shard provisions fetch fallback. The source-shard proposer
-/// normally broadcasts `provisions.broadcast` to target shards alongside
-/// its block proposal; suppressing it forces the target shard to fetch
-/// provisions via `GetProvisionsRequest` against the source-shard
-/// committee.
+/// Run a multi-shard fault scenario end-to-end and assert universal
+/// recovery.
 ///
-/// Liveness criterion: the cross-shard transaction reaches terminal state
-/// on every validator in both shards AND was *successfully executed* (not
-/// aborted) — verified via `transactions_aborted == 0`.
-#[test]
-fn cross_shard_provisions_fetch_fallback_when_broadcast_dropped() {
+/// Common shape across cross-shard fault tests: 2 shards × 3 validators,
+/// genesis-funded accounts on each shard, 1s warm-up, install faults,
+/// submit a withdraw-deposit cross-shard tx, run 30s, then assert:
+///   - L1: every installed rule fired ≥ 1
+///   - L2: for each `fetch_kind`, `fetch_started` / `fetch_completed` /
+///     `fetch_items_sent` ≥ 1
+///   - L3: every validator reached terminal state for the tx, and
+///     `transactions_aborted == 0` across the system
+///
+/// `install_faults` runs after warm-up so genesis can settle cleanly.
+fn run_cross_shard_fault_scenario<F>(install_faults: F, fetch_kinds: &[&'static str])
+where
+    F: FnOnce(&mut SimulationRunner) -> Vec<RuleHandle>,
+{
     let (_guard, recorder) = test_setup();
 
     let config = multi_shard_config();
@@ -230,19 +236,13 @@ fn cross_shard_provisions_fetch_fallback_when_broadcast_dropped() {
     let initial_balance = Decimal::from(10_000);
     runner.initialize_genesis_with_balances(&[(acc_a, initial_balance), (acc_b, initial_balance)]);
 
-    // Let consensus warm up before installing the fault — gives genesis
-    // header propagation a chance to land cleanly.
     runner.run_until(Duration::from_secs(1));
+    let rules = install_faults(&mut runner);
+    assert!(
+        !rules.is_empty(),
+        "install_faults must return at least one rule handle"
+    );
 
-    // Drop the cross-shard provisions notification globally. The source
-    // shard still produces provisions; the target shard must fetch.
-    let rule = runner
-        .network_mut()
-        .fault()
-        .drop_type("provisions.broadcast")
-        .install();
-
-    // Cross-shard tx: withdraw on shard 0, deposit on shard 1.
     let manifest = ManifestBuilder::new()
         .lock_fee(acc_a, Decimal::from(10))
         .withdraw_from_account(acc_a, XRD, Decimal::from(500))
@@ -254,20 +254,12 @@ fn cross_shard_provisions_fetch_fallback_when_broadcast_dropped() {
         routable_from_notarized_v1(notarized, test_validity_range()).expect("valid tx");
     let tx_hash = tx.hash();
 
-    // Confirm the manifest actually produced a cross-shard tx: declared
-    // reads/writes must span both shards.
     let touched_shards: std::collections::BTreeSet<ShardGroupId> = tx
         .declared_reads
         .iter()
         .chain(tx.declared_writes.iter())
         .map(|nid| shard_for_node(nid, num_shards))
         .collect();
-    println!(
-        "diag: tx declared_reads={} declared_writes={} shards_touched={:?}",
-        tx.declared_reads.len(),
-        tx.declared_writes.len(),
-        touched_shards,
-    );
     assert!(
         touched_shards.len() >= 2,
         "tx is not cross-shard: only touches {touched_shards:?}"
@@ -279,43 +271,31 @@ fn cross_shard_provisions_fetch_fallback_when_broadcast_dropped() {
         NodeInput::SubmitTransaction { tx: Arc::new(tx) },
     );
 
-    // Cross-shard provision fetch only fires after the source shard has
-    // committed the block referencing the missing provisions (5s timeout
-    // per PROVISION_FALLBACK_TIMEOUT). 30s is enough at these latencies.
     runner.run_until(runner.now() + Duration::from_secs(30));
 
-    // Layer 1: fault rule actually intercepted the cross-shard broadcast.
-    assert!(
-        rule.fired() >= 1,
-        "expected drop_type(\"provisions.broadcast\") rule to fire, got {}",
-        rule.fired()
-    );
+    // Layer 1: every installed rule actually intercepted at least one
+    // message. Catches misconfigured matchers that silently match nothing.
+    for (i, rule) in rules.iter().enumerate() {
+        assert!(
+            rule.fired() >= 1,
+            "fault rule {i} did not fire — test premise broken (rule matched no messages)"
+        );
+    }
 
-    // Layer 2: the provision-fetch fallback engaged. Recorded by the
-    // request handler (all serving paths) and by the client `Fetch`
-    // state machine.
-    let fetch_items_sent = recorder.counter("fetch_items_sent", Some("provision"));
-    let fetch_started = recorder.counter("fetch_started", Some("provision"));
-    let fetch_completed = recorder.counter("fetch_completed", Some("provision"));
-    assert!(
-        fetch_started >= 1,
-        "expected fetch_started{{kind=\"provision\"}} >= 1, got {fetch_started} \
-         (rule fired {} times)",
-        rule.fired()
-    );
-    assert!(
-        fetch_completed >= 1,
-        "expected fetch_completed{{kind=\"provision\"}} >= 1, got {fetch_completed} \
-         (started={fetch_started})"
-    );
-    assert!(
-        fetch_items_sent >= 1,
-        "expected fetch_items_sent{{kind=\"provision\"}} >= 1, got {fetch_items_sent}"
-    );
+    // Layer 2: each fetch protocol engaged client-side and server-side.
+    for kind in fetch_kinds {
+        let started = recorder.counter("fetch_started", Some(kind));
+        let completed = recorder.counter("fetch_completed", Some(kind));
+        let items_sent = recorder.counter("fetch_items_sent", Some(kind));
+        assert!(
+            started >= 1 && completed >= 1 && items_sent >= 1,
+            "{kind} fetch fallback didn't engage: started={started} \
+             completed={completed} items_sent={items_sent}"
+        );
+    }
 
-    // Layer 3: every validator in both shards reaches terminal state for
-    // the tx, AND the tx was successfully executed (not aborted). Aborts
-    // bump `transactions_aborted` per node — it must stay zero.
+    // Layer 3: every validator reaches terminal state for the tx, and
+    // the tx was successfully executed (not aborted).
     let total_nodes = config.num_shards * config.validators_per_shard;
     for node_idx in 0..total_nodes {
         assert!(
@@ -327,21 +307,29 @@ fn cross_shard_provisions_fetch_fallback_when_broadcast_dropped() {
     assert_eq!(
         aborts, 0,
         "expected zero abort events, got {aborts} (fetch fallback \
-         delivered provisions but tx still aborted somewhere)"
+         delivered data but tx still aborted somewhere)"
     );
+}
 
-    for shard in 0..config.num_shards {
-        let start = shard * config.validators_per_shard;
-        let end = start + config.validators_per_shard;
-        let shard_max = (start..end)
-            .map(|i| runner.node(i).unwrap().bft().committed_height())
-            .max()
-            .unwrap();
-        assert!(
-            shard_max > BlockHeight(0),
-            "shard {shard} did not advance past genesis (max height {shard_max})"
-        );
-    }
+/// Cross-shard provisions fetch fallback. The source-shard proposer
+/// normally broadcasts `provisions.broadcast` to target shards alongside
+/// its block proposal; suppressing it forces the target shard to fetch
+/// provisions via `GetProvisionsRequest` against the source-shard
+/// committee.
+#[test]
+fn cross_shard_provisions_fetch_fallback_when_broadcast_dropped() {
+    run_cross_shard_fault_scenario(
+        |runner| {
+            vec![
+                runner
+                    .network_mut()
+                    .fault()
+                    .drop_type("provisions.broadcast")
+                    .install(),
+            ]
+        },
+        &["provision"],
+    );
 }
 
 /// Cross-shard execution-certificate fetch fallback. Wave leaders
@@ -350,210 +338,45 @@ fn cross_shard_provisions_fetch_fallback_when_broadcast_dropped() {
 /// notifications forces each shard to fetch the remote shard's EC via
 /// `GetExecutionCertsRequest` so its local wave can complete.
 ///
-/// Mirrors `cross_shard_provisions_fetch_fallback_when_broadcast_dropped`
-/// for the *output* side of the cross-shard pipeline (provisions are the
-/// input, ECs are the output).
+/// Mirrors the provisions test for the *output* side of the cross-shard
+/// pipeline (provisions are the input, ECs are the output).
 #[test]
 fn cross_shard_exec_cert_fetch_fallback_when_broadcast_dropped() {
-    let (_guard, recorder) = test_setup();
-
-    let config = multi_shard_config();
-    let num_shards = u64::from(config.num_shards);
-    let mut runner = SimulationRunner::new(&config, 42);
-
-    let ((kp_a, acc_a), (_kp_b, acc_b)) = find_accounts_on_each_shard(num_shards);
-    let initial_balance = Decimal::from(10_000);
-    runner.initialize_genesis_with_balances(&[(acc_a, initial_balance), (acc_b, initial_balance)]);
-
-    runner.run_until(Duration::from_secs(1));
-
-    // Drop the cross-shard EC notification globally. Each wave leader still
-    // forms an EC; the remote shard must fetch it via
-    // `GetExecutionCertsRequest` so its wave can complete.
-    let rule = runner
-        .network_mut()
-        .fault()
-        .drop_type("execution.cert.batch")
-        .install();
-
-    let manifest = ManifestBuilder::new()
-        .lock_fee(acc_a, Decimal::from(10))
-        .withdraw_from_account(acc_a, XRD, Decimal::from(500))
-        .try_deposit_entire_worktop_or_abort(acc_b, None)
-        .build();
-    let notarized =
-        sign_and_notarize(manifest, &NetworkDefinition::simulator(), 200, &kp_a).expect("sign tx");
-    let tx: RoutableTransaction =
-        routable_from_notarized_v1(notarized, test_validity_range()).expect("valid tx");
-    let tx_hash = tx.hash();
-
-    let touched_shards: std::collections::BTreeSet<ShardGroupId> = tx
-        .declared_reads
-        .iter()
-        .chain(tx.declared_writes.iter())
-        .map(|nid| shard_for_node(nid, num_shards))
-        .collect();
-    assert!(
-        touched_shards.len() >= 2,
-        "tx is not cross-shard: only touches {touched_shards:?}"
-    );
-
-    runner.schedule_initial_event(
-        0,
-        runner.now(),
-        NodeInput::SubmitTransaction { tx: Arc::new(tx) },
-    );
-
-    runner.run_until(runner.now() + Duration::from_secs(30));
-
-    // Layer 1: rule actually intercepted EC notifications.
-    assert!(
-        rule.fired() >= 1,
-        "expected drop_type(\"execution.cert.batch\") rule to fire, got {}",
-        rule.fired()
-    );
-
-    // Layer 2: the EC-fetch fallback engaged.
-    let fetch_started = recorder.counter("fetch_started", Some("exec_cert"));
-    let fetch_completed = recorder.counter("fetch_completed", Some("exec_cert"));
-    let fetch_items_sent = recorder.counter("fetch_items_sent", Some("exec_cert"));
-    assert!(
-        fetch_started >= 1,
-        "expected fetch_started{{kind=\"exec_cert\"}} >= 1, got {fetch_started} \
-         (rule fired {} times)",
-        rule.fired()
-    );
-    assert!(
-        fetch_completed >= 1,
-        "expected fetch_completed{{kind=\"exec_cert\"}} >= 1, got {fetch_completed} \
-         (started={fetch_started})"
-    );
-    assert!(
-        fetch_items_sent >= 1,
-        "expected fetch_items_sent{{kind=\"exec_cert\"}} >= 1, got {fetch_items_sent}"
-    );
-
-    // Layer 3: every validator reaches terminal state and the tx was not
-    // aborted.
-    let total_nodes = config.num_shards * config.validators_per_shard;
-    for node_idx in 0..total_nodes {
-        assert!(
-            tx_reached_terminal_state(&runner, node_idx, &tx_hash),
-            "node {node_idx} did not reach terminal state for tx {tx_hash:?}",
-        );
-    }
-    let aborts = recorder.counter("transactions_aborted", None);
-    assert_eq!(
-        aborts, 0,
-        "expected zero abort events, got {aborts} (fetch fallback \
-         delivered ECs but tx still aborted somewhere)"
+    run_cross_shard_fault_scenario(
+        |runner| {
+            vec![
+                runner
+                    .network_mut()
+                    .fault()
+                    .drop_type("execution.cert.batch")
+                    .install(),
+            ]
+        },
+        &["exec_cert"],
     );
 }
 
 /// Compound fault: drop *both* `provisions.broadcast` and
 /// `execution.cert.batch` simultaneously. Both fetch protocols must
-/// engage independently — the input-side (provisions) and output-side
-/// (ECs) pipelines are gated on different timeouts and different fetch
-/// instances; this test proves they compose without deadlock when both
-/// primary channels fail at once.
+/// engage independently — they're gated on different timeouts and
+/// different fetch instances; this proves they compose without
+/// deadlock when both primary cross-shard channels fail at once.
 #[test]
 fn cross_shard_compound_provisions_and_exec_cert_fetch_fallback() {
-    let (_guard, recorder) = test_setup();
-
-    let config = multi_shard_config();
-    let num_shards = u64::from(config.num_shards);
-    let mut runner = SimulationRunner::new(&config, 42);
-
-    let ((kp_a, acc_a), (_kp_b, acc_b)) = find_accounts_on_each_shard(num_shards);
-    let initial_balance = Decimal::from(10_000);
-    runner.initialize_genesis_with_balances(&[(acc_a, initial_balance), (acc_b, initial_balance)]);
-
-    runner.run_until(Duration::from_secs(1));
-
-    // Both cross-shard primary channels suppressed.
-    let provisions_rule = runner
-        .network_mut()
-        .fault()
-        .drop_type("provisions.broadcast")
-        .install();
-    let exec_cert_rule = runner
-        .network_mut()
-        .fault()
-        .drop_type("execution.cert.batch")
-        .install();
-
-    let manifest = ManifestBuilder::new()
-        .lock_fee(acc_a, Decimal::from(10))
-        .withdraw_from_account(acc_a, XRD, Decimal::from(500))
-        .try_deposit_entire_worktop_or_abort(acc_b, None)
-        .build();
-    let notarized =
-        sign_and_notarize(manifest, &NetworkDefinition::simulator(), 200, &kp_a).expect("sign tx");
-    let tx: RoutableTransaction =
-        routable_from_notarized_v1(notarized, test_validity_range()).expect("valid tx");
-    let tx_hash = tx.hash();
-
-    let touched_shards: std::collections::BTreeSet<ShardGroupId> = tx
-        .declared_reads
-        .iter()
-        .chain(tx.declared_writes.iter())
-        .map(|nid| shard_for_node(nid, num_shards))
-        .collect();
-    assert!(
-        touched_shards.len() >= 2,
-        "tx is not cross-shard: only touches {touched_shards:?}"
-    );
-
-    runner.schedule_initial_event(
-        0,
-        runner.now(),
-        NodeInput::SubmitTransaction { tx: Arc::new(tx) },
-    );
-
-    runner.run_until(runner.now() + Duration::from_secs(30));
-
-    // Layer 1: both rules intercepted at least one message.
-    assert!(
-        provisions_rule.fired() >= 1,
-        "expected provisions.broadcast rule to fire, got {}",
-        provisions_rule.fired()
-    );
-    assert!(
-        exec_cert_rule.fired() >= 1,
-        "expected execution.cert.batch rule to fire, got {}",
-        exec_cert_rule.fired()
-    );
-
-    // Layer 2: both fetch protocols engaged.
-    let prov_started = recorder.counter("fetch_started", Some("provision"));
-    let prov_completed = recorder.counter("fetch_completed", Some("provision"));
-    let prov_items = recorder.counter("fetch_items_sent", Some("provision"));
-    let ec_started = recorder.counter("fetch_started", Some("exec_cert"));
-    let ec_completed = recorder.counter("fetch_completed", Some("exec_cert"));
-    let ec_items = recorder.counter("fetch_items_sent", Some("exec_cert"));
-    assert!(
-        prov_started >= 1 && prov_completed >= 1 && prov_items >= 1,
-        "provision fetch fallback didn't engage: started={prov_started} \
-         completed={prov_completed} items_sent={prov_items}"
-    );
-    assert!(
-        ec_started >= 1 && ec_completed >= 1 && ec_items >= 1,
-        "exec_cert fetch fallback didn't engage: started={ec_started} \
-         completed={ec_completed} items_sent={ec_items}"
-    );
-
-    // Layer 3: every validator reaches terminal state, no aborts.
-    let total_nodes = config.num_shards * config.validators_per_shard;
-    for node_idx in 0..total_nodes {
-        assert!(
-            tx_reached_terminal_state(&runner, node_idx, &tx_hash),
-            "node {node_idx} did not reach terminal state for tx {tx_hash:?}",
-        );
-    }
-    let aborts = recorder.counter("transactions_aborted", None);
-    assert_eq!(
-        aborts, 0,
-        "expected zero abort events, got {aborts} (compound fault: \
-         both fetch protocols engaged but tx still aborted somewhere)"
+    run_cross_shard_fault_scenario(
+        |runner| {
+            let provisions_rule = runner
+                .network_mut()
+                .fault()
+                .drop_type("provisions.broadcast")
+                .install();
+            let exec_cert_rule = runner
+                .network_mut()
+                .fault()
+                .drop_type("execution.cert.batch")
+                .install();
+            vec![provisions_rule, exec_cert_rule]
+        },
+        &["provision", "exec_cert"],
     );
 }
