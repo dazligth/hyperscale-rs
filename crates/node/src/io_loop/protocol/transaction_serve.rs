@@ -16,6 +16,14 @@ const MAX_ITEMS_PER_RESPONSE: usize = 500;
 ///
 /// Checks the in-memory cache first (for recently received but not yet
 /// committed transactions), then falls back to storage.
+///
+/// Intentionally caller-agnostic: the function takes no requester identity
+/// and no shard scope. Any peer that knows the tx hash can fetch the body,
+/// which is what makes cross-shard data-availability fallback work — when
+/// gossip drops a tx whose provisions have already arrived at a remote
+/// shard, that shard's mempool fetches by hash from the source committee
+/// and this handler answers without distinction. Don't add a peer / shard
+/// check here without redesigning the cross-shard DA path.
 pub fn serve_transaction_request(
     storage: &impl ChainReader,
     tx_cache: &QuickCache<TxHash, Arc<RoutableTransaction>>,

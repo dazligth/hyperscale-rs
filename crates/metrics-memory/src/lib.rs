@@ -298,6 +298,10 @@ impl MetricsRecorder for MemoryRecorder {
     fn record_transaction_aborted(&self) {
         self.inc("transactions_aborted", None, 1);
     }
+
+    fn record_expected_tx_dropped(&self) {
+        self.inc("expected_tx_dropped", None, 1);
+    }
 }
 
 #[cfg(test)]

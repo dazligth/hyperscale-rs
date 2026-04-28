@@ -384,6 +384,30 @@ fn cross_shard_compound_provisions_and_exec_cert_fetch_fallback() {
     );
 }
 
+/// Cross-shard transaction-data-availability fallback. A cross-shard tx is
+/// submitted to shard 0; provisions flow normally to shard 1, but
+/// `transaction.gossip` is dropped network-wide so shard 1 never sees the
+/// tx body via gossip. Shard 1's mempool records the tx as expected from
+/// the verified provisions bundle, waits out `EXPECTED_TX_GRACE`, then
+/// fetches from shard 0's committee via `GetTransactionsRequest`. The
+/// shared scenario asserts liveness (every node terminal) and zero aborts;
+/// horizon-bounded eviction is covered by mempool unit tests.
+#[test]
+fn cross_shard_transaction_da_fallback_when_gossip_dropped() {
+    run_cross_shard_fault_scenario(
+        |runner| {
+            vec![
+                runner
+                    .network_mut()
+                    .fault()
+                    .drop_type("transaction.gossip")
+                    .install(),
+            ]
+        },
+        &["transaction"],
+    );
+}
+
 /// Time-bounded fault: `provisions.broadcast` drops during a 5s window
 /// shortly after the cross-shard tx is submitted, then the fault lifts.
 /// The cross-shard tx falls inside the fault window and must recover via

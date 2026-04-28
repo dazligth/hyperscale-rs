@@ -12,6 +12,7 @@
 //! methods; all I/O is deferred to the caller via returned `Action`s.
 
 mod coordinator;
+mod expected_txs;
 mod lock_tracker;
 mod ready_set;
 mod tombstones;

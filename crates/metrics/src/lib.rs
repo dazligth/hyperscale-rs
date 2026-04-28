@@ -426,6 +426,12 @@ pub trait MetricsRecorder: Send + Sync + 'static {
     /// Record a cross-shard transaction abort (timeout or conflict).
     fn record_transaction_aborted(&self) {}
 
+    /// Record an expected cross-shard tx dropped past `RETENTION_HORIZON`
+    /// without arriving via gossip, submit, fetch, or block inclusion. A
+    /// non-zero rate here means cross-shard data availability has failed for
+    /// some payload (bug, attack, or partition past every other timeout).
+    fn record_expected_tx_dropped(&self) {}
+
     // ── Lock Contention ──────────────────────────────────────────────
 
     /// Set lock contention metrics.
@@ -894,6 +900,12 @@ pub fn record_invalid_message() {
 #[inline]
 pub fn record_transaction_aborted() {
     recorder().record_transaction_aborted();
+}
+
+/// Record an expected cross-shard tx dropped past `RETENTION_HORIZON`.
+#[inline]
+pub fn record_expected_tx_dropped() {
+    recorder().record_expected_tx_dropped();
 }
 
 // ── Lock Contention ──────────────────────────────────────────────────

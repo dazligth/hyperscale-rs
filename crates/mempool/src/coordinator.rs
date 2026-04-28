@@ -1,13 +1,14 @@
 //! Mempool state.
 
+use crate::expected_txs::{EXPECTED_TX_GRACE, ExpectedTxs};
 use crate::lock_tracker::LockTracker;
 use crate::ready_set::ReadySet;
 use crate::tombstones::TombstoneStore;
-use hyperscale_core::{Action, ProtocolEvent};
+use hyperscale_core::{Action, FetchPeers, FetchRequest, ProtocolEvent};
 use hyperscale_types::{
     BlockHeight, BloomFilter, CertifiedBlock, DEFAULT_FPR, LocalTimestamp, NodeId,
-    RoutableTransaction, TopologySnapshot, TransactionDecision, TransactionStatus, TxHash,
-    WeightedTimestamp,
+    RETENTION_HORIZON, RoutableTransaction, ShardGroupId, TopologySnapshot, TransactionDecision,
+    TransactionStatus, TxHash, WeightedTimestamp,
 };
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -196,6 +197,12 @@ pub struct MempoolCoordinator {
     /// across validators and independent of block production rate.
     current_ts: WeightedTimestamp,
 
+    /// Cross-shard txs the mempool has been told to expect via verified
+    /// provisions bundles, but has not yet seen on the wire (gossip / submit
+    /// / block inclusion). Cleared on admission; consulted for fetch fallback
+    /// and horizon-bounded eviction.
+    expected_txs: ExpectedTxs,
+
     /// Configuration for mempool behavior.
     config: MempoolConfig,
 }
@@ -234,6 +241,7 @@ impl MempoolCoordinator {
             ready: ReadySet::new(),
             current_height: BlockHeight(0),
             current_ts: WeightedTimestamp::ZERO,
+            expected_txs: ExpectedTxs::new(),
             config,
         }
     }
@@ -279,6 +287,9 @@ impl MempoolCoordinator {
                 admitted_at: now,
             },
         );
+        // Tx is now in pool — any pending cross-shard expectation is satisfied,
+        // regardless of which source originally signaled it.
+        self.expected_txs.forget(&hash);
 
         Some(cross_shard)
     }
@@ -373,6 +384,28 @@ impl MempoolCoordinator {
                 txs: admitted,
             })]
         }
+    }
+
+    /// Number of distinct tx hashes the mempool is currently expecting via
+    /// verified provisions but has not yet seen on the wire. A tx referenced
+    /// by N source shards counts once.
+    #[must_use]
+    pub fn pending_expected_count(&self) -> usize {
+        self.expected_txs.len()
+    }
+
+    /// Timestamp of the first sighting for an expected tx, if any. Used by
+    /// the horizon sweep and by tests asserting lifecycle.
+    #[must_use]
+    pub fn expected_tx_first_seen_ts(&self, tx_hash: &TxHash) -> Option<WeightedTimestamp> {
+        self.expected_txs.first_seen_ts(tx_hash)
+    }
+
+    /// Source shard recorded for an expected tx, if any. First sighting wins;
+    /// later signals from other shards are ignored.
+    #[must_use]
+    pub fn expected_tx_source(&self, tx_hash: &TxHash) -> Option<ShardGroupId> {
+        self.expected_txs.source(tx_hash)
     }
 
     /// Evict a transaction that has reached a terminal state.
@@ -483,6 +516,9 @@ impl MempoolCoordinator {
                     admitted_at: LocalTimestamp::ZERO,
                 }
             });
+            // Block inclusion is the strongest possible signal that the tx
+            // exists; any cross-shard expectation is satisfied.
+            self.expected_txs.forget(&hash);
         }
 
         // Update transaction status to Committed and add locks.
@@ -509,6 +545,68 @@ impl MempoolCoordinator {
                     });
                 }
             }
+        }
+
+        // Record cross-shard txs we now expect to see on the wire (gossip,
+        // submit, or — failing both within the grace window — fetch). Skipped
+        // for txs already in pool (gossip already won); per-(tx, source) dedup
+        // is handled by `ExpectedTxs::record`.
+        for provision in block.provisions() {
+            let source_shard = provision.source_shard;
+            for tx_entries in &provision.transactions {
+                let tx_hash = tx_entries.tx_hash;
+                if self.pool.contains_key(&tx_hash) {
+                    continue;
+                }
+                self.expected_txs
+                    .record(tx_hash, source_shard, self.current_ts);
+            }
+        }
+
+        // Fire fetches for entries whose grace window has elapsed. Re-emitted
+        // every block past grace; the fetch protocol dedupes in-flight ids
+        // and handles peer rotation. Cleared on admission via the normal
+        // gossip / submit / block-include cleanup paths.
+        for (source_shard, ids) in self
+            .expected_txs
+            .due_for_fetch(self.current_ts, EXPECTED_TX_GRACE)
+        {
+            let peers = topology.committee_for_shard(source_shard).to_vec();
+            if peers.is_empty() {
+                tracing::warn!(
+                    ?source_shard,
+                    missing_count = ids.len(),
+                    "Expected-tx fetch suppressed: no committee for source shard"
+                );
+                continue;
+            }
+            tracing::debug!(
+                ?source_shard,
+                missing_count = ids.len(),
+                height = height.0,
+                "Mempool fetching expected cross-shard txs past grace window"
+            );
+            actions.push(Action::Fetch(FetchRequest::Transactions {
+                ids,
+                peers: FetchPeers::rotation(peers),
+            }));
+        }
+
+        // Hard horizon: any expected-tx that survived grace + every realistic
+        // fetch retry past `RETENTION_HORIZON` is provably moot — every wave
+        // that needed it has long since timed out via WAVE_TIMEOUT. Drop with
+        // warn + metric; non-zero rate here means cross-shard DA failed.
+        for (tx_hash, source_shard) in self
+            .expected_txs
+            .drop_past_horizon(self.current_ts, RETENTION_HORIZON)
+        {
+            tracing::warn!(
+                ?tx_hash,
+                ?source_shard,
+                height = height.0,
+                "Expected cross-shard tx dropped past RETENTION_HORIZON without DA"
+            );
+            hyperscale_metrics::record_expected_tx_dropped();
         }
 
         // Per-tx terminal state from committed wave certificates. Decisions are
@@ -924,7 +1022,8 @@ mod tests {
     use super::*;
     use hyperscale_test_helpers::{TestCommittee, make_finalized_wave};
     use hyperscale_types::{
-        FinalizedWave, ShardGroupId, ValidatorId, test_utils::test_transaction,
+        Block, FinalizedWave, MerkleInclusionProof, Provisions, ShardGroupId, TxEntries,
+        ValidatorId, test_utils::test_transaction,
     };
 
     fn make_test_topology() -> TopologySnapshot {
@@ -952,6 +1051,357 @@ mod tests {
             vec![Arc::new(fw)],
         );
         hyperscale_test_helpers::certify(block, height.0 * TEST_BLOCK_INTERVAL_MS)
+    }
+
+    /// Build a `CertifiedBlock` whose body carries one `Provisions` bundle
+    /// from `source_shard` referencing `tx_hashes`. No transactions in the
+    /// block body itself (the bundle is the cross-shard signal).
+    fn certified_block_with_provisions(
+        height: BlockHeight,
+        source_shard: ShardGroupId,
+        tx_hashes: &[TxHash],
+    ) -> CertifiedBlock {
+        let transactions = tx_hashes
+            .iter()
+            .map(|h| TxEntries {
+                tx_hash: *h,
+                entries: vec![],
+                target_nodes: vec![],
+            })
+            .collect();
+        let provision = Provisions::new(
+            source_shard,
+            ShardGroupId(0),
+            height,
+            MerkleInclusionProof::dummy(),
+            transactions,
+        );
+        let block = match hyperscale_test_helpers::make_live_block(
+            ShardGroupId(0),
+            height,
+            1_234_567_890,
+            ValidatorId(0),
+            vec![],
+            vec![],
+        ) {
+            Block::Live {
+                header,
+                transactions,
+                certificates,
+                ..
+            } => Block::Live {
+                header,
+                transactions,
+                certificates,
+                provisions: vec![Arc::new(provision)],
+            },
+            sealed @ Block::Sealed { .. } => sealed,
+        };
+        hyperscale_test_helpers::certify(block, height.0 * TEST_BLOCK_INTERVAL_MS)
+    }
+
+    #[test]
+    fn provisions_record_expected_txs_for_unseen_hashes() {
+        let topology = make_test_topology();
+        let mut mempool = MempoolCoordinator::new();
+
+        let already_seen = test_transaction(1);
+        let already_seen_hash = already_seen.hash();
+        mempool.on_submit_transaction(&topology, Arc::new(already_seen), LocalTimestamp::ZERO);
+
+        let unseen_hash = test_transaction(2).hash();
+
+        let certified = certified_block_with_provisions(
+            BlockHeight(5),
+            ShardGroupId(1),
+            &[already_seen_hash, unseen_hash],
+        );
+        mempool.on_block_committed(&topology, &certified);
+
+        assert_eq!(mempool.pending_expected_count(), 1);
+        let expected_ts = WeightedTimestamp::from_millis(5 * TEST_BLOCK_INTERVAL_MS);
+        assert_eq!(
+            mempool.expected_tx_first_seen_ts(&unseen_hash),
+            Some(expected_ts)
+        );
+        assert_eq!(
+            mempool.expected_tx_source(&unseen_hash),
+            Some(ShardGroupId(1))
+        );
+        assert!(
+            mempool
+                .expected_tx_first_seen_ts(&already_seen_hash)
+                .is_none(),
+            "txs already in pool are not expected-tracked"
+        );
+    }
+
+    #[test]
+    fn first_sighting_wins_across_sources_and_repeats() {
+        let topology = make_test_topology();
+        let mut mempool = MempoolCoordinator::new();
+
+        let unseen_hash = test_transaction(1).hash();
+
+        // Earliest sighting at H=3 from shard 1.
+        mempool.on_block_committed(
+            &topology,
+            &certified_block_with_provisions(BlockHeight(3), ShardGroupId(1), &[unseen_hash]),
+        );
+        // Same source at a later height — no-op.
+        mempool.on_block_committed(
+            &topology,
+            &certified_block_with_provisions(BlockHeight(7), ShardGroupId(1), &[unseen_hash]),
+        );
+        // A different source at a later height — also no-op (first sighting wins).
+        mempool.on_block_committed(
+            &topology,
+            &certified_block_with_provisions(BlockHeight(7), ShardGroupId(2), &[unseen_hash]),
+        );
+
+        assert_eq!(mempool.pending_expected_count(), 1);
+        assert_eq!(
+            mempool.expected_tx_first_seen_ts(&unseen_hash),
+            Some(WeightedTimestamp::from_millis(3 * TEST_BLOCK_INTERVAL_MS))
+        );
+        assert_eq!(
+            mempool.expected_tx_source(&unseen_hash),
+            Some(ShardGroupId(1))
+        );
+    }
+
+    #[test]
+    fn gossip_arrival_drops_expected_entry() {
+        let topology = make_test_topology();
+        let mut mempool = MempoolCoordinator::new();
+
+        let tx = test_transaction(1);
+        let tx_hash = tx.hash();
+
+        // Provision arrives first, mempool starts expecting the tx.
+        mempool.on_block_committed(
+            &topology,
+            &certified_block_with_provisions(BlockHeight(1), ShardGroupId(1), &[tx_hash]),
+        );
+        assert_eq!(mempool.pending_expected_count(), 1);
+
+        // Gossip arrives — expectation cleared.
+        mempool.on_transaction_gossip(&topology, Arc::new(tx), false, LocalTimestamp::ZERO);
+        assert_eq!(mempool.pending_expected_count(), 0);
+    }
+
+    #[test]
+    fn rpc_submit_drops_expected_entry() {
+        let topology = make_test_topology();
+        let mut mempool = MempoolCoordinator::new();
+
+        let tx = test_transaction(1);
+        let tx_hash = tx.hash();
+
+        mempool.on_block_committed(
+            &topology,
+            &certified_block_with_provisions(BlockHeight(1), ShardGroupId(1), &[tx_hash]),
+        );
+        assert_eq!(mempool.pending_expected_count(), 1);
+
+        mempool.on_submit_transaction(&topology, Arc::new(tx), LocalTimestamp::ZERO);
+        assert_eq!(mempool.pending_expected_count(), 0);
+    }
+
+    #[test]
+    fn block_inclusion_drops_expected_entry() {
+        let topology = make_test_topology();
+        let mut mempool = MempoolCoordinator::new();
+
+        let tx = test_transaction(1);
+        let tx_hash = tx.hash();
+
+        mempool.on_block_committed(
+            &topology,
+            &certified_block_with_provisions(BlockHeight(1), ShardGroupId(1), &[tx_hash]),
+        );
+        assert_eq!(mempool.pending_expected_count(), 1);
+
+        // A later block on this shard includes the tx body — block-include
+        // path admits it bypassing the gossip/submit `admit_internal` path,
+        // so the cleanup site there is exercised independently.
+        let certified = certified_commit_block(
+            BlockHeight(2),
+            tx,
+            make_finalized_wave(BlockHeight(2), tx_hash, TransactionDecision::Accept),
+        );
+        mempool.on_block_committed(&topology, &certified);
+        assert_eq!(mempool.pending_expected_count(), 0);
+    }
+
+    #[test]
+    fn no_fetch_emitted_within_grace_window() {
+        // TEST_BLOCK_INTERVAL_MS = 500; grace = 2_000ms. First sighting at
+        // H=1 (ts=500); H=4 (ts=2_000) → elapsed 1_500ms < 2_000ms.
+        let topology = make_test_topology();
+        let mut mempool = MempoolCoordinator::new();
+
+        let unseen_hash = test_transaction(1).hash();
+
+        mempool.on_block_committed(
+            &topology,
+            &certified_block_with_provisions(BlockHeight(1), ShardGroupId(0), &[unseen_hash]),
+        );
+        let actions = mempool.on_block_committed(
+            &topology,
+            &certified_block_with_provisions(BlockHeight(4), ShardGroupId(0), &[]),
+        );
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, Action::Fetch(FetchRequest::Transactions { .. }))),
+            "Fetch should not fire within grace window"
+        );
+        assert_eq!(mempool.pending_expected_count(), 1);
+    }
+
+    #[test]
+    fn fetch_emitted_after_grace_window_targets_source_committee() {
+        // First sighting at H=1 (ts=500); H=5 (ts=2_500) → elapsed 2_000ms.
+        let topology = make_test_topology();
+        let source = ShardGroupId(0);
+        let mut mempool = MempoolCoordinator::new();
+
+        let unseen_hash = test_transaction(1).hash();
+
+        mempool.on_block_committed(
+            &topology,
+            &certified_block_with_provisions(BlockHeight(1), source, &[unseen_hash]),
+        );
+        let actions = mempool.on_block_committed(
+            &topology,
+            &certified_block_with_provisions(BlockHeight(5), source, &[]),
+        );
+
+        let fetch = actions
+            .iter()
+            .find_map(|a| match a {
+                Action::Fetch(FetchRequest::Transactions { ids, peers }) => Some((ids, peers)),
+                _ => None,
+            })
+            .expect("fetch action emitted past grace");
+        assert_eq!(fetch.0, &vec![unseen_hash]);
+        assert_eq!(fetch.1.preferred, None);
+        assert_eq!(fetch.1.peers, topology.committee_for_shard(source).to_vec());
+    }
+
+    #[test]
+    fn fetch_uses_first_sighting_source_only() {
+        let topology = make_test_topology();
+        let mut mempool = MempoolCoordinator::new();
+
+        let unseen_hash = test_transaction(1).hash();
+
+        // First sighting wins: shard 0 at H=1 owns the entry. Shard 1's later
+        // signal at H=2 is ignored, so the fetch must target shard 0's
+        // committee even though shard 1 also referenced it.
+        mempool.on_block_committed(
+            &topology,
+            &certified_block_with_provisions(BlockHeight(1), ShardGroupId(0), &[unseen_hash]),
+        );
+        mempool.on_block_committed(
+            &topology,
+            &certified_block_with_provisions(BlockHeight(2), ShardGroupId(1), &[unseen_hash]),
+        );
+        let actions = mempool.on_block_committed(
+            &topology,
+            &certified_block_with_provisions(BlockHeight(5), ShardGroupId(0), &[]),
+        );
+
+        let fetches: Vec<_> = actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::Fetch(FetchRequest::Transactions { ids, peers }) => Some((ids, peers)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fetches.len(), 1);
+        assert_eq!(fetches[0].0, &vec![unseen_hash]);
+        assert_eq!(
+            fetches[0].1.peers,
+            topology.committee_for_shard(ShardGroupId(0)).to_vec()
+        );
+    }
+
+    #[test]
+    fn entry_dropped_past_retention_horizon_emits_metric() {
+        // RETENTION_HORIZON ≈ 5min + 24s. Sighting at H=1 (ts=500ms); commit
+        // far past horizon at H=700 (ts=350_000ms) — well over 324_000ms.
+        let topology = make_test_topology();
+        let mut mempool = MempoolCoordinator::new();
+
+        let unseen_hash = test_transaction(1).hash();
+
+        let recorder = hyperscale_metrics_memory::MemoryRecorder::new();
+        let arc: std::sync::Arc<dyn hyperscale_metrics::MetricsRecorder> =
+            std::sync::Arc::new(recorder.clone());
+        hyperscale_metrics::with_scoped_recorder(arc, || {
+            mempool.on_block_committed(
+                &topology,
+                &certified_block_with_provisions(BlockHeight(1), ShardGroupId(0), &[unseen_hash]),
+            );
+            assert_eq!(mempool.pending_expected_count(), 1);
+            assert_eq!(recorder.counter("expected_tx_dropped", None), 0);
+
+            mempool.on_block_committed(
+                &topology,
+                &certified_block_with_provisions(BlockHeight(700), ShardGroupId(0), &[]),
+            );
+            assert_eq!(mempool.pending_expected_count(), 0);
+            assert_eq!(recorder.counter("expected_tx_dropped", None), 1);
+        });
+    }
+
+    #[test]
+    fn entry_retained_within_retention_horizon() {
+        // H=100 (ts=50_000ms) is well past grace (2_000ms) but well under
+        // RETENTION_HORIZON (~324_000ms). Entry should still be tracked, and
+        // a fetch is emitted but no drop.
+        let topology = make_test_topology();
+        let mut mempool = MempoolCoordinator::new();
+
+        let unseen_hash = test_transaction(1).hash();
+
+        mempool.on_block_committed(
+            &topology,
+            &certified_block_with_provisions(BlockHeight(1), ShardGroupId(0), &[unseen_hash]),
+        );
+        mempool.on_block_committed(
+            &topology,
+            &certified_block_with_provisions(BlockHeight(100), ShardGroupId(0), &[]),
+        );
+        assert_eq!(mempool.pending_expected_count(), 1);
+    }
+
+    #[test]
+    fn fetch_stops_after_admission_clears_expectation() {
+        let topology = make_test_topology();
+        let mut mempool = MempoolCoordinator::new();
+
+        let tx = test_transaction(1);
+        let tx_hash = tx.hash();
+
+        mempool.on_block_committed(
+            &topology,
+            &certified_block_with_provisions(BlockHeight(1), ShardGroupId(0), &[tx_hash]),
+        );
+        mempool.on_transaction_gossip(&topology, Arc::new(tx), false, LocalTimestamp::ZERO);
+
+        let actions = mempool.on_block_committed(
+            &topology,
+            &certified_block_with_provisions(BlockHeight(5), ShardGroupId(0), &[]),
+        );
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, Action::Fetch(FetchRequest::Transactions { .. }))),
+            "no fetch after admission cleared expectation"
+        );
     }
 
     #[test]

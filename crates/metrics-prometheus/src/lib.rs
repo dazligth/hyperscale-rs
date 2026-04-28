@@ -109,6 +109,7 @@ pub struct Metrics {
 
     // === Aborted Transactions ===
     pub transactions_aborted: Counter,
+    pub expected_tx_dropped: Counter,
 
     // === Lock Contention ===
     pub lock_contention_ratio: Gauge,
@@ -569,6 +570,12 @@ impl Metrics {
             transactions_aborted: register_counter!(
                 "hyperscale_transactions_aborted_total",
                 "Total cross-shard transactions aborted (timeout or node-ID conflict)"
+            )
+            .unwrap(),
+
+            expected_tx_dropped: register_counter!(
+                "hyperscale_mempool_expected_tx_dropped_total",
+                "Expected cross-shard txs dropped past RETENTION_HORIZON without DA fulfilment"
             )
             .unwrap(),
 
@@ -1082,6 +1089,10 @@ impl MetricsRecorder for PrometheusRecorder {
 
     fn record_transaction_aborted(&self) {
         self.metrics.transactions_aborted.inc();
+    }
+
+    fn record_expected_tx_dropped(&self) {
+        self.metrics.expected_tx_dropped.inc();
     }
 
     // ── Lock Contention ──────────────────────────────────────────────
