@@ -449,3 +449,111 @@ fn cross_shard_exec_cert_fetch_fallback_when_broadcast_dropped() {
          delivered ECs but tx still aborted somewhere)"
     );
 }
+
+/// Compound fault: drop *both* `provisions.broadcast` and
+/// `execution.cert.batch` simultaneously. Both fetch protocols must
+/// engage independently — the input-side (provisions) and output-side
+/// (ECs) pipelines are gated on different timeouts and different fetch
+/// instances; this test proves they compose without deadlock when both
+/// primary channels fail at once.
+#[test]
+fn cross_shard_compound_provisions_and_exec_cert_fetch_fallback() {
+    let (_guard, recorder) = test_setup();
+
+    let config = multi_shard_config();
+    let num_shards = u64::from(config.num_shards);
+    let mut runner = SimulationRunner::new(&config, 42);
+
+    let ((kp_a, acc_a), (_kp_b, acc_b)) = find_accounts_on_each_shard(num_shards);
+    let initial_balance = Decimal::from(10_000);
+    runner.initialize_genesis_with_balances(&[(acc_a, initial_balance), (acc_b, initial_balance)]);
+
+    runner.run_until(Duration::from_secs(1));
+
+    // Both cross-shard primary channels suppressed.
+    let provisions_rule = runner
+        .network_mut()
+        .fault()
+        .drop_type("provisions.broadcast")
+        .install();
+    let exec_cert_rule = runner
+        .network_mut()
+        .fault()
+        .drop_type("execution.cert.batch")
+        .install();
+
+    let manifest = ManifestBuilder::new()
+        .lock_fee(acc_a, Decimal::from(10))
+        .withdraw_from_account(acc_a, XRD, Decimal::from(500))
+        .try_deposit_entire_worktop_or_abort(acc_b, None)
+        .build();
+    let notarized =
+        sign_and_notarize(manifest, &NetworkDefinition::simulator(), 200, &kp_a).expect("sign tx");
+    let tx: RoutableTransaction =
+        routable_from_notarized_v1(notarized, test_validity_range()).expect("valid tx");
+    let tx_hash = tx.hash();
+
+    let touched_shards: std::collections::BTreeSet<ShardGroupId> = tx
+        .declared_reads
+        .iter()
+        .chain(tx.declared_writes.iter())
+        .map(|nid| shard_for_node(nid, num_shards))
+        .collect();
+    assert!(
+        touched_shards.len() >= 2,
+        "tx is not cross-shard: only touches {touched_shards:?}"
+    );
+
+    runner.schedule_initial_event(
+        0,
+        runner.now(),
+        NodeInput::SubmitTransaction { tx: Arc::new(tx) },
+    );
+
+    runner.run_until(runner.now() + Duration::from_secs(30));
+
+    // Layer 1: both rules intercepted at least one message.
+    assert!(
+        provisions_rule.fired() >= 1,
+        "expected provisions.broadcast rule to fire, got {}",
+        provisions_rule.fired()
+    );
+    assert!(
+        exec_cert_rule.fired() >= 1,
+        "expected execution.cert.batch rule to fire, got {}",
+        exec_cert_rule.fired()
+    );
+
+    // Layer 2: both fetch protocols engaged.
+    let prov_started = recorder.counter("fetch_started", Some("provision"));
+    let prov_completed = recorder.counter("fetch_completed", Some("provision"));
+    let prov_items = recorder.counter("fetch_items_sent", Some("provision"));
+    let ec_started = recorder.counter("fetch_started", Some("exec_cert"));
+    let ec_completed = recorder.counter("fetch_completed", Some("exec_cert"));
+    let ec_items = recorder.counter("fetch_items_sent", Some("exec_cert"));
+    assert!(
+        prov_started >= 1 && prov_completed >= 1 && prov_items >= 1,
+        "provision fetch fallback didn't engage: started={prov_started} \
+         completed={prov_completed} items_sent={prov_items}"
+    );
+    assert!(
+        ec_started >= 1 && ec_completed >= 1 && ec_items >= 1,
+        "exec_cert fetch fallback didn't engage: started={ec_started} \
+         completed={ec_completed} items_sent={ec_items}"
+    );
+
+    // Layer 3: every validator reaches terminal state, no aborts.
+    let total_nodes = config.num_shards * config.validators_per_shard;
+    for node_idx in 0..total_nodes {
+        assert!(
+            tx_reached_terminal_state(&runner, node_idx, &tx_hash),
+            "node {node_idx} did not reach terminal state for tx {tx_hash:?}",
+        );
+    }
+    let aborts = recorder.counter("transactions_aborted", None);
+    assert_eq!(
+        aborts, 0,
+        "expected zero abort events, got {aborts} (compound fault: \
+         both fetch protocols engaged but tx still aborted somewhere)"
+    );
+}
