@@ -422,28 +422,15 @@ impl TopologySnapshot {
         crate::shard_for_node(node_id, self.num_shards)
     }
 
-    /// Compute write shards for a transaction.
-    pub fn consensus_shards(&self, tx: &RoutableTransaction) -> Vec<ShardGroupId> {
-        tx.declared_writes
-            .iter()
-            .map(|node_id| self.shard_for_node_id(node_id))
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect()
-    }
-
-    /// Compute read-only shards for a transaction.
-    pub fn provisioning_shards(&self, tx: &RoutableTransaction) -> Vec<ShardGroupId> {
-        let write_shards: BTreeSet<_> = tx
-            .declared_writes
-            .iter()
-            .map(|node_id| self.shard_for_node_id(node_id))
-            .collect();
-
+    /// Every shard a transaction touches via either `declared_reads` or
+    /// `declared_writes`. Each shard executes the whole transaction, so
+    /// every touched shard needs every input substate it doesn't own
+    /// locally — reads and writes participate symmetrically here.
+    pub fn all_shards_for_transaction(&self, tx: &RoutableTransaction) -> Vec<ShardGroupId> {
         tx.declared_reads
             .iter()
+            .chain(tx.declared_writes.iter())
             .map(|node_id| self.shard_for_node_id(node_id))
-            .filter(|shard| !write_shards.contains(shard))
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect()
@@ -451,20 +438,12 @@ impl TopologySnapshot {
 
     /// Check if a transaction is cross-shard.
     pub fn is_cross_shard_transaction(&self, tx: &RoutableTransaction) -> bool {
-        self.consensus_shards(tx).len() > 1
+        self.all_shards_for_transaction(tx).len() > 1
     }
 
     /// Check if a transaction is single-shard.
     pub fn is_single_shard_transaction(&self, tx: &RoutableTransaction) -> bool {
-        self.consensus_shards(tx).len() <= 1
-    }
-
-    /// Get all shards involved in a transaction (both consensus and provisioning).
-    pub fn all_shards_for_transaction(&self, tx: &RoutableTransaction) -> Vec<ShardGroupId> {
-        let consensus = self.consensus_shards(tx);
-        let provisioning = self.provisioning_shards(tx);
-        let all: BTreeSet<_> = consensus.into_iter().chain(provisioning).collect();
-        all.into_iter().collect()
+        self.all_shards_for_transaction(tx).len() <= 1
     }
 
     /// Check if a transaction involves the local shard for consensus.
