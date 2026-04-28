@@ -416,13 +416,30 @@ fn cross_shard_provisions_recovers_after_transient_broadcast_outage() {
 /// `provision.request` is dropped 50% (so each fetch attempt has a
 /// coin-flip chance of timing out and being retried).
 ///
-/// Exercises [`Fetch::handle_failed`] and the retry path that wasn't
-/// covered by the all-or-nothing tests above. Runs across three seeds
-/// to confirm the seeded-RNG retry path is deterministic — every seed
-/// must independently reach successful execution within the 30s budget.
-#[test]
-fn cross_shard_provisions_fetch_with_50pct_request_loss() {
-    for seed in [42u64, 1337, 2026] {
+/// Generate one `#[test]` per seed so cargo runs them in parallel.
+///
+/// Use for probabilistic / multi-seed scenarios where each seed must
+/// independently pass. Each entry is `name => seed`; the macro emits a
+/// `#[test] fn <name>()` that invokes `$body($seed)`. Because the test
+/// names are spelled out per entry, no proc-macro identifier concatenation
+/// (e.g. `paste`) is required.
+macro_rules! seeded_tests {
+    (fn $body_arg:ident: u64 = $body:block, $($name:ident => $seed:literal),+ $(,)?) => {
+        $(
+            #[test]
+            fn $name() {
+                let $body_arg: u64 = $seed;
+                $body
+            }
+        )+
+    };
+}
+
+// Exercises `Fetch::handle_failed` and the retry path that wasn't covered
+// by the all-or-nothing tests above. Every seed must independently reach
+// successful execution within the 30s budget.
+seeded_tests! {
+    fn seed: u64 = {
         run_cross_shard_fault_scenario_with_seed(
             |runner| {
                 let broadcast_rule = runner
@@ -440,7 +457,10 @@ fn cross_shard_provisions_fetch_with_50pct_request_loss() {
             &["provision"],
             seed,
         );
-    }
+    },
+    cross_shard_provisions_fetch_with_50pct_request_loss_seed_42 => 42,
+    cross_shard_provisions_fetch_with_50pct_request_loss_seed_1337 => 1337,
+    cross_shard_provisions_fetch_with_50pct_request_loss_seed_2026 => 2026,
 }
 
 /// Cross-shard remote-header fetch fallback. Source-shard validators
