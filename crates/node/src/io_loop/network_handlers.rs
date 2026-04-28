@@ -264,6 +264,7 @@ where
                     if certs.is_empty() {
                         GetExecutionCertsResponse { certificates: None }
                     } else {
+                        hyperscale_metrics::record_fetch_response_sent("exec_cert", certs.len());
                         GetExecutionCertsResponse {
                             certificates: Some(certs),
                         }

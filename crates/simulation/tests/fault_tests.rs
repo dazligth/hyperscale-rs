@@ -343,3 +343,109 @@ fn cross_shard_provisions_fetch_fallback_when_broadcast_dropped() {
         );
     }
 }
+
+/// Cross-shard execution-certificate fetch fallback. Wave leaders
+/// normally broadcast `execution.cert.batch` notifications to remote
+/// participating shards once 2f+1 votes aggregate; suppressing those
+/// notifications forces each shard to fetch the remote shard's EC via
+/// `GetExecutionCertsRequest` so its local wave can complete.
+///
+/// Mirrors `cross_shard_provisions_fetch_fallback_when_broadcast_dropped`
+/// for the *output* side of the cross-shard pipeline (provisions are the
+/// input, ECs are the output).
+#[test]
+fn cross_shard_exec_cert_fetch_fallback_when_broadcast_dropped() {
+    let (_guard, recorder) = test_setup();
+
+    let config = multi_shard_config();
+    let num_shards = u64::from(config.num_shards);
+    let mut runner = SimulationRunner::new(&config, 42);
+
+    let ((kp_a, acc_a), (_kp_b, acc_b)) = find_accounts_on_each_shard(num_shards);
+    let initial_balance = Decimal::from(10_000);
+    runner.initialize_genesis_with_balances(&[(acc_a, initial_balance), (acc_b, initial_balance)]);
+
+    runner.run_until(Duration::from_secs(1));
+
+    // Drop the cross-shard EC notification globally. Each wave leader still
+    // forms an EC; the remote shard must fetch it via
+    // `GetExecutionCertsRequest` so its wave can complete.
+    let rule = runner
+        .network_mut()
+        .fault()
+        .drop_type("execution.cert.batch")
+        .install();
+
+    let manifest = ManifestBuilder::new()
+        .lock_fee(acc_a, Decimal::from(10))
+        .withdraw_from_account(acc_a, XRD, Decimal::from(500))
+        .try_deposit_entire_worktop_or_abort(acc_b, None)
+        .build();
+    let notarized =
+        sign_and_notarize(manifest, &NetworkDefinition::simulator(), 200, &kp_a).expect("sign tx");
+    let tx: RoutableTransaction =
+        routable_from_notarized_v1(notarized, test_validity_range()).expect("valid tx");
+    let tx_hash = tx.hash();
+
+    let touched_shards: std::collections::BTreeSet<ShardGroupId> = tx
+        .declared_reads
+        .iter()
+        .chain(tx.declared_writes.iter())
+        .map(|nid| shard_for_node(nid, num_shards))
+        .collect();
+    assert!(
+        touched_shards.len() >= 2,
+        "tx is not cross-shard: only touches {touched_shards:?}"
+    );
+
+    runner.schedule_initial_event(
+        0,
+        runner.now(),
+        NodeInput::SubmitTransaction { tx: Arc::new(tx) },
+    );
+
+    runner.run_until(runner.now() + Duration::from_secs(30));
+
+    // Layer 1: rule actually intercepted EC notifications.
+    assert!(
+        rule.fired() >= 1,
+        "expected drop_type(\"execution.cert.batch\") rule to fire, got {}",
+        rule.fired()
+    );
+
+    // Layer 2: the EC-fetch fallback engaged.
+    let fetch_started = recorder.counter("fetch_started", Some("exec_cert"));
+    let fetch_completed = recorder.counter("fetch_completed", Some("exec_cert"));
+    let fetch_items_sent = recorder.counter("fetch_items_sent", Some("exec_cert"));
+    assert!(
+        fetch_started >= 1,
+        "expected fetch_started{{kind=\"exec_cert\"}} >= 1, got {fetch_started} \
+         (rule fired {} times)",
+        rule.fired()
+    );
+    assert!(
+        fetch_completed >= 1,
+        "expected fetch_completed{{kind=\"exec_cert\"}} >= 1, got {fetch_completed} \
+         (started={fetch_started})"
+    );
+    assert!(
+        fetch_items_sent >= 1,
+        "expected fetch_items_sent{{kind=\"exec_cert\"}} >= 1, got {fetch_items_sent}"
+    );
+
+    // Layer 3: every validator reaches terminal state and the tx was not
+    // aborted.
+    let total_nodes = config.num_shards * config.validators_per_shard;
+    for node_idx in 0..total_nodes {
+        assert!(
+            tx_reached_terminal_state(&runner, node_idx, &tx_hash),
+            "node {node_idx} did not reach terminal state for tx {tx_hash:?}",
+        );
+    }
+    let aborts = recorder.counter("transactions_aborted", None);
+    assert_eq!(
+        aborts, 0,
+        "expected zero abort events, got {aborts} (fetch fallback \
+         delivered ECs but tx still aborted somewhere)"
+    );
+}
