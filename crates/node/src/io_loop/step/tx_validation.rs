@@ -89,11 +89,12 @@ where
         let tx_hash = tx.hash();
 
         // Gossip to all relevant shards (reads + writes).
+        let num_shards = self.topology.load().num_shards();
         let shards: std::collections::BTreeSet<ShardGroupId> = tx
             .declared_reads
             .iter()
             .chain(tx.declared_writes.iter())
-            .map(|node_id| hyperscale_types::shard_for_node(node_id, self.num_shards))
+            .map(|node_id| hyperscale_types::shard_for_node(node_id, num_shards))
             .collect();
         for shard in shards {
             let gossip = TransactionGossip::from_arc(Arc::clone(&tx));

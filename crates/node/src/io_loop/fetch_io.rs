@@ -28,25 +28,20 @@ where
     ) {
         use crate::io_loop::protocol::fetch::FetchOutput;
 
+        let local_shard = self.topology.load().local_shard();
         for FetchOutput::Send { ids, peers } in outputs {
             if B::PER_ID {
                 for id in ids {
                     B::dispatch_chunk(
                         vec![id],
                         &peers,
-                        self.local_shard,
+                        local_shard,
                         &*self.network,
                         &self.event_sender,
                     );
                 }
             } else {
-                B::dispatch_chunk(
-                    ids,
-                    &peers,
-                    self.local_shard,
-                    &*self.network,
-                    &self.event_sender,
-                );
+                B::dispatch_chunk(ids, &peers, local_shard, &*self.network, &self.event_sender);
             }
         }
     }

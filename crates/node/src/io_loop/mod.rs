@@ -52,7 +52,7 @@ use hyperscale_dispatch::Dispatch;
 use hyperscale_engine::{Engine, RadixExecutor, TransactionValidation};
 use hyperscale_network::Network;
 use hyperscale_storage::Storage;
-use hyperscale_types::{Bls12381G1PrivateKey, ShardGroupId, TopologySnapshot, TxHash, ValidatorId};
+use hyperscale_types::{Bls12381G1PrivateKey, TopologySnapshot, TxHash};
 use quick_cache::sync::Cache as QuickCache;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -119,11 +119,30 @@ where
     S: Storage,
     D: Dispatch,
 {
-    // Core components
+    /// State machine driven exclusively from the pinned thread via
+    /// `state.handle()`. All `ProtocolEvent` ingestion and `Action`
+    /// emission happen here; off-thread closures never touch it.
     state: NodeStateMachine,
+
+    /// Persistent block / receipt / JMT store. `Arc` so delegated
+    /// closures (block-commit, fetch-serve, sync) can read it from
+    /// thread pools without crossing back to the pinned thread.
     storage: Arc<S>,
+
+    /// Transaction executor. Cloned (cheaply) into the block-commit
+    /// closure on each drain — `Engine` requires `Clone`, so this is
+    /// held by value rather than behind an `Arc`.
     executor: E,
+
+    /// Network sender plus the registry of inbound gossip / request
+    /// handlers installed at `init` time. `Arc` so handler closures
+    /// and dispatch jobs can broadcast / reply without re-entering
+    /// the pinned thread.
     network: Arc<N>,
+
+    /// Thread-pool scheduler for off-thread work (crypto verify,
+    /// tx validation, block-commit persistence, fetch-serve). Each
+    /// `dispatch.spawn` site routes results back via `event_sender`.
     dispatch: D,
 
     /// Channel back to the pinned-thread event loop.
@@ -151,12 +170,17 @@ where
     /// each `dispatch.spawn` site calls `event_sender.send` directly.
     event_sender: crossbeam::channel::Sender<NodeInput>,
 
-    // Identity
+    /// Local validator's BLS signing key. `Arc` so it can be moved
+    /// into off-thread signing closures (e.g. wave-vote signing on
+    /// the crypto pool).
     signing_key: Arc<Bls12381G1PrivateKey>,
+
+    /// Lock-free topology snapshot shared with network handler closures
+    /// and delegated dispatch jobs. The pinned thread is the sole writer
+    /// (via `Action::TopologyChanged`); all other readers `.load()` for
+    /// an atomic snapshot. The state machine owns its own copy — this
+    /// field exists for off-thread consumers that can't reach into it.
     topology: SharedTopologySnapshot,
-    local_shard: ShardGroupId,
-    validator_id: ValidatorId,
-    num_shards: u64,
 
     /// Block commit pipeline: accumulates commits, applies persistence
     /// backpressure, and drains them into a single async closure that
@@ -177,13 +201,35 @@ where
     /// Sync + per-payload fetch protocols.
     protocols: ProtocolHost,
 
-    // Transaction validation
+    /// Stateless transaction validator (signature + format + EC checks).
+    /// `Arc` so it can be cloned into the `tx_validation` pool closure
+    /// on each batch flush.
     tx_validator: Arc<TransactionValidation>,
+
+    /// Hashes currently in the validation pipeline — either sitting in
+    /// `validation_batch` or being verified off-thread. Acts as a dedup
+    /// guard so duplicate gossip / re-submits don't enqueue twice.
+    /// Entries are removed by `TransactionValidated` /
+    /// `TransactionValidationsFailed` handlers.
     pending_validation: HashSet<TxHash>,
+
+    /// Subset of `pending_validation` that originated from a local RPC /
+    /// sim submission rather than gossip. Carried through validation so
+    /// the resulting `TransactionValidated` event can flag
+    /// `submitted_locally = true` for mempool admission accounting.
     locally_submitted: HashSet<TxHash>,
 
-    // Batch accumulators
+    /// Pending transactions awaiting batched signature / format /
+    /// declared-shard verification on the `tx_validation` pool.
+    /// Bounded by `tx_validation_max` count and `tx_validation_window`
+    /// time; flushed on either trigger or on explicit pre-step deadline
+    /// check.
     validation_batch: BatchAccumulator<Arc<hyperscale_types::RoutableTransaction>>,
+
+    /// Pending remote-committed-header gossip awaiting batched BLS
+    /// sender-signature verification on the crypto pool. Inbound
+    /// committee-membership and pubkey resolution happen on the network
+    /// thread; only the per-message BLS verify is deferred here.
     committed_header_batch: BatchAccumulator<CommittedHeaderVerificationItem>,
 
     /// Last time a "transaction finalization exceeded 10s" warning was emitted.
@@ -195,9 +241,20 @@ where
     /// are dropped on terminal status.
     tx_phase_times: phase_times::TxPhaseTimesCache,
 
-    // Accumulated outputs from this step (for caller to drain)
+    /// Per-step buffer of `(tx_hash, status)` pairs emitted via
+    /// `Action::EmitTransactionStatus`. Drained into `StepOutput` at the
+    /// end of each `step()` for the runner to forward to RPC subscribers.
     emitted_statuses: Vec<(TxHash, hyperscale_types::TransactionStatus)>,
+
+    /// Per-step counter of actions produced by the state machine. Drained
+    /// into `StepOutput` for the runner's metrics; reset by `step()` (and
+    /// cleared mid-step by handlers that synthesize follow-up events).
     actions_generated: usize,
+
+    /// Per-step buffer of timer set / cancel operations. The runner is
+    /// responsible for translating these into actual timer-driver calls
+    /// since timer firing is inherently runner-specific (wall-clock in
+    /// production, logical-clock in simulation).
     pending_timer_ops: Vec<TimerOp>,
 }
 
@@ -225,9 +282,6 @@ where
         config: NodeConfig,
         tx_validator: Arc<TransactionValidation>,
     ) -> Self {
-        let topo = topology.load();
-        let local_shard = topo.local_shard();
-        let validator_id = topo.local_validator_id();
         let initial_persisted_height = state.bft().committed_height();
         let b = &config.batch;
         let protocols = ProtocolHost::new(&config);
@@ -246,9 +300,6 @@ where
             event_sender,
             signing_key: Arc::new(signing_key),
             topology,
-            local_shard,
-            validator_id,
-            num_shards: topo.num_shards(),
             // At startup, everything committed is also persisted on disk.
             block_commit: BlockCommitCoordinator::new(initial_persisted_height),
             pending_chain,
@@ -268,14 +319,6 @@ where
             actions_generated: 0,
             pending_timer_ops: Vec::new(),
         }
-    }
-
-    /// Rebuild derived topology state from a topology snapshot.
-    /// Called after storing a new topology via `Action::TopologyChanged`.
-    const fn rebuild_topology_cache_from(&mut self, topology: &hyperscale_types::TopologySnapshot) {
-        self.local_shard = topology.local_shard();
-        self.validator_id = topology.local_validator_id();
-        self.num_shards = topology.num_shards();
     }
 
     // ─── Time ────────────────────────────────────────────────────────────

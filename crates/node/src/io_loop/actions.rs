@@ -234,9 +234,8 @@ where
         self.emitted_statuses.push((tx_hash, status));
     }
 
-    fn handle_topology_changed(&mut self, topology: &Arc<hyperscale_types::TopologySnapshot>) {
+    fn handle_topology_changed(&self, topology: &Arc<hyperscale_types::TopologySnapshot>) {
         self.topology.store(Arc::clone(topology));
-        self.rebuild_topology_cache_from(topology);
 
         // Push updated validator keys to the network layer for bind verification.
         let keys: hyperscale_network::ValidatorKeyMap = topology
@@ -248,7 +247,7 @@ where
         self.network.update_validator_keys(Arc::new(keys));
 
         tracing::info!(
-            local_shard = self.local_shard.0,
+            local_shard = topology.local_shard().0,
             local_peers = self.local_peers().len(),
             "Network topology updated"
         );
@@ -563,9 +562,10 @@ where
     /// to `network.request()`.
     pub(super) fn local_peers(&self) -> Vec<ValidatorId> {
         let topo = self.topology.load();
-        topo.committee_for_shard(self.local_shard)
+        let self_id = topo.local_validator_id();
+        topo.committee_for_shard(topo.local_shard())
             .iter()
-            .filter(|&&v| v != self.validator_id)
+            .filter(|&&v| v != self_id)
             .copied()
             .collect()
     }
