@@ -5,26 +5,26 @@ use sbor::prelude::BasicSbor;
 
 /// Response to a local provisions fetch request.
 ///
-/// `batches` holds the batches the responder has. The requester knows the
+/// `provisions` holds the batches the responder has. The requester knows the
 /// hashes it asked for, so missing hashes are computed client-side as
 /// `requested - returned`; the wire format does not duplicate that diff.
 #[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
 pub struct GetLocalProvisionsResponse {
     /// Provision batches the responder had locally.
-    pub batches: Vec<Provisions>,
+    pub provisions: Vec<Provisions>,
 }
 
 impl GetLocalProvisionsResponse {
-    /// Build a response carrying `batches`.
+    /// Build a response carrying `provisions`.
     #[must_use]
-    pub const fn new(batches: Vec<Provisions>) -> Self {
-        Self { batches }
+    pub const fn new(provisions: Vec<Provisions>) -> Self {
+        Self { provisions }
     }
 
     /// Build an empty response (responder had none of the requested batches).
     #[must_use]
     pub const fn empty() -> Self {
-        Self { batches: vec![] }
+        Self { provisions: vec![] }
     }
 }
 
@@ -45,6 +45,6 @@ mod tests {
     #[test]
     fn test_empty_response() {
         let resp = GetLocalProvisionsResponse::empty();
-        assert!(resp.batches.is_empty());
+        assert!(resp.provisions.is_empty());
     }
 }

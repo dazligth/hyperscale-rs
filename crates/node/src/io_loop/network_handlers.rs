@@ -186,14 +186,14 @@ where
                 move |req: hyperscale_messages::request::GetLocalProvisionsRequest| {
                     use hyperscale_messages::response::GetLocalProvisionsResponse;
 
-                    let mut batches = Vec::with_capacity(req.batch_hashes.len());
+                    let mut provisions = Vec::with_capacity(req.batch_hashes.len());
                     for h in &req.batch_hashes {
                         if let Some(b) = provision_store.get(h) {
-                            batches.push((*b).clone());
+                            provisions.push((*b).clone());
                         }
                     }
 
-                    GetLocalProvisionsResponse::new(batches)
+                    GetLocalProvisionsResponse::new(provisions)
                 },
             );
 

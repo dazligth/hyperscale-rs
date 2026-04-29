@@ -165,11 +165,11 @@ impl FetchBinding for LocalProvisionBinding {
             Box::new(move |result| {
                 if let Ok(resp) = result {
                     let delivered: std::collections::HashSet<ProvisionHash> =
-                        resp.batches.iter().map(Provisions::hash).collect();
+                        resp.provisions.iter().map(Provisions::hash).collect();
                     let missing_hashes: Vec<ProvisionHash> =
                         hs.into_iter().filter(|h| !delivered.contains(h)).collect();
                     let had_misses = !missing_hashes.is_empty();
-                    let batches = resp.batches.into_iter().map(Arc::new).collect();
+                    let batches = resp.provisions.into_iter().map(Arc::new).collect();
                     let _ = es.send(NodeInput::LocalProvisionReceived {
                         batches,
                         missing_hashes,
