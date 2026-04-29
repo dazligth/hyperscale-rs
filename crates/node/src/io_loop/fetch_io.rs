@@ -28,7 +28,7 @@ where
     ) {
         use crate::io_loop::protocol::fetch::FetchOutput;
 
-        let local_shard = self.topology.load().local_shard();
+        let local_shard = self.topology_snapshot.load().local_shard();
         for FetchOutput::Send { ids, peers } in outputs {
             if B::PER_ID {
                 for id in ids {

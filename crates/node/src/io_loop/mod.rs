@@ -180,7 +180,7 @@ where
     /// (via `Action::TopologyChanged`); all other readers `.load()` for
     /// an atomic snapshot. The state machine owns its own copy — this
     /// field exists for off-thread consumers that can't reach into it.
-    topology: SharedTopologySnapshot,
+    topology_snapshot: SharedTopologySnapshot,
 
     /// Block commit pipeline: accumulates commits, applies persistence
     /// backpressure, and drains them into a single async closure that
@@ -278,7 +278,7 @@ where
         dispatch: D,
         event_sender: crossbeam::channel::Sender<NodeInput>,
         signing_key: Bls12381G1PrivateKey,
-        topology: SharedTopologySnapshot,
+        topology_snapshot: SharedTopologySnapshot,
         config: NodeConfig,
         tx_validator: Arc<TransactionValidation>,
     ) -> Self {
@@ -299,7 +299,7 @@ where
             dispatch,
             event_sender,
             signing_key: Arc::new(signing_key),
-            topology,
+            topology_snapshot,
             // At startup, everything committed is also persisted on disk.
             block_commit: BlockCommitCoordinator::new(initial_persisted_height),
             pending_chain,

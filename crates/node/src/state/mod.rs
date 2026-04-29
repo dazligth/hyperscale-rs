@@ -241,7 +241,7 @@ impl StateMachine for NodeStateMachine {
             //
             // TODO(epoch): After transition_to_next_epoch() / mark_shard_splitting() /
             // clear_shard_splitting() mutates self.topology, emit
-            // Action::TopologyChanged { topology: Arc::clone(self.topology.snapshot()) }
+            // Action::TopologyChanged { topology_snapshot: Arc::clone(self.topology.snapshot()) }
             // so the io_loop updates its shared topology snapshot.
             ProtocolEvent::GlobalConsensusTimer
             | ProtocolEvent::GlobalBlockReceived { .. }

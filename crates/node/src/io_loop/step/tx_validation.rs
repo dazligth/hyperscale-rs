@@ -89,7 +89,7 @@ where
         let tx_hash = tx.hash();
 
         // Gossip to all relevant shards (reads + writes).
-        let num_shards = self.topology.load().num_shards();
+        let num_shards = self.topology_snapshot.load().num_shards();
         let shards: std::collections::BTreeSet<ShardGroupId> = tx
             .declared_reads
             .iter()

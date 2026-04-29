@@ -234,7 +234,7 @@ pub fn handle_action<S, E, N>(
                 &requests,
                 &shard_recipients,
             );
-            let validator_id = ctx.topology.local_validator_id();
+            let validator_id = ctx.topology_snapshot.local_validator_id();
             for (provisions, recipients) in batches {
                 if provisions.transactions.is_empty() {
                     continue;

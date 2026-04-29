@@ -430,7 +430,7 @@ impl ProductionRunnerBuilder {
             xb_consensus_rx: Some(xb_consensus_rx),
             xb_shutdown_rx: Some(xb_shutdown_rx),
             network: adapter,
-            topology,
+            topology_snapshot: topology,
             storage,
             dispatch,
             rpc_status: self.rpc_status,
@@ -483,7 +483,7 @@ pub struct ProductionRunner {
     /// Libp2p network adapter (shared with `InboundRouter`, `RequestManager`).
     network: Arc<Libp2pAdapter>,
     /// Network topology snapshot (lock-free `ArcSwap`, updated on epoch transitions).
-    topology: SharedTopologySnapshot,
+    topology_snapshot: SharedTopologySnapshot,
     /// `RocksDB` storage (for `InboundRouter` and genesis).
     #[allow(dead_code)]
     storage: Arc<RocksDbStorage>,
@@ -625,7 +625,7 @@ impl ProductionRunner {
 
         // Create genesis block.
         let first_validator = self
-            .topology
+            .topology_snapshot
             .load()
             .committee_for_shard(self.local_shard)
             .first()

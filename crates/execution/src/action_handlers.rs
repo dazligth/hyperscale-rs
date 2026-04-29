@@ -302,8 +302,8 @@ where
             state_root: _,
         } => {
             let start = std::time::Instant::now();
-            let local_shard = ctx.topology.local_shard();
-            let num_shards = ctx.topology.num_shards();
+            let local_shard = ctx.topology_snapshot.local_shard();
+            let num_shards = ctx.topology_snapshot.num_shards();
             let view = ctx.pending_chain.view_at(block_hash);
             let view_snap =
                 <hyperscale_storage::SubstateView<_> as SubstateStore>::snapshot(&*view);
@@ -340,8 +340,8 @@ where
             requests,
         } => {
             let start = std::time::Instant::now();
-            let local_shard = ctx.topology.local_shard();
-            let num_shards = ctx.topology.num_shards();
+            let local_shard = ctx.topology_snapshot.local_shard();
+            let num_shards = ctx.topology_snapshot.num_shards();
             let view = ctx.pending_chain.view_at(block_hash);
             let view_snap =
                 <hyperscale_storage::SubstateView<_> as SubstateStore>::snapshot(&*view);
@@ -390,8 +390,8 @@ where
             tx_outcomes,
             leader,
         } => {
-            let local_shard = ctx.topology.local_shard();
-            let validator_id = ctx.topology.local_validator_id();
+            let local_shard = ctx.topology_snapshot.local_shard();
+            let validator_id = ctx.topology_snapshot.local_validator_id();
             let tx_count = u32::try_from(tx_outcomes.len()).unwrap_or(u32::MAX);
             let msg = hyperscale_types::exec_vote_message(
                 vote_anchor_ts,
@@ -450,7 +450,7 @@ where
             let sig = ctx.signing_key.sign_v1(&msg);
             let batch = hyperscale_messages::ExecutionCertificatesNotification::new(
                 vec![cert],
-                ctx.topology.local_validator_id(),
+                ctx.topology_snapshot.local_validator_id(),
                 sig,
             );
             ctx.network.notify(&recipients, &batch);

@@ -23,7 +23,7 @@ use std::sync::Arc;
 #[allow(missing_docs)] // bag of references; field names match the borrowed types
 pub struct ActionContext<'a, S: Storage, E: Engine, N: Network> {
     pub executor: &'a E,
-    pub topology: &'a TopologySnapshot,
+    pub topology_snapshot: &'a TopologySnapshot,
     /// Chain-state lookup. Handlers that read state call
     /// `pending_chain.view_at(block_hash)` to build an anchored view.
     pub pending_chain: &'a Arc<PendingChain<S>>,

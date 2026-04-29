@@ -658,10 +658,10 @@ pub fn handle_action<S, E, N>(
             block_hash,
             expected,
             transactions,
-            topology,
+            topology_snapshot,
         } => {
             let start = std::time::Instant::now();
-            let valid = verify_provision_tx_roots(&expected, &transactions, &topology);
+            let valid = verify_provision_tx_roots(&expected, &transactions, &topology_snapshot);
             metrics::record_signature_verification_latency(
                 "provision_tx_roots",
                 start.elapsed().as_secs_f64(),
@@ -830,7 +830,7 @@ pub fn handle_action<S, E, N>(
                 transactions,
                 finalized_waves.clone(),
                 shard_group_id,
-                ctx.topology,
+                ctx.topology_snapshot,
                 provisions.clone(),
                 parent_in_flight,
                 finalized_tx_count,
@@ -870,10 +870,10 @@ pub fn handle_action<S, E, N>(
             let sig = ctx.signing_key.sign_v1(&msg);
             let gossip = hyperscale_messages::BlockHeaderNotification::new(*header, *manifest, sig);
             let local_peers: Vec<ValidatorId> = ctx
-                .topology
-                .committee_for_shard(ctx.topology.local_shard())
+                .topology_snapshot
+                .committee_for_shard(ctx.topology_snapshot.local_shard())
                 .iter()
-                .filter(|&&v| v != ctx.topology.local_validator_id())
+                .filter(|&&v| v != ctx.topology_snapshot.local_validator_id())
                 .copied()
                 .collect();
             ctx.network.notify(&local_peers, &gossip);
@@ -888,10 +888,10 @@ pub fn handle_action<S, E, N>(
         } => {
             let vote = BlockVote::new(
                 block_hash,
-                ctx.topology.local_shard(),
+                ctx.topology_snapshot.local_shard(),
                 height,
                 round,
-                ctx.topology.local_validator_id(),
+                ctx.topology_snapshot.local_validator_id(),
                 ctx.signing_key,
                 timestamp,
             );
@@ -912,7 +912,7 @@ pub fn handle_action<S, E, N>(
             let sig = ctx.signing_key.sign_v1(&msg);
             let gossip = hyperscale_messages::CommittedBlockHeaderGossip {
                 committed_header,
-                sender: ctx.topology.local_validator_id(),
+                sender: ctx.topology_snapshot.local_validator_id(),
                 sender_signature: sig,
             };
             ctx.network.broadcast_global(&gossip);

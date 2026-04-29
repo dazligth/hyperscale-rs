@@ -134,7 +134,7 @@ where
                 } => {
                     let es = self.event_sender.clone();
                     let peers = self
-                        .topology
+                        .topology_snapshot
                         .load()
                         .committee_for_shard(source_shard)
                         .to_vec();

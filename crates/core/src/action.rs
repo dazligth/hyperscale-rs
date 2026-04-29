@@ -429,7 +429,7 @@ pub enum Action {
         /// Transactions in the block.
         transactions: Vec<Arc<RoutableTransaction>>,
         /// Topology snapshot used to route txs to target shards.
-        topology: TopologySnapshot,
+        topology_snapshot: TopologySnapshot,
     },
 
     /// Build a complete block proposal.
@@ -599,7 +599,7 @@ pub enum Action {
     /// `local_shard` / `num_shards`.
     TopologyChanged {
         /// New topology snapshot to propagate.
-        topology: Arc<TopologySnapshot>,
+        topology_snapshot: Arc<TopologySnapshot>,
     },
 
     // ═══════════════════════════════════════════════════════════════════════

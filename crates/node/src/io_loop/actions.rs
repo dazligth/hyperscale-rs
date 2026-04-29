@@ -128,7 +128,9 @@ where
                 self.tx_phase_times
                     .record_ec_created(&tx_hashes, self.state.now());
             }
-            Action::TopologyChanged { topology } => self.handle_topology_changed(&topology),
+            Action::TopologyChanged { topology_snapshot } => {
+                self.handle_topology_changed(&topology_snapshot);
+            }
         }
     }
 
@@ -235,7 +237,7 @@ where
     }
 
     fn handle_topology_changed(&self, topology: &Arc<hyperscale_types::TopologySnapshot>) {
-        self.topology.store(Arc::clone(topology));
+        self.topology_snapshot.store(Arc::clone(topology));
 
         // Push updated validator keys to the network layer for bind verification.
         let keys: hyperscale_network::ValidatorKeyMap = topology
@@ -478,7 +480,7 @@ where
 
         // Clone cheap shared state for the 'static spawn closure.
         let executor = self.executor.clone();
-        let topology_snapshot = self.topology.load_full();
+        let topology_snapshot = self.topology_snapshot.load_full();
         let prepared_commits = self.block_commit.prepared_commits_handle();
         let pending_chain = Arc::clone(&self.pending_chain);
         let network = Arc::clone(&self.network);
@@ -515,7 +517,7 @@ where
             };
             let ctx = ActionContext {
                 executor: &executor,
-                topology: &topology_snapshot,
+                topology_snapshot: &topology_snapshot,
                 pending_chain: &pending_chain,
                 network: &network,
                 signing_key: &signing_key,
@@ -561,7 +563,7 @@ where
     /// Local shard committee excluding self, for use as the `peers` argument
     /// to `network.request()`.
     pub(super) fn local_peers(&self) -> Vec<ValidatorId> {
-        let topo = self.topology.load();
+        let topo = self.topology_snapshot.load();
         let self_id = topo.local_validator_id();
         topo.committee_for_shard(topo.local_shard())
             .iter()

@@ -78,7 +78,7 @@ where
         // same key wait on a shared condvar instead of computing again.
 
         let storage = Arc::clone(&self.storage);
-        let topology = self.topology.clone();
+        let topology = self.topology_snapshot.clone();
         let outbound_cache = Arc::clone(&self.caches.provision_store);
 
         let dedup: Arc<std::sync::Mutex<ProvisionsRequestDedup>> =
@@ -293,7 +293,7 @@ where
         // ── block.committed → pre-filter, then NodeInput::CommittedBlockGossipReceived ─
 
         let tx = self.event_sender.clone();
-        let topology = self.topology.clone();
+        let topology = self.topology_snapshot.clone();
         self.network
             .register_gossip_handler::<hyperscale_messages::CommittedBlockHeaderGossip>(
                 TopicScope::Global,
@@ -343,7 +343,7 @@ where
         // ── block.header → verify proposer sig, then ProtocolEvent::BlockHeaderReceived ─
 
         let tx = self.event_sender.clone();
-        let topology = self.topology.clone();
+        let topology = self.topology_snapshot.clone();
         self.network
             .register_notification_handler::<BlockHeaderNotification>(
                 move |gossip: BlockHeaderNotification| {
@@ -378,7 +378,7 @@ where
         // ── provisions.broadcast → verify sender sig, then ProtocolEvent::ProvisionsReceived ─
 
         let tx = self.event_sender.clone();
-        let topology = self.topology.clone();
+        let topology = self.topology_snapshot.clone();
         self.network
             .register_notification_handler::<hyperscale_messages::ProvisionsNotification>(
                 move |notification: hyperscale_messages::ProvisionsNotification| {
@@ -422,7 +422,7 @@ where
         // ── execution.vote.batch → verify sender sig, then ProtocolEvent::ExecutionVoteReceived ─
 
         let tx = self.event_sender.clone();
-        let topology = self.topology.clone();
+        let topology = self.topology_snapshot.clone();
         self.network
             .register_notification_handler::<ExecutionVotesNotification>(
                 move |batch: ExecutionVotesNotification| {
@@ -457,7 +457,7 @@ where
         // ── execution.cert.batch → verify sender sig, then ProtocolEvent::ExecutionCertificatesReceived ─
 
         let tx = self.event_sender.clone();
-        let topology = self.topology.clone();
+        let topology = self.topology_snapshot.clone();
         self.network
             .register_notification_handler::<ExecutionCertificatesNotification>(
                 move |batch: ExecutionCertificatesNotification| {
