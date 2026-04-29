@@ -1458,7 +1458,7 @@ impl BftCoordinator {
             "Emitting vote (signing delegated to crypto pool)"
         );
 
-        let recipients = crate::lookups::vote_recipients(topology, height, round);
+        let next_proposers = crate::lookups::vote_recipients(topology, height, round);
 
         // Emit SignAndBroadcastBlockVote — the io_loop signs on the consensus
         // crypto pool, broadcasts, and feeds the signed vote back for local
@@ -1468,7 +1468,7 @@ impl BftCoordinator {
             height,
             round,
             timestamp,
-            recipients,
+            next_proposers,
         }]
     }
 

@@ -865,7 +865,7 @@ pub fn handle_action<S, E, N>(
             height,
             round,
             timestamp,
-            recipients,
+            next_proposers,
         } => {
             let vote = BlockVote::new(
                 block_hash,
@@ -877,7 +877,7 @@ pub fn handle_action<S, E, N>(
                 timestamp,
             );
             let gossip = hyperscale_messages::BlockVoteNotification { vote: vote.clone() };
-            ctx.network.notify(&recipients, &gossip);
+            ctx.network.notify(&next_proposers, &gossip);
             // Feed our own signed vote back for local VoteSet tracking.
             (ctx.notify)(NodeInput::Protocol(Box::new(
                 ProtocolEvent::BlockVoteReceived { vote },

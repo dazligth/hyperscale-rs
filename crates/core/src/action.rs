@@ -573,7 +573,7 @@ pub enum Action {
     // ═══════════════════════════════════════════════════════════════════════
     // Network: BFT Votes
     // ═══════════════════════════════════════════════════════════════════════
-    /// Sign and broadcast a block vote to targeted recipients.
+    /// Sign and broadcast a block vote to the next proposer(s).
     ///
     /// The `io_loop` signs the vote on the consensus crypto pool, then
     /// broadcasts to the next proposer and feeds the signed vote back
@@ -587,9 +587,9 @@ pub enum Action {
         round: Round,
         /// Proposer timestamp from the block header (echoed in the vote).
         timestamp: ProposerTimestamp,
-        /// Targeted vote recipients — the next proposer who needs this vote
-        /// to build the QC for the next block.
-        recipients: Vec<ValidatorId>,
+        /// Local-shard validators eligible to propose the next block; they
+        /// need this vote to assemble the QC.
+        next_proposers: Vec<ValidatorId>,
     },
 
     // ═══════════════════════════════════════════════════════════════════════
