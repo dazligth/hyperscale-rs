@@ -37,7 +37,7 @@ SMOKE_TEST_TIMEOUT="${SMOKE_TEST_TIMEOUT:-60s}" # Smoke test timeout
 SKIP_BUILD="${SKIP_BUILD:-false}"               # Skip building binaries
 NODE_HOSTNAME="${NODE_HOSTNAME:-localhost}"     # Hostname for spammer endpoints
 TCP_FALLBACK_ENABLED="${TCP_FALLBACK_ENABLED:-false}" # Enable TCP fallback transport (default: false)
-NETWORK_LATENCY_MS=""                           # Network latency in milliseconds (empty = disabled)
+NETWORK_LATENCY_MS="100"                        # Network latency in milliseconds (empty = disabled)
 PACKET_LOSS_PERCENT=""                          # Packet loss percentage (empty = disabled)
 JMT_HISTORY_LENGTH=256                          # Number of block heights of JMT history to retain (default: 256)
 
