@@ -130,18 +130,6 @@ where
                     .record_ec_created(&tx_hashes, self.state.now());
             }
             Action::TopologyChanged { topology } => self.handle_topology_changed(&topology),
-
-            // ─── Global consensus / epoch (not yet implemented) ────────────
-            Action::ProposeGlobalBlock { .. }
-            | Action::BroadcastGlobalBlockVote { .. }
-            | Action::TransitionEpoch { .. }
-            | Action::MarkValidatorReady { .. }
-            | Action::InitiateShardSplit { .. }
-            | Action::CompleteShardSplit { .. }
-            | Action::InitiateShardMerge { .. }
-            | Action::CompleteShardMerge { .. }
-            | Action::PersistEpochConfig { .. }
-            | Action::FetchEpochConfig { .. } => {}
         }
     }
 

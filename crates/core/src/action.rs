@@ -3,12 +3,11 @@
 use crate::{FetchRequest, ProtocolEvent, TimerId};
 use hyperscale_types::{
     Block, BlockHash, BlockHeader, BlockHeight, BlockManifest, BlockVote, Bls12381G1PublicKey,
-    Bls12381G2Signature, CertificateRoot, CommittedBlockHeader, EpochConfig, EpochId,
-    ExecutionCertificate, ExecutionVote, FinalizedWave, GlobalReceiptRoot, LocalReceiptRoot,
-    NodeId, ProposerTimestamp, ProvisionHash, ProvisionTxRoot, Provisions, ProvisionsRoot,
-    QuorumCertificate, ReceiptBundle, Round, RoutableTransaction, ShardGroupId, SignerBitfield,
-    StateProvision, StateRoot, TopologySnapshot, TransactionRoot, TransactionStatus, TxHash,
-    TxOutcome, ValidatorId, VotePower, WaveId, WeightedTimestamp,
+    CertificateRoot, CommittedBlockHeader, ExecutionCertificate, ExecutionVote, FinalizedWave,
+    GlobalReceiptRoot, LocalReceiptRoot, NodeId, ProposerTimestamp, ProvisionHash, ProvisionTxRoot,
+    Provisions, ProvisionsRoot, QuorumCertificate, ReceiptBundle, Round, RoutableTransaction,
+    ShardGroupId, StateProvision, StateRoot, TopologySnapshot, TransactionRoot, TransactionStatus,
+    TxHash, TxOutcome, ValidatorId, WaveId, WeightedTimestamp,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -46,7 +45,7 @@ pub struct ProvisionsRequest {
 #[derive(Debug, Clone, strum::IntoStaticStr)]
 pub enum Action {
     // ═══════════════════════════════════════════════════════════════════════
-    // Network: BFT Consensus
+    // Network: BFT
     // ═══════════════════════════════════════════════════════════════════════
     /// Sign and broadcast a block header (proposal) to the local shard.
     ///
@@ -56,6 +55,25 @@ pub enum Action {
         header: Box<BlockHeader>,
         /// Manifest listing the block's tx / cert / provision hashes.
         manifest: Box<BlockManifest>,
+    },
+
+    /// Sign and broadcast a block vote to the next proposer(s).
+    ///
+    /// The `io_loop` signs the vote on the consensus crypto pool, then
+    /// broadcasts to the next proposer and feeds the signed vote back
+    /// to the state machine for local `VoteSet` tracking.
+    SignAndBroadcastBlockVote {
+        /// Block being voted on.
+        block_hash: BlockHash,
+        /// Block height.
+        height: BlockHeight,
+        /// Round at which the vote is being cast.
+        round: Round,
+        /// Proposer timestamp from the block header (echoed in the vote).
+        timestamp: ProposerTimestamp,
+        /// Local-shard validators eligible to propose the next block; they
+        /// need this vote to assemble the QC.
+        next_proposers: Vec<ValidatorId>,
     },
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -531,6 +549,9 @@ pub enum Action {
         source: crate::CommitSource,
     },
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // RPC Status / Telemetry
+    // ═══════════════════════════════════════════════════════════════════════
     /// Emit transaction status update for RPC status cache.
     ///
     /// Emitted by the mempool whenever a transaction's status changes:
@@ -571,146 +592,17 @@ pub enum Action {
     },
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Network: BFT Votes
+    // Topology
     // ═══════════════════════════════════════════════════════════════════════
-    /// Sign and broadcast a block vote to the next proposer(s).
-    ///
-    /// The `io_loop` signs the vote on the consensus crypto pool, then
-    /// broadcasts to the next proposer and feeds the signed vote back
-    /// to the state machine for local `VoteSet` tracking.
-    SignAndBroadcastBlockVote {
-        /// Block being voted on.
-        block_hash: BlockHash,
-        /// Block height.
-        height: BlockHeight,
-        /// Round at which the vote is being cast.
-        round: Round,
-        /// Proposer timestamp from the block header (echoed in the vote).
-        timestamp: ProposerTimestamp,
-        /// Local-shard validators eligible to propose the next block; they
-        /// need this vote to assemble the QC.
-        next_proposers: Vec<ValidatorId>,
-    },
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Storage: Execution
-    // ═══════════════════════════════════════════════════════════════════════
-    /// Persist receipt bundles to disk. Fire-and-forget — no `ProtocolEvent` response.
-    // ═══════════════════════════════════════════════════════════════════════
-    // Global Consensus / Epoch Management
-    // ═══════════════════════════════════════════════════════════════════════
-    /// Propose a global block for epoch management.
-    ///
-    /// Only the designated global proposer (rotating based on epoch height) calls this.
-    ProposeGlobalBlock {
-        /// Current epoch.
-        epoch: EpochId,
-        /// Height within the global chain.
-        height: BlockHeight,
-        /// The proposed next epoch configuration (if this finalizes an epoch).
-        next_epoch_config: Option<Box<EpochConfig>>,
-    },
-
-    /// Broadcast a shard vote for a global block.
-    ///
-    /// This is the "shard-level vote" - sent after 2f+1 local validators agree.
-    BroadcastGlobalBlockVote {
-        /// The block being voted on.
-        block_hash: BlockHash,
-        /// This shard's ID.
-        shard: ShardGroupId,
-        /// Aggregated BLS signature from 2f+1 local validators.
-        shard_signature: Bls12381G2Signature,
-        /// Which validators in this shard signed.
-        signers: SignerBitfield,
-        /// Total voting power in the shard signature.
-        voting_power: VotePower,
-    },
-
-    /// Initiate epoch transition.
-    ///
-    /// Called when `EpochTransitionReady` event is received.
-    /// Updates the topology and notifies subsystems.
-    TransitionEpoch {
-        /// The epoch we're transitioning from.
-        from_epoch: EpochId,
-        /// The epoch we're transitioning to.
-        to_epoch: EpochId,
-        /// The finalized configuration for the new epoch.
-        next_config: Box<EpochConfig>,
-    },
-
     /// Propagate updated topology to the `io_loop` / network layer.
     ///
-    /// Emitted by the state machine after any topology mutation (epoch
-    /// transition, shard split/merge). The `io_loop` stores the snapshot
-    /// into its shared topology snapshot (`ArcSwap`), rebuilds
-    /// `cached_local_peers`, and updates `local_shard` / `num_shards`.
+    /// Emitted by the state machine after any topology mutation. The
+    /// `io_loop` stores the snapshot into its shared topology snapshot
+    /// (`ArcSwap`), rebuilds `cached_local_peers`, and updates
+    /// `local_shard` / `num_shards`.
     TopologyChanged {
         /// New topology snapshot to propagate.
         topology: Arc<TopologySnapshot>,
-    },
-
-    /// Mark this validator as ready for the new epoch.
-    ///
-    /// Called after sync completes when validator was in Waiting state.
-    MarkValidatorReady {
-        /// The epoch.
-        epoch: EpochId,
-        /// The shard.
-        shard: ShardGroupId,
-    },
-
-    /// Initiate a shard split.
-    ///
-    /// Marks the shard as splitting in the topology, triggering transaction rejection.
-    InitiateShardSplit {
-        /// The shard being split.
-        source_shard: ShardGroupId,
-        /// The new shard ID.
-        new_shard: ShardGroupId,
-        /// The hash range split point.
-        split_point: u64,
-    },
-
-    /// Complete a shard split.
-    ///
-    /// Called after state migration is complete.
-    CompleteShardSplit {
-        /// The original shard.
-        source_shard: ShardGroupId,
-        /// The new shard.
-        new_shard: ShardGroupId,
-    },
-
-    /// Initiate a shard merge.
-    InitiateShardMerge {
-        /// First shard.
-        shard_a: ShardGroupId,
-        /// Second shard.
-        shard_b: ShardGroupId,
-        /// Resulting shard ID.
-        merged_shard: ShardGroupId,
-    },
-
-    /// Complete a shard merge.
-    CompleteShardMerge {
-        /// The merged shard.
-        merged_shard: ShardGroupId,
-    },
-
-    /// Persist epoch configuration to storage.
-    PersistEpochConfig {
-        /// The epoch configuration to persist.
-        config: Box<EpochConfig>,
-    },
-
-    /// Fetch the latest epoch configuration from storage.
-    ///
-    /// Returns via `ProtocolEvent` (to be added) when complete.
-    FetchEpochConfig {
-        /// Optional epoch ID to fetch (None = latest).
-        epoch: Option<EpochId>,
     },
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -724,9 +616,10 @@ pub enum Action {
     RestoreCommittedState,
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Runner I/O Requests (network fetches handled by the runner)
-    // These request the runner to perform network I/O and deliver results
-    // back as NodeInputs (TransactionReceived, BlockSyncResponseReceived)
+    // Runner I/O Requests
+    // These request the runner to perform network I/O. Sync responses
+    // arrive as `NodeInput::BlockSyncResponseReceived`; fetch protocol
+    // responses arrive as `ProtocolEvent::*Received` variants.
     // ═══════════════════════════════════════════════════════════════════════
     /// Request the runner to start syncing to a target height.
     ///
@@ -761,12 +654,6 @@ pub enum Action {
 }
 
 impl Action {
-    /// Check if this is a continuation action.
-    #[must_use]
-    pub const fn is_continuation(&self) -> bool {
-        matches!(self, Self::Continuation(_))
-    }
-
     /// Get the action type name for telemetry.
     #[must_use]
     pub fn type_name(&self) -> &'static str {
