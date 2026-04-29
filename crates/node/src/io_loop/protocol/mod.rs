@@ -8,6 +8,7 @@
 
 pub mod binding;
 pub mod block_serve;
+pub mod block_sync;
 pub mod fetch;
 pub mod host;
 pub mod provision_serve;
