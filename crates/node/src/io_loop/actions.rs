@@ -20,7 +20,7 @@ use hyperscale_network::Network;
 use hyperscale_storage::{ChainWriter, Storage};
 use hyperscale_types::{Block, BlockHeight, QuorumCertificate, StateRoot, TxHash, ValidatorId};
 use std::sync::Arc;
-use tracing::{debug, trace, warn};
+use tracing::{debug, error, trace, warn};
 impl<S, N, D, E> IoLoop<S, N, D, E>
 where
     S: Storage,
@@ -320,13 +320,39 @@ where
                 None,
             );
 
-            // Byzantine detection: state root mismatch is fatal.
-            assert_eq!(
-                computed_root,
-                block.header().state_root,
-                "State root mismatch for synced block at height {}",
-                height.0
-            );
+            // The sync-block ingress validator rejects peer-shipped
+            // divergent receipts before BFT sees the block, and
+            // `WaveState`'s divergence detector keeps locally-produced
+            // bad receipts out of `finalized`. A mismatch here means our
+            // local parent state itself diverged from canonical — a JMT
+            // or commit-batch bug, or pre-existing corruption in
+            // `StateCf`. Block-by-block sync can't repair this; the
+            // operator must restore from a state snapshot or
+            // wipe-and-resync from genesis.
+            if computed_root != block.header().state_root {
+                error!(
+                    height = height.0,
+                    ?block_hash,
+                    expected_root = ?block.header().state_root,
+                    computed_root = ?computed_root,
+                    ?parent_state_root,
+                    parent_block_height = parent_block_height.0,
+                    ?source,
+                    "Local state divergence detected on synced block apply — \
+                     parent state does not produce the canonical state root. \
+                     Rebuild required: restore from state snapshot or \
+                     resync from genesis."
+                );
+                panic!(
+                    "Local state divergence at height {}: parent state root \
+                     {parent_state_root:?} does not produce canonical state \
+                     root {expected:?} (computed {computed:?}). Operator \
+                     intervention required.",
+                    height.0,
+                    expected = block.header().state_root,
+                    computed = computed_root,
+                );
+            }
 
             // Insert JMT snapshot into PendingChain so child blocks'
             // VerifyStateRoot can find this block's tree nodes via the overlay.
