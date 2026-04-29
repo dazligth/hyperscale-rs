@@ -180,8 +180,8 @@ pub enum ProtocolEvent {
         shard: ShardGroupId,
         /// Remote block height (for correlation).
         height: BlockHeight,
-        /// The verified header.
-        header: Arc<CommittedBlockHeader>,
+        /// The verified committed header.
+        committed_header: Arc<CommittedBlockHeader>,
         /// `true` when the QC passed verification.
         valid: bool,
     },
@@ -230,6 +230,31 @@ pub enum ProtocolEvent {
     // ═══════════════════════════════════════════════════════════════════════
     // Provision
     // ═══════════════════════════════════════════════════════════════════════
+    /// Received provisions from a source shard (light-client path).
+    ///
+    /// All transactions share the same `(source_shard, block_height)`
+    /// because they originate from a single `FetchAndBroadcastProvisions` action.
+    ProvisionsReceived {
+        /// Provisions batch received from a source shard.
+        provisions: Provisions,
+    },
+
+    /// Batch-level provision verification completed.
+    ///
+    /// The QC is verified once for the source block's attestation; merkle
+    /// proofs are checked against the verified state root. The committed
+    /// header is returned so the state machine can promote it without
+    /// re-lookup.
+    StateProvisionsVerified {
+        /// The verified provisions.
+        provisions: Provisions,
+        /// The committed header whose QC passed verification.
+        /// `None` if no candidate header passed QC verification.
+        committed_header: Option<Arc<CommittedBlockHeader>>,
+        /// Whether the batch passed verification.
+        valid: bool,
+    },
+
     /// A provisions has been verified — ready for downstream consumption.
     ///
     /// `source_block_ts` is the BFT-authenticated weighted timestamp of the
@@ -241,15 +266,6 @@ pub enum ProtocolEvent {
         provisions: Arc<Provisions>,
         /// BFT-authenticated weighted timestamp of the source shard's committing QC.
         source_block_ts: WeightedTimestamp,
-    },
-
-    /// Received provisions from a source shard (light-client path).
-    ///
-    /// All transactions share the same `(source_shard, block_height)`
-    /// because they originate from a single `FetchAndBroadcastProvisions` action.
-    ProvisionsReceived {
-        /// Provisions batch received from a source shard.
-        provisions: Provisions,
     },
 
     /// Provisions our proposer generated were broadcast to a target shard.
@@ -272,22 +288,6 @@ pub enum ProtocolEvent {
         target_shard: ShardGroupId,
         /// Per-tx outcomes from the EC, used to drain matching outbound entries.
         tx_outcomes: Vec<TxOutcome>,
-    },
-
-    /// Batch-level provision verification completed.
-    ///
-    /// The QC is verified once for the source block's attestation; merkle
-    /// proofs are checked against the verified state root. The committed
-    /// header is returned so the state machine can promote it without
-    /// re-lookup.
-    StateProvisionsVerified {
-        /// The verified provisions.
-        provisions: Provisions,
-        /// The committed header whose QC passed verification.
-        /// `None` if no candidate header passed QC verification.
-        committed_header: Option<Arc<CommittedBlockHeader>>,
-        /// Whether the batch passed verification.
-        valid: bool,
     },
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -335,14 +335,6 @@ pub enum ProtocolEvent {
         certificate: ExecutionCertificate,
     },
 
-    /// Execution certificate signature verification completed.
-    ExecutionCertificateSignatureVerified {
-        /// The certificate whose signature was verified.
-        certificate: ExecutionCertificate,
-        /// `true` when the aggregated signature passed verification.
-        valid: bool,
-    },
-
     /// Execution certificates delivered from any source — fetch response or
     /// peer broadcast (post sender-sig check). Each cert carries its own
     /// `(shard_group_id, block_height, wave_id)`. The state machine iterates
@@ -354,17 +346,12 @@ pub enum ProtocolEvent {
         certificates: Vec<ExecutionCertificate>,
     },
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // Mempool / Transactions
-    // ═══════════════════════════════════════════════════════════════════════
-    /// Transaction passed async validation. Routed to the state machine for
-    /// mempool admission. Mempool emits `Continuation(TransactionsAdmitted)`
-    /// for whatever it admits.
-    TransactionValidated {
-        /// The validated transaction.
-        tx: Arc<RoutableTransaction>,
-        /// `true` if this validator submitted the tx (don't gossip back to client).
-        submitted_locally: bool,
+    /// Execution certificate signature verification completed.
+    ExecutionCertificateSignatureVerified {
+        /// The certificate whose signature was verified.
+        certificate: ExecutionCertificate,
+        /// `true` when the aggregated signature passed verification.
+        valid: bool,
     },
 
     /// An execution certificate was just admitted to the canonical EC store.
@@ -375,18 +362,6 @@ pub enum ProtocolEvent {
     ExecutionCertificateAdmitted {
         /// The verified certificate.
         certificate: Arc<ExecutionCertificate>,
-    },
-
-    /// Transactions delivered from a fetch request (raw, before mempool admission).
-    ///
-    /// Routed to `NodeStateMachine::on_transactions_fetched`, which funnels
-    /// them through mempool admission. The fetch protocol drain hooks this
-    /// event directly to drop every delivered hash from `in_flight`,
-    /// including duplicates / tombstoned / validity-expired txs that won't
-    /// surface via `TransactionsAdmitted`.
-    TransactionsReceived {
-        /// Transactions returned by the peer.
-        transactions: Vec<Arc<RoutableTransaction>>,
     },
 
     /// Finalized waves delivered from a peer in response to a fetch request.
@@ -413,6 +388,31 @@ pub enum ProtocolEvent {
     FinalizedWavesAdmitted {
         /// Finalized waves newly admitted on this admission call.
         waves: Vec<Arc<FinalizedWave>>,
+    },
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Mempool / Transactions
+    // ═══════════════════════════════════════════════════════════════════════
+    /// Transaction passed async validation. Routed to the state machine for
+    /// mempool admission. Mempool emits `Continuation(TransactionsAdmitted)`
+    /// for whatever it admits.
+    TransactionValidated {
+        /// The validated transaction.
+        tx: Arc<RoutableTransaction>,
+        /// `true` if this validator submitted the tx (don't gossip back to client).
+        submitted_locally: bool,
+    },
+
+    /// Transactions delivered from a fetch request (raw, before mempool admission).
+    ///
+    /// Routed to `NodeStateMachine::on_transactions_fetched`, which funnels
+    /// them through mempool admission. The fetch protocol drain hooks this
+    /// event directly to drop every delivered hash from `in_flight`,
+    /// including duplicates / tombstoned / validity-expired txs that won't
+    /// surface via `TransactionsAdmitted`.
+    TransactionsReceived {
+        /// Transactions returned by the peer.
+        transactions: Vec<Arc<RoutableTransaction>>,
     },
 
     /// One or more transactions were just admitted to the canonical mempool.

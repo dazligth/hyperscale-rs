@@ -544,7 +544,7 @@ impl RemoteHeaderCoordinator {
         topology: &TopologySnapshot,
         shard: ShardGroupId,
         height: BlockHeight,
-        header: Arc<CommittedBlockHeader>,
+        committed_header: Arc<CommittedBlockHeader>,
     ) -> Vec<Action> {
         let committee = topology.committee_for_shard(shard);
         let committee_public_keys: Vec<Bls12381G1PublicKey> = committee
@@ -562,7 +562,7 @@ impl RemoteHeaderCoordinator {
         let quorum_threshold = topology.quorum_threshold_for_shard(shard);
 
         vec![Action::VerifyRemoteHeaderQc {
-            header,
+            committed_header,
             committee_public_keys,
             committee_voting_power,
             quorum_threshold,

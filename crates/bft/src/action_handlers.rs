@@ -598,7 +598,7 @@ pub fn handle_action<S, E, N>(
         }
 
         Action::VerifyRemoteHeaderQc {
-            header,
+            committed_header,
             committee_public_keys,
             committee_voting_power,
             quorum_threshold,
@@ -606,15 +606,16 @@ pub fn handle_action<S, E, N>(
             height,
         } => {
             let start = std::time::Instant::now();
-            let qc_valid = verify_qc_signature(&header.qc, &committee_public_keys);
+            let qc_valid = verify_qc_signature(&committed_header.qc, &committee_public_keys);
             let valid = if qc_valid {
-                let total_power: u64 = header
+                let total_power: u64 = committed_header
                     .qc
                     .signers
                     .set_indices()
                     .filter_map(|idx| committee_voting_power.get(idx).copied())
                     .sum();
-                total_power >= quorum_threshold && header.qc.block_hash == header.header.hash()
+                total_power >= quorum_threshold
+                    && committed_header.qc.block_hash == committed_header.header.hash()
             } else {
                 false
             };
@@ -626,7 +627,7 @@ pub fn handle_action<S, E, N>(
                 ProtocolEvent::RemoteHeaderQcVerified {
                     shard,
                     height,
-                    header,
+                    committed_header,
                     valid,
                 },
             )));

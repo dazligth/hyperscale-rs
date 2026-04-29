@@ -286,7 +286,7 @@ pub enum Action {
     /// Returns `ProtocolEvent::RemoteHeaderQcVerified` when complete.
     VerifyRemoteHeaderQc {
         /// The remote header to verify.
-        header: Arc<CommittedBlockHeader>,
+        committed_header: Arc<CommittedBlockHeader>,
         /// Public keys for the remote shard's committee (from topology).
         committee_public_keys: Vec<Bls12381G1PublicKey>,
         /// Voting power for each committee member (parallel to `committee_public_keys`).

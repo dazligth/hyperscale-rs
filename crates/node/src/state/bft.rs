@@ -108,13 +108,13 @@ impl NodeStateMachine {
             ProtocolEvent::RemoteHeaderQcVerified {
                 shard,
                 height,
-                header,
+                committed_header,
                 valid,
             } => self.remote_headers.on_remote_header_qc_verified(
                 self.topology.snapshot(),
                 shard,
                 height,
-                header,
+                committed_header,
                 valid,
             ),
             ProtocolEvent::RemoteHeaderAdmitted { committed_header } => {
