@@ -403,7 +403,7 @@ pub enum ProtocolEvent {
     // Storage Callbacks
     // ═══════════════════════════════════════════════════════════════════════
     /// Chain metadata fetched from storage.
-    ChainMetadataFetched {
+    CommittedStateRestored {
         /// Highest committed height found in storage (`0` for fresh start).
         height: BlockHeight,
         /// Hash of the highest committed block, if present.
@@ -428,11 +428,6 @@ pub enum ProtocolEvent {
         /// Height the sync protocol caught up to.
         height: BlockHeight,
     },
-
-    /// Sync recovery complete — validator has caught up and is resuming consensus.
-    /// Triggers immediate provision and remote header fetching so the validator
-    /// can participate in execution for recent blocks within the timeout window.
-    SyncResumed,
 
     // ═══════════════════════════════════════════════════════════════════════
     // Global Consensus / Epoch

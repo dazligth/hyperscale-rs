@@ -13,18 +13,11 @@
 //! Production: `SyncManager` wraps this, maps outputs to tokio tasks.
 //! Simulation: feeds inputs/outputs synchronously via event queue.
 
-use hyperscale_messages::request::{GetBlockRequest, GetBlockTopUpRequest};
-use hyperscale_messages::response::{
-    ElidedCertifiedBlock, GetBlockResponse, GetBlockTopUpResponse,
-};
 use hyperscale_metrics as metrics;
-use hyperscale_provisions::ProvisionStore;
-use hyperscale_storage::ChainReader;
-use hyperscale_types::{BlockHash, BlockHeight, CertifiedBlock, Provisions, WAVE_TIMEOUT};
+use hyperscale_types::{BlockHeight, CertifiedBlock};
 use serde::Serialize;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{info, trace, warn};
 
@@ -140,10 +133,7 @@ impl Default for SyncStatus {
 #[allow(missing_docs)] // variant payloads are self-describing (height, now, block)
 pub enum SyncInput {
     /// Start or update sync target.
-    StartSync {
-        target_height: BlockHeight,
-        target_hash: BlockHash,
-    },
+    StartSync { target_height: BlockHeight },
     /// A block response was received.
     /// `None` means the peer did not have the block.
     BlockResponseReceived {
@@ -166,10 +156,14 @@ pub enum SyncInput {
 pub enum SyncOutput {
     /// Request the runner to fetch a block at this height. `target_height`
     /// is the sync target, passed through to the serving peer so it can
-    /// choose between `Block::Live` and `Block::Sealed`.
+    /// choose between `Block::Live` and `Block::Sealed`. `force_full` is
+    /// set after a rehydration miss on this height — the next request
+    /// must omit the inventory bloom so the responder cannot elide bodies
+    /// the requester couldn't resolve last time.
     FetchBlock {
         height: BlockHeight,
         target_height: BlockHeight,
+        force_full: bool,
     },
     /// A validated block is ready to deliver to BFT.
     DeliverBlock { certified: Box<CertifiedBlock> },
@@ -184,7 +178,7 @@ pub enum SyncOutput {
 /// executing the returned outputs.
 pub struct SyncProtocol {
     config: SyncConfig,
-    sync_target: Option<(BlockHeight, BlockHash)>,
+    sync_target: Option<BlockHeight>,
     committed_height: BlockHeight,
     heights_to_fetch: BinaryHeap<Reverse<BlockHeight>>,
     heights_queued: HashSet<BlockHeight>,
@@ -192,6 +186,11 @@ pub struct SyncProtocol {
     /// Heights whose last fetch failed; held out of `heights_to_fetch`
     /// until their backoff deadline elapses.
     deferred: HashMap<BlockHeight, DeferralBackoff>,
+    /// Heights whose previous response failed rehydration. The next fetch
+    /// for these heights must omit the inventory bloom so the responder
+    /// cannot elide bodies the requester couldn't resolve last time.
+    /// Drained when the height is committed or sync completes.
+    force_full_refetch: HashSet<BlockHeight>,
 }
 
 impl SyncProtocol {
@@ -206,7 +205,15 @@ impl SyncProtocol {
             heights_queued: HashSet::new(),
             in_flight: HashSet::new(),
             deferred: HashMap::new(),
+            force_full_refetch: HashSet::new(),
         }
+    }
+
+    /// Mark `height` so its next fetch omits the inventory bloom. Called
+    /// after a rehydration miss: the responder elided bodies the requester
+    /// couldn't resolve, so the next request must allow no elision.
+    pub fn mark_force_full_refetch(&mut self, height: BlockHeight) {
+        self.force_full_refetch.insert(height);
     }
 
     /// True if any heights are parked awaiting backoff. Lets the runner
@@ -219,10 +226,7 @@ impl SyncProtocol {
     /// Process an input and return outputs.
     pub fn handle(&mut self, input: SyncInput) -> Vec<SyncOutput> {
         match input {
-            SyncInput::StartSync {
-                target_height,
-                target_hash,
-            } => self.handle_start_sync(target_height, target_hash),
+            SyncInput::StartSync { target_height } => self.handle_start_sync(target_height),
             SyncInput::BlockResponseReceived { height, block, now } => {
                 self.handle_block_response(height, block.map(|b| *b), now)
             }
@@ -244,7 +248,7 @@ impl SyncProtocol {
     #[must_use]
     pub fn blocks_behind(&self) -> u64 {
         self.sync_target
-            .map_or(0, |(t, _)| t.0.saturating_sub(self.committed_height.0))
+            .map_or(0, |t| t.0.saturating_sub(self.committed_height.0))
     }
 
     /// Get current sync status.
@@ -257,10 +261,10 @@ impl SyncProtocol {
                 SyncStateKind::Idle
             },
             current_height: self.committed_height.0,
-            target_height: self.sync_target.map(|(h, _)| h.0),
+            target_height: self.sync_target.map(|h| h.0),
             blocks_behind: self
                 .sync_target
-                .map_or(0, |(t, _)| t.0.saturating_sub(self.committed_height.0)),
+                .map_or(0, |t| t.0.saturating_sub(self.committed_height.0)),
             pending_fetches: self.in_flight.len(),
             queued_heights: self.heights_queued.len() + self.deferred.len(),
         }
@@ -270,23 +274,18 @@ impl SyncProtocol {
     // Input Handlers
     // ═══════════════════════════════════════════════════════════════════════
 
-    fn handle_start_sync(
-        &mut self,
-        target_height: BlockHeight,
-        target_hash: BlockHash,
-    ) -> Vec<SyncOutput> {
-        if self.sync_target.is_some_and(|(t, _)| t >= target_height) {
+    fn handle_start_sync(&mut self, target_height: BlockHeight) -> Vec<SyncOutput> {
+        if self.sync_target.is_some_and(|t| t >= target_height) {
             return vec![];
         }
 
         info!(
             target_height = target_height.0,
-            ?target_hash,
             committed = self.committed_height.0,
             "Starting sync"
         );
 
-        self.sync_target = Some((target_height, target_hash));
+        self.sync_target = Some(target_height);
         self.queue_heights_in_window();
         self.emit_fetch_outputs()
     }
@@ -386,7 +385,7 @@ impl SyncProtocol {
         self.committed_height = height;
         self.remove_heights_at_or_below(height);
 
-        if let Some((target, _)) = self.sync_target {
+        if let Some(target) = self.sync_target {
             metrics::record_sync_block_applied();
             if height >= target {
                 info!(height = height.0, target = target.0, "Sync complete");
@@ -428,16 +427,18 @@ impl SyncProtocol {
         self.heights_to_fetch.clear();
         self.heights_queued.clear();
         self.deferred.clear();
+        self.force_full_refetch.clear();
     }
 
     fn remove_heights_at_or_below(&mut self, threshold: BlockHeight) {
         self.heights_queued.retain(|&h| h > threshold);
         self.in_flight.retain(|&h| h > threshold);
         self.deferred.retain(|&h, _| h > threshold);
+        self.force_full_refetch.retain(|&h| h > threshold);
     }
 
     fn queue_heights_in_window(&mut self) {
-        let Some((target_height, _)) = self.sync_target else {
+        let Some(target_height) = self.sync_target else {
             return;
         };
 
@@ -461,7 +462,7 @@ impl SyncProtocol {
     /// after `handle_start_sync`, so a missing target means nothing to
     /// fetch.
     fn emit_fetch_outputs(&mut self) -> Vec<SyncOutput> {
-        let Some((target_height, _)) = self.sync_target else {
+        let Some(target_height) = self.sync_target else {
             return Vec::new();
         };
         let mut outputs = Vec::new();
@@ -471,6 +472,7 @@ impl SyncProtocol {
                 outputs.push(SyncOutput::FetchBlock {
                     height,
                     target_height,
+                    force_full: self.force_full_refetch.contains(&height),
                 });
             } else {
                 break;
@@ -478,142 +480,6 @@ impl SyncProtocol {
         }
         outputs
     }
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// Inbound request serving
-// ═══════════════════════════════════════════════════════════════════════
-
-/// Retention margin beyond `WAVE_TIMEOUT` for the serve decision.
-///
-/// A block's waves are live for `WAVE_TIMEOUT`; a late-syncing peer still
-/// needs a rotation budget to fetch provisions, execute, and vote before
-/// its rotation deadline passes. Sized to cover one vote-retry rotation.
-const SERVE_MARGIN: Duration = Duration::from_secs(12);
-const LIVE_WINDOW: Duration = Duration::from_secs(WAVE_TIMEOUT.as_secs() + SERVE_MARGIN.as_secs());
-
-/// Serve an inbound block sync request.
-///
-/// Storage always returns `Block::Sealed` — the persisted shape carries no
-/// provisions. Whether the requester needs `Block::Live` is a function of
-/// the block's own age: if its waves could still be open for execution
-/// voting (`block_ts + WAVE_TIMEOUT + margin > tip_ts`), provisions are
-/// attached from the local cache. Otherwise the `Sealed` block is served.
-///
-/// The wave-window check is based on the BFT-authenticated
-/// `weighted_timestamp` of the committing QC and the serving peer's own
-/// latest QC timestamp — both quantities are deterministic and don't
-/// depend on the requester's view.
-///
-/// On cache miss inside the live window the block is still served as
-/// `Sealed`; the requester fetches missing provisions through the cross-shard
-/// provision fetch instead of round-robining peers.
-pub fn serve_block_request(
-    storage: &impl ChainReader,
-    provision_store: &ProvisionStore,
-    req: &GetBlockRequest,
-) -> GetBlockResponse {
-    trace!(
-        height = req.height.0,
-        target_height = req.target_height.0,
-        "Handling block sync request"
-    );
-    let Some(hyperscale_storage::BlockForSync {
-        block,
-        qc,
-        provision_hashes,
-    }) = storage.get_block_for_sync(req.height)
-    else {
-        return GetBlockResponse::not_found();
-    };
-
-    let block_ts = qc.weighted_timestamp;
-    let tip_ts = storage
-        .latest_qc()
-        .map_or(block_ts, |q| q.weighted_timestamp);
-    let wave_window_open = tip_ts.elapsed_since(block_ts) < LIVE_WINDOW;
-
-    if !wave_window_open || provision_hashes.is_empty() {
-        return GetBlockResponse::found(ElidedCertifiedBlock::elide(&block, qc, &req.inventory));
-    }
-
-    let resolved: Option<Vec<Arc<Provisions>>> = provision_hashes
-        .iter()
-        .map(|h| provision_store.get(h))
-        .collect();
-
-    if let Some(provisions) = resolved {
-        GetBlockResponse::found(ElidedCertifiedBlock::elide(
-            &block.into_live(provisions),
-            qc,
-            &req.inventory,
-        ))
-    } else {
-        // Cache miss inside the live window. Serve Sealed and let the
-        // requester pull provisions via the fetch protocol — avoids
-        // the peer-rotation retry storm the old `not_found` path caused
-        // when provisions had aged out everywhere.
-        trace!(
-            height = req.height.0,
-            "Cache miss for provisions inside live window — serving sealed"
-        );
-        metrics::record_sync_response_error("provision_cache_miss");
-        GetBlockResponse::found(ElidedCertifiedBlock::elide(&block, qc, &req.inventory))
-    }
-}
-
-/// Serve a top-up request — the requester's rehydration of an earlier
-/// elided response missed some bodies (bloom false-positives or local
-/// evictions), so it's asking for just those hashes.
-///
-/// Reads the block from storage and returns only the bodies whose hashes
-/// are listed in the request. Hashes we don't have (block evicted, or
-/// caller's hash is unknown) are silently omitted — the requester then
-/// falls back to a full refetch.
-pub fn serve_block_topup_request(
-    storage: &impl ChainReader,
-    provision_store: &ProvisionStore,
-    req: &GetBlockTopUpRequest,
-) -> GetBlockTopUpResponse {
-    let Some(hyperscale_storage::BlockForSync { block, .. }) =
-        storage.get_block_for_sync(req.height)
-    else {
-        return GetBlockTopUpResponse::empty();
-    };
-
-    let transactions = req
-        .missing_tx
-        .iter()
-        .filter_map(|want| {
-            block
-                .transactions()
-                .iter()
-                .find(|tx| tx.hash() == *want)
-                .map(|tx| (*want, Arc::clone(tx)))
-        })
-        .collect();
-
-    let certificates = req
-        .missing_cert
-        .iter()
-        .filter_map(|want| {
-            block
-                .certificates()
-                .iter()
-                .find(|fw| fw.wave_id_hash() == *want)
-                .map(|fw| (*want, Arc::clone(fw)))
-        })
-        .collect();
-
-    // Provisions never live in the persisted block — they're held only in
-    // the in-memory cache, so resolve top-up hits against `provision_store`.
-    let provisions = req
-        .missing_provision
-        .iter()
-        .filter_map(|want| provision_store.get(want).map(|p| (*want, p)))
-        .collect();
-
-    GetBlockTopUpResponse::new(transactions, certificates, provisions)
 }
 
 #[cfg(test)]
@@ -644,7 +510,6 @@ mod tests {
 
         let outputs = protocol.handle(SyncInput::StartSync {
             target_height: BlockHeight(5),
-            target_hash: BlockHash::ZERO,
         });
 
         assert!(protocol.is_syncing());
@@ -665,7 +530,6 @@ mod tests {
 
         protocol.handle(SyncInput::StartSync {
             target_height: BlockHeight(2),
-            target_hash: BlockHash::ZERO,
         });
 
         assert!(protocol.is_syncing());
@@ -692,7 +556,6 @@ mod tests {
 
         protocol.handle(SyncInput::StartSync {
             target_height: BlockHeight(1),
-            target_hash: BlockHash::ZERO,
         });
 
         let t0 = Instant::now();
@@ -738,7 +601,6 @@ mod tests {
         });
         protocol.handle(SyncInput::StartSync {
             target_height: BlockHeight(1),
-            target_hash: BlockHash::ZERO,
         });
 
         let t0 = Instant::now();
@@ -779,6 +641,70 @@ mod tests {
             outputs
                 .iter()
                 .any(|o| matches!(o, SyncOutput::FetchBlock { height, .. } if height.0 == 1))
+        );
+    }
+
+    #[test]
+    fn force_full_refetch_propagates_to_next_fetch_output() {
+        let mut protocol = SyncProtocol::new(SyncConfig {
+            max_concurrent_fetches: 4,
+            sync_window_size: 10,
+        });
+
+        let outputs = protocol.handle(SyncInput::StartSync {
+            target_height: BlockHeight(3),
+        });
+
+        // Initial fetches: nothing flagged.
+        assert!(outputs.iter().all(|o| matches!(
+            o,
+            SyncOutput::FetchBlock {
+                force_full: false,
+                ..
+            }
+        )));
+
+        // Mark height 2; next fetch wave for that height must carry the flag.
+        protocol.mark_force_full_refetch(BlockHeight(2));
+        let outputs = protocol.handle(SyncInput::BlockFetchFailed {
+            height: BlockHeight(2),
+            now: Instant::now() + Duration::from_secs(2),
+        });
+        // Failure parks; tick to promote and re-emit.
+        let _ = outputs;
+        let outputs = protocol.handle(SyncInput::Tick {
+            now: Instant::now() + Duration::from_secs(10),
+        });
+        let height_2 = outputs.iter().find_map(|o| match o {
+            SyncOutput::FetchBlock {
+                height, force_full, ..
+            } if height.0 == 2 => Some(*force_full),
+            _ => None,
+        });
+        assert_eq!(
+            height_2,
+            Some(true),
+            "force_full must propagate to the re-emitted FetchBlock for height 2"
+        );
+    }
+
+    #[test]
+    fn force_full_refetch_drains_on_commit() {
+        let mut protocol = SyncProtocol::new(SyncConfig {
+            max_concurrent_fetches: 4,
+            sync_window_size: 10,
+        });
+        let _ = protocol.handle(SyncInput::StartSync {
+            target_height: BlockHeight(3),
+        });
+        protocol.mark_force_full_refetch(BlockHeight(1));
+        // Commit past the marked height — drain.
+        let _ = protocol.handle(SyncInput::BlockCommitted {
+            height: BlockHeight(1),
+        });
+        assert!(
+            !protocol.force_full_refetch.contains(&BlockHeight(1)),
+            "commit at height must drop the marker"
         );
     }
 }
