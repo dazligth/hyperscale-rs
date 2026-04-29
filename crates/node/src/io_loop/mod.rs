@@ -347,6 +347,26 @@ where
             NodeInput::SyncBlockFetchFailed { height } => {
                 self.handle_sync_block_fetch_failed(height);
             }
+            NodeInput::RemoteHeadersResponseReceived {
+                source_shard,
+                from_height,
+                count,
+                headers,
+            } => {
+                self.handle_remote_headers_response_received(
+                    source_shard,
+                    from_height,
+                    count,
+                    headers,
+                );
+            }
+            NodeInput::RemoteHeadersFetchFailed {
+                source_shard,
+                from_height,
+                count,
+            } => {
+                self.handle_remote_headers_fetch_failed(source_shard, from_height, count);
+            }
 
             // ── Fetch protocol ─────────────────────────────────────────
             NodeInput::TransactionReceived { transactions } => {
@@ -369,11 +389,6 @@ where
             }
 
             NodeInput::ExecCertFetchFailed { hashes } => self.handle_exec_cert_fetch_failed(hashes),
-
-            NodeInput::HeaderFetchFailed {
-                source_shard,
-                from_height,
-            } => self.handle_header_fetch_failed(source_shard, from_height),
 
             // ── Committed header (gossip → BLS verify → state machine) ──
             NodeInput::CommittedHeaderValidated {

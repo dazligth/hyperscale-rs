@@ -11,7 +11,6 @@ use hyperscale_messages::{
 };
 use hyperscale_network::Network;
 use hyperscale_storage::Storage;
-use hyperscale_types::BlockHeight;
 use tracing::warn;
 
 impl<S, N, D, E> IoLoop<S, N, D, E>
@@ -29,9 +28,10 @@ where
     pub(super) fn register_request_handler(&self) {
         use crate::io_loop::protocol::block_serve::serve_block_request;
         use crate::io_loop::protocol::provision_serve::serve_provision_request;
+        use crate::io_loop::protocol::remote_header_serve::serve_remote_headers_request;
         use crate::io_loop::protocol::transaction_serve::serve_transaction_request;
         use hyperscale_messages::request::{
-            GetBlockRequest, GetProvisionsRequest, GetTransactionsRequest,
+            GetBlockRequest, GetProvisionsRequest, GetRemoteHeadersRequest, GetTransactionsRequest,
         };
         use std::collections::HashMap;
         use std::sync::Arc;
@@ -263,33 +263,13 @@ where
                 },
             );
 
-        // ── committed_header.request → serve from local storage ────────
+        // ── remote_header.request → range header sync ───────────────────
 
         let storage = Arc::clone(&self.storage);
         self.network
-            .register_request_handler::<hyperscale_messages::request::GetCommittedBlockHeaderRequest>(
-                move |req: hyperscale_messages::request::GetCommittedBlockHeaderRequest| {
-                    use hyperscale_messages::response::GetCommittedBlockHeaderResponse;
-
-                    // Look up the committed block at the requested height.
-                    let certified = storage
-                        .get_block(BlockHeight(req.height.0));
-
-                    match certified {
-                        Some(certified) => {
-                            let committed = hyperscale_types::CommittedBlockHeader::new(
-                                certified.block.header().clone(),
-                                certified.qc,
-                            );
-                            hyperscale_metrics::record_fetch_response_sent("header", 1);
-                            GetCommittedBlockHeaderResponse {
-                                header: Some(committed),
-                            }
-                        }
-                        None => GetCommittedBlockHeaderResponse { header: None },
-                    }
-                },
-            );
+            .register_request_handler::<GetRemoteHeadersRequest>(move |req| {
+                serve_remote_headers_request(&*storage, &req)
+            });
     }
 
     /// Register gossip handlers for broadcast message types (transactions

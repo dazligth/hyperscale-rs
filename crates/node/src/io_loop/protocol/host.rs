@@ -7,10 +7,14 @@
 
 use super::binding::{
     ExecCertBinding, ExecCertFetch, FetchBinding, FinalizedWaveBinding, FinalizedWaveFetch,
-    HeaderBinding, HeaderFetch, LocalProvisionBinding, LocalProvisionFetch, ProvisionBinding,
-    ProvisionFetch, TransactionBinding, TransactionFetch,
+    LocalProvisionBinding, LocalProvisionFetch, ProvisionBinding, ProvisionFetch,
+    TransactionBinding, TransactionFetch,
 };
 use super::fetch::FetchConfig;
+use super::remote_header_sync::{
+    RemoteHeaderSyncConfig, RemoteHeaderSyncProtocol, SyncInput as RemoteHeaderSyncInput,
+    SyncOutput as RemoteHeaderSyncOutput,
+};
 use super::sync::{SyncInput, SyncOutput, SyncProtocol, SyncStatus};
 use crate::config::NodeConfig;
 use hyperscale_core::ProtocolEvent;
@@ -20,6 +24,11 @@ use std::time::Instant;
 pub struct ProtocolHost {
     /// Block-sync state machine.
     pub sync: SyncProtocol,
+
+    /// Multi-shard remote-header sync state machine. Catches up missing
+    /// committed-header chains by batching contiguous heights into range
+    /// fetches.
+    pub remote_header_sync: RemoteHeaderSyncProtocol,
 
     /// Per-block transaction fetch (intra-shard, pinned to proposer).
     pub transaction: TransactionFetch,
@@ -35,9 +44,6 @@ pub struct ProtocolHost {
 
     /// Cross-shard execution-cert fetch (rotates through source committee).
     pub exec_cert: ExecCertFetch,
-
-    /// Cross-shard committed-block-header fetch (rotates through source committee).
-    pub header: HeaderFetch,
 }
 
 impl ProtocolHost {
@@ -46,6 +52,7 @@ impl ProtocolHost {
     pub fn new(config: &NodeConfig) -> Self {
         Self {
             sync: SyncProtocol::new(config.sync.clone()),
+            remote_header_sync: RemoteHeaderSyncProtocol::new(RemoteHeaderSyncConfig::default()),
             transaction: TransactionFetch::new("transaction", config.transaction_fetch.clone()),
             local_provision: LocalProvisionFetch::new(
                 "local_provision",
@@ -65,15 +72,6 @@ impl ProtocolHost {
             ),
             provision: ProvisionFetch::new("provision", config.provision_fetch.clone()),
             exec_cert: ExecCertFetch::new("exec_cert", config.exec_cert_fetch.clone()),
-            // Header fetches are scope-id (one per height); single-id chunks suffice.
-            header: HeaderFetch::new(
-                "header",
-                FetchConfig {
-                    max_in_flight: 16,
-                    max_ids_per_request: 1,
-                    parallel_chunks_per_tick: 4,
-                },
-            ),
         }
     }
 
@@ -86,8 +84,9 @@ impl ProtocolHost {
             || self.finalized_wave.has_pending()
             || self.provision.has_pending()
             || self.exec_cert.has_pending()
-            || self.header.has_pending()
             || self.sync.has_deferred()
+            || self.remote_header_sync.has_deferred()
+            || self.remote_header_sync.is_syncing()
     }
 
     /// Fan an admission `ProtocolEvent` across every binding. Each
@@ -99,13 +98,33 @@ impl ProtocolHost {
         FinalizedWaveBinding::apply_admission(&mut self.finalized_wave, event);
         ProvisionBinding::apply_admission(&mut self.provision, event);
         ExecCertBinding::apply_admission(&mut self.exec_cert, event);
-        HeaderBinding::apply_admission(&mut self.header, event);
     }
 
     /// Drive the sync protocol's periodic tick. Returns the outputs the
     /// I/O loop should dispatch (block fetches, deliveries, sync-complete).
     pub fn sync_tick(&mut self, now: Instant) -> Vec<SyncOutput> {
         self.sync.handle(SyncInput::Tick { now })
+    }
+
+    /// Drive the remote-header-sync periodic tick. Returns range fetches
+    /// and any newly-emitted `SyncComplete` for shards that just caught up.
+    pub fn remote_header_sync_tick(&mut self, now: Instant) -> Vec<RemoteHeaderSyncOutput> {
+        self.remote_header_sync
+            .handle(RemoteHeaderSyncInput::Tick { now })
+    }
+
+    /// Notify the remote-header-sync FSM that `RemoteHeaderCoordinator`
+    /// admitted a header at `height` for `source_shard`.
+    pub fn on_remote_header_admitted(
+        &mut self,
+        source_shard: hyperscale_types::ShardGroupId,
+        height: hyperscale_types::BlockHeight,
+    ) -> Vec<RemoteHeaderSyncOutput> {
+        self.remote_header_sync
+            .handle(RemoteHeaderSyncInput::HeaderAdmitted {
+                source_shard,
+                height,
+            })
     }
 
     /// Snapshot per-binding fetch counts plus sync status. The I/O loop
@@ -123,8 +142,6 @@ impl ProtocolHost {
             provision_pending: self.provision.pending_count(),
             exec_cert_in_flight: self.exec_cert.in_flight_count(),
             exec_cert_pending: self.exec_cert.pending_count(),
-            header_in_flight: self.header.in_flight_count(),
-            header_pending: self.header.pending_count(),
             sync_status: self.sync.status(),
         }
     }
@@ -146,7 +163,5 @@ pub struct ProtocolMetrics {
     pub provision_pending: usize,
     pub exec_cert_in_flight: usize,
     pub exec_cert_pending: usize,
-    pub header_in_flight: usize,
-    pub header_pending: usize,
     pub sync_status: SyncStatus,
 }

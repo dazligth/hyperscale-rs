@@ -70,6 +70,30 @@ pub enum NodeInput {
         height: BlockHeight,
     },
 
+    /// Range response from a remote-header sync fetch. Headers are in
+    /// ascending height order starting at `from_height`; missing tail
+    /// heights (responder short-capped) get re-deferred by the FSM.
+    RemoteHeadersResponseReceived {
+        /// Source shard the fetch targeted.
+        source_shard: hyperscale_types::ShardGroupId,
+        /// First height of the requested range.
+        from_height: BlockHeight,
+        /// Number of heights the request covered.
+        count: u64,
+        /// Headers the responder returned.
+        headers: Vec<hyperscale_types::CommittedBlockHeader>,
+    },
+
+    /// Remote-header range fetch failed (transport error / no peer).
+    RemoteHeadersFetchFailed {
+        /// Source shard the fetch targeted.
+        source_shard: hyperscale_types::ShardGroupId,
+        /// First height of the requested range.
+        from_height: BlockHeight,
+        /// Number of heights the request covered.
+        count: u64,
+    },
+
     /// Periodic tick for the fetch protocol to retry pending operations.
     FetchTick,
 
@@ -189,14 +213,6 @@ pub enum NodeInput {
         /// Wave ids that weren't returned.
         hashes: Vec<WaveId>,
     },
-
-    /// A committed block header fetch request failed.
-    HeaderFetchFailed {
-        /// Source shard the fetch targeted.
-        source_shard: ShardGroupId,
-        /// Starting height that failed to return.
-        from_height: BlockHeight,
-    },
 }
 
 impl NodeInput {
@@ -232,6 +248,8 @@ impl NodeInput {
             Self::SubmitTransaction { .. } => EventPriority::Client,
             Self::SyncBlockResponseReceived { .. } => EventPriority::Internal,
             Self::SyncBlockFetchFailed { .. } => EventPriority::Internal,
+            Self::RemoteHeadersResponseReceived { .. } => EventPriority::Internal,
+            Self::RemoteHeadersFetchFailed { .. } => EventPriority::Internal,
             Self::FetchTick => EventPriority::Timer,
             Self::FetchTransactionsFailed { .. } => EventPriority::Internal,
             Self::TransactionReceived { .. } => EventPriority::Network,
@@ -242,7 +260,6 @@ impl NodeInput {
             Self::ProvisionsFetchFailed { .. } => EventPriority::Internal,
             Self::ExecutionCertsReceived { .. } => EventPriority::Internal,
             Self::ExecCertFetchFailed { .. } => EventPriority::Internal,
-            Self::HeaderFetchFailed { .. } => EventPriority::Internal,
             Self::LocalProvisionReceived { .. } => EventPriority::Internal,
             Self::LocalProvisionsFetchFailed { .. } => EventPriority::Internal,
             Self::FinalizedWaveReceived { .. } => EventPriority::Internal,
