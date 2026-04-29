@@ -39,6 +39,11 @@ use crate::batch_accumulator::BatchAccumulator;
 use crate::config::NodeConfig;
 use crate::io_loop::block_commit::BlockCommitCoordinator;
 use crate::io_loop::caches::SharedCaches;
+use crate::io_loop::protocol::binding::{
+    ExecCertBinding, FinalizedWaveBinding, LocalProvisionBinding, ProvisionBinding,
+    TransactionBinding,
+};
+use crate::io_loop::protocol::fetch::FetchInput;
 use crate::io_loop::protocol::host::ProtocolHost;
 use crate::io_loop::step::CommittedHeaderVerificationItem;
 use arc_swap::ArcSwap;
@@ -373,7 +378,8 @@ where
 
             // ── Fetch protocol ─────────────────────────────────────────
             NodeInput::FetchTransactionsFailed { hashes } => {
-                self.handle_fetch_transactions_failed(hashes);
+                self.drive_fetch::<TransactionBinding>(FetchInput::Failed { ids: hashes });
+                self.update_fetch_tick_timer();
             }
 
             NodeInput::FetchTick => self.handle_fetch_tick(),
@@ -381,9 +387,17 @@ where
             NodeInput::ProvisionsFetchFailed {
                 source_shard,
                 block_height,
-            } => self.handle_provisions_fetch_failed(source_shard, block_height),
+            } => {
+                self.drive_fetch::<ProvisionBinding>(FetchInput::Failed {
+                    ids: vec![(source_shard, block_height)],
+                });
+                self.update_fetch_tick_timer();
+            }
 
-            NodeInput::ExecCertFetchFailed { hashes } => self.handle_exec_cert_fetch_failed(hashes),
+            NodeInput::ExecCertFetchFailed { hashes } => {
+                self.drive_fetch::<ExecCertBinding>(FetchInput::Failed { ids: hashes });
+                self.update_fetch_tick_timer();
+            }
 
             // ── Committed header (gossip → BLS verify → state machine) ──
             NodeInput::CommittedBlockGossipReceived {
@@ -399,11 +413,13 @@ where
             ),
 
             NodeInput::LocalProvisionsFetchFailed { hashes } => {
-                self.handle_local_provisions_fetch_failed(hashes);
+                self.drive_fetch::<LocalProvisionBinding>(FetchInput::Failed { ids: hashes });
+                self.update_fetch_tick_timer();
             }
 
             NodeInput::FinalizedWaveFetchFailed { hashes } => {
-                self.handle_finalized_wave_fetch_failed(hashes);
+                self.drive_fetch::<FinalizedWaveBinding>(FetchInput::Failed { ids: hashes });
+                self.update_fetch_tick_timer();
             }
         }
 
