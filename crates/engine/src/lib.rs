@@ -1,50 +1,55 @@
 //! Radix Engine integration.
 //!
 //! This crate provides synchronous transaction execution suitable for
-//! single-threaded deterministic simulation.
+//! both deterministic single-threaded simulation and parallel production
+//! runners.
 //!
 //! # Architecture
 //!
-//! The consensus separates pure state machine logic from I/O.
-//! Transaction execution is computationally expensive and delegated to the
-//! runner layer. The executor does NOT own storage - the runner owns storage
-//! and passes it to the executor.
+//! Consensus separates pure state-machine logic from I/O. Transaction
+//! execution is computationally expensive and lives in the runner layer:
+//! the executor does NOT own storage — the runner owns storage and
+//! passes it to the executor.
 //!
-//! ```text
-//! State Machine                           Runner (owns storage + executor)
-//!      │                                    │
-//!      ├─► Action::ExecuteTransactions ────►│ calls executor.execute(&storage, ...)
-//!      │                                    │
-//!      │◄─ ExecutionBatchCompleted      ◄───┤ (returns votes)
-//! ```
+//! The state machine emits `Action::ExecuteTransactions`; the runner
+//! takes a snapshot, dispatches it to the appropriate engine method
+//! ([`Engine::execute_single_shard`] for local-only, or
+//! [`Engine::execute_cross_shard`] when other-shard provisions are
+//! attached), and feeds the resulting [`ExecutedTx`] batch back as
+//! `ProtocolEvent::ExecutionBatchCompleted`.
 //!
 //! # Simulation vs Production
 //!
-//! - **Simulation**: Calls executor methods inline (single-threaded, deterministic)
-//! - **Production**: Spawns executor methods on rayon thread pool (parallel, async callback)
+//! - **Simulation**: [`SimulationEngine`] wraps [`RadixExecutor`] with a
+//!   per-shard result cache so identical executions across validators
+//!   only run once.
+//! - **Production**: [`RadixExecutor`] is called directly, typically
+//!   dispatched to a rayon thread pool by the runner.
 //!
-//! Both use the real Radix Engine - the difference is the calling convention.
+//! Both implement the [`Engine`] trait — callers code against the trait.
 
 #![warn(missing_docs)]
-mod error;
-mod execution;
+
+mod engine;
 mod executor;
 mod genesis;
 mod genesis_cache;
-mod result;
-mod simulation_engine;
+mod output;
+mod provisioned_snapshot;
+mod receipt;
+mod simulation;
 mod validation;
 
-/// Shard assignment and write filtering for Radix Engine DatabaseUpdates.
+/// Shard assignment and write filtering for Radix Engine `DatabaseUpdates`.
 pub mod sharding;
 
-pub use execution::ProvisionedSnapshot;
-pub use executor::{Engine, RadixExecutor, fetch_state_entries};
+pub use engine::Engine;
+pub use executor::{RadixExecutor, fetch_state_entries};
 pub use genesis::GenesisConfig;
 pub use genesis_cache::prepared_genesis;
-pub use result::{ExecutedTx, ExecutionOutput};
-pub use simulation_engine::{SimExecutionCache, SimulationEngine};
+pub use output::{ExecutedTx, ExecutionOutput};
+pub use simulation::{SimExecutionCache, SimulationEngine};
 pub use validation::TransactionValidation;
 
-// Re-export Radix types needed by engine callers (not storage-related)
+// Re-export Radix types needed by engine callers (not storage-related).
 pub use radix_common::network::NetworkDefinition;

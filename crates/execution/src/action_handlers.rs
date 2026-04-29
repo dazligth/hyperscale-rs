@@ -307,24 +307,17 @@ where
             let view = ctx.pending_chain.view_at(block_hash);
             let view_snap =
                 <hyperscale_storage::SubstateView<_> as SubstateStore>::snapshot(&*view);
-            let batch_result = ctx.executor.execute_single_shard(
+            let output = ctx.executor.execute_single_shard(
                 &view_snap,
                 transactions.as_slice(),
                 local_shard,
                 num_shards,
             );
-            let per_tx: Vec<_> = match batch_result {
-                Ok(output) => output.results,
-                Err(e) => {
-                    tracing::warn!(error = %e, "single-shard batch execution failed");
-                    transactions
-                        .iter()
-                        .map(|tx| ExecutedTx::failure(tx.hash(), e.to_string()))
-                        .collect()
-                }
-            };
-            let (tx_outcomes, results): (Vec<_>, Vec<_>) =
-                per_tx.into_iter().map(|tx| (tx.outcome, tx.entry)).unzip();
+            let (tx_outcomes, results): (Vec<_>, Vec<_>) = output
+                .results
+                .into_iter()
+                .map(|tx| (tx.outcome, tx.entry))
+                .unzip();
             metrics::record_execution_latency(start.elapsed().as_secs_f64());
             (ctx.notify)(NodeInput::Protocol(Box::new(
                 ProtocolEvent::ExecutionBatchCompleted {
@@ -348,25 +341,16 @@ where
             let (tx_outcomes, results): (Vec<_>, Vec<_>) = requests
                 .iter()
                 .map(|req| {
-                    let output = ctx.executor.execute_cross_shard(
+                    let mut output = ctx.executor.execute_cross_shard(
                         &view_snap,
                         std::slice::from_ref(&req.transaction),
                         &req.provisions,
                         local_shard,
                         num_shards,
                     );
-                    let tx = match output {
-                        Ok(mut o) => o.results.pop().unwrap_or_else(|| {
-                            ExecutedTx::failure(
-                                req.tx_hash,
-                                "No cross-shard execution result returned",
-                            )
-                        }),
-                        Err(e) => {
-                            tracing::warn!(tx_hash = ?req.tx_hash, error = %e, "cross-shard execution failed");
-                            ExecutedTx::failure(req.tx_hash, e.to_string())
-                        }
-                    };
+                    let tx = output.results.pop().unwrap_or_else(|| {
+                        ExecutedTx::failure(req.tx_hash, "No cross-shard execution result returned")
+                    });
                     (tx.outcome, tx.entry)
                 })
                 .unzip();

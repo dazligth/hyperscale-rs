@@ -1,4 +1,16 @@
-//! Genesis bootstrapping.
+//! Genesis bootstrap configuration.
+//!
+//! [`GenesisConfig`] is the canonical input to Radix Engine genesis
+//! bootstrap (validators, stake allocations, faucet supply, consensus
+//! manager parameters). It hashes deterministically via
+//! [`GenesisConfig::cache_hash`] so [`crate::prepared_genesis`] can
+//! memoize the resulting `DatabaseUpdates` per `(network, config)`
+//! across the entire process.
+//!
+//! Bootstrap itself runs the Radix Engine through the protocol updates
+//! `Babylon → CuttlefishPart2`. It is `pub(crate)` because callers
+//! should always go through [`crate::prepared_genesis`] for caching;
+//! direct `bootstrap` calls bypass it and pay the ~2.5s cost every time.
 
 use radix_common::math::Decimal;
 use radix_common::network::NetworkDefinition;

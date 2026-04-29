@@ -6,7 +6,7 @@
 //! free of node/runner concerns so the dispatcher only handles event plumbing.
 
 use hyperscale_core::ProvisionsRequest;
-use hyperscale_engine::{Engine, sharding::expand_nodes_with_owned_at_height};
+use hyperscale_engine::{Engine, fetch_state_entries, sharding::expand_nodes_with_owned_at_height};
 use hyperscale_jmt::TreeReader as JmtTreeReader;
 use hyperscale_storage::{SubstateStore, SubstateView, VersionedStore};
 use hyperscale_types::{
@@ -32,8 +32,7 @@ pub type ProvisionBatch = (Provisions, Vec<ValidatorId>);
 /// Returns an empty `Vec` when no entries could be fetched (e.g. JMT version
 /// unavailable for `block_height`); callers still emit a `ProvisionsReady` event
 /// so the state machine can mark the action complete.
-pub fn fetch_and_broadcast_provision<S, E, H>(
-    executor: &E,
+pub fn fetch_and_broadcast_provision<S, H>(
     view: &SubstateView<S>,
     source_shard: ShardGroupId,
     block_height: BlockHeight,
@@ -42,10 +41,9 @@ pub fn fetch_and_broadcast_provision<S, E, H>(
 ) -> Vec<ProvisionBatch>
 where
     S: SubstateStore + VersionedStore + JmtTreeReader + Sync,
-    E: Engine,
     H: BuildHasher,
 {
-    let per_tx = fetch_entries_for_requests(executor, view, requests, source_shard, block_height);
+    let per_tx = fetch_entries_for_requests(view, requests, source_shard, block_height);
     if per_tx.is_empty() {
         warn!(
             source_shard = source_shard.0,
@@ -63,8 +61,7 @@ where
 /// Expands declared account `NodeId`s to include their owned vaults before
 /// fetching. The remote shard needs vault substates (balances) to execute
 /// transfers, not just the account's own substates.
-fn fetch_entries_for_requests<S, E>(
-    executor: &E,
+fn fetch_entries_for_requests<S>(
     view: &SubstateView<S>,
     requests: &[ProvisionsRequest],
     source_shard: ShardGroupId,
@@ -72,7 +69,6 @@ fn fetch_entries_for_requests<S, E>(
 ) -> Vec<FetchedTxEntries>
 where
     S: SubstateStore + VersionedStore,
-    E: Engine,
 {
     let mut per_tx = Vec::with_capacity(requests.len());
     for req in requests {
@@ -89,8 +85,7 @@ where
             );
             continue;
         };
-        let Some(entries) = executor.fetch_state_entries(view, &expanded_nodes, block_height)
-        else {
+        let Some(entries) = fetch_state_entries(view, &expanded_nodes, block_height) else {
             warn!(
                 source_shard = source_shard.0,
                 block_height = block_height.0,
@@ -227,7 +222,6 @@ pub fn handle_action<S, E, N>(
         } => {
             let view = ctx.pending_chain.view_at(block_hash);
             let batches = fetch_and_broadcast_provision(
-                ctx.executor,
                 &view,
                 source_shard,
                 block_height,
