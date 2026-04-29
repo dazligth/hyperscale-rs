@@ -16,8 +16,10 @@ mod expected_txs;
 mod lock_tracker;
 mod ready_set;
 mod tombstones;
+mod tx_store;
 
 pub use coordinator::{
     DEFAULT_MIN_DWELL_TIME, LockContentionStats, MempoolConfig, MempoolCoordinator,
     MempoolMemoryStats,
 };
+pub use tx_store::TxStore;

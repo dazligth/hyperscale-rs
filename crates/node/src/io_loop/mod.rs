@@ -204,7 +204,10 @@ where
         let protocols = ProtocolHost::new(&config);
         let storage = Arc::new(storage);
         let pending_chain = Arc::new(hyperscale_storage::PendingChain::new(Arc::clone(&storage)));
-        let caches = SharedCaches::new(Arc::clone(state.provisions().store()));
+        let caches = SharedCaches::new(
+            Arc::clone(state.provisions().store()),
+            Arc::clone(state.mempool().tx_store()),
+        );
         Self {
             state,
             storage,

@@ -59,10 +59,10 @@ where
         // ── transaction.request → fetch protocol ─────────────────────
 
         let storage = Arc::clone(&self.storage);
-        let tx_cache = Arc::clone(&self.caches.tx);
+        let tx_store = Arc::clone(&self.caches.tx_store);
         self.network
             .register_request_handler::<GetTransactionsRequest>(move |req| {
-                serve_transaction_request(&*storage, &tx_cache, &req)
+                serve_transaction_request(&*storage, &tx_store, &req)
             });
 
         // ── provision.request → serve from local store ───────────────

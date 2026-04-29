@@ -36,7 +36,6 @@ fn memory_stats_destructures_all_fields_for_fresh_coordinator() {
         pool,
         ready,
         tombstones,
-        recently_evicted,
         locked_nodes,
         deferred_by_nodes,
         txs_deferred_by_node,
@@ -46,7 +45,6 @@ fn memory_stats_destructures_all_fields_for_fresh_coordinator() {
     assert_eq!(pool, 0);
     assert_eq!(ready, 0);
     assert_eq!(tombstones, 0);
-    assert_eq!(recently_evicted, 0);
     assert_eq!(locked_nodes, 0);
     assert_eq!(deferred_by_nodes, 0);
     assert_eq!(txs_deferred_by_node, 0);

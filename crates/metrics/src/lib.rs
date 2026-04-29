@@ -128,8 +128,6 @@ pub struct MemoryMetrics {
     pub mempool_ready: usize,
     /// Terminal state transactions (for dedup).
     pub mempool_tombstones: usize,
-    /// Evicted transactions (for peer fetch).
-    pub mempool_recently_evicted: usize,
     /// Cached set of locked nodes.
     pub mempool_locked_nodes: usize,
     /// Transactions deferred due to node conflicts.
@@ -164,8 +162,9 @@ pub struct MemoryMetrics {
     pub prov_committed_tombstones: usize,
 
     // ── Node (io_loop) ──
-    /// LRU cache of transaction bodies (fixed capacity, ~50k).
-    pub node_tx_cache: usize,
+    /// Shared transaction body store (admitted-and-not-yet-pruned). Sized
+    /// by tombstone retention windows, not LRU pressure.
+    pub node_tx_store: usize,
     /// LRU cache of transaction statuses (fixed capacity, ~100k).
     pub node_tx_status_cache: usize,
     /// LRU cache of finalized wave certificates (fixed capacity, ~10k).

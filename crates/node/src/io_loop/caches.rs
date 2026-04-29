@@ -12,10 +12,10 @@
 //! `Continuation(FinalizedWavesAdmitted)`, validated transactions, terminal
 //! status), and handlers read them on remote-peer requests.
 
+use hyperscale_mempool::TxStore;
 use hyperscale_provisions::ProvisionStore;
 use hyperscale_types::{
-    ExecutionCertificate, FinalizedWave, RoutableTransaction, TransactionStatus, TxHash, WaveId,
-    WaveIdHash,
+    ExecutionCertificate, FinalizedWave, TransactionStatus, TxHash, WaveId, WaveIdHash,
 };
 use quick_cache::sync::Cache as QuickCache;
 use std::collections::HashMap;
@@ -23,8 +23,6 @@ use std::sync::{Arc, Mutex};
 
 /// Default certificate cache capacity.
 pub(super) const DEFAULT_CERT_CACHE_SIZE: usize = 10_000;
-/// Default transaction cache capacity.
-pub(super) const DEFAULT_TX_CACHE_SIZE: usize = 50_000;
 /// Default transaction status cache capacity.
 pub(super) const DEFAULT_TX_STATUS_CACHE_SIZE: usize = 100_000;
 
@@ -35,10 +33,13 @@ pub type ExecCertCache = Arc<Mutex<HashMap<(WaveIdHash, WaveId), Arc<ExecutionCe
 /// Inbound request-serving caches plus the cross-thread transaction-status
 /// view exposed to external RPC consumers.
 pub struct SharedCaches {
-    /// Validated transactions, keyed by hash. Populated when the validation
-    /// pipeline accepts a tx; queried by the inbound transaction request
-    /// handler before falling through to `RocksDB`.
-    pub tx: Arc<QuickCache<TxHash, Arc<RoutableTransaction>>>,
+    /// Shared transaction body store. Populated by mempool admission;
+    /// pruned alongside tombstones when validity windows expire. Queried
+    /// by the inbound transaction request handler before falling through
+    /// to storage. Owned jointly with [`hyperscale_mempool::MempoolCoordinator`]
+    /// — both hold `Arc<TxStore>` pointing at the same map, so the network
+    /// worker can read bodies without contending on a mempool lock.
+    pub tx_store: Arc<TxStore>,
     /// Latest emitted status per transaction. Survives mempool eviction so
     /// RPC `tx_status` lookups can answer for finalized/expired txs.
     pub tx_status: Arc<QuickCache<TxHash, TransactionStatus>>,
@@ -60,11 +61,12 @@ pub struct SharedCaches {
 }
 
 impl SharedCaches {
-    /// Construct caches at `io_loop` startup. The `ProvisionStore` is
-    /// produced by the provision coordinator and cloned in.
-    pub fn new(provision_store: Arc<ProvisionStore>) -> Self {
+    /// Construct caches at `io_loop` startup. The `ProvisionStore` and
+    /// `TxStore` are owned by their respective state machines; clones are
+    /// passed in so the same `Arc`s flow into network handler closures.
+    pub fn new(provision_store: Arc<ProvisionStore>, tx_store: Arc<TxStore>) -> Self {
         Self {
-            tx: Arc::new(QuickCache::new(DEFAULT_TX_CACHE_SIZE)),
+            tx_store,
             tx_status: Arc::new(QuickCache::new(DEFAULT_TX_STATUS_CACHE_SIZE)),
             finalized_wave: Arc::new(QuickCache::new(DEFAULT_CERT_CACHE_SIZE)),
             provision_store,

@@ -1,11 +1,10 @@
 //! Inbound transaction-fetch request handling.
 
+use hyperscale_mempool::TxStore;
 use hyperscale_messages::request::GetTransactionsRequest;
 use hyperscale_messages::response::GetTransactionsResponse;
 use hyperscale_metrics as metrics;
 use hyperscale_storage::ChainReader;
-use hyperscale_types::{RoutableTransaction, TxHash};
-use quick_cache::sync::Cache as QuickCache;
 use std::sync::Arc;
 use tracing::{debug, trace};
 
@@ -14,8 +13,11 @@ const MAX_ITEMS_PER_RESPONSE: usize = 500;
 
 /// Serve an inbound transaction fetch request.
 ///
-/// Checks the in-memory cache first (for recently received but not yet
-/// committed transactions), then falls back to storage.
+/// Two tiers: the shared [`TxStore`] (transactions we admitted to our own
+/// mempool, retained until their tombstone window elapses) and storage
+/// (committed transactions). We deliberately do *not* serve transactions
+/// we never admitted — if we didn't vouch for it, we're not the right
+/// source.
 ///
 /// Intentionally caller-agnostic: the function takes no requester identity
 /// and no shard scope. Any peer that knows the tx hash can fetch the body,
@@ -26,7 +28,7 @@ const MAX_ITEMS_PER_RESPONSE: usize = 500;
 /// check here without redesigning the cross-shard DA path.
 pub fn serve_transaction_request(
     storage: &impl ChainReader,
-    tx_cache: &QuickCache<TxHash, Arc<RoutableTransaction>>,
+    tx_store: &TxStore,
     req: &GetTransactionsRequest,
 ) -> GetTransactionsResponse {
     let requested_count = req.tx_hashes.len();
@@ -44,7 +46,7 @@ pub fn serve_transaction_request(
     let mut found = Vec::with_capacity(hashes.len());
     let mut missing = Vec::new();
     for hash in hashes {
-        if let Some(tx) = tx_cache.get(hash) {
+        if let Some(tx) = tx_store.get(hash) {
             found.push(tx);
         } else {
             missing.push(*hash);

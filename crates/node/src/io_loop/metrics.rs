@@ -172,7 +172,6 @@ where
                 mempool_pool: mempool_mem.pool,
                 mempool_ready: mempool_mem.ready,
                 mempool_tombstones: mempool_mem.tombstones,
-                mempool_recently_evicted: mempool_mem.recently_evicted,
                 mempool_locked_nodes: mempool_mem.locked_nodes,
                 mempool_deferred_by_nodes: mempool_mem.deferred_by_nodes,
                 mempool_txs_deferred_by_node: mempool_mem.txs_deferred_by_node,
@@ -190,7 +189,7 @@ where
                 prov_queued_provisions: prov_mem.queued_provisions,
                 prov_committed_tombstones: prov_mem.committed_tombstones,
                 // Node (io_loop)
-                node_tx_cache: self.caches.tx.len(),
+                node_tx_store: self.caches.tx_store.len(),
                 node_tx_status_cache: self.caches.tx_status.len(),
                 node_finalized_wave_cache: self.caches.finalized_wave.len(),
                 node_provision_cache: self.caches.provision_store.len(),

@@ -32,8 +32,14 @@ where
 {
     // ─── step() handlers ────────────────────────────────────────────────
 
-    /// Validation succeeded — cache the body, settle the locally-submitted
-    /// flag, and feed the tx into the state machine's gossip-admission path.
+    /// Validation succeeded — settle the locally-submitted flag and feed
+    /// the tx into the state machine's gossip-admission path. Body
+    /// insertion into [`TxStore`] happens inside
+    /// [`MempoolCoordinator::on_transaction_gossip`] on successful
+    /// admission, not here — we only serve bodies we vouched for.
+    ///
+    /// [`TxStore`]: hyperscale_mempool::TxStore
+    /// [`MempoolCoordinator::on_transaction_gossip`]: hyperscale_mempool::MempoolCoordinator
     pub(in crate::io_loop) fn handle_transaction_validated(
         &mut self,
         tx: Arc<RoutableTransaction>,
@@ -42,7 +48,6 @@ where
         let tx_hash = tx.hash();
         self.pending_validation.remove(&tx_hash);
         let is_local = submitted_locally || self.locally_submitted.remove(&tx_hash);
-        self.caches.tx.insert(tx_hash, Arc::clone(&tx));
         self.actions_generated = 0;
         self.feed_event(ProtocolEvent::TransactionGossipReceived {
             tx,
@@ -67,7 +72,10 @@ where
         tx: Arc<RoutableTransaction>,
     ) {
         let tx_hash = tx.hash();
-        if self.caches.tx.get(&tx_hash).is_none() && !self.state.mempool().is_tombstoned(&tx_hash) {
+        // Already-vouched (in TxStore) or terminally-rejected (tombstoned)
+        // are skipped. `pending_validation` blocks duplicate enqueues.
+        if !self.caches.tx_store.contains(&tx_hash) && !self.state.mempool().is_tombstoned(&tx_hash)
+        {
             self.pending_validation.insert(tx_hash);
             self.queue_validation(tx);
         }
@@ -91,7 +99,7 @@ where
             self.network.broadcast_to_shard(shard, &gossip);
         }
 
-        if !self.pending_validation.contains(&tx_hash) && self.caches.tx.get(&tx_hash).is_none() {
+        if !self.pending_validation.contains(&tx_hash) && !self.caches.tx_store.contains(&tx_hash) {
             // Paired with validation: only queued txs are removed on completion.
             self.locally_submitted.insert(tx_hash);
             self.pending_validation.insert(tx_hash);

@@ -1221,10 +1221,6 @@ impl MetricsRecorder for PrometheusRecorder {
             .set(m.mempool_tombstones as f64);
         self.metrics
             .memory_mempool
-            .with_label_values(&["recently_evicted"])
-            .set(m.mempool_recently_evicted as f64);
-        self.metrics
-            .memory_mempool
             .with_label_values(&["locked_nodes"])
             .set(m.mempool_locked_nodes as f64);
         self.metrics
@@ -1287,8 +1283,8 @@ impl MetricsRecorder for PrometheusRecorder {
         // Node (io_loop)
         self.metrics
             .memory_node
-            .with_label_values(&["tx_cache"])
-            .set(m.node_tx_cache as f64);
+            .with_label_values(&["tx_store"])
+            .set(m.node_tx_store as f64);
         self.metrics
             .memory_node
             .with_label_values(&["tx_status_cache"])

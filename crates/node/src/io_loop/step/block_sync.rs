@@ -158,7 +158,7 @@ where
     /// requester already has.
     fn build_sync_inventory(&self) -> Inventory {
         Inventory {
-            tx_have: self.state.mempool().tx_bloom_snapshot(),
+            tx_have: self.caches.tx_store.tx_bloom_snapshot(),
             cert_have: self.state.execution().cert_bloom_snapshot(),
             provision_have: self.caches.provision_store.provision_bloom_snapshot(),
         }
