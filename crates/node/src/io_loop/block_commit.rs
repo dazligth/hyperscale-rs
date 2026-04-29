@@ -236,6 +236,10 @@ where
     /// each `PreparedCommit`. Writing them in a single task guarantees
     /// ordering: the I/O pool does not guarantee FIFO across separate
     /// `spawn()` calls.
+    ///
+    /// Deferred `BlockCommitted` and `BlockPersisted` events return to
+    /// the pinned thread via `event_tx`; see `IoLoop::event_sender`
+    /// for the off-thread → pinned-thread routing convention.
     #[allow(clippy::significant_drop_tightening, clippy::too_many_lines)]
     pub fn flush<D: Dispatch>(
         &mut self,

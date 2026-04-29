@@ -120,7 +120,11 @@ where
     /// Flush the validation batch, dispatching to the `tx_validation` pool.
     ///
     /// Valid transactions are sent back as `TransactionValidated` events
-    /// through the event channel; failures land as `TransactionValidationsFailed`.
+    /// through the event channel; failures land as
+    /// `TransactionValidationsFailed` so the `IoLoop` can clean up
+    /// `pending_validation` / `locally_submitted`. See
+    /// `IoLoop::event_sender` for the off-thread → pinned-thread
+    /// routing convention.
     pub(in crate::io_loop) fn flush_validation_batch(&mut self) {
         let batch = self.validation_batch.take();
         if batch.is_empty() {

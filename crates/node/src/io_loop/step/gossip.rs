@@ -60,7 +60,10 @@ where
     ///
     /// Spawns one closure on the crypto pool that verifies each sender's
     /// BLS signature. Valid headers are emitted directly as
-    /// `ProtocolEvent::RemoteHeaderReceived` for state-machine ingestion.
+    /// `ProtocolEvent::RemoteHeaderReceived` for state-machine ingestion;
+    /// invalid items are warn-dropped (byzantine peer; no `IoLoop`
+    /// cleanup needed). See `IoLoop::event_sender` for the off-thread
+    /// → pinned-thread routing convention.
     pub(in crate::io_loop) fn flush_committed_header_verifications(&mut self) {
         let items = self.committed_header_batch.take();
         if items.is_empty() {

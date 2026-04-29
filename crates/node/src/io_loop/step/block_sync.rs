@@ -6,8 +6,9 @@
 //! - building `GetBlockRequest`s with the right inventory bloom + force-full
 //!   override
 //! - rehydrating elided responses against local caches
-//! - validating block / QC shape (height match, QC hash match, QC height
-//!   match, certificate-root match)
+//! - structurally validating the rehydrated block (off-thread on
+//!   `ConsensusCrypto`): height + QC binding + every Merkle root the
+//!   header commits to, plus per-wave receipt-vs-EC shape
 //! - delivering valid blocks to BFT via `ProtocolEvent::BlockSyncReadyToApply`
 //! - feeding scheduling events back to the FSM
 //!
@@ -19,7 +20,7 @@ use crate::io_loop::IoLoop;
 use crate::io_loop::protocol::block_sync::{BlockSyncInput, BlockSyncOutput};
 use crate::io_loop::protocol::sync::SyncOutput;
 use hyperscale_core::{NodeInput, ProtocolEvent};
-use hyperscale_dispatch::Dispatch;
+use hyperscale_dispatch::{Dispatch, DispatchPool};
 use hyperscale_engine::Engine;
 use hyperscale_messages::request::Inventory;
 use hyperscale_messages::response::{ElidedCertifiedBlock, RehydrationMiss};
@@ -51,8 +52,12 @@ where
     // ─── step() handlers ────────────────────────────────────────────────
 
     /// Handle a sync block response: rehydrate the elided block against
-    /// local caches; on a miss, mark the height for a full refetch and
-    /// signal the FSM to re-queue.
+    /// local caches, then dispatch structural validation off-thread on
+    /// `ConsensusCrypto`. On rehydration miss, mark the height for full
+    /// refetch and re-queue. The verdict returns as
+    /// `NodeInput::SyncBlockValidated` / `SyncBlockValidationFailed` —
+    /// see `IoLoop::event_sender` for the off-thread → pinned-thread
+    /// routing convention.
     pub(in crate::io_loop) fn handle_block_sync_response_received(
         &mut self,
         height: BlockHeight,
@@ -74,12 +79,49 @@ where
                 return;
             }
         };
-        self.deliver_sync_block(height, cert);
+
+        // Dispatch structural validation to ConsensusCrypto. The
+        // `local_receipt_root` Merkle is the heavy step (SBOR-encode of
+        // every receipt's `database_updates`); off-loading keeps the
+        // pinned thread responsive during catch-up.
+        let event_tx = self.event_sender.clone();
+        self.dispatch.spawn(DispatchPool::ConsensusCrypto, move || {
+            let event = match validate_synced_block(height, &cert) {
+                Ok(()) => NodeInput::SyncBlockValidated {
+                    height,
+                    certified: Box::new(cert),
+                },
+                Err(reason) => NodeInput::SyncBlockValidationFailed { height, reason },
+            };
+            let _ = event_tx.send(event);
+        });
     }
 
     /// Handle a sync block fetch failure (network error / not-found).
     pub(in crate::io_loop) fn handle_block_sync_fetch_failed(&mut self, height: BlockHeight) {
         metrics::record_sync_response_error("block", "fetch_failed");
+        self.feed_block_sync_fetch_failed(height);
+    }
+
+    /// Resume the post-validation delivery path after off-thread
+    /// structural validation succeeded.
+    pub(in crate::io_loop) fn handle_sync_block_validated(
+        &mut self,
+        height: BlockHeight,
+        certified: CertifiedBlock,
+    ) {
+        self.deliver_validated_sync_block(height, certified);
+    }
+
+    /// Resume the failure path after off-thread structural validation
+    /// rejected the response.
+    pub(in crate::io_loop) fn handle_sync_block_validation_failed(
+        &mut self,
+        height: BlockHeight,
+        reason: &'static str,
+    ) {
+        tracing::warn!(height = height.0, reason, "Sync: rejecting response");
+        metrics::record_sync_block_filtered("block", reason);
         self.feed_block_sync_fetch_failed(height);
     }
 
@@ -179,16 +221,10 @@ where
         )
     }
 
-    /// Validate a rehydrated block and either deliver it to BFT or
-    /// re-queue via fetch-failed.
-    fn deliver_sync_block(&mut self, height: BlockHeight, certified: CertifiedBlock) {
-        if let Err(reason) = validate_synced_block(height, &certified) {
-            tracing::warn!(height = height.0, reason, "Sync: rejecting response");
-            metrics::record_sync_block_filtered("block", reason);
-            self.feed_block_sync_fetch_failed(height);
-            return;
-        }
-
+    /// Hand a validated synced block to BFT and advance the sync FSM.
+    /// Structural validation runs off-thread; this is the
+    /// post-verdict pinned-thread continuation.
+    fn deliver_validated_sync_block(&mut self, height: BlockHeight, certified: CertifiedBlock) {
         metrics::record_sync_round_completed("block");
 
         // Hand the block off to BFT; tell the FSM the height was delivered.

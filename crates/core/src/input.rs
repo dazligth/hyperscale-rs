@@ -2,8 +2,8 @@
 
 use crate::ProtocolEvent;
 use hyperscale_types::{
-    BlockHeight, Bls12381G1PublicKey, Bls12381G2Signature, CommittedBlockHeader, ProvisionHash,
-    RoutableTransaction, ShardGroupId, TxHash, ValidatorId, WaveId, WaveIdHash,
+    BlockHeight, Bls12381G1PublicKey, Bls12381G2Signature, CertifiedBlock, CommittedBlockHeader,
+    ProvisionHash, RoutableTransaction, ShardGroupId, TxHash, ValidatorId, WaveId, WaveIdHash,
 };
 use std::sync::Arc;
 
@@ -75,6 +75,25 @@ pub enum NodeInput {
     BlockSyncFetchFailed {
         /// Height that failed to fetch.
         height: BlockHeight,
+    },
+
+    /// Sync block passed structural validation off-thread (Merkle roots,
+    /// QC binding, per-wave shape). The pinned-thread `IoLoop` re-enters
+    /// the post-validation delivery path on receipt.
+    SyncBlockValidated {
+        /// Height of the validated block.
+        height: BlockHeight,
+        /// Rehydrated, structurally-valid certified block ready for BFT.
+        certified: Box<CertifiedBlock>,
+    },
+
+    /// Sync block failed structural validation off-thread. The pinned
+    /// thread re-queues the height for retry.
+    SyncBlockValidationFailed {
+        /// Height that failed to validate.
+        height: BlockHeight,
+        /// Static reason tag — used for both metrics labels and warn logs.
+        reason: &'static str,
     },
 
     /// Range response from a remote-header sync fetch. Headers are in
@@ -205,6 +224,8 @@ impl NodeInput {
             Self::TransactionGossipReceived { .. } => EventPriority::Network,
             Self::BlockSyncResponseReceived { .. } => EventPriority::Internal,
             Self::BlockSyncFetchFailed { .. } => EventPriority::Internal,
+            Self::SyncBlockValidated { .. } => EventPriority::Internal,
+            Self::SyncBlockValidationFailed { .. } => EventPriority::Internal,
             Self::RemoteHeadersResponseReceived { .. } => EventPriority::Internal,
             Self::RemoteHeadersFetchFailed { .. } => EventPriority::Internal,
             Self::FetchTick => EventPriority::Timer,

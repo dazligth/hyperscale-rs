@@ -125,6 +125,30 @@ where
     executor: E,
     network: Arc<N>,
     dispatch: D,
+
+    /// Channel back to the pinned-thread event loop.
+    ///
+    /// Off-thread work spawned via `dispatch.spawn(pool, ...)` returns
+    /// results here as `NodeInput` events, which the next pinned-thread
+    /// `step()` iteration drains. Two routing rules:
+    ///
+    /// - **State-machine consumers** (BFT / execution / mempool — anything
+    ///   driven by `state.handle()`) ride
+    ///   `NodeInput::Protocol(ProtocolEvent::*)`. Examples: gossip BLS
+    ///   verification emits `RemoteHeaderReceived`; block-commit drain
+    ///   emits `BlockCommitted` / `BlockPersisted`.
+    /// - **`IoLoop`-only consumers** (validation pipeline, sync
+    ///   delivery, fetch retry — anything handled in `step()` directly
+    ///   without entering the state machine) ride a dedicated top-level
+    ///   `NodeInput` variant. Examples: `TransactionValidated`,
+    ///   `SyncBlockValidated`, `*FetchFailed`.
+    ///
+    /// Failure handling is pattern-specific and intentional: drop on
+    /// byzantine input (gossip), emit a typed failure variant when the
+    /// `IoLoop` has cleanup to do (`TransactionValidationsFailed`,
+    /// `SyncBlockValidationFailed`), abort on storage faults
+    /// (block-commit). Don't paper over these in a generic helper —
+    /// each `dispatch.spawn` site calls `event_sender.send` directly.
     event_sender: crossbeam::channel::Sender<NodeInput>,
 
     // Identity
@@ -351,6 +375,12 @@ where
             }
             NodeInput::BlockSyncFetchFailed { height } => {
                 self.handle_block_sync_fetch_failed(height);
+            }
+            NodeInput::SyncBlockValidated { height, certified } => {
+                self.handle_sync_block_validated(height, *certified);
+            }
+            NodeInput::SyncBlockValidationFailed { height, reason } => {
+                self.handle_sync_block_validation_failed(height, reason);
             }
             NodeInput::RemoteHeadersResponseReceived {
                 source_shard,
