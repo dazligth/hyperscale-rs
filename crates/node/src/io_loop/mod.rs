@@ -377,7 +377,7 @@ where
             }
 
             // ── Fetch protocol ─────────────────────────────────────────
-            NodeInput::FetchTransactionsFailed { hashes } => {
+            NodeInput::TransactionsFetchFailed { hashes } => {
                 self.drive_fetch::<TransactionBinding>(FetchInput::Failed { ids: hashes });
                 self.update_fetch_tick_timer();
             }
@@ -417,7 +417,7 @@ where
                 self.update_fetch_tick_timer();
             }
 
-            NodeInput::FinalizedWaveFetchFailed { hashes } => {
+            NodeInput::FinalizedWavesFetchFailed { hashes } => {
                 self.drive_fetch::<FinalizedWaveBinding>(FetchInput::Failed { ids: hashes });
                 self.update_fetch_tick_timer();
             }

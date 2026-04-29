@@ -96,8 +96,8 @@ pub enum NodeInput {
     /// Periodic tick for the fetch protocol to retry pending operations.
     FetchTick,
 
-    /// Fetch transactions failed from network callback.
-    FetchTransactionsFailed {
+    /// A transaction fetch request failed (network error or peer returned None).
+    TransactionsFetchFailed {
         /// Transaction hashes that failed to fetch.
         hashes: Vec<TxHash>,
     },
@@ -108,8 +108,8 @@ pub enum NodeInput {
         hashes: Vec<ProvisionHash>,
     },
 
-    /// A finalized wave fetch request failed.
-    FinalizedWaveFetchFailed {
+    /// A finalized-wave fetch request failed.
+    FinalizedWavesFetchFailed {
         /// Wave-id hashes that weren't returned.
         hashes: Vec<WaveIdHash>,
     },
@@ -200,14 +200,14 @@ impl NodeInput {
             Self::RemoteHeadersResponseReceived { .. } => EventPriority::Internal,
             Self::RemoteHeadersFetchFailed { .. } => EventPriority::Internal,
             Self::FetchTick => EventPriority::Timer,
-            Self::FetchTransactionsFailed { .. } => EventPriority::Internal,
+            Self::TransactionsFetchFailed { .. } => EventPriority::Internal,
             Self::TransactionValidated { .. } => EventPriority::Internal,
             Self::TransactionValidationsFailed { .. } => EventPriority::Internal,
             Self::CommittedBlockGossipReceived { .. } => EventPriority::Network,
             Self::ProvisionsFetchFailed { .. } => EventPriority::Internal,
             Self::ExecCertFetchFailed { .. } => EventPriority::Internal,
             Self::LocalProvisionsFetchFailed { .. } => EventPriority::Internal,
-            Self::FinalizedWaveFetchFailed { .. } => EventPriority::Internal,
+            Self::FinalizedWavesFetchFailed { .. } => EventPriority::Internal,
         }
     }
 

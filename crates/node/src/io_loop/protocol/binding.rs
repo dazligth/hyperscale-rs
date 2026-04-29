@@ -116,7 +116,7 @@ impl FetchBinding for TransactionBinding {
                         ProtocolEvent::TransactionsReceived { transactions: txs },
                     )));
                     if !missing_hashes.is_empty() {
-                        let _ = es.send(NodeInput::FetchTransactionsFailed {
+                        let _ = es.send(NodeInput::TransactionsFetchFailed {
                             hashes: missing_hashes,
                         });
                     }
@@ -126,7 +126,7 @@ impl FetchBinding for TransactionBinding {
                         ResponseVerdict::Accept
                     }
                 } else {
-                    let _ = es.send(NodeInput::FetchTransactionsFailed { hashes: hs });
+                    let _ = es.send(NodeInput::TransactionsFetchFailed { hashes: hs });
                     ResponseVerdict::Accept
                 }
             }),
@@ -252,7 +252,7 @@ impl FetchBinding for FinalizedWaveBinding {
                         ProtocolEvent::FinalizedWavesReceived { waves },
                     )));
                     if !missing_hashes.is_empty() {
-                        let _ = es.send(NodeInput::FinalizedWaveFetchFailed {
+                        let _ = es.send(NodeInput::FinalizedWavesFetchFailed {
                             hashes: missing_hashes,
                         });
                     }
@@ -262,7 +262,7 @@ impl FetchBinding for FinalizedWaveBinding {
                         ResponseVerdict::Accept
                     }
                 } else {
-                    let _ = es.send(NodeInput::FinalizedWaveFetchFailed { hashes: hs });
+                    let _ = es.send(NodeInput::FinalizedWavesFetchFailed { hashes: hs });
                     ResponseVerdict::Accept
                 }
             }),
