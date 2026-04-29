@@ -2,10 +2,11 @@
 //!
 //! Tracks a set of pending ids. Each `Request` carries the peer pool the
 //! ids should be fetched from; the protocol stores it as `Arc<FetchPeers>`
-//! so siblings share state and group naturally at emit time. Each `Tick`
-//! collects ids that aren't in flight, groups them by their peer-pool
-//! identity, and emits chunked `Send`s up to per-tick and global concurrency
-//! caps. The protocol does NO peer selection — it hands the full pool
+//! so siblings share state. Each `Tick` collects ids that aren't in flight,
+//! groups them by their peer-pool *value* (so callers that emit one
+//! `Request` per id still batch when their peer pools are equal), and
+//! emits chunked `Send`s up to per-tick and global concurrency caps. The
+//! protocol does NO peer selection — it hands the full pool
 //! through to the output handler, which calls `Network::request` and lets
 //! the network's health-weighted selector pick.
 //!
@@ -212,10 +213,12 @@ impl<Id: Eq + Hash + Ord + Clone + std::fmt::Debug> Fetch<Id> {
             return vec![];
         }
 
-        // Group ready ids by their peer-pool identity (Arc pointer). Siblings
-        // from the same `Request` share an Arc, so they coalesce into one
-        // `Send` even when many ids share the same network target.
-        let mut groups: HashMap<*const FetchPeers, (Arc<FetchPeers>, Vec<Id>)> = HashMap::new();
+        // Group ready ids by peer-pool *content*. Two `Request` calls that
+        // carry identical `FetchPeers` end up with distinct `Arc`s but should
+        // still coalesce into one `Send` — keying by Arc identity defeats
+        // batching for callers that emit single-id Actions (e.g. exec-cert,
+        // remote-provision).
+        let mut groups: HashMap<FetchPeers, (Arc<FetchPeers>, Vec<Id>)> = HashMap::new();
         let mut taken = 0usize;
         for (id, entry) in &self.pending {
             if taken >= global_room {
@@ -224,18 +227,22 @@ impl<Id: Eq + Hash + Ord + Clone + std::fmt::Debug> Fetch<Id> {
             if entry.in_flight {
                 continue;
             }
-            let key = Arc::as_ptr(&entry.peers);
             groups
-                .entry(key)
+                .entry((*entry.peers).clone())
                 .or_insert_with(|| (Arc::clone(&entry.peers), Vec::new()))
                 .1
                 .push(id.clone());
             taken += 1;
         }
 
-        // Iterate groups by peer-pointer order for deterministic test output.
-        let mut group_order: Vec<*const FetchPeers> = groups.keys().copied().collect();
-        group_order.sort_unstable();
+        // Iterate groups in sorted order for deterministic test output.
+        let mut group_order: Vec<FetchPeers> = groups.keys().cloned().collect();
+        group_order.sort_unstable_by(|a, b| {
+            a.preferred
+                .map(|v| v.0)
+                .cmp(&b.preferred.map(|v| v.0))
+                .then_with(|| a.peers.cmp(&b.peers))
+        });
 
         let mut outputs = Vec::new();
         let mut chunks_emitted = 0usize;
@@ -365,6 +372,37 @@ mod tests {
             .collect();
         preferreds.sort_by_key(|v| v.0);
         assert_eq!(preferreds, vec![vid(1), vid(2)]);
+    }
+
+    #[test]
+    fn separate_requests_with_equal_peers_coalesce_into_one_send() {
+        // Regression: emitters that dispatch one Action per id (e.g.
+        // `FetchRequest::ExecutionCerts { wave_id }`) hand the protocol a
+        // fresh `Vec<Id>::with one entry` per call. Each call wraps its
+        // peers in a fresh `Arc<FetchPeers>` — pre-fix, grouping by
+        // `Arc::as_ptr` defeated batching even when every call shared the
+        // same peer pool, so 30 ids → 30 single-id Sends instead of one
+        // chunked Send.
+        let mut p = Fetch::<TxHash>::new(
+            "test",
+            FetchConfig {
+                max_in_flight: 100,
+                max_ids_per_request: 50,
+                parallel_chunks_per_tick: 8,
+            },
+        );
+        // 30 separate single-id Requests, each carrying an equal-but-not-
+        // identical `FetchPeers` (constructed fresh per call).
+        for n in 0..30u8 {
+            p.handle(FetchInput::Request {
+                ids: vec![tx(n)],
+                peers: pinned(vid(1)),
+            });
+        }
+        let out = p.handle(FetchInput::Tick);
+        assert_eq!(out.len(), 1, "30 single-id Requests should coalesce");
+        let FetchOutput::Send { ids, .. } = &out[0];
+        assert_eq!(ids.len(), 30);
     }
 
     #[test]

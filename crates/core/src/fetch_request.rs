@@ -22,7 +22,7 @@ use hyperscale_types::{
 /// to expect one peer to have the data first (e.g. block proposer for
 /// BFT-path fetches). Use `None` when any peer in the pool is equally
 /// likely to serve.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FetchPeers {
     /// Peer to try first each round, when one peer has a structural reason
     /// to be the canonical source. `None` for "no preferred — let the
