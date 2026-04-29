@@ -918,7 +918,7 @@ impl ExecutionCoordinator {
         &mut self,
         topology: &TopologySnapshot,
         wave_id: &WaveId,
-        certificate: hyperscale_types::ExecutionCertificate,
+        certificate: &Arc<ExecutionCertificate>,
     ) -> Vec<Action> {
         let mut actions = Vec::new();
 
@@ -927,11 +927,9 @@ impl ExecutionCoordinator {
         // aggregated, especially with many shards where provision flow is slower).
         let remote_shards: Vec<ShardGroupId> = wave_id.remote_shards.iter().copied().collect();
 
-        let certificate = Arc::new(certificate);
-
         // Cache the cert in io_loop for fallback serving.
         actions.push(Action::TrackExecutionCertificate {
-            certificate: Arc::clone(&certificate),
+            certificate: Arc::clone(certificate),
         });
 
         // Broadcast EC to all local peers (they don't aggregate — they need it).
@@ -939,7 +937,7 @@ impl ExecutionCoordinator {
         if !local_peers.is_empty() {
             actions.push(Action::BroadcastExecutionCertificate {
                 shard: topology.local_shard(),
-                certificate: Arc::clone(&certificate),
+                certificate: Arc::clone(certificate),
                 recipients: local_peers,
             });
         }
@@ -950,13 +948,13 @@ impl ExecutionCoordinator {
         for target_shard in &remote_shards {
             let recipients: Vec<ValidatorId> = topology.committee_for_shard(*target_shard).to_vec();
             self.outbound_certs.on_broadcast(
-                Arc::clone(&certificate),
+                Arc::clone(certificate),
                 *target_shard,
                 recipients.clone(),
             );
             actions.push(Action::BroadcastExecutionCertificate {
                 shard: *target_shard,
-                certificate: Arc::clone(&certificate),
+                certificate: Arc::clone(certificate),
                 recipients,
             });
         }
@@ -969,7 +967,7 @@ impl ExecutionCoordinator {
         );
 
         // Feed the EC to the wave-level certificate tracker for finalization.
-        actions.extend(self.handle_wave_attestation(topology, &certificate));
+        actions.extend(self.handle_wave_attestation(topology, certificate));
 
         actions
     }
@@ -985,7 +983,7 @@ impl ExecutionCoordinator {
     pub fn on_wave_certificate(
         &mut self,
         topology: &TopologySnapshot,
-        cert: hyperscale_types::ExecutionCertificate,
+        cert: ExecutionCertificate,
     ) -> Vec<Action> {
         let shard = cert.shard_group_id();
 
@@ -1030,7 +1028,7 @@ impl ExecutionCoordinator {
     pub fn on_certificate_verified(
         &mut self,
         topology: &TopologySnapshot,
-        certificate: hyperscale_types::ExecutionCertificate,
+        certificate: Arc<ExecutionCertificate>,
         valid: bool,
     ) -> Vec<Action> {
         if !valid {
@@ -1043,7 +1041,7 @@ impl ExecutionCoordinator {
         }
 
         let shard = certificate.shard_group_id();
-        let ec_arc = Arc::new(certificate);
+        let ec_arc = certificate;
         let mut actions = vec![Action::Continuation(
             ProtocolEvent::ExecutionCertificateAdmitted {
                 certificate: Arc::clone(&ec_arc),
@@ -2162,7 +2160,7 @@ mod tests {
         );
 
         // Simulate receiving a verified local shard EC.
-        let cert = hyperscale_types::ExecutionCertificate::new(
+        let cert = ExecutionCertificate::new(
             wave_id,
             WeightedTimestamp::ZERO,
             GlobalReceiptRoot::ZERO,
@@ -2170,7 +2168,7 @@ mod tests {
             hyperscale_types::zero_bls_signature(),
             hyperscale_types::SignerBitfield::new(4),
         );
-        state.on_certificate_verified(&topo, cert, true);
+        state.on_certificate_verified(&topo, Arc::new(cert), true);
 
         // Advance time past the retry deadline; if the retry had survived,
         // this would fire a SignAndSendExecutionVote action.
@@ -2193,7 +2191,7 @@ mod tests {
 
         let mut state = make_test_state();
 
-        let cert = hyperscale_types::ExecutionCertificate::new(
+        let cert = ExecutionCertificate::new(
             wave_id.clone(),
             WeightedTimestamp::ZERO,
             GlobalReceiptRoot::ZERO,
@@ -2202,7 +2200,7 @@ mod tests {
             hyperscale_types::SignerBitfield::new(4),
         );
 
-        let actions = state.on_certificate_aggregated(&topo, &wave_id, cert);
+        let actions = state.on_certificate_aggregated(&topo, &wave_id, &Arc::new(cert));
 
         // Should have: TrackExecutionCertificate + BroadcastEC(local) + BroadcastEC(remote shard 1)
         let broadcast_actions: Vec<_> = actions
@@ -2248,7 +2246,7 @@ mod tests {
             std::iter::once(ShardGroupId(0)).collect(),
         );
         // No local waves / trackers have been created for this tx.
-        let cert = hyperscale_types::ExecutionCertificate::new(
+        let cert = ExecutionCertificate::new(
             wave_id,
             WeightedTimestamp::ZERO,
             GlobalReceiptRoot::ZERO,
@@ -2438,7 +2436,7 @@ mod tests {
         }
 
         // Add the local EC; same wave_id flips `local_ec_emitted` to true.
-        let local_ec = Arc::new(hyperscale_types::ExecutionCertificate::new(
+        let local_ec = Arc::new(ExecutionCertificate::new(
             wave_id.clone(),
             WeightedTimestamp(1_000),
             GlobalReceiptRoot::from_raw(Hash::from_bytes(b"global_receipt_root")),

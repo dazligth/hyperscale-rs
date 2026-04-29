@@ -247,7 +247,7 @@ pub enum ProtocolEvent {
     /// re-lookup.
     StateProvisionsVerified {
         /// The verified provisions.
-        provisions: Provisions,
+        provisions: Arc<Provisions>,
         /// The committed header whose QC passed verification.
         /// `None` if no candidate header passed QC verification.
         committed_header: Option<Arc<CommittedBlockHeader>>,
@@ -332,7 +332,7 @@ pub enum ProtocolEvent {
         /// Wave whose EC was aggregated.
         wave_id: WaveId,
         /// The newly aggregated execution certificate.
-        certificate: ExecutionCertificate,
+        certificate: Arc<ExecutionCertificate>,
     },
 
     /// Execution certificates delivered from any source — fetch response or
@@ -349,7 +349,7 @@ pub enum ProtocolEvent {
     /// Execution certificate signature verification completed.
     ExecutionCertificateSignatureVerified {
         /// The certificate whose signature was verified.
-        certificate: ExecutionCertificate,
+        certificate: Arc<ExecutionCertificate>,
         /// `true` when the aggregated signature passed verification.
         valid: bool,
     },

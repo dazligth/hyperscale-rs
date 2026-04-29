@@ -264,7 +264,7 @@ where
             (ctx.notify)(NodeInput::Protocol(Box::new(
                 ProtocolEvent::ExecutionCertificateAggregated {
                     wave_id,
-                    certificate,
+                    certificate: Arc::new(certificate),
                 },
             )));
         }
@@ -289,7 +289,10 @@ where
         } => {
             let valid = verify_execution_certificate_signature(&certificate, &public_keys);
             (ctx.notify)(NodeInput::Protocol(Box::new(
-                ProtocolEvent::ExecutionCertificateSignatureVerified { certificate, valid },
+                ProtocolEvent::ExecutionCertificateSignatureVerified {
+                    certificate: Arc::new(certificate),
+                    valid,
+                },
             )));
         }
         Action::ExecuteTransactions {

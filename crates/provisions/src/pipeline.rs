@@ -91,11 +91,10 @@ impl ProvisionPipeline {
     /// emit). Idempotent if the same content hash is inserted twice.
     pub(crate) fn insert_verified(
         &mut self,
-        provisions: Provisions,
+        provisions: Arc<Provisions>,
         source_block_ts: WeightedTimestamp,
     ) -> Arc<Provisions> {
         let key = (provisions.source_shard, provisions.block_height);
-        let provisions = Arc::new(provisions);
         self.verified.insert(
             key,
             VerifiedProvision {
@@ -217,7 +216,7 @@ mod tests {
         let mut pl = ProvisionPipeline::new(Arc::clone(&store));
         let provisions = make_provisions(1, ShardGroupId(1), BlockHeight(10));
         let hash = provisions.hash();
-        let arc = pl.insert_verified(provisions, ts(1_000));
+        let arc = pl.insert_verified(Arc::new(provisions), ts(1_000));
         assert!(pl.has_verified((ShardGroupId(1), BlockHeight(10))));
         assert!(store.get(&hash).is_some());
         assert_eq!(arc.source_shard, ShardGroupId(1));
@@ -232,7 +231,7 @@ mod tests {
         let provisions_v = make_provisions(1, ShardGroupId(1), BlockHeight(10));
         let source_ts = ts(1_000);
         let live_after = provisions_v.deadline(source_ts);
-        pl.insert_verified(provisions_v, source_ts);
+        pl.insert_verified(Arc::new(provisions_v), source_ts);
 
         pl.buffer_pending(
             (ShardGroupId(2), BlockHeight(5)),

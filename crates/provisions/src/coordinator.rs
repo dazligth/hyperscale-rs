@@ -547,7 +547,7 @@ impl ProvisionCoordinator {
     pub fn on_state_provisions_verified(
         &mut self,
         _topology: &TopologySnapshot,
-        provisions: Provisions,
+        provisions: Arc<Provisions>,
         committed_header: Option<&Arc<CommittedBlockHeader>>,
         valid: bool,
         now: LocalTimestamp,
@@ -972,7 +972,7 @@ mod tests {
         coordinator.on_state_provisions_received(&topology, provisions.clone());
         coordinator.on_state_provisions_verified(
             &topology,
-            provisions,
+            Arc::new(provisions),
             Some(&header),
             true,
             LocalTimestamp::ZERO,
@@ -1003,7 +1003,7 @@ mod tests {
         // Verify
         let actions = coordinator.on_state_provisions_verified(
             &topology,
-            provisions,
+            Arc::new(provisions),
             Some(&header),
             true,
             LocalTimestamp::ZERO,
@@ -1033,7 +1033,7 @@ mod tests {
         // Verification fails — no committed_header returned
         let actions = coordinator.on_state_provisions_verified(
             &topology,
-            provisions,
+            Arc::new(provisions),
             None,
             false,
             LocalTimestamp::ZERO,
@@ -1230,7 +1230,7 @@ mod tests {
         // Entire provisions fails verification
         let actions = coordinator.on_state_provisions_verified(
             &topology,
-            provisions,
+            Arc::new(provisions),
             Some(&header),
             false,
             LocalTimestamp::ZERO,
@@ -1377,7 +1377,7 @@ mod tests {
         coordinator.on_state_provisions_received(&topology, provisions.clone());
         coordinator.on_state_provisions_verified(
             &topology,
-            provisions,
+            Arc::new(provisions),
             Some(&header),
             true,
             LocalTimestamp::ZERO,
@@ -1518,7 +1518,7 @@ mod tests {
         coordinator.on_state_provisions_received(&topology, provisions.clone());
         coordinator.on_state_provisions_verified(
             &topology,
-            provisions,
+            Arc::new(provisions),
             Some(&header),
             true,
             LocalTimestamp::ZERO,
@@ -1562,7 +1562,7 @@ mod tests {
         coordinator.on_state_provisions_received(&topology, provisions.clone());
         coordinator.on_state_provisions_verified(
             &topology,
-            provisions,
+            Arc::new(provisions),
             Some(&header),
             true,
             LocalTimestamp::ZERO,
@@ -1627,7 +1627,7 @@ mod tests {
         coordinator.on_state_provisions_received(&topology, provisions.clone());
         coordinator.on_state_provisions_verified(
             &topology,
-            provisions,
+            Arc::new(provisions),
             Some(&header),
             true,
             LocalTimestamp::ZERO,
@@ -1702,7 +1702,7 @@ mod tests {
         coordinator.on_state_provisions_received(&topology, provisions.clone());
         coordinator.on_state_provisions_verified(
             &topology,
-            provisions,
+            Arc::new(provisions),
             Some(&header),
             true,
             LocalTimestamp::ZERO,
@@ -1827,7 +1827,13 @@ mod tests {
         coordinator.on_verified_remote_header(topology, &header);
         let provisions = make_provisions(tx_hash, source_shard, ShardGroupId(0), height);
         coordinator.on_state_provisions_received(topology, provisions.clone());
-        coordinator.on_state_provisions_verified(topology, provisions, Some(&header), true, now);
+        coordinator.on_state_provisions_verified(
+            topology,
+            Arc::new(provisions),
+            Some(&header),
+            true,
+            now,
+        );
     }
 
     #[test]
@@ -1970,7 +1976,7 @@ mod tests {
                     coordinator.on_state_provisions_received(&topology, provisions.clone());
                     coordinator.on_state_provisions_verified(
                         &topology,
-                        provisions,
+                        Arc::new(provisions),
                         Some(&header),
                         true,
                         LocalTimestamp::ZERO,

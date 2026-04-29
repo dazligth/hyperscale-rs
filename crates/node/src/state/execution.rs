@@ -47,7 +47,7 @@ impl NodeStateMachine {
             } => self.execution.on_certificate_aggregated(
                 self.topology.snapshot(),
                 &wave_id,
-                certificate,
+                &certificate,
             ),
             ProtocolEvent::ExecutionCertificatesReceived { certificates } => {
                 let topology = self.topology.snapshot();

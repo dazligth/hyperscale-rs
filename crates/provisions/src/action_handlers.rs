@@ -212,7 +212,7 @@ pub fn handle_action<S, E, N>(
             );
             (ctx.notify)(NodeInput::Protocol(Box::new(
                 ProtocolEvent::StateProvisionsVerified {
-                    provisions,
+                    provisions: Arc::new(provisions),
                     committed_header: Some(committed_header),
                     valid: all_valid,
                 },
