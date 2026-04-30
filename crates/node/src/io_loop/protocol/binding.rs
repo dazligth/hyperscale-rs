@@ -147,7 +147,7 @@ impl FetchBinding for TransactionBinding {
             _ => return,
         };
         if !ids.is_empty() {
-            fetch.handle(FetchInput::Admitted { ids });
+            fetch.handle(FetchInput::Drop { ids });
         }
     }
 }
@@ -207,7 +207,7 @@ impl FetchBinding for LocalProvisionBinding {
 
     fn apply_admission(fetch: &mut Fetch<ProvisionHash>, event: &ProtocolEvent) {
         if let ProtocolEvent::ProvisionsAdmitted { provisions, .. } = event {
-            fetch.handle(FetchInput::Admitted {
+            fetch.handle(FetchInput::Drop {
                 ids: vec![provisions.hash()],
             });
         }
@@ -272,7 +272,7 @@ impl FetchBinding for FinalizedWaveBinding {
     fn apply_admission(fetch: &mut Fetch<WaveIdHash>, event: &ProtocolEvent) {
         if let ProtocolEvent::FinalizedWavesAdmitted { waves } = event {
             let ids: Vec<WaveIdHash> = waves.iter().map(|w| w.wave_id_hash()).collect();
-            fetch.handle(FetchInput::Admitted { ids });
+            fetch.handle(FetchInput::Drop { ids });
         }
     }
 }
@@ -340,7 +340,7 @@ impl FetchBinding for ExecCertBinding {
 
     fn apply_admission(fetch: &mut Fetch<WaveId>, event: &ProtocolEvent) {
         if let ProtocolEvent::ExecutionCertificateAdmitted { certificate } = event {
-            fetch.handle(FetchInput::Admitted {
+            fetch.handle(FetchInput::Drop {
                 ids: vec![certificate.wave_id.clone()],
             });
         }
@@ -438,23 +438,9 @@ impl FetchBinding for ProvisionBinding {
 
     fn apply_admission(fetch: &mut Fetch<Self::Id>, event: &ProtocolEvent) {
         if let ProtocolEvent::ProvisionsAdmitted { provisions, .. } = event {
-            fetch.handle(FetchInput::Admitted {
+            fetch.handle(FetchInput::Drop {
                 ids: vec![(provisions.source_shard, provisions.block_height)],
             });
         }
     }
-}
-
-/// True once `ProvisionCoordinator` no longer expects provisions for `id`.
-///
-/// The verified remote header that registered the expectation has either
-/// been satisfied or pruned. Lifetime is bound by `ProvisionCoordinator`'s
-/// expected-set, not by admission events alone.
-#[must_use]
-pub fn provisions_is_abandoned(
-    state: &crate::state::NodeStateMachine,
-    id: &(ShardGroupId, BlockHeight),
-) -> bool {
-    let (shard, height) = *id;
-    !state.provisions().is_expected(shard, height)
 }

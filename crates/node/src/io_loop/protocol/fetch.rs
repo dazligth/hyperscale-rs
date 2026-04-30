@@ -10,9 +10,11 @@
 //! through to the output handler, which calls `Network::request` and lets
 //! the network's health-weighted selector pick.
 //!
-//! Entries self-evict on `Admitted`. Emitters that decide an id is no
-//! longer needed feed the id back through `Admitted` to drop it without a
-//! fetch ever returning. Cross-shard payloads instantiate this with
+//! Entries self-evict on `Drop`. Emitters that decide an id is no longer
+//! needed feed the id back through the same input — the FSM doesn't care
+//! whether the payload landed (admission) or the consumer abandoned the
+//! request (explicit cancel via `Action::AbandonFetch`); both paths route
+//! ids back here. Cross-shard payloads instantiate this with
 //! `Id = (ShardGroupId, BlockHeight)` — one id per request; the chunking
 //! machinery handles that as a special case of a one-element batch.
 
@@ -61,12 +63,14 @@ pub enum FetchInput<Id> {
         /// Ids that were in flight on the failed chunk.
         ids: Vec<Id>,
     },
-    /// One or more ids landed via *any* path (fetch, gossip, local
-    /// production). Drops them from the pending set. Doubles as the
-    /// "no-longer-needed" signal — emitters that abandon a request feed
-    /// the ids back here to drop them without a fetch ever returning.
-    Admitted {
-        /// Ids whose payloads have been admitted (or are no longer wanted).
+    /// Stop tracking these ids. Fed by the binding's `apply_admission` hook
+    /// when a payload landed via *any* path (fetch, gossip, local production)
+    /// and by `io_loop`'s `Action::AbandonFetch` dispatcher when a consumer
+    /// coordinator drops the id from its expected-set. The FSM is indifferent
+    /// to which — both paths converge on `handle_drop`.
+    Drop {
+        /// Ids whose payloads have been admitted or whose fetch has been
+        /// abandoned by the originating coordinator.
         ids: Vec<Id>,
     },
     /// Drive pending fetches: emit chunks up to per-tick and global caps.
@@ -120,7 +124,7 @@ impl<Id: Eq + Hash + Ord + Clone + std::fmt::Debug> Fetch<Id> {
         match input {
             FetchInput::Request { ids, peers } => self.handle_request(ids, peers),
             FetchInput::Failed { ids } => self.handle_failed(&ids),
-            FetchInput::Admitted { ids } => self.handle_drop(&ids),
+            FetchInput::Drop { ids } => self.handle_drop(&ids),
             FetchInput::Tick => self.spawn_pending_fetches(),
         }
     }
@@ -141,17 +145,6 @@ impl<Id: Eq + Hash + Ord + Clone + std::fmt::Debug> Fetch<Id> {
     #[must_use]
     pub fn pending_count(&self) -> usize {
         self.pending.len()
-    }
-
-    /// Drop every id for which `is_abandoned` returns `true`. Lets an
-    /// instance prune ids whose lifetime is bound by consumer state rather
-    /// than admission (e.g. cross-shard provisions follow
-    /// `ProvisionCoordinator`'s expected-set).
-    pub fn evict_abandoned<F>(&mut self, mut is_abandoned: F)
-    where
-        F: FnMut(&Id) -> bool,
-    {
-        self.pending.retain(|id, _| !is_abandoned(id));
     }
 
     fn handle_request(&mut self, ids: Vec<Id>, peers: FetchPeers) -> Vec<FetchOutput<Id>> {
@@ -338,7 +331,7 @@ mod tests {
         });
         p.handle(FetchInput::Tick);
 
-        p.handle(FetchInput::Admitted {
+        p.handle(FetchInput::Drop {
             ids: vec![tx(1), tx(2)],
         });
         assert!(!p.has_pending());
@@ -347,7 +340,7 @@ mod tests {
     #[test]
     fn admitted_unknown_id_is_silent_noop() {
         let mut p = Fetch::<TxHash>::new("test", config());
-        let out = p.handle(FetchInput::Admitted { ids: vec![tx(99)] });
+        let out = p.handle(FetchInput::Drop { ids: vec![tx(99)] });
         assert!(out.is_empty());
     }
 

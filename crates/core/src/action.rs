@@ -1,6 +1,6 @@
 //! Action types for the deterministic state machine.
 
-use crate::{FetchRequest, ProtocolEvent, TimerId};
+use crate::{FetchAbandon, FetchRequest, ProtocolEvent, TimerId};
 use hyperscale_types::{
     Block, BlockHash, BlockHeader, BlockHeight, BlockManifest, BlockVote, Bls12381G1PublicKey,
     CertificateRoot, CommittedBlockHeader, ExecutionCertificate, ExecutionVote, FinalizedWave,
@@ -644,10 +644,20 @@ pub enum Action {
     ///
     /// Replaces the family of flat `Fetch*` / `RequestMissing*` variants —
     /// `io_loop`'s dispatcher matches the inner [`FetchRequest`] and dispatches
-    /// to the corresponding `instances/*.rs` module. Cancellation is driven
-    /// by admission events (`Continuation(*Admitted/*Verified)`) and the
-    /// per-instance `is_abandoned` predicate, not by separate cancel actions.
+    /// to the corresponding binding. Admission events (`Continuation(*Admitted
+    /// /*Verified)`) drain ids that arrived; explicit cancellation flows
+    /// through [`Self::AbandonFetch`] when a consumer's expected-set drops a
+    /// key without it ever being admitted.
     Fetch(FetchRequest),
+
+    /// Cancel an in-flight fetch the originating coordinator no longer wants.
+    ///
+    /// Symmetric to [`Self::Fetch`] — `io_loop`'s dispatcher matches the
+    /// inner [`FetchAbandon`] and feeds the ids through `FetchInput::Drop`
+    /// on the corresponding binding. Emitted by coordinators at every
+    /// expected-set drop site (verification succeeded, retention-horizon
+    /// orphan cleanup, deadline eviction).
+    AbandonFetch(FetchAbandon),
 }
 
 impl Action {

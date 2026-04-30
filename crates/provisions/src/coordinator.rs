@@ -16,7 +16,7 @@ use crate::pipeline::ProvisionPipeline;
 use crate::queue::QueuedProvisionBuffer;
 use crate::store::ProvisionStore;
 use crate::verified_headers::VerifiedHeaderBuffer;
-use hyperscale_core::{Action, FetchPeers, FetchRequest, ProtocolEvent};
+use hyperscale_core::{Action, FetchAbandon, FetchPeers, FetchRequest, ProtocolEvent};
 use hyperscale_types::{
     BlockHeight, CommittedBlockHeader, Hash, LocalTimestamp, ProvisionHash, ProvisionTxRoot,
     Provisions, RETENTION_HORIZON, ShardGroupId, TopologySnapshot, compute_padded_merkle_root,
@@ -197,6 +197,7 @@ impl ProvisionCoordinator {
         topology: &TopologySnapshot,
         certified: &hyperscale_types::CertifiedBlock,
     ) -> Vec<Action> {
+        let mut actions: Vec<Action> = Vec::new();
         let block = &certified.block;
         let new_ts = certified.qc.weighted_timestamp;
         self.expected.record_block_committed(block.height(), new_ts);
@@ -222,9 +223,14 @@ impl ProvisionCoordinator {
         // fallback fetch never resolved within `RETENTION_HORIZON`. Under
         // normal operation a header is retained exactly while its provisions
         // are outstanding; this only catches entries that would otherwise
-        // leak indefinitely.
-        for key in self.expected.cleanup_orphans(retention_cutoff) {
-            self.headers.remove(key);
+        // leak indefinitely. Each dropped key emits an `AbandonFetch` so
+        // the io_loop's `ProvisionBinding` clears the matching in-flight.
+        for (source_shard, block_height) in self.expected.cleanup_orphans(retention_cutoff) {
+            self.headers.remove((source_shard, block_height));
+            actions.push(Action::AbandonFetch(FetchAbandon::RemoteProvisions {
+                source_shard,
+                block_height,
+            }));
         }
 
         // Prune tombstones past `RETENTION_HORIZON`, measured against
@@ -241,25 +247,27 @@ impl ProvisionCoordinator {
 
         // Lift each timed-out expectation into a fallback fetch action,
         // attaching the source shard's committee from topology.
-        self.expected
-            .check_timeouts(local_ts)
-            .into_iter()
-            .map(|effect| {
-                Action::Fetch(FetchRequest::RemoteProvisions {
-                    source_shard: effect.source_shard,
-                    block_height: effect.block_height,
-                    peers: FetchPeers::with_preferred(
-                        effect.proposer,
-                        topology
-                            .committee_for_shard(effect.source_shard)
-                            .iter()
-                            .copied()
-                            .filter(|p| *p != effect.proposer)
-                            .collect(),
-                    ),
-                })
-            })
-            .collect()
+        actions.extend(
+            self.expected
+                .check_timeouts(local_ts)
+                .into_iter()
+                .map(|effect| {
+                    Action::Fetch(FetchRequest::RemoteProvisions {
+                        source_shard: effect.source_shard,
+                        block_height: effect.block_height,
+                        peers: FetchPeers::with_preferred(
+                            effect.proposer,
+                            topology
+                                .committee_for_shard(effect.source_shard)
+                                .iter()
+                                .copied()
+                                .filter(|p| *p != effect.proposer)
+                                .collect(),
+                        ),
+                    })
+                }),
+        );
+        actions
     }
 
     /// Drop every artefact whose deadline has passed `local_committed_ts`.
@@ -283,6 +291,12 @@ impl ProvisionCoordinator {
 
         self.queue.drop_past_deadline(now);
 
+        // Pipeline eviction is post-receipt buffering only — these keys are
+        // satisfied from the fetch's perspective (the response arrived; the
+        // entry is waiting on a header to verify against). No in-flight
+        // fetch corresponds, so no `AbandonFetch` is owed. Cancellation of
+        // genuine in-flight fetches flows through `expected.cleanup_orphans`
+        // in `on_block_committed`.
         let evicted_keys = self.pipeline.drop_past_deadline(now);
         for key in evicted_keys {
             self.headers.remove(key);
@@ -557,9 +571,11 @@ impl ProvisionCoordinator {
 
         // Clear expected-provision tracking and the matching header. The
         // header's only job — verify these provisions — is done; hanging on
-        // to it wastes memory. Any in-flight fallback fetch self-cancels
-        // via the `ProvisionsAdmitted` continuation, which the io_loop
-        // turns into an admission signal on the provision fetch protocol.
+        // to it wastes memory. Cancellation of any in-flight fallback fetch
+        // is explicit: emit `AbandonFetch` so the io_loop's
+        // `ProvisionBinding` drops the in-flight without waiting on the
+        // `ProvisionsAdmitted` continuation (which still fires for its own
+        // downstream consumers but no longer doubles as the cancel signal).
         if let Some(header) = committed_header {
             let shard = header.header.shard_group_id;
             let height = header.header.height;
@@ -567,6 +583,10 @@ impl ProvisionCoordinator {
 
             if self.expected.on_provisions_verified(shard, height) {
                 self.headers.remove(key);
+                actions.push(Action::AbandonFetch(FetchAbandon::RemoteProvisions {
+                    source_shard: shard,
+                    block_height: height,
+                }));
             }
         }
 
@@ -663,14 +683,6 @@ impl ProvisionCoordinator {
     #[must_use]
     pub fn verified_remote_header_count(&self) -> usize {
         self.headers.len()
-    }
-
-    /// Whether cross-shard provisions for `(source_shard, block_height)` are
-    /// currently expected — i.e. a verified remote header has registered an
-    /// expectation that hasn't yet been satisfied.
-    #[must_use]
-    pub fn is_expected(&self, source_shard: ShardGroupId, block_height: BlockHeight) -> bool {
-        self.expected.contains(source_shard, block_height)
     }
 }
 
@@ -1572,6 +1584,91 @@ mod tests {
         // `ProvisionsAdmitted` interception drives any in-flight fetch
         // admission downstream.
         assert_eq!(coordinator.expected.len(), 0);
+    }
+
+    #[test]
+    fn test_verified_provisions_emit_abandon_fetch() {
+        let topology = make_test_topology(ShardGroupId(0));
+        let mut coordinator = ProvisionCoordinator::new();
+
+        let source_shard = ShardGroupId(1);
+        let block_height = BlockHeight(10);
+
+        let header =
+            make_committed_header_with_targets(source_shard, block_height, vec![ShardGroupId(0)]);
+        coordinator.on_verified_remote_header(&topology, &header);
+
+        let provisions = make_provisions(
+            TxHash::from_raw(Hash::from_bytes(b"tx1")),
+            source_shard,
+            ShardGroupId(0),
+            block_height,
+        );
+        coordinator.on_state_provisions_received(&topology, provisions.clone());
+        let actions = coordinator.on_state_provisions_verified(
+            &topology,
+            Arc::new(provisions),
+            Some(&header),
+            true,
+            LocalTimestamp::ZERO,
+        );
+
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                Action::AbandonFetch(FetchAbandon::RemoteProvisions {
+                    source_shard: s,
+                    block_height: h,
+                }) if *s == source_shard && *h == block_height
+            )),
+            "Expected AbandonFetch for verified provisions, got: {actions:?}"
+        );
+    }
+
+    #[test]
+    fn test_orphan_cleanup_emits_abandon_fetch() {
+        let topology = make_test_topology(ShardGroupId(0));
+        let mut coordinator = ProvisionCoordinator::new();
+
+        // Prime local clock so the expected-provision entry gets a real
+        // baseline rather than the zero sentinel retro-stamped on first commit.
+        coordinator.on_block_committed(&topology, &make_block(BlockHeight(1)));
+
+        let source_shard = ShardGroupId(1);
+        let block_height = BlockHeight(10);
+
+        let header =
+            make_committed_header_with_targets(source_shard, block_height, vec![ShardGroupId(0)]);
+        coordinator.on_verified_remote_header(&topology, &header);
+
+        let orphan_cutoff_blocks = u64::try_from(RETENTION_HORIZON.as_millis()).unwrap_or(u64::MAX)
+            / TEST_BLOCK_INTERVAL_MS;
+
+        // Walk up to (but not past) the orphan cutoff — no Abandon yet.
+        for h in 2..=orphan_cutoff_blocks + 1 {
+            let actions = coordinator.on_block_committed(&topology, &make_block(BlockHeight(h)));
+            assert!(
+                !actions.iter().any(|a| matches!(a, Action::AbandonFetch(_))),
+                "AbandonFetch fired before orphan cutoff at h={h}"
+            );
+        }
+
+        // One past the cutoff — orphan sweep drops the expected entry and
+        // emits AbandonFetch for the dropped key.
+        let actions = coordinator.on_block_committed(
+            &topology,
+            &make_block(BlockHeight(orphan_cutoff_blocks + 2)),
+        );
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                Action::AbandonFetch(FetchAbandon::RemoteProvisions {
+                    source_shard: s,
+                    block_height: h,
+                }) if *s == source_shard && *h == block_height
+            )),
+            "Expected AbandonFetch from orphan cleanup, got: {actions:?}"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════

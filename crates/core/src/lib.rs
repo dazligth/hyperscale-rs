@@ -30,6 +30,7 @@
 
 mod action;
 mod action_context;
+mod fetch_abandon;
 mod fetch_request;
 mod input;
 mod protocol_event;
@@ -38,6 +39,7 @@ mod traits;
 
 pub use action::{Action, CrossShardExecutionRequest, ProvisionsRequest};
 pub use action_context::{ActionContext, PreparedBlock};
+pub use fetch_abandon::FetchAbandon;
 pub use fetch_request::{FetchPeers, FetchRequest};
 pub use input::{EventPriority, NodeInput};
 pub use protocol_event::{CommitSource, ProtocolEvent, VerificationKind};

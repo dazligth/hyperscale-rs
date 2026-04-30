@@ -10,8 +10,8 @@ use crate::io_loop::protocol::binding::{
 use crate::io_loop::protocol::block_sync::BlockSyncInput;
 use crate::io_loop::protocol::fetch::FetchInput;
 use hyperscale_core::{
-    Action, ActionContext, CommitSource, FetchRequest, NodeInput, PreparedBlock, ProtocolEvent,
-    StateMachine,
+    Action, ActionContext, CommitSource, FetchAbandon, FetchRequest, NodeInput, PreparedBlock,
+    ProtocolEvent, StateMachine,
 };
 use hyperscale_dispatch::Dispatch;
 use hyperscale_engine::Engine;
@@ -75,6 +75,7 @@ where
                 target,
             } => self.process_start_remote_header_sync(source_shard, target),
             Action::Fetch(req) => self.process_fetch_request(req),
+            Action::AbandonFetch(req) => self.process_fetch_abandon(req),
 
             // ─── io_loop-internal effects ──────────────────────────────────
             Action::SetTimer { id, duration } => {
@@ -459,6 +460,27 @@ where
                     peers,
                 });
             }
+        }
+
+        self.update_fetch_tick_timer();
+    }
+
+    /// Dispatch a typed fetch-abandon to the corresponding binding.
+    ///
+    /// Symmetric to [`Self::process_fetch_request`] — translates the
+    /// variant payload into ids and feeds them through `FetchInput::Drop`,
+    /// which removes them from the binding's pending set without ever
+    /// issuing or completing a fetch. Refreshes the tick timer once at
+    /// the end (the pending set may now be empty).
+    #[allow(clippy::needless_pass_by_value)] // mirrors process_fetch_request; future variants carry Vec ids
+    fn process_fetch_abandon(&mut self, req: FetchAbandon) {
+        match req {
+            FetchAbandon::RemoteProvisions {
+                source_shard,
+                block_height,
+            } => self.drive_fetch::<ProvisionBinding>(FetchInput::Drop {
+                ids: vec![(source_shard, block_height)],
+            }),
         }
 
         self.update_fetch_tick_timer();

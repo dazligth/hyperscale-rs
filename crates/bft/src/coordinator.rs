@@ -611,8 +611,8 @@ impl BftCoordinator {
             "Recovered chain state from storage"
         );
 
-        // Pending blocks at or below the recovered committed height self-evict
-        // from fetch protocols on the next tick via the `is_abandoned` predicate.
+        // Pending blocks at or below the recovered committed height are pruned
+        // by `cleanup_old_state` on the next commit.
 
         // Set timers to resume consensus and trigger first proposal attempt
         self.queue_ready_proposal();
@@ -2281,8 +2281,6 @@ impl BftCoordinator {
         let parent_state_root = self.committed_state_root;
         let parent_block_height = self.committed_height;
 
-        // Removed blocks self-evict from fetch protocols on the next tick
-        // via the `is_abandoned` predicate.
         self.record_block_committed(&block, block_hash, qc.weighted_timestamp);
         self.record_leader_activity();
 
@@ -2392,8 +2390,6 @@ impl BftCoordinator {
 
         // Advance committed_height. The QC is the proof of commit — same
         // timing as the consensus path.
-        // Removed blocks self-evict from fetch protocols on the next tick
-        // via the `is_abandoned` predicate.
         self.record_block_committed(&block, block_hash, qc.weighted_timestamp);
 
         // Track sync progress for the loop iterator.
@@ -2857,9 +2853,8 @@ impl BftCoordinator {
         self.votes.clear_for_height(height, new_round)
     }
 
-    /// Clean up old state after commit. Pending blocks at or below the
-    /// committed height self-evict from fetch protocols on the next tick via
-    /// the `is_abandoned` predicate (`has_pending_block` returns false).
+    /// Clean up old state after commit. Drops pending-block, vote, and
+    /// commit-tracking entries at or below `committed_height`.
     fn cleanup_old_state(&mut self, committed_height: BlockHeight) {
         self.pending_blocks
             .retain(|_, pending| pending.header().height > committed_height);
@@ -2997,12 +2992,6 @@ impl BftCoordinator {
     #[must_use]
     pub const fn committed_height(&self) -> BlockHeight {
         self.committed_height
-    }
-
-    /// Whether a pending block is currently being assembled for `block_hash`.
-    #[must_use]
-    pub fn has_pending_block(&self, block_hash: BlockHash) -> bool {
-        self.pending_blocks.contains_key(&block_hash)
     }
 
     /// Single chokepoint for dropping a pending block. All single-block
