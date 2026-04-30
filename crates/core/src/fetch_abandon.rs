@@ -8,7 +8,7 @@
 //! Symmetric to [`crate::FetchRequest`]: one variant per binding, same
 //! keying, but with no peer pool — cancellation has no destination.
 //! `io_loop`'s dispatcher matches the inner enum and feeds the ids through
-//! `FetchInput::Drop` on the corresponding binding.
+//! `FetchInput::Abandoned` on the corresponding binding.
 
 use hyperscale_types::{BlockHeight, ShardGroupId, TxHash};
 

@@ -389,8 +389,15 @@ pub trait MetricsRecorder: Send + Sync + 'static {
     /// Record a fetch operation started.
     fn record_fetch_started(&self, kind: &str) {}
 
-    /// Record a fetch operation completed.
+    /// Record a fetch operation completed — payload landed via fetch response,
+    /// gossip, or local production and drained the pending entry.
     fn record_fetch_completed(&self, kind: &str) {}
+
+    /// Record a fetch operation cancelled by an explicit `Action::AbandonFetch`
+    /// — the originating coordinator gave up on the id without it ever being
+    /// admitted. Distinct from `record_fetch_completed` so the two populations
+    /// can be tracked separately in observability.
+    fn record_fetch_abandoned(&self, kind: &str) {}
 
     /// Record a fetch operation released for retry. Increments per release-
     /// for-retry, not per unrecoverable failure — the retry budget is owned
@@ -810,10 +817,16 @@ pub fn record_fetch_started(kind: &str) {
     recorder().record_fetch_started(kind);
 }
 
-/// Record a fetch operation completed.
+/// Record a fetch operation completed (payload landed and drained the entry).
 #[inline]
 pub fn record_fetch_completed(kind: &str) {
     recorder().record_fetch_completed(kind);
+}
+
+/// Record a fetch operation cancelled by `Action::AbandonFetch`.
+#[inline]
+pub fn record_fetch_abandoned(kind: &str) {
+    recorder().record_fetch_abandoned(kind);
 }
 
 /// Record a fetch operation released for retry.

@@ -10,13 +10,14 @@
 //! through to the output handler, which calls `Network::request` and lets
 //! the network's health-weighted selector pick.
 //!
-//! Entries self-evict on `Drop`. Emitters that decide an id is no longer
-//! needed feed the id back through the same input — the FSM doesn't care
-//! whether the payload landed (admission) or the consumer abandoned the
-//! request (explicit cancel via `Action::AbandonFetch`); both paths route
-//! ids back here. Cross-shard payloads instantiate this with
-//! `Id = (ShardGroupId, BlockHeight)` — one id per request; the chunking
-//! machinery handles that as a special case of a one-element batch.
+//! Entries self-evict on `Admitted` (payload landed via fetch / gossip /
+//! local production) or `Abandoned` (consumer dropped its expectation via
+//! `Action::AbandonFetch`). Both paths converge on the same internal
+//! removal logic; they're surfaced as distinct inputs so the two
+//! populations are observable as separate metrics. Cross-shard payloads
+//! instantiate this with `Id = (ShardGroupId, BlockHeight)` — one id per
+//! request; the chunking machinery handles that as a special case of a
+//! one-element batch.
 
 use hyperscale_core::FetchPeers;
 use hyperscale_metrics as metrics;
@@ -63,14 +64,19 @@ pub enum FetchInput<Id> {
         /// Ids that were in flight on the failed chunk.
         ids: Vec<Id>,
     },
-    /// Stop tracking these ids. Fed by the binding's `apply_admission` hook
-    /// when a payload landed via *any* path (fetch, gossip, local production)
-    /// and by `io_loop`'s `Action::AbandonFetch` dispatcher when a consumer
-    /// coordinator drops the id from its expected-set. The FSM is indifferent
-    /// to which — both paths converge on `handle_drop`.
-    Drop {
-        /// Ids whose payloads have been admitted or whose fetch has been
-        /// abandoned by the originating coordinator.
+    /// Payload for `ids` landed via fetch response, gossip, or local
+    /// production. Fed by the binding's `apply_admission` hook on canonical
+    /// admission events. Records `record_fetch_completed` per id removed.
+    Admitted {
+        /// Ids whose payloads have been admitted.
+        ids: Vec<Id>,
+    },
+    /// Consumer coordinator dropped its expectation for `ids`. Fed by
+    /// `io_loop`'s `Action::AbandonFetch` dispatcher. Records
+    /// `record_fetch_abandoned` per id removed — distinct from `Admitted`
+    /// so the two populations are observable separately.
+    Abandoned {
+        /// Ids whose fetch has been cancelled by the originating coordinator.
         ids: Vec<Id>,
     },
     /// Drive pending fetches: emit chunks up to per-tick and global caps.
@@ -95,6 +101,14 @@ pub enum FetchOutput<Id> {
 struct Entry {
     peers: Arc<FetchPeers>,
     in_flight: bool,
+}
+
+/// Why an id is being removed from the pending set — drives which counter
+/// `handle_drop` increments.
+#[derive(Debug, Clone, Copy)]
+enum DropKind {
+    Admitted,
+    Abandoned,
 }
 
 /// Id-keyed fetch state machine.
@@ -124,7 +138,8 @@ impl<Id: Eq + Hash + Ord + Clone + std::fmt::Debug> Fetch<Id> {
         match input {
             FetchInput::Request { ids, peers } => self.handle_request(ids, peers),
             FetchInput::Failed { ids } => self.handle_failed(&ids),
-            FetchInput::Drop { ids } => self.handle_drop(&ids),
+            FetchInput::Admitted { ids } => self.handle_drop(&ids, DropKind::Admitted),
+            FetchInput::Abandoned { ids } => self.handle_drop(&ids, DropKind::Abandoned),
             FetchInput::Tick => self.spawn_pending_fetches(),
         }
     }
@@ -190,10 +205,13 @@ impl<Id: Eq + Hash + Ord + Clone + std::fmt::Debug> Fetch<Id> {
         vec![]
     }
 
-    fn handle_drop(&mut self, ids: &[Id]) -> Vec<FetchOutput<Id>> {
+    fn handle_drop(&mut self, ids: &[Id], kind: DropKind) -> Vec<FetchOutput<Id>> {
         for id in ids {
             if self.pending.remove(id).is_some() {
-                metrics::record_fetch_completed(self.kind);
+                match kind {
+                    DropKind::Admitted => metrics::record_fetch_completed(self.kind),
+                    DropKind::Abandoned => metrics::record_fetch_abandoned(self.kind),
+                }
             }
         }
         vec![]
@@ -331,7 +349,7 @@ mod tests {
         });
         p.handle(FetchInput::Tick);
 
-        p.handle(FetchInput::Drop {
+        p.handle(FetchInput::Admitted {
             ids: vec![tx(1), tx(2)],
         });
         assert!(!p.has_pending());
@@ -340,8 +358,23 @@ mod tests {
     #[test]
     fn admitted_unknown_id_is_silent_noop() {
         let mut p = Fetch::<TxHash>::new("test", config());
-        let out = p.handle(FetchInput::Drop { ids: vec![tx(99)] });
+        let out = p.handle(FetchInput::Admitted { ids: vec![tx(99)] });
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn abandoned_drops_ids_like_admitted() {
+        let mut p = Fetch::<TxHash>::new("test", config());
+        p.handle(FetchInput::Request {
+            ids: vec![tx(1), tx(2)],
+            peers: pinned(vid(1)),
+        });
+        p.handle(FetchInput::Tick);
+
+        p.handle(FetchInput::Abandoned {
+            ids: vec![tx(1), tx(2)],
+        });
+        assert!(!p.has_pending());
     }
 
     #[test]

@@ -288,6 +288,10 @@ impl MetricsRecorder for MemoryRecorder {
         self.inc("fetch_completed", Some(kind), 1);
     }
 
+    fn record_fetch_abandoned(&self, kind: &str) {
+        self.inc("fetch_abandoned", Some(kind), 1);
+    }
+
     fn record_fetch_retried(&self, kind: &str) {
         self.inc("fetch_retried", Some(kind), 1);
     }

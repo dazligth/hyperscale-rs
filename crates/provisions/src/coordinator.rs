@@ -571,11 +571,12 @@ impl ProvisionCoordinator {
 
         // Clear expected-provision tracking and the matching header. The
         // header's only job — verify these provisions — is done; hanging on
-        // to it wastes memory. Cancellation of any in-flight fallback fetch
-        // is explicit: emit `AbandonFetch` so the io_loop's
-        // `ProvisionBinding` drops the in-flight without waiting on the
-        // `ProvisionsAdmitted` continuation (which still fires for its own
-        // downstream consumers but no longer doubles as the cancel signal).
+        // to it wastes memory. The in-flight fallback fetch (if any) is
+        // drained by the `ProvisionsAdmitted` continuation emitted below —
+        // `apply_admission` translates that into `FetchInput::Admitted`,
+        // which counts toward `record_fetch_completed`. Explicit
+        // `AbandonFetch` is reserved for paths where no admission event
+        // fires (orphan cleanup in `on_block_committed`).
         if let Some(header) = committed_header {
             let shard = header.header.shard_group_id;
             let height = header.header.height;
@@ -583,10 +584,6 @@ impl ProvisionCoordinator {
 
             if self.expected.on_provisions_verified(shard, height) {
                 self.headers.remove(key);
-                actions.push(Action::AbandonFetch(FetchAbandon::RemoteProvisions {
-                    source_shard: shard,
-                    block_height: height,
-                }));
             }
         }
 
@@ -1584,45 +1581,6 @@ mod tests {
         // `ProvisionsAdmitted` interception drives any in-flight fetch
         // admission downstream.
         assert_eq!(coordinator.expected.len(), 0);
-    }
-
-    #[test]
-    fn test_verified_provisions_emit_abandon_fetch() {
-        let topology = make_test_topology(ShardGroupId(0));
-        let mut coordinator = ProvisionCoordinator::new();
-
-        let source_shard = ShardGroupId(1);
-        let block_height = BlockHeight(10);
-
-        let header =
-            make_committed_header_with_targets(source_shard, block_height, vec![ShardGroupId(0)]);
-        coordinator.on_verified_remote_header(&topology, &header);
-
-        let provisions = make_provisions(
-            TxHash::from_raw(Hash::from_bytes(b"tx1")),
-            source_shard,
-            ShardGroupId(0),
-            block_height,
-        );
-        coordinator.on_state_provisions_received(&topology, provisions.clone());
-        let actions = coordinator.on_state_provisions_verified(
-            &topology,
-            Arc::new(provisions),
-            Some(&header),
-            true,
-            LocalTimestamp::ZERO,
-        );
-
-        assert!(
-            actions.iter().any(|a| matches!(
-                a,
-                Action::AbandonFetch(FetchAbandon::RemoteProvisions {
-                    source_shard: s,
-                    block_height: h,
-                }) if *s == source_shard && *h == block_height
-            )),
-            "Expected AbandonFetch for verified provisions, got: {actions:?}"
-        );
     }
 
     #[test]

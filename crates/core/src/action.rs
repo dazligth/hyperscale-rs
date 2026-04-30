@@ -653,10 +653,10 @@ pub enum Action {
     /// Cancel an in-flight fetch the originating coordinator no longer wants.
     ///
     /// Symmetric to [`Self::Fetch`] — `io_loop`'s dispatcher matches the
-    /// inner [`FetchAbandon`] and feeds the ids through `FetchInput::Drop`
-    /// on the corresponding binding. Emitted by coordinators at every
-    /// expected-set drop site (verification succeeded, retention-horizon
-    /// orphan cleanup, deadline eviction).
+    /// inner [`FetchAbandon`] and feeds the ids through
+    /// `FetchInput::Abandoned` on the corresponding binding. Emitted by
+    /// coordinators at every expected-set drop site (verification
+    /// succeeded, retention-horizon orphan cleanup, deadline eviction).
     AbandonFetch(FetchAbandon),
 }
 

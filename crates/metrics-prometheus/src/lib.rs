@@ -100,6 +100,7 @@ pub struct Metrics {
     // === Fetch ===
     pub fetch_started: CounterVec,
     pub fetch_completed: CounterVec,
+    pub fetch_abandoned: CounterVec,
     pub fetch_retried: CounterVec,
     pub fetch_items_received: CounterVec,
     pub fetch_items_sent: CounterVec,
@@ -499,7 +500,14 @@ impl Metrics {
 
             fetch_completed: register_counter_vec!(
                 "hyperscale_fetch_completed_total",
-                "Total fetch operations completed successfully",
+                "Total fetch operations completed successfully (payload landed and drained the entry)",
+                &["kind"]
+            )
+            .unwrap(),
+
+            fetch_abandoned: register_counter_vec!(
+                "hyperscale_fetch_abandoned_total",
+                "Total fetch operations cancelled by Action::AbandonFetch (consumer gave up before admission)",
                 &["kind"]
             )
             .unwrap(),
@@ -1001,6 +1009,13 @@ impl MetricsRecorder for PrometheusRecorder {
     fn record_fetch_completed(&self, kind: &str) {
         self.metrics
             .fetch_completed
+            .with_label_values(&[kind])
+            .inc();
+    }
+
+    fn record_fetch_abandoned(&self, kind: &str) {
+        self.metrics
+            .fetch_abandoned
             .with_label_values(&[kind])
             .inc();
     }

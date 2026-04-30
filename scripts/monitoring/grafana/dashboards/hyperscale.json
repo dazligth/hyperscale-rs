@@ -2330,7 +2330,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 62
+        "y": 78
       },
       "id": 50,
       "options": {
@@ -2519,7 +2519,7 @@
       "gridPos": {
         "h": 8,
         "w": 8,
-        "x": 16,
+        "x": 0,
         "y": 62
       },
       "id": 52,
@@ -2619,7 +2619,7 @@
       "gridPos": {
         "h": 8,
         "w": 8,
-        "x": 0,
+        "x": 8,
         "y": 78
       },
       "id": 56,
@@ -2656,34 +2656,43 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Per-shard sync activity. Each row = (kind, shard); colored bar = sync currently in progress (catching up). Empty rows = up to date.",
+      "description": "Fetches cancelled by Action::AbandonFetch — coordinator dropped the expectation before admission. Distinct from completed (payload landed). mempool kind also tracks `expected_tx_dropped_total` (cross-shard txs dropped past RETENTION_HORIZON without DA).",
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "thresholds"
+            "mode": "palette-classic"
           },
           "custom": {
-            "fillOpacity": 70,
-            "lineWidth": 0,
-            "spanNulls": false
-          },
-          "mappings": [
-            {
-              "options": {
-                "0": {
-                  "color": "green",
-                  "index": 0,
-                  "text": "idle"
-                },
-                "1": {
-                  "color": "orange",
-                  "index": 1,
-                  "text": "syncing"
-                }
-              },
-              "type": "value"
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
             }
-          ],
+          },
+          "mappings": [],
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -2693,29 +2702,28 @@
               }
             ]
           },
-          "unit": "short"
+          "unit": "ops"
         },
         "overrides": []
       },
       "gridPos": {
         "h": 8,
         "w": 8,
-        "x": 8,
-        "y": 78
+        "x": 16,
+        "y": 62
       },
       "id": 57,
       "options": {
-        "alignValue": "left",
         "legend": {
-          "displayMode": "list",
+          "calcs": [
+            "mean"
+          ],
+          "displayMode": "table",
           "placement": "bottom",
           "showLegend": true
         },
-        "mergeValues": true,
-        "rowHeight": 0.9,
-        "showValue": "never",
         "tooltip": {
-          "mode": "single",
+          "mode": "multi",
           "sort": "none"
         }
       },
@@ -2725,13 +2733,22 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "max by (kind, shard) (hyperscale_sync_in_progress)",
-          "legendFormat": "{{kind}} – Shard {{shard}}",
+          "expr": "sum by (kind) (rate(hyperscale_fetch_abandoned_total[1m]))",
+          "legendFormat": "fetch / {{kind}}",
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(hyperscale_mempool_expected_tx_dropped_total[1m]))",
+          "legendFormat": "mempool / expected-tx past horizon",
+          "refId": "B"
         }
       ],
-      "title": "Sync Active by Shard / Kind",
-      "type": "state-timeline"
+      "title": "Fetch Abandoned / Dropped Rate",
+      "type": "timeseries"
     },
     {
       "datasource": {

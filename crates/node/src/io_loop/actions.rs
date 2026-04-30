@@ -468,20 +468,21 @@ where
     /// Dispatch a typed fetch-abandon to the corresponding binding.
     ///
     /// Symmetric to [`Self::process_fetch_request`] — translates the
-    /// variant payload into ids and feeds them through `FetchInput::Drop`,
-    /// which removes them from the binding's pending set without ever
-    /// issuing or completing a fetch. Refreshes the tick timer once at
-    /// the end (the pending set may now be empty).
+    /// variant payload into ids and feeds them through `FetchInput::Abandoned`,
+    /// which removes them from the binding's pending set and increments
+    /// `record_fetch_abandoned` so the cancellation is observable separately
+    /// from genuine admissions. Refreshes the tick timer once at the end
+    /// (the pending set may now be empty).
     #[allow(clippy::needless_pass_by_value)] // mirrors process_fetch_request; future variants carry Vec ids
     fn process_fetch_abandon(&mut self, req: FetchAbandon) {
         match req {
             FetchAbandon::Transactions { ids } => {
-                self.drive_fetch::<TransactionBinding>(FetchInput::Drop { ids });
+                self.drive_fetch::<TransactionBinding>(FetchInput::Abandoned { ids });
             }
             FetchAbandon::RemoteProvisions {
                 source_shard,
                 block_height,
-            } => self.drive_fetch::<ProvisionBinding>(FetchInput::Drop {
+            } => self.drive_fetch::<ProvisionBinding>(FetchInput::Abandoned {
                 ids: vec![(source_shard, block_height)],
             }),
         }
