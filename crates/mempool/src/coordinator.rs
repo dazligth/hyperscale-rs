@@ -408,18 +408,32 @@ impl MempoolCoordinator {
         now: LocalTimestamp,
     ) -> Vec<Action> {
         let mut admitted = Vec::with_capacity(txs.len());
+        // Hashes that admission rejected (dup / tombstoned / expired) but
+        // were tracked as expected. The tx is provably moot — retrying
+        // serves nothing and re-fetching every block until
+        // `RETENTION_HORIZON` saturates the fetch FSM. Forget the
+        // expectation and abandon any in-flight retry.
+        let mut moot: Vec<TxHash> = Vec::new();
         for tx in txs {
+            let hash = tx.hash();
             if self.admit_internal(topology, &tx, false, now).is_some() {
                 admitted.push(tx);
+            } else if self.expected_txs.forget(&hash) {
+                moot.push(hash);
             }
         }
-        if admitted.is_empty() {
-            vec![]
-        } else {
-            vec![Action::Continuation(ProtocolEvent::TransactionsAdmitted {
-                txs: admitted,
-            })]
+        let mut actions = Vec::new();
+        if !moot.is_empty() {
+            actions.push(Action::AbandonFetch(FetchAbandon::Transactions {
+                ids: moot,
+            }));
         }
+        if !admitted.is_empty() {
+            actions.push(Action::Continuation(ProtocolEvent::TransactionsAdmitted {
+                txs: admitted,
+            }));
+        }
+        actions
     }
 
     /// Number of distinct tx hashes the mempool is currently expecting via
@@ -1461,6 +1475,58 @@ mod tests {
                 Action::AbandonFetch(FetchAbandon::Transactions { ids }) if ids == &[tx_hash]
             )),
             "Expected AbandonFetch for block-included expected tx, got: {actions:?}"
+        );
+    }
+
+    #[test]
+    fn fetched_but_rejected_tx_clears_expected_state() {
+        // Regression: when a fetched cross-shard tx is rejected by
+        // admission (validity expired / tombstoned / dup), its hash must
+        // be forgotten from `expected_txs` and abandoned in the fetch
+        // FSM. Otherwise `due_for_fetch` re-emits `Action::Fetch` for the
+        // same hash on every subsequent block commit, saturating the
+        // fetch FSM until RETENTION_HORIZON ages it out — visible in
+        // production as "tx fetch rises to the absolute resource limit"
+        // whenever execution falls behind enough for tx validity to
+        // elapse before delivery.
+        let topology = make_test_topology();
+        let mut mempool = MempoolCoordinator::new();
+
+        let tx = test_transaction(1);
+        let tx_hash = tx.hash();
+
+        // Block H=1 records the expectation.
+        mempool.on_block_committed(
+            &topology,
+            &certified_block_with_provisions(BlockHeight(1), ShardGroupId(0), &[tx_hash]),
+        );
+        assert_eq!(mempool.pending_expected_count(), 1);
+
+        // Advance current_ts past the tx's validity window. `test_validity_range`
+        // ends at 60_000ms; TEST_BLOCK_INTERVAL_MS=500 → past validity at H≥121.
+        mempool.on_block_committed(
+            &topology,
+            &certified_block_with_provisions(BlockHeight(125), ShardGroupId(0), &[]),
+        );
+
+        // Source committee delivers the tx body — but admission rejects
+        // because the tx is past its validity window.
+        let actions =
+            mempool.on_fetched_transactions(&topology, vec![Arc::new(tx)], LocalTimestamp::ZERO);
+
+        assert_eq!(
+            mempool.pending_expected_count(),
+            0,
+            "rejected tx must be cleared from expected_txs so the next \
+             block doesn't re-fire a fetch for it"
+        );
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                Action::AbandonFetch(FetchAbandon::Transactions { ids }) if ids == &[tx_hash]
+            )),
+            "rejected tx must emit AbandonFetch so any in-flight retry \
+             is cancelled, got: {actions:?}"
         );
     }
 
