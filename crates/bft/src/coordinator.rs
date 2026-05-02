@@ -676,12 +676,43 @@ impl BftCoordinator {
             );
         }
 
+        let (parent_block_hash, parent_qc) = self.chain_view().proposal_parent();
+
+        // Post-fallback recovery: if the parent is a fallback, propose an
+        // empty block too. The QC on this block is what commits the parent
+        // fallback (HotStuff-2 two-chain rule); if this block carries
+        // content that can't be fetched, no QC forms, the fallback never
+        // commits, `weighted_timestamp` never advances, and deadline-based
+        // pruning of stale provisions/txs never fires — so the next Normal
+        // proposer keeps pulling in the same unfetchable items, locking the
+        // shard in a view-change storm. An empty block votes trivially,
+        // commits the fallback, advances `weighted_timestamp`, and lets the
+        // following block carry fresh content. We keep `is_fallback = false`
+        // so the rule doesn't recurse: the block after this one resumes
+        // Normal proposals against pruned coordinator state.
+        let parent_is_fallback = self
+            .chain_view()
+            .get_header(parent_block_hash)
+            .is_some_and(|h| h.is_fallback);
+        if parent_is_fallback {
+            return self.build_and_dispatch_proposal(
+                topology,
+                next_height,
+                round,
+                ProposalKind::Normal {
+                    transactions: Vec::new(),
+                    finalized_waves: Vec::new(),
+                    provisions: Vec::new(),
+                    finalized_tx_count: 0,
+                },
+            );
+        }
+
         // Walk the QC chain to find certificates, transactions, and
         // provisions already in pending/certified blocks above committed
         // height — the two-chain commit window leaves them visible and the
         // mempool doesn't clear its ready-set until commit, so we must dedup
         // here to avoid repeating items across consecutive blocks.
-        let (parent_block_hash, parent_qc) = self.chain_view().proposal_parent();
         let (qc_chain_cert_hashes, qc_chain_tx_hashes, qc_chain_provision_hashes) =
             self.collect_qc_chain_hashes(parent_block_hash);
 
