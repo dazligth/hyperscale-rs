@@ -103,6 +103,17 @@ pub const fn uses_relaxed_retry(class: hyperscale_types::MessageClass) -> bool {
     )
 }
 
+/// Whether a class is in the cross-shard reservation tier.
+///
+/// `CrossShardProgress` traffic (provisions / EC fallback fetches) is
+/// bounded by `config.cross_shard_max_concurrent` so a cross-shard fetch
+/// storm during topology churn cannot starve the BFT hot path
+/// (`Consensus`, `BlockCompletion`).
+#[must_use]
+pub const fn is_cross_shard(class: hyperscale_types::MessageClass) -> bool {
+    matches!(class, hyperscale_types::MessageClass::CrossShardProgress)
+}
+
 #[cfg(test)]
 mod retry_regime_tests {
     use super::uses_relaxed_retry;
@@ -170,11 +181,18 @@ pub struct RequestManagerConfig {
     /// Cap on concurrent in-flight requests in the *sheddable* classes
     /// (`Recovery` + `Bulk`). Counted as a subset of `max_concurrent` —
     /// prevents a flood of catchup / DA-backfill fetches from filling the
-    /// global pool and starving hot-path classes (`Consensus`,
-    /// `BlockCompletion`, `CrossShardProgress`). Sized so the hot path
-    /// always has at least `max_concurrent - sheddable_max_concurrent`
-    /// slots available regardless of sheddable load.
+    /// global pool and starving the hot path.
     pub sheddable_max_concurrent: usize,
+
+    /// Cap on concurrent in-flight requests in the `CrossShardProgress`
+    /// class. Counted as a subset of `max_concurrent` — prevents a
+    /// cross-shard fetch storm (provisions / EC fallback during topology
+    /// churn) from filling the global pool and starving the BFT hot path
+    /// (`Consensus`, `BlockCompletion`). The hot path is therefore
+    /// guaranteed `max_concurrent - cross_shard_max_concurrent -
+    /// sheddable_max_concurrent` slots regardless of cross-shard or
+    /// sheddable load.
+    pub cross_shard_max_concurrent: usize,
 }
 
 impl Default for RequestManagerConfig {
@@ -189,10 +207,16 @@ impl Default for RequestManagerConfig {
             backoff_multiplier: 1.5,
             target_success_rate: 0.5,
             min_concurrent: 4,
-            // 16/64 leaves 48 slots for hot-path classes under any
-            // sheddable load — sized to absorb catchup / DA bursts without
-            // blocking pending-block or cross-shard fetches.
+            // 16/64 leaves 48 slots for hot-path + cross-shard classes
+            // under any sheddable load — sized to absorb catchup / DA
+            // bursts without blocking pending-block or cross-shard fetches.
             sheddable_max_concurrent: 16,
+            // 24/64 paired with sheddable_max=16 reserves
+            // 24 = 64 - 24 - 16 slots for the BFT hot path. Cross-shard
+            // volume is bounded by shard-pairs × waves and rarely exceeds
+            // single digits in steady state, so 24 has wide headroom for
+            // topology-churn bursts while preserving hot-path capacity.
+            cross_shard_max_concurrent: 24,
         }
     }
 }
@@ -218,6 +242,10 @@ pub struct RequestManager {
     /// independently by `config.sheddable_max_concurrent` so catchup /
     /// DA-backfill bursts can't starve the hot-path classes.
     sheddable_in_flight: AtomicUsize,
+    /// Subset of `in_flight` whose class is `CrossShardProgress`. Capped
+    /// independently by `config.cross_shard_max_concurrent` so cross-shard
+    /// fetch storms can't starve the BFT hot path.
+    cross_shard_in_flight: AtomicUsize,
     /// Per-class in-flight counters used to drive the
     /// `request_slots_in_flight{class}` gauge. Indexed by class
     /// discriminant (0..=4). Sum equals `in_flight`.
@@ -239,6 +267,7 @@ impl RequestManager {
             }),
             in_flight: AtomicUsize::new(0),
             sheddable_in_flight: AtomicUsize::new(0),
+            cross_shard_in_flight: AtomicUsize::new(0),
             per_class_in_flight: [
                 AtomicUsize::new(0),
                 AtomicUsize::new(0),
