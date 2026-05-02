@@ -212,6 +212,12 @@ pub enum Action {
         round: Round,
         /// Parent block hash (from the block's header).
         parent_block_hash: BlockHash,
+        /// Parent QC's `weighted_timestamp` — monotonicity floor applied to
+        /// every vote timestamp during stake-weighted aggregation. Without
+        /// this, slow-clocked or Byzantine voters can drag the aggregated
+        /// `weighted_timestamp` back below the parent's, breaking deadline
+        /// pruning and validity-window monotonicity.
+        parent_weighted_timestamp: WeightedTimestamp,
         /// Votes to verify and potentially aggregate.
         /// Each tuple is (`committee_index`, vote, `public_key`, `voting_power`).
         votes_to_verify: Vec<(usize, BlockVote, Bls12381G1PublicKey, u64)>,

@@ -45,6 +45,7 @@ pub fn verify_and_build_qc(
     height: BlockHeight,
     round: Round,
     parent_block_hash: BlockHash,
+    parent_weighted_timestamp: WeightedTimestamp,
     votes_to_verify: Vec<(usize, BlockVote, Bls12381G1PublicKey, u64)>,
     already_verified: Vec<(usize, BlockVote, u64)>,
     total_voting_power: u64,
@@ -74,6 +75,7 @@ pub fn verify_and_build_qc(
         height,
         round,
         parent_block_hash,
+        parent_weighted_timestamp,
         &all_verified,
     );
 
@@ -152,6 +154,7 @@ pub fn build_qc_from_verified(
     height: BlockHeight,
     round: Round,
     parent_block_hash: BlockHash,
+    parent_weighted_timestamp: WeightedTimestamp,
     verified_votes: &[(usize, BlockVote, u64)],
 ) -> Option<QuorumCertificate> {
     let mut sorted: Vec<_> = verified_votes.to_vec();
@@ -166,13 +169,19 @@ pub fn build_qc_from_verified(
         }
     };
 
+    let floor_ms = parent_weighted_timestamp.as_millis();
     let max_idx = sorted.iter().map(|(idx, _, _)| *idx).max().unwrap_or(0);
     let mut signers = SignerBitfield::new(max_idx + 1);
     let mut timestamp_weight_sum: u128 = 0;
     let mut verified_power: u64 = 0;
     for (idx, vote, power) in &sorted {
         signers.set(*idx);
-        timestamp_weight_sum += u128::from(vote.timestamp.as_millis()) * u128::from(*power);
+        // Per-vote monotonicity clamp: a vote timestamp below parent's
+        // `weighted_timestamp` (slow honest clock or Byzantine voter) is
+        // raised to the floor before aggregation, so the resulting QC's
+        // `weighted_timestamp` is guaranteed >= parent's.
+        let clamped_ms = vote.timestamp.as_millis().max(floor_ms);
+        timestamp_weight_sum += u128::from(clamped_ms) * u128::from(*power);
         verified_power += *power;
     }
 
@@ -558,6 +567,7 @@ pub fn handle_action<S, E, N>(
             height,
             round,
             parent_block_hash,
+            parent_weighted_timestamp,
             votes_to_verify,
             verified_votes,
             total_voting_power,
@@ -569,6 +579,7 @@ pub fn handle_action<S, E, N>(
                 height,
                 round,
                 parent_block_hash,
+                parent_weighted_timestamp,
                 votes_to_verify,
                 verified_votes,
                 total_voting_power,
@@ -1055,8 +1066,16 @@ mod tests {
             })
             .collect();
 
-        let qc = build_qc_from_verified(block_hash, shard(), height, round, parent, &verified)
-            .expect("build_qc should succeed");
+        let qc = build_qc_from_verified(
+            block_hash,
+            shard(),
+            height,
+            round,
+            parent,
+            WeightedTimestamp::ZERO,
+            &verified,
+        )
+        .expect("build_qc should succeed");
 
         let pubs: Vec<_> = keys.iter().map(Bls12381G1PrivateKey::public_key).collect();
         assert!(verify_qc_signature(&qc, &pubs));
@@ -1084,6 +1103,7 @@ mod tests {
             BlockHeight(1),
             Round::INITIAL,
             BlockHash::ZERO,
+            WeightedTimestamp::ZERO,
             &verified,
         )
         .unwrap();
@@ -1121,11 +1141,54 @@ mod tests {
             BlockHeight(1),
             Round::INITIAL,
             BlockHash::ZERO,
+            WeightedTimestamp::ZERO,
             &verified,
         )
         .unwrap();
 
         assert_eq!(qc.weighted_timestamp.as_millis(), 2333);
+    }
+
+    #[test]
+    fn build_qc_from_verified_clamps_vote_timestamps_to_parent_floor() {
+        let keys = keypairs(3);
+        let block_hash = BlockHash::from_raw(Hash::from_bytes(b"b"));
+        // Two voters under the floor (500, 800) and one above (3000); floor=2000.
+        // Without clamp the mean would be (500 + 800 + 3000) / 3 = 1433 — below
+        // parent. With clamp each below-floor vote rises to 2000, giving a mean
+        // of (2000 + 2000 + 3000) / 3 = 2333, monotonically >= parent.
+        let verified = vec![
+            (
+                0,
+                make_vote(&keys, 0, block_hash, BlockHeight(1), Round::INITIAL, 500),
+                1u64,
+            ),
+            (
+                1,
+                make_vote(&keys, 1, block_hash, BlockHeight(1), Round::INITIAL, 800),
+                1u64,
+            ),
+            (
+                2,
+                make_vote(&keys, 2, block_hash, BlockHeight(1), Round::INITIAL, 3000),
+                1u64,
+            ),
+        ];
+
+        let parent_floor = WeightedTimestamp::from_millis(2000);
+        let qc = build_qc_from_verified(
+            block_hash,
+            shard(),
+            BlockHeight(1),
+            Round::INITIAL,
+            BlockHash::ZERO,
+            parent_floor,
+            &verified,
+        )
+        .unwrap();
+
+        assert_eq!(qc.weighted_timestamp.as_millis(), 2333);
+        assert!(qc.weighted_timestamp.as_millis() >= parent_floor.as_millis());
     }
 
     // ─── verify_and_build_qc (composition) ──────────────────────────────
@@ -1151,6 +1214,7 @@ mod tests {
             height,
             round,
             BlockHash::ZERO,
+            WeightedTimestamp::ZERO,
             to_verify,
             Vec::new(),
             10,
@@ -1179,6 +1243,7 @@ mod tests {
             height,
             round,
             BlockHash::ZERO,
+            WeightedTimestamp::ZERO,
             to_verify,
             Vec::new(),
             4,
@@ -1207,6 +1272,7 @@ mod tests {
             BlockHeight(1),
             Round::INITIAL,
             BlockHash::ZERO,
+            WeightedTimestamp::ZERO,
             &verified,
         )
         .unwrap();
@@ -1232,6 +1298,7 @@ mod tests {
             BlockHeight(1),
             Round::INITIAL,
             BlockHash::ZERO,
+            WeightedTimestamp::ZERO,
             &verified,
         )
         .unwrap();

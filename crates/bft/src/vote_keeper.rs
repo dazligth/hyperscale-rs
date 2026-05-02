@@ -262,7 +262,9 @@ impl VoteKeeper {
             return vec![];
         }
 
-        let Some((_, height, round, parent_block_hash)) = vote_set.verification_data() else {
+        let Some((_, height, round, parent_block_hash, parent_weighted_timestamp)) =
+            vote_set.verification_data()
+        else {
             return vec![];
         };
 
@@ -287,6 +289,7 @@ impl VoteKeeper {
             height,
             round,
             parent_block_hash,
+            parent_weighted_timestamp,
             votes_to_verify,
             verified_votes,
             total_voting_power: total_power,

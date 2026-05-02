@@ -11,6 +11,7 @@
 
 use hyperscale_types::{
     BlockHash, BlockHeader, BlockHeight, BlockVote, Bls12381G1PublicKey, Round, VotePower,
+    WeightedTimestamp,
 };
 
 #[cfg(test)]
@@ -33,6 +34,13 @@ pub struct VoteSet {
 
     /// Parent block hash (from the block's header).
     parent_block_hash: Option<BlockHash>,
+
+    /// Parent QC's `weighted_timestamp` (from the block's header). Used as
+    /// the per-vote monotonicity floor during stake-weighted aggregation:
+    /// any vote timestamp below this is raised to the floor before being
+    /// summed, so the resulting QC's `weighted_timestamp` is guaranteed
+    /// >= parent's.
+    parent_weighted_timestamp: Option<WeightedTimestamp>,
 
     // ═══════════════════════════════════════════════════════════════════════
     // Verified votes (passed signature verification)
@@ -71,13 +79,14 @@ pub struct VoteSet {
 impl VoteSet {
     /// Create a new vote set.
     pub fn new(header: Option<&BlockHeader>, num_validators: usize) -> Self {
-        let (block_hash, height, round, parent_block_hash) =
-            header.map_or((None, None, None, None), |h| {
+        let (block_hash, height, round, parent_block_hash, parent_weighted_timestamp) = header
+            .map_or((None, None, None, None, None), |h| {
                 (
                     Some(h.hash()),
                     Some(h.height),
                     Some(h.round),
                     Some(h.parent_block_hash),
+                    Some(h.parent_qc.weighted_timestamp),
                 )
             });
 
@@ -86,6 +95,7 @@ impl VoteSet {
             height,
             round,
             parent_block_hash,
+            parent_weighted_timestamp,
             verified_votes: Vec::new(),
             verified_power: 0,
             verified_timestamp_weight_sum: 0,
@@ -136,6 +146,9 @@ impl VoteSet {
         }
         if self.parent_block_hash.is_none() {
             self.parent_block_hash = Some(header.parent_block_hash);
+        }
+        if self.parent_weighted_timestamp.is_none() {
+            self.parent_weighted_timestamp = Some(header.parent_qc.weighted_timestamp);
         }
         if self.block_hash.is_none() {
             self.block_hash = Some(header.hash());
@@ -218,13 +231,19 @@ impl VoteSet {
 
     /// Get data needed for verification action.
     ///
-    /// Returns (`block_hash`, height, round, `parent_block_hash`) or None if not ready.
-    pub fn verification_data(&self) -> Option<(BlockHash, BlockHeight, Round, BlockHash)> {
+    /// Returns (`block_hash`, height, round, `parent_block_hash`,
+    /// `parent_weighted_timestamp`) or `None` if not ready. The parent's
+    /// weighted timestamp is the per-vote monotonicity floor used by the
+    /// QC builder.
+    pub fn verification_data(
+        &self,
+    ) -> Option<(BlockHash, BlockHeight, Round, BlockHash, WeightedTimestamp)> {
         Some((
             self.block_hash?,
             self.height?,
             self.round.unwrap_or(Round::INITIAL),
             self.parent_block_hash?,
+            self.parent_weighted_timestamp?,
         ))
     }
 
@@ -246,10 +265,15 @@ impl VoteSet {
     pub fn on_votes_verified(&mut self, verified_votes: Vec<(usize, BlockVote, u64)>) {
         self.pending_verification = false;
 
+        let floor_ms = self
+            .parent_weighted_timestamp
+            .map_or(0, WeightedTimestamp::as_millis);
         for (committee_index, vote, voting_power) in verified_votes {
-            // Accumulate weighted timestamp
-            self.verified_timestamp_weight_sum +=
-                u128::from(vote.timestamp.as_millis()) * u128::from(voting_power);
+            // Per-vote monotonicity clamp against parent's weighted timestamp
+            // — keeps the aggregated `weighted_timestamp` monotonic regardless
+            // of slow-clocked or Byzantine voters.
+            let clamped_ms = vote.timestamp.as_millis().max(floor_ms);
+            self.verified_timestamp_weight_sum += u128::from(clamped_ms) * u128::from(voting_power);
             self.verified_power += voting_power;
             self.verified_votes
                 .push((committee_index, vote, voting_power));
@@ -287,9 +311,12 @@ impl VoteSet {
             self.seen_validators[committee_index] = true;
         }
 
-        // Accumulate weighted timestamp
-        self.verified_timestamp_weight_sum +=
-            u128::from(vote.timestamp.as_millis()) * u128::from(voting_power);
+        // Per-vote monotonicity clamp; see `on_votes_verified` for rationale.
+        let floor_ms = self
+            .parent_weighted_timestamp
+            .map_or(0, WeightedTimestamp::as_millis);
+        let clamped_ms = vote.timestamp.as_millis().max(floor_ms);
+        self.verified_timestamp_weight_sum += u128::from(clamped_ms) * u128::from(voting_power);
         self.verified_power += voting_power;
         self.verified_votes
             .push((committee_index, vote, voting_power));
