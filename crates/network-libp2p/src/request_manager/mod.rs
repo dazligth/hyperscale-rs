@@ -198,25 +198,24 @@ pub struct RequestManagerConfig {
 impl Default for RequestManagerConfig {
     fn default() -> Self {
         Self {
-            max_concurrent: 64,
-            max_per_peer: 8,
+            max_concurrent: 128,
+            max_per_peer: 16,
             retries_before_rotation: 2,
             max_total_attempts: 15,
             initial_backoff: Duration::from_millis(100),
             max_backoff: Duration::from_millis(500), // Cap backoff to match stream timeout
             backoff_multiplier: 1.5,
             target_success_rate: 0.5,
-            min_concurrent: 4,
-            // 16/64 leaves 48 slots for hot-path + cross-shard classes
+            min_concurrent: 8,
+            // 32/128 leaves 96 slots for hot-path + cross-shard classes
             // under any sheddable load — sized to absorb catchup / DA
             // bursts without blocking pending-block or cross-shard fetches.
-            sheddable_max_concurrent: 16,
-            // 24/64 paired with sheddable_max=16 reserves
-            // 24 = 64 - 24 - 16 slots for the BFT hot path. Cross-shard
-            // volume is bounded by shard-pairs × waves and rarely exceeds
-            // single digits in steady state, so 24 has wide headroom for
-            // topology-churn bursts while preserving hot-path capacity.
-            cross_shard_max_concurrent: 24,
+            sheddable_max_concurrent: 32,
+            // 48/128 paired with sheddable_max=32 reserves
+            // 48 = 128 - 48 - 32 slots for the BFT hot path. Sized so a
+            // burst of cross-shard fallback fetches can run in parallel
+            // rather than serialising on a tight cap.
+            cross_shard_max_concurrent: 48,
         }
     }
 }
