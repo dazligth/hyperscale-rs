@@ -385,14 +385,14 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = RequestManagerConfig::default();
-        assert_eq!(config.max_concurrent, 64);
+        assert_eq!(config.max_concurrent, 128);
         assert_eq!(config.retries_before_rotation, 2);
         assert_eq!(config.max_total_attempts, 15);
         assert_eq!(config.initial_backoff, Duration::from_millis(100));
         assert_eq!(config.max_backoff, Duration::from_millis(500));
         assert!((config.backoff_multiplier - 1.5).abs() < f64::EPSILON);
         assert!((config.target_success_rate - 0.5).abs() < f64::EPSILON);
-        assert_eq!(config.min_concurrent, 4);
+        assert_eq!(config.min_concurrent, 8);
         assert!(config.min_concurrent <= config.max_concurrent);
     }
 }

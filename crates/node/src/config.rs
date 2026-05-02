@@ -52,6 +52,16 @@ pub struct BatchConfig {
     pub committed_header_max: usize,
     /// Flush window for the committed-block-header sender-signature batch.
     pub committed_header_window: Duration,
+
+    /// Max transactions in a per-shard outbound `TransactionGossip` batch.
+    /// Bounded so the encoded batch stays well under the gossipsub
+    /// max-message size (default 1 MiB) at typical tx sizes.
+    pub tx_gossip_max: usize,
+    /// Flush window for the per-shard outbound `TransactionGossip` batch.
+    /// Trades a small tail-latency cost for substantially fewer wire
+    /// messages and larger per-message payloads (which activates
+    /// gossipsub v1.2 IDONTWANT dedup).
+    pub tx_gossip_window: Duration,
 }
 
 impl Default for BatchConfig {
@@ -71,6 +81,9 @@ impl Default for BatchConfig {
 
             committed_header_max: 32,
             committed_header_window: Duration::from_millis(15),
+
+            tx_gossip_max: 200,
+            tx_gossip_window: Duration::from_millis(50),
         }
     }
 }

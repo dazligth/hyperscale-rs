@@ -283,9 +283,9 @@ where
         self.network.register_gossip_handler::<TransactionGossip>(
             TopicScope::Shard,
             move |gossip: TransactionGossip| -> GossipVerdict {
-                let _ = tx.send(NodeInput::TransactionGossipReceived {
-                    tx: gossip.transaction,
-                });
+                for transaction in gossip.transactions {
+                    let _ = tx.send(NodeInput::TransactionGossipReceived { tx: transaction });
+                }
                 GossipVerdict::Accept
             },
         );

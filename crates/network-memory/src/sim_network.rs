@@ -255,11 +255,11 @@ mod tests {
     use std::sync::Mutex as StdMutex;
 
     fn test_gossip() -> TransactionGossip {
-        TransactionGossip::new(test_transaction_with_nodes(
+        TransactionGossip::from_arcs(vec![std::sync::Arc::new(test_transaction_with_nodes(
             &[1, 2, 3],
             vec![test_node(1)],
             vec![test_node(2)],
-        ))
+        ))])
     }
 
     #[test]

@@ -15,6 +15,7 @@
 //!
 //! Batch dispatch lives in [`super::super::batches`].
 
+use crate::batch_accumulator::BatchAccumulator;
 use crate::io_loop::IoLoop;
 use hyperscale_core::{NodeInput, ProtocolEvent, StateMachine};
 use hyperscale_dispatch::{Dispatch, DispatchPool};
@@ -82,13 +83,12 @@ where
         }
     }
 
-    /// Locally-submitted transaction (RPC/sim): broadcast to all relevant
-    /// shards (reads + writes) and queue for validation if not already
-    /// in flight or cached.
+    /// Locally-submitted transaction (RPC/sim): enqueue into the per-shard
+    /// outbound gossip accumulators (reads ∪ writes) and queue for
+    /// validation if not already in flight or cached.
     pub(in crate::io_loop) fn handle_submit_transaction(&mut self, tx: Arc<RoutableTransaction>) {
         let tx_hash = tx.hash();
 
-        // Gossip to all relevant shards (reads + writes).
         let num_shards = self.topology_snapshot.load().num_shards();
         let shards: std::collections::BTreeSet<ShardGroupId> = tx
             .declared_reads
@@ -97,8 +97,7 @@ where
             .map(|node_id| hyperscale_types::shard_for_node(node_id, num_shards))
             .collect();
         for shard in shards {
-            let gossip = TransactionGossip::from_arc(Arc::clone(&tx));
-            self.network.broadcast_to_shard(shard, &gossip);
+            self.enqueue_tx_for_gossip(shard, Arc::clone(&tx));
         }
 
         if !self.pending_validation.contains(&tx_hash) && !self.caches.tx_store.contains(&tx_hash) {
@@ -107,6 +106,40 @@ where
             self.pending_validation.insert(tx_hash);
             self.queue_validation(tx);
         }
+    }
+
+    /// Append a tx to the destination shard's outbound gossip accumulator,
+    /// flushing immediately if the count cap is hit. Time-based flushes
+    /// happen via [`IoLoop::flush_expired_batches`].
+    pub(in crate::io_loop) fn enqueue_tx_for_gossip(
+        &mut self,
+        shard: ShardGroupId,
+        tx: Arc<RoutableTransaction>,
+    ) {
+        let now = self.state.now();
+        let max = self.tx_gossip_max;
+        let window = self.tx_gossip_window;
+        let batch = self
+            .tx_gossip_batches
+            .entry(shard)
+            .or_insert_with(|| BatchAccumulator::new(max, window));
+        if batch.push(tx, now) {
+            self.flush_tx_gossip_batch(shard);
+        }
+    }
+
+    /// Drain the destination shard's outbound gossip accumulator and
+    /// publish it as a single `TransactionGossip` batch. No-op if empty.
+    pub(in crate::io_loop) fn flush_tx_gossip_batch(&mut self, shard: ShardGroupId) {
+        let Some(batch) = self.tx_gossip_batches.get_mut(&shard) else {
+            return;
+        };
+        let txs = batch.take();
+        if txs.is_empty() {
+            return;
+        }
+        let gossip = TransactionGossip::from_arcs(txs);
+        self.network.broadcast_to_shard(shard, &gossip);
     }
 
     // ─── Validation batching ────────────────────────────────────────────

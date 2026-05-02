@@ -52,7 +52,7 @@ use hyperscale_dispatch::Dispatch;
 use hyperscale_engine::{Engine, RadixExecutor, TransactionValidation};
 use hyperscale_network::Network;
 use hyperscale_storage::Storage;
-use hyperscale_types::{Bls12381G1PrivateKey, TopologySnapshot, TxHash};
+use hyperscale_types::{Bls12381G1PrivateKey, RoutableTransaction, TopologySnapshot, TxHash};
 use quick_cache::sync::Cache as QuickCache;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -232,6 +232,24 @@ where
     /// thread; only the per-message BLS verify is deferred here.
     committed_header_batch: BatchAccumulator<CommittedHeaderVerificationItem>,
 
+    /// Per-destination-shard outbound `TransactionGossip` accumulators.
+    /// Locally-submitted transactions are appended to one accumulator per
+    /// shard the tx touches (declared reads ∪ writes); each fills until
+    /// its count cap or time window expires, then flushes as a single
+    /// batched gossip message. Sized via [`BatchConfig::tx_gossip_max`]
+    /// and [`BatchConfig::tx_gossip_window`].
+    ///
+    /// [`BatchConfig::tx_gossip_max`]: crate::config::BatchConfig::tx_gossip_max
+    /// [`BatchConfig::tx_gossip_window`]: crate::config::BatchConfig::tx_gossip_window
+    tx_gossip_batches: std::collections::BTreeMap<
+        hyperscale_types::ShardGroupId,
+        BatchAccumulator<Arc<RoutableTransaction>>,
+    >,
+    /// Cap for new tx-gossip accumulators (mirrored from `BatchConfig`).
+    tx_gossip_max: usize,
+    /// Window for new tx-gossip accumulators (mirrored from `BatchConfig`).
+    tx_gossip_window: std::time::Duration,
+
     /// Last time a "transaction finalization exceeded 10s" warning was emitted.
     /// Rate-limited to avoid flooding logs during cross-shard latency spikes.
     last_slow_tx_warn: hyperscale_types::LocalTimestamp,
@@ -313,6 +331,9 @@ where
                 b.committed_header_max,
                 b.committed_header_window,
             ),
+            tx_gossip_batches: std::collections::BTreeMap::new(),
+            tx_gossip_max: b.tx_gossip_max,
+            tx_gossip_window: b.tx_gossip_window,
             last_slow_tx_warn: hyperscale_types::LocalTimestamp::ZERO,
             tx_phase_times: phase_times::TxPhaseTimesCache::default(),
             emitted_statuses: Vec::new(),
@@ -541,6 +562,14 @@ where
         if self.committed_header_batch.is_expired(now) {
             self.flush_committed_header_verifications();
         }
+        let expired_shards: Vec<hyperscale_types::ShardGroupId> = self
+            .tx_gossip_batches
+            .iter()
+            .filter_map(|(shard, batch)| batch.is_expired(now).then_some(*shard))
+            .collect();
+        for shard in expired_shards {
+            self.flush_tx_gossip_batch(shard);
+        }
     }
 
     /// Get the nearest batch deadline, if any.
@@ -548,9 +577,15 @@ where
     /// Used by the production `run()` loop for `recv_timeout()` and by the
     /// simulation harness to know when to schedule a flush.
     pub fn nearest_batch_deadline(&self) -> Option<hyperscale_types::LocalTimestamp> {
+        let tx_gossip_min = self
+            .tx_gossip_batches
+            .values()
+            .filter_map(BatchAccumulator::deadline)
+            .min();
         [
             self.validation_batch.deadline(),
             self.committed_header_batch.deadline(),
+            tx_gossip_min,
         ]
         .into_iter()
         .flatten()
@@ -564,5 +599,10 @@ where
         self.flush_block_commits();
         self.flush_validation_batch();
         self.flush_committed_header_verifications();
+        let shards: Vec<hyperscale_types::ShardGroupId> =
+            self.tx_gossip_batches.keys().copied().collect();
+        for shard in shards {
+            self.flush_tx_gossip_batch(shard);
+        }
     }
 }
