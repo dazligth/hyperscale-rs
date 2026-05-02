@@ -23,7 +23,7 @@
 //! let manager = RequestManager::new(adapter.clone(), RequestManagerConfig::default());
 //!
 //! // Send a request with automatic retry
-//! match manager.request(&peers, None, "block.request".into(), "block.request", sbor_bytes, RequestPriority::Background).await {
+//! match manager.request(&peers, None, "block.request".into(), "block.request", sbor_bytes, MessageClass::Recovery).await {
 //!     Ok((peer, response)) => { /* success */ }
 //!     Err(RequestError::Exhausted { attempts }) => { /* all retries failed */ }
 //!     Err(RequestError::NoPeers) => { /* no peers available */ }
@@ -90,21 +90,48 @@ pub enum RequestError {
     Shutdown,
 }
 
-/// Priority levels for requests.
+/// Whether a class should use the relaxed retry/backoff regime.
 ///
-/// Priority affects timeout tolerance and retry aggressiveness.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RequestPriority {
-    /// Critical requests (pending block completion).
-    /// Tighter timeouts, more aggressive retries.
-    Critical,
+/// `Recovery` and `Bulk` are the sheddable classes; all others get tight
+/// retries with shorter backoff to absorb packet loss without falling
+/// behind on the BFT or cross-shard hot paths.
+#[must_use]
+pub const fn uses_relaxed_retry(class: hyperscale_types::MessageClass) -> bool {
+    matches!(
+        class,
+        hyperscale_types::MessageClass::Recovery | hyperscale_types::MessageClass::Bulk
+    )
+}
 
-    /// Normal requests.
-    Normal,
+#[cfg(test)]
+mod retry_regime_tests {
+    use super::uses_relaxed_retry;
+    use hyperscale_types::MessageClass;
 
-    /// Background requests (sync).
-    /// Higher timeout tolerance, less aggressive.
-    Background,
+    #[test]
+    fn consensus_uses_tight_retry() {
+        assert!(!uses_relaxed_retry(MessageClass::Consensus));
+    }
+
+    #[test]
+    fn block_completion_uses_tight_retry() {
+        assert!(!uses_relaxed_retry(MessageClass::BlockCompletion));
+    }
+
+    #[test]
+    fn cross_shard_progress_uses_tight_retry() {
+        assert!(!uses_relaxed_retry(MessageClass::CrossShardProgress));
+    }
+
+    #[test]
+    fn recovery_uses_relaxed_retry() {
+        assert!(uses_relaxed_retry(MessageClass::Recovery));
+    }
+
+    #[test]
+    fn bulk_uses_relaxed_retry() {
+        assert!(uses_relaxed_retry(MessageClass::Bulk));
+    }
 }
 
 /// Configuration for the request manager.
@@ -139,6 +166,15 @@ pub struct RequestManagerConfig {
 
     /// Minimum concurrency (won't reduce below this even under poor conditions).
     pub min_concurrent: usize,
+
+    /// Cap on concurrent in-flight requests in the *sheddable* classes
+    /// (`Recovery` + `Bulk`). Counted as a subset of `max_concurrent` —
+    /// prevents a flood of catchup / DA-backfill fetches from filling the
+    /// global pool and starving hot-path classes (`Consensus`,
+    /// `BlockCompletion`, `CrossShardProgress`). Sized so the hot path
+    /// always has at least `max_concurrent - sheddable_max_concurrent`
+    /// slots available regardless of sheddable load.
+    pub sheddable_max_concurrent: usize,
 }
 
 impl Default for RequestManagerConfig {
@@ -153,6 +189,10 @@ impl Default for RequestManagerConfig {
             backoff_multiplier: 1.5,
             target_success_rate: 0.5,
             min_concurrent: 4,
+            // 16/64 leaves 48 slots for hot-path classes under any
+            // sheddable load — sized to absorb catchup / DA bursts without
+            // blocking pending-block or cross-shard fetches.
+            sheddable_max_concurrent: 16,
         }
     }
 }
@@ -174,6 +214,14 @@ pub struct RequestManager {
     health: PeerHealthTracker,
     /// Current in-flight request count.
     in_flight: AtomicUsize,
+    /// Subset of `in_flight` whose class is `Recovery` or `Bulk`. Capped
+    /// independently by `config.sheddable_max_concurrent` so catchup /
+    /// DA-backfill bursts can't starve the hot-path classes.
+    sheddable_in_flight: AtomicUsize,
+    /// Per-class in-flight counters used to drive the
+    /// `request_slots_in_flight{class}` gauge. Indexed by class
+    /// discriminant (0..=4). Sum equals `in_flight`.
+    per_class_in_flight: [AtomicUsize; 5],
     /// Current effective concurrency limit (may be reduced adaptively).
     effective_concurrent: AtomicUsize,
 }
@@ -190,8 +238,29 @@ impl RequestManager {
                 ..Default::default()
             }),
             in_flight: AtomicUsize::new(0),
+            sheddable_in_flight: AtomicUsize::new(0),
+            per_class_in_flight: [
+                AtomicUsize::new(0),
+                AtomicUsize::new(0),
+                AtomicUsize::new(0),
+                AtomicUsize::new(0),
+                AtomicUsize::new(0),
+            ],
             effective_concurrent: AtomicUsize::new(effective),
             config,
+        }
+    }
+
+    /// Map a `MessageClass` onto the index used by `per_class_in_flight`.
+    /// Mirrors the enum discriminant order in `crates/types/src/network.rs`.
+    #[inline]
+    pub(super) const fn class_index(class: hyperscale_types::MessageClass) -> usize {
+        match class {
+            hyperscale_types::MessageClass::Consensus => 0,
+            hyperscale_types::MessageClass::BlockCompletion => 1,
+            hyperscale_types::MessageClass::CrossShardProgress => 2,
+            hyperscale_types::MessageClass::Recovery => 3,
+            hyperscale_types::MessageClass::Bulk => 4,
         }
     }
 
@@ -204,7 +273,7 @@ impl RequestManager {
     /// * `request_desc` - Description for logging (e.g., "block.request")
     /// * `type_id` - Message type identifier for the typed frame header
     /// * `sbor_data` - SBOR-encoded request payload (compressed by transport)
-    /// * `priority` - Request priority (affects timeout and retry aggressiveness)
+    /// * `class` - Message class (drives timeout and retry aggressiveness)
     ///
     /// # Returns
     ///
@@ -221,10 +290,9 @@ impl RequestManager {
         request_desc: String,
         type_id: &'static str,
         sbor_data: Vec<u8>,
-        priority: RequestPriority,
+        class: hyperscale_types::MessageClass,
     ) -> Result<(PeerId, Bytes), RequestError> {
-        // Acquire concurrency slot
-        self.acquire_slot().await?;
+        self.acquire_slot(class).await?;
 
         let result = self
             .request_inner(
@@ -233,12 +301,11 @@ impl RequestManager {
                 &request_desc,
                 type_id,
                 &sbor_data,
-                priority,
+                class,
             )
             .await;
 
-        // Release slot
-        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        self.release_slot(class);
 
         result
     }

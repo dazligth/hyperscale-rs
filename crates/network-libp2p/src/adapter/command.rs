@@ -1,32 +1,49 @@
-//! Command types and priority-based command channels.
+//! Command types and class-based command channels.
 
-use hyperscale_types::MessagePriority;
+use hyperscale_metrics as metrics;
+use hyperscale_types::MessageClass;
 use libp2p::{Multiaddr, PeerId as Libp2pPeerId};
 use tokio::sync::mpsc;
+use tracing::warn;
 
 /// Maximum number of commands to drain per event loop iteration.
 /// Prevents tight loops from monopolizing the event loop when channels are flooded.
-/// High-priority response commands and normal commands each have this limit.
 pub(super) const MAX_COMMANDS_PER_DRAIN: usize = 100;
+
+/// Bounded capacity for the `Recovery` class channel.
+///
+/// Catchup traffic (block / remote-header sync) is sheddable: a flood here
+/// must not consume unbounded memory and must not delay urgent classes via
+/// the event loop's drain budget. Sized to absorb a sync session's typical
+/// burst (one batch every ~200ms × tens of in-flight peers) without
+/// blocking the steady-state.
+pub(super) const RECOVERY_CHANNEL_CAPACITY: usize = 4096;
+
+/// Bounded capacity for the `Bulk` class channel.
+///
+/// `TransactionGossip` is the highest-volume class; under congestion the
+/// fetch-fallback path recovers any drops. Larger than `Recovery` because
+/// per-tx volume is the workload's natural scaling axis.
+pub(super) const BULK_CHANNEL_CAPACITY: usize = 8192;
 
 /// Commands sent to the swarm task.
 ///
-/// Commands are processed in priority order when using priority channels.
+/// Commands are processed in class order when using class channels.
 /// Non-broadcast commands (Subscribe, Dial, etc.) are always processed
-/// with high priority since they're control operations.
+/// at the most-urgent class since they're control operations.
 #[derive(Debug)]
 pub(super) enum SwarmCommand {
     /// Subscribe to a gossipsub topic.
     Subscribe { topic: String },
 
-    /// Broadcast a message to a topic with priority.
+    /// Broadcast a message to a topic with the given class.
     ///
-    /// Priority determines processing order in the event loop.
-    /// Higher priority messages are processed before lower priority ones.
+    /// Class determines processing order in the event loop. More-urgent
+    /// classes are processed before less-urgent ones.
     Broadcast {
         topic: String,
         data: Vec<u8>,
-        priority: MessagePriority,
+        class: MessageClass,
     },
 
     /// Dial a peer.
@@ -43,94 +60,133 @@ pub(super) enum SwarmCommand {
     },
 }
 
-/// Receiver type for priority command channels.
-pub(super) type PriorityReceivers = (
+/// Receiver type for class-tiered command channels.
+///
+/// The first three lanes are unbounded — `Consensus`, `BlockCompletion`,
+/// and `CrossShardProgress` are low-cardinality by construction and
+/// dropping them is a liveness hazard. The last two are bounded — see
+/// [`RECOVERY_CHANNEL_CAPACITY`] and [`BULK_CHANNEL_CAPACITY`].
+pub(super) type ClassReceivers = (
     mpsc::UnboundedReceiver<SwarmCommand>,
     mpsc::UnboundedReceiver<SwarmCommand>,
     mpsc::UnboundedReceiver<SwarmCommand>,
-    mpsc::UnboundedReceiver<SwarmCommand>,
-    mpsc::UnboundedReceiver<SwarmCommand>,
+    mpsc::Receiver<SwarmCommand>,
+    mpsc::Receiver<SwarmCommand>,
 );
 
-/// Priority-based command channels for the swarm task.
+/// Class-tiered command channels for the swarm task.
 ///
-/// Commands are sent to the appropriate channel based on message priority.
-/// The event loop processes channels in priority order (Critical first, Background last).
+/// Commands are sent to the appropriate channel based on message class.
+/// The event loop processes channels in class order (Consensus first, Bulk last).
+///
+/// Sheddable lanes (`Recovery`, `Bulk`) are bounded; if their channel is
+/// full at send time, the command is dropped and a backpressure event is
+/// recorded so the operator can see when the cap is biting. Hot lanes
+/// (`Consensus`, `BlockCompletion`, `CrossShardProgress`) are unbounded —
+/// their volume is bounded by protocol cardinality.
 #[derive(Clone, Debug)]
-pub(super) struct PriorityCommandChannels {
-    /// Critical priority - BFT consensus messages, pending block requests.
+pub(super) struct ClassCommandChannels {
+    /// Consensus class — BFT round-blocking traffic.
     /// Never dropped, processed immediately.
-    critical: mpsc::UnboundedSender<SwarmCommand>,
+    consensus: mpsc::UnboundedSender<SwarmCommand>,
 
-    /// Coordination priority - Cross-shard execution messages.
-    /// High priority, may be batched.
-    coordination: mpsc::UnboundedSender<SwarmCommand>,
+    /// `BlockCompletion` class — DA gap-closure for the current proposal.
+    block_completion: mpsc::UnboundedSender<SwarmCommand>,
 
-    /// Finalization priority - Wave certificate gossip.
-    /// Important but not liveness-critical.
-    finalization: mpsc::UnboundedSender<SwarmCommand>,
+    /// `CrossShardProgress` class — execution and finalization coordination.
+    cross_shard_progress: mpsc::UnboundedSender<SwarmCommand>,
 
-    /// Propagation priority - Transaction gossip (mempool).
-    /// Best-effort, can be shed under load.
-    propagation: mpsc::UnboundedSender<SwarmCommand>,
+    /// Recovery class — catch-up traffic. Sheddable; bounded at
+    /// [`RECOVERY_CHANNEL_CAPACITY`]. Drops on overflow.
+    recovery: mpsc::Sender<SwarmCommand>,
 
-    /// Background priority - Sync operations.
-    /// Lowest priority, fully deferrable.
-    background: mpsc::UnboundedSender<SwarmCommand>,
+    /// Bulk class — high-volume best-effort with fetch fallback. Bounded
+    /// at [`BULK_CHANNEL_CAPACITY`]. Drops on overflow.
+    bulk: mpsc::Sender<SwarmCommand>,
 }
 
-impl PriorityCommandChannels {
-    /// Create new priority channels, returning (senders, receivers).
-    pub(super) fn new() -> (Self, PriorityReceivers) {
-        let (critical_tx, critical_rx) = mpsc::unbounded_channel();
-        let (coordination_tx, coordination_rx) = mpsc::unbounded_channel();
-        let (finalization_tx, finalization_rx) = mpsc::unbounded_channel();
-        let (propagation_tx, propagation_rx) = mpsc::unbounded_channel();
-        let (background_tx, background_rx) = mpsc::unbounded_channel();
+impl ClassCommandChannels {
+    /// Create new class channels, returning (senders, receivers).
+    pub(super) fn new() -> (Self, ClassReceivers) {
+        let (consensus_tx, consensus_rx) = mpsc::unbounded_channel();
+        let (block_completion_tx, block_completion_rx) = mpsc::unbounded_channel();
+        let (cross_shard_progress_tx, cross_shard_progress_rx) = mpsc::unbounded_channel();
+        let (recovery_tx, recovery_rx) = mpsc::channel(RECOVERY_CHANNEL_CAPACITY);
+        let (bulk_tx, bulk_rx) = mpsc::channel(BULK_CHANNEL_CAPACITY);
 
         (
             Self {
-                critical: critical_tx,
-                coordination: coordination_tx,
-                finalization: finalization_tx,
-                propagation: propagation_tx,
-                background: background_tx,
+                consensus: consensus_tx,
+                block_completion: block_completion_tx,
+                cross_shard_progress: cross_shard_progress_tx,
+                recovery: recovery_tx,
+                bulk: bulk_tx,
             },
             (
-                critical_rx,
-                coordination_rx,
-                finalization_rx,
-                propagation_rx,
-                background_rx,
+                consensus_rx,
+                block_completion_rx,
+                cross_shard_progress_rx,
+                recovery_rx,
+                bulk_rx,
             ),
         )
     }
 
-    /// Send a command to the appropriate priority channel.
+    /// Send a command to the appropriate class channel.
     ///
-    /// For Broadcast commands, uses the embedded priority.
-    /// For control commands (Subscribe, Dial, etc.), uses Critical priority.
+    /// For Broadcast commands, uses the embedded class.
+    /// For control commands (Subscribe, Dial, etc.), uses Consensus class.
+    ///
+    /// Returns `Err` only when the receiver is gone (swarm task shut down).
+    /// A full sheddable channel is *not* an error: the command is dropped
+    /// with a `network_command_dropped` backpressure event recorded.
     #[allow(clippy::result_large_err)]
     pub(super) fn send(
         &self,
         cmd: SwarmCommand,
     ) -> Result<(), mpsc::error::SendError<SwarmCommand>> {
-        let priority = match &cmd {
-            SwarmCommand::Broadcast { priority, .. } => *priority,
-            // Control commands always get critical priority
+        let class = match &cmd {
+            SwarmCommand::Broadcast { class, .. } => *class,
+            // Control commands always get Consensus class.
             SwarmCommand::Subscribe { .. }
             | SwarmCommand::Dial { .. }
             | SwarmCommand::GetListenAddresses { .. }
-            | SwarmCommand::GetConnectedPeers { .. } => MessagePriority::Critical,
+            | SwarmCommand::GetConnectedPeers { .. } => MessageClass::Consensus,
         };
 
-        match priority {
-            MessagePriority::Critical => self.critical.send(cmd),
-            MessagePriority::Coordination => self.coordination.send(cmd),
-            MessagePriority::Finalization => self.finalization.send(cmd),
-            MessagePriority::Propagation => self.propagation.send(cmd),
-            MessagePriority::Background => self.background.send(cmd),
+        match class {
+            MessageClass::Consensus => self.consensus.send(cmd),
+            MessageClass::BlockCompletion => self.block_completion.send(cmd),
+            MessageClass::CrossShardProgress => self.cross_shard_progress.send(cmd),
+            MessageClass::Recovery => try_send_or_drop(&self.recovery, cmd, "recovery_channel"),
+            MessageClass::Bulk => try_send_or_drop(&self.bulk, cmd, "bulk_channel"),
         }
+    }
+}
+
+/// Non-blocking send into a bounded sheddable lane. On `Full`, drop the
+/// command and record a backpressure event tagged `source` so the operator
+/// can see the lane biting; the function still returns `Ok(())` because a
+/// full sheddable lane is not a fatal error. On `Closed`, return the same
+/// `SendError` shape as the unbounded lanes so callers don't need to
+/// handle a separate variant.
+#[allow(clippy::result_large_err)]
+fn try_send_or_drop(
+    sender: &mpsc::Sender<SwarmCommand>,
+    cmd: SwarmCommand,
+    source: &'static str,
+) -> Result<(), mpsc::error::SendError<SwarmCommand>> {
+    match sender.try_send(cmd) {
+        Ok(()) => Ok(()),
+        Err(mpsc::error::TrySendError::Full(dropped)) => {
+            metrics::record_backpressure_event(source);
+            warn!(source, "Sheddable class channel full; dropping command");
+            // Drop is intentional. Return Ok so callers don't treat
+            // backpressure as a hard error.
+            drop(dropped);
+            Ok(())
+        }
+        Err(mpsc::error::TrySendError::Closed(cmd)) => Err(mpsc::error::SendError(cmd)),
     }
 }
 
@@ -139,79 +195,77 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_priority_channels_creation() {
-        let (_channels, (mut crit, mut coord, mut final_, mut prop, mut bg)) =
-            PriorityCommandChannels::new();
+    fn test_class_channels_creation() {
+        let (_channels, (mut con, mut bc, mut csp, mut rec, mut bulk)) =
+            ClassCommandChannels::new();
 
-        // All receivers should be empty initially
-        assert!(crit.try_recv().is_err());
-        assert!(coord.try_recv().is_err());
-        assert!(final_.try_recv().is_err());
-        assert!(prop.try_recv().is_err());
-        assert!(bg.try_recv().is_err());
+        assert!(con.try_recv().is_err());
+        assert!(bc.try_recv().is_err());
+        assert!(csp.try_recv().is_err());
+        assert!(rec.try_recv().is_err());
+        assert!(bulk.try_recv().is_err());
     }
 
     #[test]
-    fn test_broadcast_routes_by_priority() {
-        let (channels, (mut crit, mut coord, mut final_, mut prop, mut bg)) =
-            PriorityCommandChannels::new();
+    fn test_broadcast_routes_by_class() {
+        let (channels, (mut con, mut bc, mut csp, mut rec, mut bulk)) = ClassCommandChannels::new();
 
         channels
             .send(SwarmCommand::Broadcast {
                 topic: "t".into(),
                 data: vec![1],
-                priority: MessagePriority::Critical,
+                class: MessageClass::Consensus,
             })
             .unwrap();
         channels
             .send(SwarmCommand::Broadcast {
                 topic: "t".into(),
                 data: vec![2],
-                priority: MessagePriority::Coordination,
+                class: MessageClass::BlockCompletion,
             })
             .unwrap();
         channels
             .send(SwarmCommand::Broadcast {
                 topic: "t".into(),
                 data: vec![3],
-                priority: MessagePriority::Finalization,
+                class: MessageClass::CrossShardProgress,
             })
             .unwrap();
         channels
             .send(SwarmCommand::Broadcast {
                 topic: "t".into(),
                 data: vec![4],
-                priority: MessagePriority::Propagation,
+                class: MessageClass::Recovery,
             })
             .unwrap();
         channels
             .send(SwarmCommand::Broadcast {
                 topic: "t".into(),
                 data: vec![5],
-                priority: MessagePriority::Background,
+                class: MessageClass::Bulk,
             })
             .unwrap();
 
         assert!(
-            matches!(crit.try_recv().unwrap(), SwarmCommand::Broadcast { data, .. } if data == vec![1])
+            matches!(con.try_recv().unwrap(), SwarmCommand::Broadcast { data, .. } if data == vec![1])
         );
         assert!(
-            matches!(coord.try_recv().unwrap(), SwarmCommand::Broadcast { data, .. } if data == vec![2])
+            matches!(bc.try_recv().unwrap(), SwarmCommand::Broadcast { data, .. } if data == vec![2])
         );
         assert!(
-            matches!(final_.try_recv().unwrap(), SwarmCommand::Broadcast { data, .. } if data == vec![3])
+            matches!(csp.try_recv().unwrap(), SwarmCommand::Broadcast { data, .. } if data == vec![3])
         );
         assert!(
-            matches!(prop.try_recv().unwrap(), SwarmCommand::Broadcast { data, .. } if data == vec![4])
+            matches!(rec.try_recv().unwrap(), SwarmCommand::Broadcast { data, .. } if data == vec![4])
         );
         assert!(
-            matches!(bg.try_recv().unwrap(), SwarmCommand::Broadcast { data, .. } if data == vec![5])
+            matches!(bulk.try_recv().unwrap(), SwarmCommand::Broadcast { data, .. } if data == vec![5])
         );
     }
 
     #[test]
-    fn test_control_commands_use_critical_channel() {
-        let (channels, (mut crit, _, _, _, _)) = PriorityCommandChannels::new();
+    fn test_control_commands_use_consensus_channel() {
+        let (channels, (mut con, _, _, _, _)) = ClassCommandChannels::new();
 
         channels
             .send(SwarmCommand::Subscribe {
@@ -219,7 +273,7 @@ mod tests {
             })
             .unwrap();
         assert!(matches!(
-            crit.try_recv().unwrap(),
+            con.try_recv().unwrap(),
             SwarmCommand::Subscribe { .. }
         ));
 
@@ -228,15 +282,12 @@ mod tests {
                 address: "/ip4/127.0.0.1/tcp/1234".parse().unwrap(),
             })
             .unwrap();
-        assert!(matches!(
-            crit.try_recv().unwrap(),
-            SwarmCommand::Dial { .. }
-        ));
+        assert!(matches!(con.try_recv().unwrap(), SwarmCommand::Dial { .. }));
     }
 
     #[test]
     fn test_send_fails_on_closed_channel() {
-        let (channels, receivers) = PriorityCommandChannels::new();
+        let (channels, receivers) = ClassCommandChannels::new();
         drop(receivers);
 
         let result = channels.send(SwarmCommand::Subscribe {
@@ -247,22 +298,108 @@ mod tests {
 
     #[test]
     fn test_multiple_messages_preserve_order() {
-        let (channels, (mut crit, _, _, _, _)) = PriorityCommandChannels::new();
+        let (channels, (mut con, _, _, _, _)) = ClassCommandChannels::new();
 
         for i in 0..5u8 {
             channels
                 .send(SwarmCommand::Broadcast {
                     topic: format!("topic-{i}"),
                     data: vec![i],
-                    priority: MessagePriority::Critical,
+                    class: MessageClass::Consensus,
                 })
                 .unwrap();
         }
 
         for i in 0..5u8 {
-            let msg = crit.try_recv().unwrap();
+            let msg = con.try_recv().unwrap();
             assert!(matches!(msg, SwarmCommand::Broadcast { data, .. } if data == vec![i]));
         }
-        assert!(crit.try_recv().is_err());
+        assert!(con.try_recv().is_err());
+    }
+
+    /// Helper: build a Broadcast command on the given class.
+    fn bcast(class: MessageClass, n: u8) -> SwarmCommand {
+        SwarmCommand::Broadcast {
+            topic: "t".into(),
+            data: vec![n],
+            class,
+        }
+    }
+
+    #[test]
+    fn recovery_lane_drops_when_full_without_error() {
+        // Slow consumer: never drain. The lane must stop accepting once
+        // it hits its bounded capacity, but `send` must report `Ok(())`
+        // — sheddable backpressure is not a hard error.
+        let (channels, (_con, _bc, _csp, _rec_rx, _bulk_rx)) = ClassCommandChannels::new();
+
+        let mut accepted = 0usize;
+        // Push twice the capacity so we definitely overflow.
+        for n in 0..(RECOVERY_CHANNEL_CAPACITY * 2) {
+            #[allow(clippy::cast_possible_truncation)]
+            let cmd = bcast(MessageClass::Recovery, (n & 0xFF) as u8);
+            // Every call returns Ok regardless of full/accepted.
+            channels.send(cmd).expect("send should not fail on full");
+            accepted += 1;
+        }
+        assert_eq!(accepted, RECOVERY_CHANNEL_CAPACITY * 2);
+    }
+
+    #[test]
+    fn bulk_lane_drops_when_full_without_error() {
+        // Same contract as recovery but for the higher-volume Bulk lane.
+        let (channels, (_con, _bc, _csp, _rec_rx, _bulk_rx)) = ClassCommandChannels::new();
+
+        for n in 0..(BULK_CHANNEL_CAPACITY * 2) {
+            #[allow(clippy::cast_possible_truncation)]
+            channels
+                .send(bcast(MessageClass::Bulk, (n & 0xFF) as u8))
+                .expect("send should not fail on full");
+        }
+    }
+
+    #[test]
+    fn hot_lanes_remain_unbounded() {
+        // Hot lanes have no capacity limit. Sending well past either
+        // sheddable cap on a Consensus lane still routes every command.
+        let (channels, (mut con, _bc, _csp, _rec, _bulk)) = ClassCommandChannels::new();
+
+        let count = BULK_CHANNEL_CAPACITY + 1024;
+        for n in 0..count {
+            #[allow(clippy::cast_possible_truncation)]
+            channels
+                .send(bcast(MessageClass::Consensus, (n & 0xFF) as u8))
+                .unwrap();
+        }
+        let mut drained = 0usize;
+        while con.try_recv().is_ok() {
+            drained += 1;
+        }
+        assert_eq!(
+            drained, count,
+            "Consensus lane must accept and deliver every command"
+        );
+    }
+
+    #[test]
+    fn full_recovery_does_not_block_hot_lane() {
+        // Motivating regression: a flood on Recovery must not stall
+        // Consensus traffic. Saturate Recovery, then send on Consensus
+        // and verify it lands on its receiver.
+        let (channels, (mut con, _bc, _csp, _rec_rx, _bulk_rx)) = ClassCommandChannels::new();
+
+        for n in 0..(RECOVERY_CHANNEL_CAPACITY * 2) {
+            #[allow(clippy::cast_possible_truncation)]
+            channels
+                .send(bcast(MessageClass::Recovery, (n & 0xFF) as u8))
+                .unwrap();
+        }
+
+        // A Consensus command goes through unaffected.
+        channels
+            .send(bcast(MessageClass::Consensus, 0xAB))
+            .expect("hot lane unaffected by sheddable backpressure");
+        let msg = con.try_recv().expect("Consensus command delivered");
+        assert!(matches!(msg, SwarmCommand::Broadcast { data, .. } if data == vec![0xAB]));
     }
 }
