@@ -1004,12 +1004,16 @@ impl ExecutionCoordinator {
         let shard = cert.shard_group_id();
 
         // Clear expected cert tracking and mark as fulfilled so late-arriving
-        // duplicate headers don't re-register the expectation.
+        // duplicate headers don't re-register the expectation. The tombstone
+        // is drained primarily by `on_txs_terminated` as the EC's txs reach
+        // terminal state in finalized local waves; the deadline is just a
+        // backstop for outcomes that don't touch our shard.
         let cleared = self.expected_certs.mark_fulfilled(
             shard,
             cert.block_height(),
             &cert.wave_id,
-            self.committed_ts,
+            cert.tx_outcomes.iter().map(|o| o.tx_hash),
+            cert.deadline(),
         );
 
         if cleared {
@@ -1643,10 +1647,16 @@ impl ExecutionCoordinator {
         // received as committed without local tracking). Either case is fine.
         self.waves.remove_wave(wave_id);
 
-        for tx_hash in fw.tx_hashes() {
-            self.waves.remove_assignment(&tx_hash);
-            self.provisioning.remove_tx(&tx_hash);
+        let tx_hashes: Vec<TxHash> = fw.tx_hashes().collect();
+        for tx_hash in &tx_hashes {
+            self.waves.remove_assignment(tx_hash);
+            self.provisioning.remove_tx(tx_hash);
         }
+        // Drain pending-tx sets on fulfilled-cert tombstones referencing
+        // any of these txs. When the EC's last referenced tx terminates,
+        // the tombstone evicts — independent of any wall-clock window.
+        self.expected_certs
+            .on_txs_terminated(tx_hashes.iter().copied());
     }
 
     /// Prune stale wave state (waves, vote trackers, early votes).
