@@ -1,20 +1,18 @@
-//! Proposal queue + commit tombstones.
+//! Proposal queue for verified provisions awaiting block inclusion.
 //!
-//! Holds verified provisions the local proposer is eligible to include in
-//! its next block, filtered at read time by a configured dwell window so
-//! peers have a chance to receive/verify the same provisions via gossip.
+//! Filtered at read time by a configured dwell window so peers have a
+//! chance to receive/verify the same provisions via gossip before the
+//! local proposer includes them.
 //!
-//! Pairs with a tombstone set: hashes of provisions that have already
-//! landed in a locally committed block. The tombstone gates duplicate
-//! gossip after commit and lets the receive path reject re-arrivals
-//! without re-queueing.
-//!
-//! All eviction triggers come from the coordinator's `on_block_committed`
-//! and `drop_past_deadline`. Pure data structures here — no topology, no
-//! time source.
+//! Re-admission of already-committed provisions is rejected upstream by
+//! BFT (`validate_no_duplicate_provisions`) and at receipt
+//! (`deadline <= local_ts`); the queue itself only owns the
+//! candidate-set bookkeeping. All eviction triggers come from the
+//! coordinator's `on_block_committed` and `drop_past_deadline`. Pure
+//! data structures here — no topology, no time source.
 
 use hyperscale_types::{LocalTimestamp, ProvisionHash, Provisions, WeightedTimestamp};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,19 +26,17 @@ struct QueuedProvision {
     source_block_ts: WeightedTimestamp,
 }
 
-/// Proposal queue + tombstone set for committed provisions.
+/// Proposal queue for verified provisions.
 #[derive(Debug)]
 pub struct QueuedProvisionBuffer {
     queue: Vec<QueuedProvision>,
-    tombstones: HashMap<ProvisionHash, WeightedTimestamp>,
     min_dwell_time: Duration,
 }
 
 impl QueuedProvisionBuffer {
-    pub(crate) fn new(min_dwell_time: Duration) -> Self {
+    pub(crate) const fn new(min_dwell_time: Duration) -> Self {
         Self {
             queue: Vec::new(),
-            tombstones: HashMap::new(),
             min_dwell_time,
         }
     }
@@ -59,33 +55,14 @@ impl QueuedProvisionBuffer {
         });
     }
 
-    /// Has this provision hash already been committed?
-    pub(crate) fn is_tombstoned(&self, hash: &ProvisionHash) -> bool {
-        self.tombstones.contains_key(hash)
-    }
-
-    /// Tombstone every committed provisions hash and drop any matching
-    /// queue entry so the proposer doesn't re-include provisions already
-    /// in the chain.
-    pub(crate) fn on_block_committed(
-        &mut self,
-        committed_hashes: &HashSet<ProvisionHash>,
-        local_ts: WeightedTimestamp,
-    ) {
+    /// Drop committed provisions from the proposer queue so the next
+    /// proposal doesn't re-include them.
+    pub(crate) fn on_block_committed(&mut self, committed_hashes: &HashSet<ProvisionHash>) {
         if committed_hashes.is_empty() {
             return;
         }
-        for h in committed_hashes {
-            self.tombstones.insert(*h, local_ts);
-        }
         self.queue
             .retain(|q| !committed_hashes.contains(&q.provisions.hash()));
-    }
-
-    /// Drop tombstones older than `cutoff`.
-    pub(crate) fn prune_tombstones(&mut self, cutoff: WeightedTimestamp) {
-        self.tombstones
-            .retain(|_, committed_at_ts| *committed_at_ts > cutoff);
     }
 
     /// Drop queued provisions whose deadline has passed `now`.
@@ -115,10 +92,6 @@ impl QueuedProvisionBuffer {
 
     pub(crate) const fn queue_len(&self) -> usize {
         self.queue.len()
-    }
-
-    pub(crate) fn tombstone_len(&self) -> usize {
-        self.tombstones.len()
     }
 }
 
@@ -159,7 +132,6 @@ mod tests {
     fn empty_queue_yields_nothing() {
         let buf = QueuedProvisionBuffer::new(Duration::ZERO);
         assert_eq!(buf.queue_len(), 0);
-        assert_eq!(buf.tombstone_len(), 0);
         assert!(buf.queued(local(0), ts(0)).is_empty());
     }
 
@@ -200,30 +172,16 @@ mod tests {
     }
 
     #[test]
-    fn on_block_committed_tombstones_and_prunes() {
+    fn on_block_committed_drops_matching_queue_entries() {
         let mut buf = QueuedProvisionBuffer::new(Duration::ZERO);
         let provisions = make_provisions(1, ShardGroupId(1), BlockHeight(10));
         let hash = provisions.hash();
         buf.enqueue(Arc::clone(&provisions), ts(1_000), local(0));
 
         let committed: HashSet<_> = std::iter::once(hash).collect();
-        buf.on_block_committed(&committed, ts(2_000));
+        buf.on_block_committed(&committed);
 
-        assert!(buf.is_tombstoned(&hash));
         assert_eq!(buf.queue_len(), 0);
-    }
-
-    #[test]
-    fn prune_tombstones_drops_old_entries() {
-        let mut buf = QueuedProvisionBuffer::new(Duration::ZERO);
-        let provisions = make_provisions(1, ShardGroupId(1), BlockHeight(10));
-        let hash = provisions.hash();
-        let committed: HashSet<_> = std::iter::once(hash).collect();
-        buf.on_block_committed(&committed, ts(1_000));
-        assert!(buf.is_tombstoned(&hash));
-
-        buf.prune_tombstones(ts(2_000));
-        assert!(!buf.is_tombstoned(&hash));
     }
 
     #[test]

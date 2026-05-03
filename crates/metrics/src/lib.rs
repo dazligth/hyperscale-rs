@@ -158,8 +158,6 @@ pub struct MemoryMetrics {
     pub prov_provisions_by_hash: usize,
     /// Provisions queued for processing.
     pub prov_queued_provisions: usize,
-    /// Tombstones for committed provisions.
-    pub prov_committed_tombstones: usize,
 
     // ── Node (io_loop) ──
     /// Shared transaction body store (admitted-and-not-yet-pruned). Sized

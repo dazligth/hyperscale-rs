@@ -72,7 +72,6 @@ pub struct ProvisionMemoryStats {
     pub expected_provisions: usize,
     pub provisions_by_hash: usize,
     pub queued_provisions: usize,
-    pub committed_tombstones: usize,
 }
 
 /// Centralized provision coordination.
@@ -175,7 +174,6 @@ impl ProvisionCoordinator {
             expected_provisions: self.expected.len(),
             provisions_by_hash: self.pipeline.store().len(),
             queued_provisions: self.queue.queue_len(),
-            committed_tombstones: self.queue.tombstone_len(),
         }
     }
 
@@ -185,12 +183,11 @@ impl ProvisionCoordinator {
     /// 1. `expected.record_block_committed` updates the local anchor and
     ///    retro-stamps pre-genesis entries. Must precede any sweep that
     ///    reads `local_ts`.
-    /// 2. `queue.on_block_committed` tombstones committed provisions and
-    ///    drops them from the proposer queue.
+    /// 2. `queue.on_block_committed` drops committed provisions from the
+    ///    proposer queue so we don't re-include them next round.
     /// 3. Orphan cleanup evicts expectations whose fallback never resolved
     ///    and prunes their matching headers.
-    /// 4. `queue.prune_tombstones` and `drop_past_deadline` use the same
-    ///    `local_ts` cutoff for retention sweeps.
+    /// 4. `drop_past_deadline` sweeps verified entries past their deadline.
     /// 5. Timeout sweep emits fallback fetches for late expectations.
     pub fn on_block_committed(
         &mut self,
@@ -203,20 +200,19 @@ impl ProvisionCoordinator {
         self.expected.record_block_committed(block.height(), new_ts);
         let local_ts = self.expected.local_ts();
 
-        // Tombstone provisions committed in this block to prevent re-queueing
-        // if duplicate gossip arrives later, and drop them from the proposer
-        // queue so we don't re-include the same provisions in the next
-        // proposal. The deadline sweep below evicts the provisions themselves
-        // from the pipeline / store once the source has aged past
-        // `RETENTION_HORIZON`.
+        // Drop provisions committed in this block from the proposer queue
+        // so we don't re-include the same provisions in the next proposal.
+        // Re-admission of already-committed batches is rejected upstream by
+        // BFT validation (`validate_no_duplicate_provisions`) and at receipt
+        // by the `deadline <= local_ts` check, so no separate tombstone is
+        // needed here.
         let committed: std::collections::HashSet<ProvisionHash> =
             block.provisions().iter().map(|p| p.hash()).collect();
-        self.queue.on_block_committed(&committed, local_ts);
+        self.queue.on_block_committed(&committed);
 
-        // Single retention cutoff for orphan and tombstone sweeps —
-        // `local_ts - RETENTION_HORIZON` is the conservative point past
-        // which any expectation, tombstone, or queued/verified entry is
-        // provably useless on every shard.
+        // Single retention cutoff for the orphan sweep — `local_ts -
+        // RETENTION_HORIZON` is the conservative point past which any
+        // expectation is provably useless on every shard.
         let retention_cutoff = local_ts.minus(RETENTION_HORIZON);
 
         // Drop truly orphaned expectations (and their headers) whose
@@ -232,10 +228,6 @@ impl ProvisionCoordinator {
                 block_height,
             }));
         }
-
-        // Prune tombstones past `RETENTION_HORIZON`, measured against
-        // BFT-authenticated time.
-        self.queue.prune_tombstones(retention_cutoff);
 
         // Drop provisions whose deadline has passed but never reached
         // commit. Without this, verified provisions whose source data has
@@ -474,10 +466,11 @@ impl ProvisionCoordinator {
 
         let key = (source_shard, block_height);
 
-        // Skip if this key was already verified (duplicate gossip/fetch) or
-        // already committed (tombstoned by hash). Avoids re-dispatching
-        // verification work and buffering stale duplicates.
-        if self.pipeline.has_verified(key) || self.queue.is_tombstoned(&provisions.hash()) {
+        // Skip if this key was already verified (duplicate gossip/fetch) —
+        // avoids re-dispatching verification work for stale duplicates.
+        // Re-admission of already-committed batches is rejected upstream
+        // by BFT validation and at the deadline check below.
+        if self.pipeline.has_verified(key) {
             return vec![];
         }
 
@@ -619,16 +612,6 @@ impl ProvisionCoordinator {
             return actions;
         };
         let source_block_ts = header.qc.weighted_timestamp;
-
-        // Skip if these provisions were already committed (duplicate gossip after commit).
-        if self.queue.is_tombstoned(&provisions.hash()) {
-            debug!(
-                source_shard = source_shard.0,
-                provision_hash = ?provisions.hash(),
-                "Skipping already-committed provisions (tombstoned)"
-            );
-            return actions;
-        }
 
         let provisions = self.pipeline.insert_verified(provisions, source_block_ts);
 

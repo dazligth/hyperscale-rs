@@ -187,7 +187,6 @@ where
                 prov_expected_provisions: prov_mem.expected_provisions,
                 prov_provisions_by_hash: prov_mem.provisions_by_hash,
                 prov_queued_provisions: prov_mem.queued_provisions,
-                prov_committed_tombstones: prov_mem.committed_tombstones,
                 // Node (io_loop)
                 node_tx_store: self.caches.tx_store.len(),
                 node_tx_status_cache: self.caches.tx_status.len(),

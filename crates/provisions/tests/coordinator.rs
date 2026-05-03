@@ -114,7 +114,6 @@ fn memory_stats_destructures_all_fields_for_fresh_coordinator() {
         expected_provisions,
         provisions_by_hash,
         queued_provisions,
-        committed_tombstones,
     } = coord.memory_stats();
 
     assert_eq!(verified_remote_headers, 0);
@@ -123,7 +122,6 @@ fn memory_stats_destructures_all_fields_for_fresh_coordinator() {
     assert_eq!(expected_provisions, 0);
     assert_eq!(provisions_by_hash, 0);
     assert_eq!(queued_provisions, 0);
-    assert_eq!(committed_tombstones, 0);
 }
 
 #[test]

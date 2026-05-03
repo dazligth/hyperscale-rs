@@ -1364,10 +1364,6 @@ impl MetricsRecorder for PrometheusRecorder {
             .memory_provisions
             .with_label_values(&["queued_provisions"])
             .set(m.prov_queued_provisions as f64);
-        self.metrics
-            .memory_provisions
-            .with_label_values(&["committed_tombstones"])
-            .set(m.prov_committed_tombstones as f64);
 
         // Node (io_loop)
         self.metrics
