@@ -1253,16 +1253,17 @@ impl ExecutionCoordinator {
             self.committed_height = height;
             self.committed_ts = certified.qc.weighted_timestamp;
         }
+        self.provisioning.advance_clock(self.committed_ts);
 
         // Retro-stamp entries recorded before the first local commit. Remote
-        // headers can register expected exec certs (and ECs themselves can be
-        // buffered) while `committed_ts` is still zero; without this, every
-        // such entry would report a ~57-year age on the next commit and
-        // trigger a fallback fetch storm.
+        // headers can register expected exec certs while `committed_ts` is
+        // still zero; without this, every such entry would report a
+        // ~57-year age on the next commit and trigger a fallback fetch
+        // storm. Buffered ECs anchor on their own BFT-attested
+        // `vote_anchor_ts` so they don't need this treatment.
         if first_commit && self.committed_ts != WeightedTimestamp::ZERO {
             let now_ts = self.committed_ts;
             self.expected_certs.retro_stamp_zero_timestamps(now_ts);
-            self.early.retro_stamp_zero_timestamps(now_ts);
         }
 
         let mut actions = Vec::new();
@@ -1273,6 +1274,7 @@ impl ExecutionCoordinator {
         actions.extend(self.check_vote_retry_timeouts(topology));
         self.prune_execution_state();
         self.early.gc_stale_ecs(self.committed_ts);
+        self.provisioning.gc_stale_provisions(self.committed_ts);
 
         // Re-broadcast outbound ECs that haven't been ACKed via wave
         // finalization. Driven from the commit cadence so the schedule is
@@ -1482,8 +1484,7 @@ impl ExecutionCoordinator {
         let routing = self.waves.classify_attestation(ec);
 
         self.early.clear_routed(ec, &routing.routed_tx_hashes);
-        self.early
-            .buffer_ec(ec, &routing.unrouted_tx_hashes, self.committed_ts);
+        self.early.buffer_ec(ec, &routing.unrouted_tx_hashes);
 
         if routing.affected_waves.is_empty() {
             return vec![];

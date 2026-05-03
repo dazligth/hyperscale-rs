@@ -32,9 +32,13 @@
 //! - [`EARLY_VOTE_RETENTION`]: how long to hold votes whose block has never
 //!   committed locally. Cleanup at commit time drops older entries since
 //!   failure to commit past this window signals BFT is broken.
-//! - [`EC_BUFFER_RETENTION`]: how long to hold ECs referencing `tx_hashes`
-//!   that never land locally (orphaned txs or malicious remotes). Sized
-//!   well above plausible cross-shard inclusion lag.
+//! - Buffered ECs evict at the EC's own
+//!   [`ExecutionCertificate::deadline`] — `vote_anchor_ts +
+//!   RETENTION_HORIZON`. Past that point every tx the EC could mention
+//!   has expired its `validity_range` and either terminated or aborted,
+//!   so no local wave can still consume it. The anchor is BFT-attested,
+//!   matching the sender-side deadline used by
+//!   [`OutboundExecCertTracker`](crate::outbound_certs::OutboundExecCertTracker).
 
 use hyperscale_types::{
     ExecutionCertificate, ExecutionVote, TxHash, WAVE_TIMEOUT, WaveId, WeightedTimestamp,
@@ -52,14 +56,6 @@ use std::time::Duration;
 /// `weighted_timestamp_ms` so the bound is BFT-authenticated.
 pub const EARLY_VOTE_RETENTION: Duration = WAVE_TIMEOUT;
 
-/// Maximum age before a buffered EC is considered stale and evicted. Bounds
-/// the leak from ECs whose `tx_hashes` never land in a local block (orphaned
-/// txs, malicious or buggy remotes referencing `tx_hashes` our shard will
-/// never see). Sized at `WAVE_TIMEOUT * 2` — twice the cross-shard execution
-/// window covers a slow remote committing locally well past its source
-/// commit, while still bounding the leak.
-const EC_BUFFER_RETENTION: Duration = Duration::from_secs(WAVE_TIMEOUT.as_secs() * 2);
-
 /// Bookkeeping for an EC awaiting local routing.
 ///
 /// Holds a single owning reference to the EC plus the set of `tx_hashes` from
@@ -71,10 +67,6 @@ const EC_BUFFER_RETENTION: Duration = Duration::from_secs(WAVE_TIMEOUT.as_secs()
 struct BufferedEc {
     ec: Arc<ExecutionCertificate>,
     pending_txs: HashSet<TxHash>,
-    /// Local weighted timestamp when this EC was first buffered. Used by
-    /// [`EarlyArrivalBuffer::gc_stale_ecs`] to evict entries past the
-    /// retention window.
-    buffered_at: WeightedTimestamp,
 }
 
 pub struct EarlyArrivalBuffer {
@@ -135,12 +127,7 @@ impl EarlyArrivalBuffer {
     /// assignment. Idempotent: `tx_hashes` already tracked for this EC's
     /// `wave_id` are skipped, so replaying a previously-buffered EC won't
     /// create duplicate entries in the reverse index.
-    pub fn buffer_ec(
-        &mut self,
-        ec: &Arc<ExecutionCertificate>,
-        tx_hashes: &[TxHash],
-        now_ts: WeightedTimestamp,
-    ) {
+    pub fn buffer_ec(&mut self, ec: &Arc<ExecutionCertificate>, tx_hashes: &[TxHash]) {
         if tx_hashes.is_empty() {
             return;
         }
@@ -150,7 +137,6 @@ impl EarlyArrivalBuffer {
             .or_insert_with(|| BufferedEc {
                 ec: Arc::clone(ec),
                 pending_txs: HashSet::new(),
-                buffered_at: now_ts,
             });
         for tx_hash in tx_hashes {
             if entry.pending_txs.insert(*tx_hash) {
@@ -202,23 +188,17 @@ impl EarlyArrivalBuffer {
         ecs
     }
 
-    /// Drop buffered ECs older than [`EC_BUFFER_RETENTION`]. Covers the
-    /// leak from `tx_hashes` that never land locally (orphaned txs or
-    /// malicious remotes referencing unknown txs). Returns the number of
-    /// ECs evicted.
-    ///
-    /// No-op before the first commit (when `now_ts` is still below the
-    /// retention window), so pre-first-commit buffered entries aren't
-    /// wiped on the very first timeout check.
+    /// Drop buffered ECs whose own deadline has elapsed. The deadline is
+    /// `ec.vote_anchor_ts + RETENTION_HORIZON`, BFT-attested by the
+    /// remote committee — the same bound the sender uses on the outbound
+    /// side. Past it, every tx the EC mentions has expired its
+    /// `validity_range` and either terminated or aborted, so no local
+    /// wave can still consume it. Returns the number of ECs evicted.
     pub fn gc_stale_ecs(&mut self, now_ts: WeightedTimestamp) -> usize {
-        if now_ts.as_millis() < u64::try_from(EC_BUFFER_RETENTION.as_millis()).unwrap_or(u64::MAX) {
-            return 0;
-        }
-        let cutoff = now_ts.minus(EC_BUFFER_RETENTION);
         let stale: Vec<WaveId> = self
             .pending_routing
             .iter()
-            .filter(|(_, entry)| entry.buffered_at <= cutoff)
+            .filter(|(_, entry)| entry.ec.deadline() <= now_ts)
             .map(|(wid, _)| wid.clone())
             .collect();
         if stale.is_empty() {
@@ -239,18 +219,6 @@ impl EarlyArrivalBuffer {
             }
         }
         count
-    }
-
-    /// Retro-stamp `buffered_at == ZERO` entries with `now_ts`.
-    /// Remote ECs can arrive before our first local commit; without this,
-    /// every such entry would report a ~57-year age on the next commit
-    /// and be evicted immediately.
-    pub fn retro_stamp_zero_timestamps(&mut self, now_ts: WeightedTimestamp) {
-        for entry in self.pending_routing.values_mut() {
-            if entry.buffered_at == WeightedTimestamp::ZERO {
-                entry.buffered_at = now_ts;
-            }
-        }
     }
 
     // ─── Query ──────────────────────────────────────────────────────────
@@ -310,10 +278,18 @@ mod tests {
     }
 
     fn make_ec(wave_id: WaveId, tx_hashes: &[TxHash]) -> Arc<ExecutionCertificate> {
+        make_ec_with_anchor(wave_id, tx_hashes, WeightedTimestamp::ZERO)
+    }
+
+    fn make_ec_with_anchor(
+        wave_id: WaveId,
+        tx_hashes: &[TxHash],
+        vote_anchor_ts: WeightedTimestamp,
+    ) -> Arc<ExecutionCertificate> {
         let outcomes: Vec<TxOutcome> = tx_hashes.iter().map(|h| make_tx_outcome(*h)).collect();
         Arc::new(ExecutionCertificate::new(
             wave_id,
-            WeightedTimestamp::ZERO,
+            vote_anchor_ts,
             GlobalReceiptRoot::ZERO,
             outcomes,
             zero_bls_signature(),
@@ -402,7 +378,7 @@ mod tests {
         let tx_b = TxHash::from_raw(Hash::from_bytes(b"b"));
         let ec = make_ec(w, &[tx_a, tx_b]);
 
-        b.buffer_ec(&ec, &[tx_a, tx_b], ms(1_000));
+        b.buffer_ec(&ec, &[tx_a, tx_b]);
 
         assert_eq!(b.pending_routing_len(), 1);
         assert_eq!(b.attestation_count_for_tx(&tx_a), 1);
@@ -416,8 +392,8 @@ mod tests {
         let tx = TxHash::from_raw(Hash::from_bytes(b"a"));
         let ec = make_ec(w, &[tx]);
 
-        b.buffer_ec(&ec, &[tx], ms(1_000));
-        b.buffer_ec(&ec, &[tx], ms(2_000));
+        b.buffer_ec(&ec, &[tx]);
+        b.buffer_ec(&ec, &[tx]);
 
         assert_eq!(b.pending_routing_len(), 1);
         assert_eq!(
@@ -435,7 +411,7 @@ mod tests {
         let tx_b = TxHash::from_raw(Hash::from_bytes(b"b"));
         let ec = make_ec(w, &[tx_a, tx_b]);
 
-        b.buffer_ec(&ec, &[tx_a, tx_b], ms(1_000));
+        b.buffer_ec(&ec, &[tx_a, tx_b]);
 
         // Partial clear: entry survives.
         b.clear_routed(&ec, &[tx_a]);
@@ -453,7 +429,7 @@ mod tests {
         let tx_a = TxHash::from_raw(Hash::from_bytes(b"a"));
         let tx_b = TxHash::from_raw(Hash::from_bytes(b"b"));
         let ec = make_ec(w, &[tx_a, tx_b]);
-        b.buffer_ec(&ec, &[tx_a, tx_b], ms(1_000));
+        b.buffer_ec(&ec, &[tx_a, tx_b]);
 
         let drained = b.drain_ecs_for_txs(&[tx_a]);
         assert_eq!(drained.len(), 1);
@@ -470,26 +446,40 @@ mod tests {
         let tx_b = TxHash::from_raw(Hash::from_bytes(b"b"));
         // Single EC covers both txs; draining both hashes should yield one EC.
         let ec = make_ec(w, &[tx_a, tx_b]);
-        b.buffer_ec(&ec, &[tx_a, tx_b], ms(1_000));
+        b.buffer_ec(&ec, &[tx_a, tx_b]);
 
         let drained = b.drain_ecs_for_txs(&[tx_a, tx_b]);
         assert_eq!(drained.len(), 1, "identity-dedup on Arc pointer");
     }
 
     #[test]
-    fn gc_stale_ecs_respects_retention_and_cleans_reverse_index() {
+    fn gc_stale_ecs_evicts_past_certificate_deadline() {
+        // Each EC's deadline is `vote_anchor_ts + RETENTION_HORIZON`.
+        // Old EC: anchor at ms(1_000) → deadline at 1_000 + horizon_ms.
+        // Fresh EC: anchor at ms(60_000) → deadline at 60_000 + horizon_ms.
         let mut b = EarlyArrivalBuffer::new();
         let w_old = wave(1);
         let w_fresh = wave(2);
         let tx_old = TxHash::from_raw(Hash::from_bytes(b"old"));
         let tx_fresh = TxHash::from_raw(Hash::from_bytes(b"fresh"));
 
-        b.buffer_ec(&make_ec(w_old, &[tx_old]), &[tx_old], ms(1_000));
-        b.buffer_ec(&make_ec(w_fresh, &[tx_fresh]), &[tx_fresh], ms(50_000));
+        let old_anchor = ms(1_000);
+        let fresh_anchor = ms(60_000);
+        b.buffer_ec(
+            &make_ec_with_anchor(w_old, &[tx_old], old_anchor),
+            &[tx_old],
+        );
+        b.buffer_ec(
+            &make_ec_with_anchor(w_fresh, &[tx_fresh], fresh_anchor),
+            &[tx_fresh],
+        );
 
-        // Retention = 60s. At now_ts = 65_000, cutoff = 5_000. The old
-        // entry (buffered at 1_000) is evicted; the fresh one survives.
-        let evicted = b.gc_stale_ecs(ms(65_000));
+        let horizon_ms =
+            u64::try_from(hyperscale_types::RETENTION_HORIZON.as_millis()).unwrap_or(u64::MAX);
+        // now sits past the old EC's deadline but before the fresh one's.
+        let now = ms(old_anchor.as_millis() + horizon_ms + 1);
+        assert!(now.as_millis() < fresh_anchor.as_millis() + horizon_ms);
+        let evicted = b.gc_stale_ecs(now);
         assert_eq!(evicted, 1);
         assert_eq!(b.pending_routing_len(), 1);
         assert_eq!(b.attestation_count_for_tx(&tx_old), 0);
@@ -497,39 +487,16 @@ mod tests {
     }
 
     #[test]
-    fn gc_stale_ecs_noop_before_retention_window_reached() {
+    fn gc_stale_ecs_preserves_entries_within_horizon() {
         let mut b = EarlyArrivalBuffer::new();
         let w = wave(1);
         let tx = TxHash::from_raw(Hash::from_bytes(b"tx"));
-        b.buffer_ec(&make_ec(w, &[tx]), &[tx], ms(0));
+        let anchor = ms(100_000);
+        b.buffer_ec(&make_ec_with_anchor(w, &[tx], anchor), &[tx]);
 
-        // now_ts below EC_BUFFER_RETENTION → no-op, even though the entry
-        // was buffered at timestamp 0.
-        let just_under = u64::try_from(EC_BUFFER_RETENTION.as_millis()).unwrap_or(u64::MAX) - 1;
-        assert_eq!(b.gc_stale_ecs(ms(just_under)), 0);
+        // now_ts equal to the anchor — well inside the EC's deadline.
+        assert_eq!(b.gc_stale_ecs(anchor), 0);
         assert_eq!(b.pending_routing_len(), 1);
-    }
-
-    #[test]
-    fn retro_stamp_updates_zero_buffered_entries_only() {
-        let mut b = EarlyArrivalBuffer::new();
-        let w_zero = wave(1);
-        let w_stamped = wave(2);
-        let tx_z = TxHash::from_raw(Hash::from_bytes(b"z"));
-        let tx_s = TxHash::from_raw(Hash::from_bytes(b"s"));
-        b.buffer_ec(&make_ec(w_zero, &[tx_z]), &[tx_z], ms(0));
-        b.buffer_ec(&make_ec(w_stamped, &[tx_s]), &[tx_s], ms(30_000));
-
-        b.retro_stamp_zero_timestamps(ms(50_000));
-
-        // After retro-stamp the "zero" entry now has buffered_at = 50_000.
-        // At now_ts = 65_000 (cutoff = 5_000), only the stamped entry
-        // (30_000 > 5_000) AND the retro-stamped entry (50_000 > 5_000)
-        // both survive. The retro-stamped entry, had it NOT been updated,
-        // would have been evicted.
-        let evicted = b.gc_stale_ecs(ms(65_000));
-        assert_eq!(evicted, 0);
-        assert_eq!(b.pending_routing_len(), 2);
     }
 
     // ─── Property tests ─────────────────────────────────────────────────
@@ -566,35 +533,33 @@ mod tests {
         }
     }
 
-    // GC never drops an EC whose buffered_at is strictly greater than
-    // the retention cutoff (now_ts - EC_BUFFER_RETENTION).
+    // GC never drops an EC whose deadline (vote_anchor_ts +
+    // RETENTION_HORIZON) is strictly greater than now_ts.
     proptest! {
         #[test]
         fn gc_preserves_fresh_entries(
             heights in proptest::collection::vec(0u64..20, 1..10),
-            ages_ms in proptest::collection::vec(0u64..120_000, 1..10),
-            now_ms in 60_000u64..600_000,
+            anchor_ms in proptest::collection::vec(0u64..1_000_000, 1..10),
+            now_ms in 0u64..2_000_000,
         ) {
             let mut b = EarlyArrivalBuffer::new();
             for (i, h) in heights.iter().enumerate() {
                 let w = wave(*h);
                 let tx = TxHash::from_raw(Hash::from_bytes(&[u8::try_from(i).unwrap_or(u8::MAX); 32]));
-                let age = ages_ms[i % ages_ms.len()];
-                let ts = if age >= now_ms { ms(0) } else { ms(now_ms - age) };
-                b.buffer_ec(&make_ec(w.clone(), &[tx]), &[tx], ts);
+                let anchor = ms(anchor_ms[i % anchor_ms.len()]);
+                b.buffer_ec(&make_ec_with_anchor(w.clone(), &[tx], anchor), &[tx]);
             }
             let before = b.pending_routing_len();
 
             b.gc_stale_ecs(ms(now_ms));
 
-            // Every surviving entry must be strictly newer than the cutoff.
-            let cutoff = ms(now_ms).minus(EC_BUFFER_RETENTION);
+            // Every surviving entry must have a deadline strictly past now.
             for entry in b.pending_routing.values() {
                 prop_assert!(
-                    entry.buffered_at > cutoff,
-                    "GC left a stale entry: buffered_at={:?}, cutoff={:?}",
-                    entry.buffered_at,
-                    cutoff
+                    entry.ec.deadline() > ms(now_ms),
+                    "GC left a stale entry: deadline={:?}, now={}",
+                    entry.ec.deadline(),
+                    now_ms,
                 );
             }
             // Invariant: we never GAIN entries from a GC call.

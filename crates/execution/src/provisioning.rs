@@ -25,7 +25,8 @@
 #[cfg(test)]
 use hyperscale_types::Hash;
 use hyperscale_types::{
-    NodeId, Provisions, ShardGroupId, StateProvision, TopologySnapshot, TxHash, WeightedTimestamp,
+    NodeId, Provisions, RETENTION_HORIZON, ShardGroupId, StateProvision, TopologySnapshot, TxHash,
+    WeightedTimestamp,
 };
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
@@ -34,8 +35,10 @@ use crate::conflict::{ConflictDetector, DetectedConflict};
 
 pub struct ProvisioningTracker {
     /// Verified provisions keyed by `tx_hash`. Written when provisions are
-    /// absorbed; read when a cross-shard wave dispatches. Cleaned only when
-    /// the wave certificate is committed (terminal state).
+    /// absorbed; read when a cross-shard wave dispatches. Cleared on the
+    /// terminal-state path ([`remove_tx`]) when a wave certificate
+    /// commits, and swept by [`gc_stale_provisions`] for txs whose
+    /// retention horizon elapsed without ever finalizing.
     verified: HashMap<TxHash, Vec<StateProvision>>,
 
     /// Remote shards each cross-shard tx needs provisions from. Populated
@@ -45,6 +48,20 @@ pub struct ProvisioningTracker {
     /// Remote shards whose provisions have been received. Populated by
     /// [`absorb_provisions`].
     received: HashMap<TxHash, BTreeSet<ShardGroupId>>,
+
+    /// Per-tx retention deadline = the latest `now + RETENTION_HORIZON`
+    /// observed at any insert point that touches the tx. Past the
+    /// deadline the tx is provably terminal everywhere — every shard
+    /// has either committed an EC for it or its `validity_range` has
+    /// expired and any wave that admitted it has timed out. Anchored
+    /// on BFT-attested `committed_ts`, matching the sender-side
+    /// deadline used by [`OutboundProvisionTracker`](hyperscale_provisions::OutboundProvisionTracker).
+    deadlines: HashMap<TxHash, WeightedTimestamp>,
+
+    /// Latest BFT-attested local-commit weighted timestamp seen via
+    /// [`advance_clock`]. Drives deadline stamping deterministically
+    /// across validators.
+    now: WeightedTimestamp,
 
     /// Detects node-ID overlap conflicts between local cross-shard txs and
     /// committed remote provisions. Deterministic because provisions are
@@ -58,8 +75,35 @@ impl ProvisioningTracker {
             verified: HashMap::new(),
             required: HashMap::new(),
             received: HashMap::new(),
+            deadlines: HashMap::new(),
+            now: WeightedTimestamp::ZERO,
             conflict_detector: ConflictDetector::new(),
         }
+    }
+
+    /// Update the BFT-attested local-commit clock used for deadline
+    /// stamping. Called once per `on_block_committed`. Monotone — out-of-order
+    /// or stale calls are ignored.
+    pub fn advance_clock(&mut self, now: WeightedTimestamp) {
+        if now > self.now {
+            self.now = now;
+        }
+    }
+
+    /// Stamp `tx_hash` with a deadline of `self.now + RETENTION_HORIZON`,
+    /// taking the latest of any existing entry. Idempotent re-stamping
+    /// only ever extends the deadline forward, so a late-arriving
+    /// provision never causes earlier eviction than its predecessor.
+    fn stamp_deadline(&mut self, tx_hash: TxHash) {
+        let deadline = self.now.plus(RETENTION_HORIZON);
+        self.deadlines
+            .entry(tx_hash)
+            .and_modify(|d| {
+                if deadline > *d {
+                    *d = deadline;
+                }
+            })
+            .or_insert(deadline);
     }
 
     // ─── Required / received ────────────────────────────────────────────
@@ -68,6 +112,7 @@ impl ProvisioningTracker {
     /// any previous entry — callers set this once per wave creation.
     pub fn record_required(&mut self, tx_hash: TxHash, remote_shards: BTreeSet<ShardGroupId>) {
         self.required.insert(tx_hash, remote_shards);
+        self.stamp_deadline(tx_hash);
     }
 
     /// Whether every remote shard's provision for `tx_hash` has been
@@ -112,6 +157,7 @@ impl ProvisioningTracker {
                 .entry(tx_hash)
                 .or_default()
                 .insert(source_shard);
+            self.stamp_deadline(tx_hash);
             touched.push(tx_hash);
         }
         touched
@@ -162,7 +208,29 @@ impl ProvisioningTracker {
         self.verified.remove(tx_hash);
         self.required.remove(tx_hash);
         self.received.remove(tx_hash);
+        self.deadlines.remove(tx_hash);
         self.conflict_detector.remove_tx(tx_hash);
+    }
+
+    /// Drop tracker state for txs whose retention horizon elapsed without
+    /// reaching wave finalization. Past `now + RETENTION_HORIZON` from the
+    /// latest insert touching the tx, the tx is provably terminal everywhere
+    /// — every shard has either committed an EC for it or its
+    /// `validity_range` has expired and any wave that admitted it has timed
+    /// out — so no future local wave can still consume the verified
+    /// provisions. Returns the number of txs swept.
+    pub fn gc_stale_provisions(&mut self, now_ts: WeightedTimestamp) -> usize {
+        let stale: Vec<TxHash> = self
+            .deadlines
+            .iter()
+            .filter(|(_, deadline)| **deadline <= now_ts)
+            .map(|(tx, _)| *tx)
+            .collect();
+        let count = stale.len();
+        for tx in stale {
+            self.remove_tx(&tx);
+        }
+        count
     }
 
     // ─── Accessors ──────────────────────────────────────────────────────
@@ -332,5 +400,75 @@ mod tests {
         // Re-record with a different requirement set.
         t.record_required(tx, [shard(1), shard(2)].into_iter().collect());
         assert_eq!(t.required.get(&tx).map_or(0, BTreeSet::len), 2);
+    }
+
+    #[test]
+    fn gc_stale_provisions_evicts_past_horizon_and_keeps_fresh() {
+        use hyperscale_types::RETENTION_HORIZON;
+
+        let mut t = ProvisioningTracker::new();
+        let tx_old = TxHash::from_raw(Hash::from_bytes(b"old"));
+        let tx_fresh = TxHash::from_raw(Hash::from_bytes(b"fresh"));
+
+        // Old tx absorbed at clock = ms(1_000).
+        t.advance_clock(WeightedTimestamp(1_000));
+        t.record_required(tx_old, std::iter::once(shard(1)).collect());
+        t.absorb_provisions(
+            &make_provisions(shard(1), BlockHeight(5), vec![tx_old]),
+            shard(0),
+        );
+
+        // Fresh tx absorbed at clock = ms(60_000).
+        t.advance_clock(WeightedTimestamp(60_000));
+        t.record_required(tx_fresh, std::iter::once(shard(1)).collect());
+        t.absorb_provisions(
+            &make_provisions(shard(1), BlockHeight(6), vec![tx_fresh]),
+            shard(0),
+        );
+
+        let horizon_ms = u64::try_from(RETENTION_HORIZON.as_millis()).unwrap_or(u64::MAX);
+        // Past tx_old's deadline (1_000 + horizon) but not tx_fresh's
+        // (60_000 + horizon).
+        let now = WeightedTimestamp(1_000 + horizon_ms + 1);
+        assert!(now.as_millis() < 60_000 + horizon_ms);
+
+        let evicted = t.gc_stale_provisions(now);
+        assert_eq!(evicted, 1);
+
+        assert!(!t.verified.contains_key(&tx_old));
+        assert!(!t.received.contains_key(&tx_old));
+        assert!(!t.required.contains_key(&tx_old));
+        assert!(t.verified.contains_key(&tx_fresh));
+        assert!(t.received.contains_key(&tx_fresh));
+        assert!(t.required.contains_key(&tx_fresh));
+    }
+
+    #[test]
+    fn gc_stale_provisions_late_insert_extends_deadline() {
+        use hyperscale_types::RETENTION_HORIZON;
+
+        let mut t = ProvisioningTracker::new();
+        let tx = TxHash::from_raw(Hash::from_bytes(b"tx"));
+
+        // First insert at clock = ms(1_000) → deadline = 1_000 + horizon.
+        t.advance_clock(WeightedTimestamp(1_000));
+        t.absorb_provisions(
+            &make_provisions(shard(1), BlockHeight(5), vec![tx]),
+            shard(0),
+        );
+
+        // Second insert at clock = ms(60_000) → deadline extended to
+        // 60_000 + horizon.
+        t.advance_clock(WeightedTimestamp(60_000));
+        t.absorb_provisions(
+            &make_provisions(shard(2), BlockHeight(5), vec![tx]),
+            shard(0),
+        );
+
+        let horizon_ms = u64::try_from(RETENTION_HORIZON.as_millis()).unwrap_or(u64::MAX);
+        // Past the FIRST deadline but not the SECOND. Entry must survive.
+        let now = WeightedTimestamp(1_000 + horizon_ms + 1);
+        assert_eq!(t.gc_stale_provisions(now), 0);
+        assert!(t.verified.contains_key(&tx));
     }
 }
