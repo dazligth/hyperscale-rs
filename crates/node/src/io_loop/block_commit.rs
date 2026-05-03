@@ -396,3 +396,605 @@ where
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossbeam::channel::{Receiver, unbounded};
+    use hyperscale_dispatch_sync::SyncDispatch;
+    use hyperscale_storage::tree::CollectedWrites;
+    use hyperscale_storage::{BaseReadCache, JmtSnapshot};
+    use hyperscale_test_helpers::{TestCommittee, make_live_block};
+    use hyperscale_types::{
+        BlockHeight, FinalizedWave, QuorumCertificate as Qc, ShardGroupId, StateRoot, ValidatorId,
+    };
+    use std::sync::atomic::AtomicU64;
+
+    /// Mock prepared-commit handle. Carries an empty `JmtSnapshot` (the
+    /// coordinator only inspects it via `jmt_snapshot()` from action
+    /// handlers, never inside `flush`) plus an opaque tag we can assert on
+    /// after the spawned closure runs.
+    struct MockPrepared {
+        snapshot: JmtSnapshot,
+        tag: u64,
+    }
+
+    /// `ChainWriter` impl that records the order in which heights are committed.
+    /// `prepare_block_commit` / `commit_block` are unreachable in these tests
+    /// because `BlockCommitCoordinator` only calls `commit_prepared_blocks`.
+    #[derive(Default)]
+    struct MockStorage {
+        committed: Mutex<Vec<(BlockHeight, u64)>>,
+    }
+
+    impl MockStorage {
+        fn committed_heights(&self) -> Vec<u64> {
+            self.committed
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(h, _)| h.0)
+                .collect()
+        }
+
+        fn committed_tags(&self) -> Vec<u64> {
+            self.committed
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, t)| *t)
+                .collect()
+        }
+    }
+
+    impl ChainWriter for MockStorage {
+        type PreparedCommit = MockPrepared;
+
+        fn jmt_snapshot(prepared: &Self::PreparedCommit) -> &JmtSnapshot {
+            &prepared.snapshot
+        }
+
+        fn prepare_block_commit(
+            &self,
+            _parent_state_root: StateRoot,
+            _parent_block_height: BlockHeight,
+            _finalized_waves: &[Arc<FinalizedWave>],
+            _block_height: BlockHeight,
+            _pending_snapshots: &[Arc<JmtSnapshot>],
+            _base_reads: Option<&BaseReadCache>,
+        ) -> (StateRoot, Self::PreparedCommit) {
+            unreachable!("BlockCommitCoordinator does not call prepare_block_commit");
+        }
+
+        #[allow(clippy::significant_drop_tightening)] // batching the lock matches the production write path
+        fn commit_prepared_blocks(
+            &self,
+            blocks: Vec<(Self::PreparedCommit, Arc<Block>, Arc<QuorumCertificate>)>,
+        ) -> Vec<StateRoot> {
+            let mut committed = self.committed.lock().unwrap();
+            let mut roots = Vec::with_capacity(blocks.len());
+            for (prepared, block, _qc) in blocks {
+                committed.push((block.height(), prepared.tag));
+                roots.push(StateRoot::ZERO);
+            }
+            roots
+        }
+
+        fn commit_block(&self, _block: &Arc<Block>, _qc: &Arc<QuorumCertificate>) -> StateRoot {
+            unreachable!("BlockCommitCoordinator does not call commit_block");
+        }
+    }
+
+    fn empty_snapshot(height: BlockHeight) -> JmtSnapshot {
+        JmtSnapshot::from_collected_writes(
+            CollectedWrites {
+                nodes: Vec::new(),
+                stale_node_keys: Vec::new(),
+            },
+            StateRoot::ZERO,
+            BlockHeight::GENESIS,
+            StateRoot::ZERO,
+            height,
+        )
+    }
+
+    /// Build a `(PendingCommit, prepared_handle)` pair for `height`. Each
+    /// height gets a distinct timestamp so block hashes differ.
+    fn make_commit(
+        committee: &TestCommittee,
+        height: BlockHeight,
+        source: CommitSource,
+    ) -> (PendingCommit, MockPrepared) {
+        let block = make_live_block(
+            ShardGroupId(0),
+            height,
+            /* timestamp_ms */ 1_000 + height.0,
+            ValidatorId(0),
+            vec![],
+            vec![],
+        );
+        let block_hash = block.hash();
+        let qc = Qc {
+            block_hash,
+            ..Qc::genesis()
+        };
+        let _ = committee; // committee unused here but kept for future signing-required tests
+        let pending = PendingCommit {
+            block: Arc::new(block),
+            qc: Arc::new(qc),
+            source,
+            committed_notified: false,
+        };
+        let prepared = MockPrepared {
+            snapshot: empty_snapshot(height),
+            tag: height.0,
+        };
+        (pending, prepared)
+    }
+
+    /// Tag generator used by `make_commit_with_tag` for tests that care about
+    /// distinguishing two prepared handles for the same height.
+    static TAG_GEN: AtomicU64 = AtomicU64::new(10_000);
+
+    fn next_tag() -> u64 {
+        TAG_GEN.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn drain_protocol_events(rx: &Receiver<NodeInput>) -> Vec<ProtocolEvent> {
+        let mut out = Vec::new();
+        while let Ok(NodeInput::Protocol(ev)) = rx.try_recv() {
+            out.push(*ev);
+        }
+        out
+    }
+
+    fn count_committed(events: &[ProtocolEvent]) -> usize {
+        events
+            .iter()
+            .filter(|e| matches!(e, ProtocolEvent::BlockCommitted { .. }))
+            .count()
+    }
+
+    fn last_persisted_height(events: &[ProtocolEvent]) -> Option<BlockHeight> {
+        events.iter().rev().find_map(|e| match e {
+            ProtocolEvent::BlockPersisted { height } => Some(*height),
+            _ => None,
+        })
+    }
+
+    fn now() -> LocalTimestamp {
+        // The accumulator only uses `now` for latency metrics; the value
+        // doesn't influence the decisions we assert on.
+        LocalTimestamp::from_millis(10_000_000)
+    }
+
+    // ── accumulate ────────────────────────────────────────────────────
+
+    #[test]
+    fn accumulate_skips_block_at_or_below_persisted_height() {
+        let committee = TestCommittee::new(4, 1);
+        let mut coord = BlockCommitCoordinator::<MockStorage>::new(BlockHeight(5));
+
+        for h in [1u64, 5] {
+            let (commit, _) = make_commit(&committee, BlockHeight(h), CommitSource::Sync);
+            assert!(matches!(
+                coord.accumulate(commit, now()),
+                AccumulateDecision::Skip
+            ));
+        }
+        assert_eq!(coord.pending_len(), 0);
+    }
+
+    #[test]
+    fn accumulate_dedups_same_block_hash() {
+        let committee = TestCommittee::new(4, 1);
+        let mut coord = BlockCommitCoordinator::<MockStorage>::new(BlockHeight::GENESIS);
+
+        let (first, _) = make_commit(&committee, BlockHeight(1), CommitSource::Aggregator);
+        let (dup, _) = make_commit(&committee, BlockHeight(1), CommitSource::Sync);
+        // Same height + builder-deterministic header → same hash.
+        assert_eq!(first.block.hash(), dup.block.hash());
+
+        assert!(matches!(
+            coord.accumulate(first, now()),
+            AccumulateDecision::Accepted { .. }
+        ));
+        assert!(matches!(
+            coord.accumulate(dup, now()),
+            AccumulateDecision::Skip
+        ));
+        assert_eq!(coord.pending_len(), 1);
+    }
+
+    #[test]
+    fn accumulate_notifies_immediately_within_lag_window() {
+        let committee = TestCommittee::new(4, 1);
+        let mut coord = BlockCommitCoordinator::<MockStorage>::new(BlockHeight::GENESIS);
+
+        // Heights 1..=MAX_PERSISTENCE_LAG should all notify immediately.
+        for h in 1..=BlockCommitCoordinator::<MockStorage>::MAX_PERSISTENCE_LAG {
+            let (commit, _) = make_commit(&committee, BlockHeight(h), CommitSource::Aggregator);
+            match coord.accumulate(commit, now()) {
+                AccumulateDecision::Accepted {
+                    height,
+                    notify_now: Some(_),
+                } => assert_eq!(height.0, h),
+                _ => panic!("expected immediate notify at height {h}"),
+            }
+        }
+    }
+
+    #[test]
+    fn accumulate_defers_notification_when_persistence_lag_exceeded() {
+        let committee = TestCommittee::new(4, 1);
+        let mut coord = BlockCommitCoordinator::<MockStorage>::new(BlockHeight::GENESIS);
+
+        let max_lag = BlockCommitCoordinator::<MockStorage>::MAX_PERSISTENCE_LAG;
+        // Anything beyond MAX_PERSISTENCE_LAG should defer the notification.
+        let (commit, _) = make_commit(&committee, BlockHeight(max_lag + 1), CommitSource::Header);
+        match coord.accumulate(commit, now()) {
+            AccumulateDecision::Accepted {
+                notify_now: None, ..
+            } => {}
+            _ => panic!("expected deferred notify"),
+        }
+    }
+
+    #[test]
+    fn accumulate_records_decision_on_pending_commit() {
+        // The notify-now decision must be persisted on the PendingCommit
+        // itself so flush sends BlockCommitted later iff we deferred at
+        // accumulate time. This guards against a re-derivation bug where
+        // a later `mark_persisted` could change the answer mid-flight.
+        let committee = TestCommittee::new(4, 1);
+        let mut coord = BlockCommitCoordinator::<MockStorage>::new(BlockHeight::GENESIS);
+
+        let max_lag = BlockCommitCoordinator::<MockStorage>::MAX_PERSISTENCE_LAG;
+        let (deferred, _) = make_commit(&committee, BlockHeight(max_lag + 1), CommitSource::Header);
+        let (immediate, _) = make_commit(&committee, BlockHeight(1), CommitSource::Aggregator);
+
+        let _ = coord.accumulate(deferred, now());
+        let _ = coord.accumulate(immediate, now());
+
+        let pending = &coord.pending;
+        let h_deferred = pending
+            .iter()
+            .find(|c| c.block.height().0 == max_lag + 1)
+            .unwrap();
+        let h_immediate = pending.iter().find(|c| c.block.height().0 == 1).unwrap();
+        assert!(!h_deferred.committed_notified);
+        assert!(h_immediate.committed_notified);
+    }
+
+    // ── mark_persisted ────────────────────────────────────────────────
+
+    #[test]
+    fn mark_persisted_is_monotonic() {
+        let mut coord = BlockCommitCoordinator::<MockStorage>::new(BlockHeight(3));
+        coord.mark_persisted(BlockHeight(7));
+        assert_eq!(coord.persisted_height().0, 7);
+        // Going backwards must not regress the high-water mark.
+        coord.mark_persisted(BlockHeight(2));
+        assert_eq!(coord.persisted_height().0, 7);
+    }
+
+    // ── prepared cache helpers ────────────────────────────────────────
+
+    #[test]
+    fn has_prepared_and_insert_prepared_roundtrip() {
+        let committee = TestCommittee::new(4, 1);
+        let coord = BlockCommitCoordinator::<MockStorage>::new(BlockHeight::GENESIS);
+        let (commit, prepared) = make_commit(&committee, BlockHeight(1), CommitSource::Sync);
+        let hash = commit.block.hash();
+
+        assert!(!coord.has_prepared(&hash));
+        coord.insert_prepared(hash, BlockHeight(1), prepared);
+        assert!(coord.has_prepared(&hash));
+        assert_eq!(coord.prepared_len(), 1);
+    }
+
+    // ── flush ─────────────────────────────────────────────────────────
+
+    fn install_prepared(
+        coord: &BlockCommitCoordinator<MockStorage>,
+        hash: BlockHash,
+        height: BlockHeight,
+        tag: u64,
+    ) {
+        coord.insert_prepared(
+            hash,
+            height,
+            MockPrepared {
+                snapshot: empty_snapshot(height),
+                tag,
+            },
+        );
+    }
+
+    fn enqueue(
+        coord: &mut BlockCommitCoordinator<MockStorage>,
+        committee: &TestCommittee,
+        height: BlockHeight,
+        source: CommitSource,
+    ) -> BlockHash {
+        let (commit, prepared) = make_commit(committee, height, source);
+        let hash = commit.block.hash();
+        let _ = coord.accumulate(commit, now());
+        coord.insert_prepared(hash, height, prepared);
+        hash
+    }
+
+    #[test]
+    fn flush_is_noop_when_pending_is_empty() {
+        let mut coord = BlockCommitCoordinator::<MockStorage>::new(BlockHeight::GENESIS);
+        let storage = Arc::new(MockStorage::default());
+        let (tx, rx) = unbounded();
+        let dispatch = SyncDispatch::new();
+
+        coord.flush(&storage, &tx, &dispatch);
+
+        assert!(storage.committed_heights().is_empty());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn flush_writes_blocks_in_height_order_even_when_accumulated_out_of_order() {
+        let committee = TestCommittee::new(4, 1);
+        let mut coord = BlockCommitCoordinator::<MockStorage>::new(BlockHeight::GENESIS);
+        let storage = Arc::new(MockStorage::default());
+        let (tx, rx) = unbounded();
+        let dispatch = SyncDispatch::new();
+
+        // Push h=3 before h=1, h=2 — flush must reorder before writing so
+        // that JMT parents land before children.
+        for h in [3u64, 1, 2] {
+            enqueue(
+                &mut coord,
+                &committee,
+                BlockHeight(h),
+                CommitSource::Aggregator,
+            );
+        }
+
+        coord.flush(&storage, &tx, &dispatch);
+
+        assert_eq!(storage.committed_heights(), vec![1, 2, 3]);
+        // No deferred BlockCommitted (all immediate); BlockPersisted at top.
+        let events = drain_protocol_events(&rx);
+        assert_eq!(count_committed(&events), 0);
+        assert_eq!(last_persisted_height(&events), Some(BlockHeight(3)));
+    }
+
+    #[test]
+    fn flush_drops_blocks_already_persisted_by_sync_path() {
+        // Sync may persist a block between accumulate (which accepted it
+        // because persisted_height was lower) and flush (where the height
+        // is now stale). The retain step must drop these silently.
+        let committee = TestCommittee::new(4, 1);
+        let mut coord = BlockCommitCoordinator::<MockStorage>::new(BlockHeight::GENESIS);
+        let storage = Arc::new(MockStorage::default());
+        let (tx, rx) = unbounded();
+        let dispatch = SyncDispatch::new();
+
+        enqueue(
+            &mut coord,
+            &committee,
+            BlockHeight(1),
+            CommitSource::Aggregator,
+        );
+        enqueue(
+            &mut coord,
+            &committee,
+            BlockHeight(2),
+            CommitSource::Aggregator,
+        );
+        // Sync races ahead and persists h=1 before flush.
+        coord.mark_persisted(BlockHeight(1));
+
+        coord.flush(&storage, &tx, &dispatch);
+
+        assert_eq!(storage.committed_heights(), vec![2]);
+        let events = drain_protocol_events(&rx);
+        assert_eq!(last_persisted_height(&events), Some(BlockHeight(2)));
+    }
+
+    #[test]
+    fn flush_defers_when_prepared_commit_missing_for_first_block() {
+        let committee = TestCommittee::new(4, 1);
+        let mut coord = BlockCommitCoordinator::<MockStorage>::new(BlockHeight::GENESIS);
+        let storage = Arc::new(MockStorage::default());
+        let (tx, rx) = unbounded();
+        let dispatch = SyncDispatch::new();
+
+        // Accumulate without ever inserting a prepared commit.
+        let (commit, _) = make_commit(&committee, BlockHeight(1), CommitSource::Aggregator);
+        let _ = coord.accumulate(commit, now());
+
+        coord.flush(&storage, &tx, &dispatch);
+
+        assert!(storage.committed_heights().is_empty());
+        assert_eq!(coord.pending_len(), 1, "block must remain pending");
+        // No spawned write means no BlockPersisted should have fired.
+        let events = drain_protocol_events(&rx);
+        assert!(last_persisted_height(&events).is_none());
+    }
+
+    #[test]
+    fn flush_defers_later_blocks_when_an_earlier_block_is_unprepared() {
+        // Height ordering must be preserved across flush boundaries: if h=2
+        // is missing its prepared commit, h=3 must wait too — even though its
+        // own prepared commit is ready — to keep parents before children.
+        let committee = TestCommittee::new(4, 1);
+        let mut coord = BlockCommitCoordinator::<MockStorage>::new(BlockHeight::GENESIS);
+        let storage = Arc::new(MockStorage::default());
+        let (tx, rx) = unbounded();
+        let dispatch = SyncDispatch::new();
+
+        // h=1 ready
+        enqueue(
+            &mut coord,
+            &committee,
+            BlockHeight(1),
+            CommitSource::Aggregator,
+        );
+        // h=2 accumulated but no prepared cached
+        let (h2, _) = make_commit(&committee, BlockHeight(2), CommitSource::Aggregator);
+        let _ = coord.accumulate(h2, now());
+        // h=3 ready
+        enqueue(
+            &mut coord,
+            &committee,
+            BlockHeight(3),
+            CommitSource::Aggregator,
+        );
+
+        coord.flush(&storage, &tx, &dispatch);
+
+        // Only h=1 should make it through; h=2 and h=3 stay pending.
+        assert_eq!(storage.committed_heights(), vec![1]);
+        let pending_heights: Vec<u64> = coord.pending.iter().map(|c| c.block.height().0).collect();
+        assert!(pending_heights.contains(&2));
+        assert!(pending_heights.contains(&3));
+
+        let events = drain_protocol_events(&rx);
+        assert_eq!(last_persisted_height(&events), Some(BlockHeight(1)));
+    }
+
+    #[test]
+    fn flush_emits_deferred_block_committed_events_after_persistence() {
+        // Pre-stage backpressure: persisted_height stays at 0 while we push
+        // commits up through height MAX_PERSISTENCE_LAG + 2. The first few
+        // notify immediately; the tail defers and must receive a
+        // BlockCommitted from the spawned write closure.
+        let committee = TestCommittee::new(4, 1);
+        let mut coord = BlockCommitCoordinator::<MockStorage>::new(BlockHeight::GENESIS);
+        let storage = Arc::new(MockStorage::default());
+        let (tx, rx) = unbounded();
+        let dispatch = SyncDispatch::new();
+
+        let max_lag = BlockCommitCoordinator::<MockStorage>::MAX_PERSISTENCE_LAG;
+        let total = max_lag + 2;
+        for h in 1..=total {
+            enqueue(
+                &mut coord,
+                &committee,
+                BlockHeight(h),
+                CommitSource::Aggregator,
+            );
+        }
+
+        coord.flush(&storage, &tx, &dispatch);
+
+        let events = drain_protocol_events(&rx);
+        // Exactly the deferred ones (heights MAX_LAG+1, MAX_LAG+2) come back
+        // through the channel — immediate notifies were short-circuited at
+        // accumulate time and aren't re-fired.
+        assert_eq!(count_committed(&events), 2, "events: {events:?}");
+        assert_eq!(last_persisted_height(&events), Some(BlockHeight(total)));
+    }
+
+    #[test]
+    fn flush_skips_when_a_previous_commit_is_still_in_flight() {
+        // The in-flight gate is the only thing that prevents two storage
+        // writes from racing on the I/O pool, where ordering between
+        // separate spawn() calls is not guaranteed.
+        let committee = TestCommittee::new(4, 1);
+        let mut coord = BlockCommitCoordinator::<MockStorage>::new(BlockHeight::GENESIS);
+        let storage = Arc::new(MockStorage::default());
+        let (tx, _rx) = unbounded();
+        let dispatch = SyncDispatch::new();
+
+        coord.commit_in_flight.store(true, Ordering::Release);
+
+        enqueue(
+            &mut coord,
+            &committee,
+            BlockHeight(1),
+            CommitSource::Aggregator,
+        );
+
+        coord.flush(&storage, &tx, &dispatch);
+
+        assert!(storage.committed_heights().is_empty());
+        assert_eq!(coord.pending_len(), 1);
+    }
+
+    #[test]
+    fn flush_clears_in_flight_flag_so_subsequent_flush_drains_backlog() {
+        // Backlog drains because the spawned closure clears commit_in_flight
+        // before sending BlockPersisted; the next feed_event → flush call
+        // sees the cleared flag and proceeds.
+        let committee = TestCommittee::new(4, 1);
+        let mut coord = BlockCommitCoordinator::<MockStorage>::new(BlockHeight::GENESIS);
+        let storage = Arc::new(MockStorage::default());
+        let (tx, _rx) = unbounded();
+        let dispatch = SyncDispatch::new();
+
+        enqueue(
+            &mut coord,
+            &committee,
+            BlockHeight(1),
+            CommitSource::Aggregator,
+        );
+        coord.flush(&storage, &tx, &dispatch);
+
+        assert!(!coord.commit_in_flight.load(Ordering::Acquire));
+
+        enqueue(
+            &mut coord,
+            &committee,
+            BlockHeight(2),
+            CommitSource::Aggregator,
+        );
+        coord.flush(&storage, &tx, &dispatch);
+
+        assert_eq!(storage.committed_heights(), vec![1, 2]);
+    }
+
+    #[test]
+    fn flush_consumes_prepared_commits_so_a_repeat_flush_finds_nothing() {
+        // The prepared cache is keyed by block hash; once the write spawned,
+        // the entry must be gone so a stray re-flush of the same height
+        // can't double-write.
+        let committee = TestCommittee::new(4, 1);
+        let mut coord = BlockCommitCoordinator::<MockStorage>::new(BlockHeight::GENESIS);
+        let storage = Arc::new(MockStorage::default());
+        let (tx, _rx) = unbounded();
+        let dispatch = SyncDispatch::new();
+
+        let hash = enqueue(
+            &mut coord,
+            &committee,
+            BlockHeight(1),
+            CommitSource::Aggregator,
+        );
+        coord.flush(&storage, &tx, &dispatch);
+
+        assert!(!coord.has_prepared(&hash));
+        assert_eq!(coord.pending_len(), 0);
+    }
+
+    #[test]
+    fn flush_keeps_qc_only_path_prepared_commit_until_it_is_used() {
+        // QC-only commits insert their PreparedCommit inline (via
+        // insert_prepared) rather than asynchronously through VerifyStateRoot.
+        // Flush must consume that handle the same way the async path does.
+        let committee = TestCommittee::new(4, 1);
+        let mut coord = BlockCommitCoordinator::<MockStorage>::new(BlockHeight::GENESIS);
+        let storage = Arc::new(MockStorage::default());
+        let (tx, _rx) = unbounded();
+        let dispatch = SyncDispatch::new();
+
+        let (commit, _) = make_commit(&committee, BlockHeight(1), CommitSource::Sync);
+        let hash = commit.block.hash();
+        let tag = next_tag();
+        install_prepared(&coord, hash, BlockHeight(1), tag);
+        let _ = coord.accumulate(commit, now());
+
+        coord.flush(&storage, &tx, &dispatch);
+
+        assert_eq!(storage.committed_heights(), vec![1]);
+        assert_eq!(storage.committed_tags(), vec![tag]);
+        assert!(!coord.has_prepared(&hash));
+    }
+}

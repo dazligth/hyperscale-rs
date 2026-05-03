@@ -26,6 +26,8 @@ tracing.workspace = true
 serde.workspace = true
 
 [dev-dependencies]
+hyperscale-dispatch-sync.workspace = true
+hyperscale-test-helpers.workspace = true
 
 [lints]
 workspace = true
