@@ -64,7 +64,9 @@
 //! that execute at different committed heights see different vault balances,
 //! producing different DatabaseUpdates and divergent state roots.
 
-use hyperscale_storage::{DatabaseUpdates, DbPartitionKey, SubstateDatabase};
+use hyperscale_storage::{
+    DatabaseUpdates, DbPartitionKey, PartitionDatabaseUpdates, SubstateDatabase,
+};
 use hyperscale_types::{BlockHeight, NodeId, ShardGroupId};
 use std::collections::{HashMap, HashSet};
 
@@ -315,9 +317,12 @@ pub fn filter_updates_for_global_receipt<S: SubstateDatabase>(
 
 /// Compute the `writes_root` for a `GlobalReceipt` from filtered `DatabaseUpdates`.
 ///
-/// SBOR-encodes the entire `DatabaseUpdates` (which uses `BTreeMap` for deterministic
-/// iteration order) and hashes to produce a single root. All validators executing
-/// the same transaction with the same declared nodes will produce identical output.
+/// `DatabaseUpdates` is built from `IndexMap`s at every level — Radix's
+/// `StateUpdates` documents itself as "not 100% canonical form" because the
+/// `by_node` order reflects engine touch order rather than a content-derived
+/// order. To make `writes_root` a pure function of the *content* of the
+/// updates (independent of how the maps were populated), we sort all
+/// `IndexMap`s by key before SBOR-encoding.
 ///
 /// # Panics
 ///
@@ -331,11 +336,31 @@ pub fn compute_writes_root(updates: &DatabaseUpdates) -> hyperscale_types::Write
         return WritesRoot::ZERO;
     }
 
-    // DatabaseUpdates uses BTreeMap internally, so SBOR encoding is
-    // deterministic across validators.
-    let encoded = radix_common::prelude::basic_encode(updates)
+    let mut canonical = updates.clone();
+    sort_database_updates(&mut canonical);
+    let encoded = radix_common::prelude::basic_encode(&canonical)
         .expect("DatabaseUpdates encoding should not fail");
     WritesRoot::from_raw(Hash::from_bytes(&encoded))
+}
+
+/// Sort every `IndexMap` inside `updates` by key, in-place.
+fn sort_database_updates(updates: &mut DatabaseUpdates) {
+    updates.node_updates.sort_keys();
+    for node_updates in updates.node_updates.values_mut() {
+        node_updates.partition_updates.sort_keys();
+        for partition_updates in node_updates.partition_updates.values_mut() {
+            match partition_updates {
+                PartitionDatabaseUpdates::Delta { substate_updates } => {
+                    substate_updates.sort_keys();
+                }
+                PartitionDatabaseUpdates::Reset {
+                    new_substate_values,
+                } => {
+                    new_substate_values.sort_keys();
+                }
+            }
+        }
+    }
 }
 
 // ============================================================================
@@ -372,4 +397,545 @@ pub fn node_entity_key(node_id: &NodeId) -> Vec<u8> {
     use radix_substate_store_interface::db_key_mapper::{DatabaseKeyMapper, SpreadPrefixKeyMapper};
     let radix_node_id = radix_common::types::NodeId(node_id.0);
     SpreadPrefixKeyMapper::to_db_node_key(&radix_node_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hyperscale_storage::{
+        DatabaseUpdate, DatabaseUpdates, DbPartitionKey, DbSortKey, NodeDatabaseUpdates,
+        PartitionDatabaseUpdates, SubstateDatabase, SubstateStore,
+    };
+    use hyperscale_types::{
+        BlockHeight, MerkleInclusionProof, NodeId, StateRoot, WritesRoot, shard_for_node,
+    };
+    use radix_substate_store_interface::db_key_mapper::{DatabaseKeyMapper, SpreadPrefixKeyMapper};
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    fn id_with_type(type_byte: u8, seed: u8) -> NodeId {
+        let mut id = [seed; 30];
+        id[0] = type_byte;
+        NodeId(id)
+    }
+
+    fn account_id(seed: u8) -> NodeId {
+        // 0x51 is a global account entity type — not in SYSTEM_ENTITY_TYPES
+        // and not in INTERNAL_ENTITY_TYPES, matching production usage.
+        id_with_type(0x51, seed)
+    }
+
+    fn fungible_vault_id(seed: u8) -> NodeId {
+        id_with_type(0x58, seed)
+    }
+
+    fn nonfungible_vault_id(seed: u8) -> NodeId {
+        id_with_type(0x98, seed)
+    }
+
+    /// SBOR-encoded `Own(node)` reference: [`SBOR_OWN_TAG`] followed by the
+    /// 30-byte `NodeId`.
+    fn own_bytes(node: &NodeId) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(31);
+        bytes.push(SBOR_OWN_TAG);
+        bytes.extend_from_slice(&node.0);
+        bytes
+    }
+
+    /// Pick a second seed whose account hashes to a different shard than `a`.
+    fn pick_other_shard_seed(a: NodeId, num_shards: u64) -> NodeId {
+        let target = shard_for_node(&a, num_shards);
+        for seed in 2u8..=255 {
+            let candidate = account_id(seed);
+            if candidate != a && shard_for_node(&candidate, num_shards) != target {
+                return candidate;
+            }
+        }
+        panic!("no other-shard seed found for num_shards={num_shards}");
+    }
+
+    fn make_set_update(
+        node: NodeId,
+        partition: u8,
+        sort: Vec<u8>,
+        value: Vec<u8>,
+    ) -> DatabaseUpdates {
+        let radix_node_id = radix_common::types::NodeId(node.0);
+        let db_node_key = SpreadPrefixKeyMapper::to_db_node_key(&radix_node_id);
+        let mut updates = DatabaseUpdates::default();
+        let nu = updates
+            .node_updates
+            .entry(db_node_key)
+            .or_insert_with(NodeDatabaseUpdates::default);
+        nu.partition_updates.insert(
+            partition,
+            PartitionDatabaseUpdates::Delta {
+                substate_updates: std::iter::once((DbSortKey(sort), DatabaseUpdate::Set(value)))
+                    .collect(),
+            },
+        );
+        updates
+    }
+
+    fn merge(mut a: DatabaseUpdates, b: DatabaseUpdates) -> DatabaseUpdates {
+        for (k, v) in b.node_updates {
+            a.node_updates.insert(k, v);
+        }
+        a
+    }
+
+    // ── MockDb: SubstateDatabase backed by an in-memory map ─────────────────
+
+    type PartitionEntries = Vec<(DbSortKey, Vec<u8>)>;
+    type PartitionMap = HashMap<(Vec<u8>, u8), PartitionEntries>;
+
+    #[derive(Clone, Default)]
+    struct MockDb {
+        partitions: PartitionMap,
+    }
+
+    impl MockDb {
+        fn insert(&mut self, owner: &NodeId, partition: u8, sort: Vec<u8>, value: Vec<u8>) {
+            let radix_node_id = radix_common::types::NodeId(owner.0);
+            let db_node_key = SpreadPrefixKeyMapper::to_db_node_key(&radix_node_id);
+            self.partitions
+                .entry((db_node_key, partition))
+                .or_default()
+                .push((DbSortKey(sort), value));
+        }
+    }
+
+    impl SubstateDatabase for MockDb {
+        fn get_raw_substate_by_db_key(
+            &self,
+            _partition_key: &DbPartitionKey,
+            _sort_key: &DbSortKey,
+        ) -> Option<Vec<u8>> {
+            None
+        }
+
+        fn list_raw_values_from_db_key(
+            &self,
+            partition_key: &DbPartitionKey,
+            _from_sort_key: Option<&DbSortKey>,
+        ) -> Box<dyn Iterator<Item = (DbSortKey, Vec<u8>)> + '_> {
+            let key = (partition_key.node_key.clone(), partition_key.partition_num);
+            match self.partitions.get(&key) {
+                Some(values) => Box::new(values.clone().into_iter()),
+                None => Box::new(std::iter::empty()),
+            }
+        }
+    }
+
+    // ── extract_owned_node_ids ───────────────────────────────────────────────
+
+    #[test]
+    fn extract_owned_short_value_is_noop() {
+        let mut ownership = HashMap::new();
+        extract_owned_node_ids(&[0x90; 5], account_id(1), &mut ownership);
+        assert!(ownership.is_empty());
+    }
+
+    #[test]
+    fn extract_owned_captures_internal_reference() {
+        let owner = account_id(1);
+        let vault = fungible_vault_id(2);
+        let mut ownership = HashMap::new();
+        extract_owned_node_ids(&own_bytes(&vault), owner, &mut ownership);
+        assert_eq!(ownership.get(&vault), Some(&owner));
+    }
+
+    #[test]
+    fn extract_owned_skips_non_internal_targets() {
+        // An Own pointing at another account (0x51) should be ignored —
+        // accounts are global, not internal entities.
+        let owner = account_id(1);
+        let other_account = account_id(2);
+        let mut ownership = HashMap::new();
+        extract_owned_node_ids(&own_bytes(&other_account), owner, &mut ownership);
+        assert!(ownership.is_empty());
+    }
+
+    #[test]
+    fn extract_owned_handles_each_internal_type() {
+        let owner = account_id(1);
+        for (i, &type_byte) in INTERNAL_ENTITY_TYPES.iter().enumerate() {
+            let seed = u8::try_from(i).expect("internal entity table fits in u8") + 10;
+            let target = id_with_type(type_byte, seed);
+            let mut ownership = HashMap::new();
+            extract_owned_node_ids(&own_bytes(&target), owner, &mut ownership);
+            assert_eq!(
+                ownership.get(&target),
+                Some(&owner),
+                "type 0x{type_byte:02x} should be captured"
+            );
+        }
+    }
+
+    #[test]
+    fn extract_owned_finds_multiple_in_one_value() {
+        let owner = account_id(1);
+        let v1 = fungible_vault_id(2);
+        let v2 = nonfungible_vault_id(3);
+        let mut value = own_bytes(&v1);
+        value.extend_from_slice(&own_bytes(&v2));
+        let mut ownership = HashMap::new();
+        extract_owned_node_ids(&value, owner, &mut ownership);
+        assert_eq!(ownership.len(), 2);
+        assert_eq!(ownership[&v1], owner);
+        assert_eq!(ownership[&v2], owner);
+    }
+
+    #[test]
+    fn extract_owned_first_owner_wins() {
+        // entry().or_insert means if the same vault is referenced twice
+        // by different owners, the first owner sticks.
+        let first = account_id(1);
+        let second = account_id(2);
+        let vault = fungible_vault_id(3);
+        let value = own_bytes(&vault);
+        let mut ownership = HashMap::new();
+        extract_owned_node_ids(&value, first, &mut ownership);
+        extract_owned_node_ids(&value, second, &mut ownership);
+        assert_eq!(ownership[&vault], first);
+    }
+
+    // ── db_node_key_to_node_id ───────────────────────────────────────────────
+
+    #[test]
+    fn db_node_key_short_returns_none() {
+        assert!(db_node_key_to_node_id(&[]).is_none());
+        assert!(db_node_key_to_node_id(&[0u8; 49]).is_none());
+    }
+
+    #[test]
+    fn db_node_key_round_trips_through_node_entity_key() {
+        let node = fungible_vault_id(42);
+        let key = node_entity_key(&node);
+        assert_eq!(key.len(), 50);
+        assert_eq!(db_node_key_to_node_id(&key), Some(node));
+    }
+
+    // ── is_internal_entity ───────────────────────────────────────────────────
+
+    #[test]
+    fn is_internal_entity_matches_internal_table() {
+        for &b in INTERNAL_ENTITY_TYPES {
+            assert!(is_internal_entity(b));
+        }
+        assert!(!is_internal_entity(0x51));
+        for &b in SYSTEM_ENTITY_TYPES {
+            assert!(!is_internal_entity(b));
+        }
+    }
+
+    // ── node_entity_key ──────────────────────────────────────────────────────
+
+    #[test]
+    fn node_entity_key_has_node_id_suffix() {
+        let node = fungible_vault_id(7);
+        let key = node_entity_key(&node);
+        assert_eq!(key.len(), 50);
+        assert_eq!(&key[20..], &node.0);
+    }
+
+    // ── compute_writes_root ──────────────────────────────────────────────────
+
+    #[test]
+    fn compute_writes_root_empty_is_zero() {
+        assert_eq!(
+            compute_writes_root(&DatabaseUpdates::default()),
+            WritesRoot::ZERO
+        );
+    }
+
+    #[test]
+    fn compute_writes_root_is_insertion_order_independent() {
+        // The cross-shard agreement contract requires that two validators which
+        // build the same logical `DatabaseUpdates` produce the same root
+        // regardless of how their underlying `IndexMap`s were populated. If
+        // this fails, validators executing the same transaction can disagree
+        // on `writes_root` and break global-receipt consensus.
+        let a = account_id(1);
+        let b = account_id(2);
+        let forward = merge(
+            make_set_update(a, 64, vec![0], vec![1]),
+            make_set_update(b, 64, vec![0], vec![1]),
+        );
+        let reverse = merge(
+            make_set_update(b, 64, vec![0], vec![1]),
+            make_set_update(a, 64, vec![0], vec![1]),
+        );
+        assert_eq!(compute_writes_root(&forward), compute_writes_root(&reverse));
+    }
+
+    #[test]
+    fn compute_writes_root_distinguishes_inputs() {
+        let a = make_set_update(account_id(1), 64, vec![0], vec![1]);
+        let b = make_set_update(account_id(2), 64, vec![0], vec![1]);
+        assert_ne!(compute_writes_root(&a), compute_writes_root(&b));
+    }
+
+    // ── resolve_owned_nodes ──────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_owned_walks_account_to_vault() {
+        let account = account_id(1);
+        let vault = fungible_vault_id(2);
+        let mut db = MockDb::default();
+        db.insert(&account, 64, vec![0], own_bytes(&vault));
+        let ownership = resolve_owned_nodes(&db, &[account]);
+        assert_eq!(ownership.get(&vault), Some(&account));
+    }
+
+    #[test]
+    fn resolve_owned_empty_when_no_substates() {
+        let db = MockDb::default();
+        let ownership = resolve_owned_nodes(&db, &[account_id(1)]);
+        assert!(ownership.is_empty());
+    }
+
+    #[test]
+    fn resolve_owned_scans_all_partitions() {
+        // Substate placed in a non-default partition is still discovered —
+        // the scan covers 0..=255.
+        let account = account_id(1);
+        let vault = fungible_vault_id(2);
+        let mut db = MockDb::default();
+        db.insert(&account, 200, vec![0], own_bytes(&vault));
+        let ownership = resolve_owned_nodes(&db, &[account]);
+        assert_eq!(ownership.get(&vault), Some(&account));
+    }
+
+    // ── filter_updates_for_shard ─────────────────────────────────────────────
+
+    #[test]
+    fn filter_for_shard_drops_system_entities() {
+        let account = account_id(1);
+        let consensus = id_with_type(0x86, 7);
+        let updates = merge(
+            make_set_update(account, 64, vec![0], vec![1]),
+            make_set_update(consensus, 64, vec![0], vec![1]),
+        );
+        let local = shard_for_node(&account, 4);
+        let filtered = filter_updates_for_shard(&updates, local, 4, &MockDb::default(), &[account]);
+        assert_eq!(filtered.node_updates.len(), 1);
+        let only = filtered.node_updates.keys().next().unwrap();
+        assert_eq!(db_node_key_to_node_id(only), Some(account));
+    }
+
+    #[test]
+    fn filter_for_shard_drops_undeclared_writes() {
+        // num_shards=1 isolates this from shard-routing concerns.
+        let account = account_id(1);
+        let stranger = account_id(2);
+        let updates = merge(
+            make_set_update(account, 64, vec![0], vec![1]),
+            make_set_update(stranger, 64, vec![0], vec![1]),
+        );
+        let local = shard_for_node(&account, 1);
+        let filtered = filter_updates_for_shard(&updates, local, 1, &MockDb::default(), &[account]);
+        assert_eq!(filtered.node_updates.len(), 1);
+    }
+
+    #[test]
+    fn filter_for_shard_drops_other_shard_writes() {
+        let a = account_id(1);
+        let b = pick_other_shard_seed(a, 4);
+        let local = shard_for_node(&a, 4);
+        let updates = merge(
+            make_set_update(a, 64, vec![0], vec![1]),
+            make_set_update(b, 64, vec![0], vec![1]),
+        );
+        let filtered = filter_updates_for_shard(&updates, local, 4, &MockDb::default(), &[a, b]);
+        assert_eq!(filtered.node_updates.len(), 1);
+        let only = filtered.node_updates.keys().next().unwrap();
+        assert_eq!(db_node_key_to_node_id(only), Some(a));
+    }
+
+    #[test]
+    fn filter_for_shard_keeps_owned_vault_with_owner() {
+        let account = account_id(1);
+        let vault = fungible_vault_id(2);
+        let mut db = MockDb::default();
+        db.insert(&account, 64, vec![0], own_bytes(&vault));
+        let updates = merge(
+            make_set_update(account, 64, vec![0], vec![1]),
+            make_set_update(vault, 0, vec![0], vec![1]),
+        );
+        let local = shard_for_node(&account, 1);
+        let filtered = filter_updates_for_shard(&updates, local, 1, &db, &[account]);
+        assert_eq!(filtered.node_updates.len(), 2);
+    }
+
+    #[test]
+    fn filter_for_shard_routes_owned_vault_by_owner_shard() {
+        // The vault hashes to whatever shard its random NodeId points at,
+        // but for routing we use the owning account's shard. Pick a vault
+        // whose own hash differs from its owner's shard, then verify the
+        // vault is kept iff we filter for the owner's shard.
+        let account = account_id(1);
+        let owner_shard = shard_for_node(&account, 4);
+        let mut vault_seed = 2u8;
+        let mut vault = fungible_vault_id(vault_seed);
+        while shard_for_node(&vault, 4) == owner_shard {
+            vault_seed = vault_seed.wrapping_add(1);
+            vault = fungible_vault_id(vault_seed);
+            assert_ne!(vault_seed, 1, "no diverging vault seed found");
+        }
+        let mut db = MockDb::default();
+        db.insert(&account, 64, vec![0], own_bytes(&vault));
+        let updates = make_set_update(vault, 0, vec![0], vec![1]);
+        // Filter at owner's shard — vault must be kept.
+        let kept = filter_updates_for_shard(&updates, owner_shard, 4, &db, &[account]);
+        assert_eq!(kept.node_updates.len(), 1);
+        // Filter at the vault's "natural" shard — must drop.
+        let dropped =
+            filter_updates_for_shard(&updates, shard_for_node(&vault, 4), 4, &db, &[account]);
+        assert!(dropped.node_updates.is_empty());
+    }
+
+    // ── filter_updates_for_global_receipt ────────────────────────────────────
+
+    #[test]
+    fn filter_for_global_receipt_keeps_writes_across_shards() {
+        let a = account_id(1);
+        let b = pick_other_shard_seed(a, 4);
+        let updates = merge(
+            make_set_update(a, 64, vec![0], vec![1]),
+            make_set_update(b, 64, vec![0], vec![1]),
+        );
+        let filtered = filter_updates_for_global_receipt(&updates, &MockDb::default(), &[a, b]);
+        assert_eq!(filtered.node_updates.len(), 2);
+    }
+
+    #[test]
+    fn filter_for_global_receipt_drops_system_and_undeclared() {
+        let account = account_id(1);
+        let stranger = account_id(2);
+        let consensus = id_with_type(0x86, 7);
+        let updates = merge(
+            merge(
+                make_set_update(account, 64, vec![0], vec![1]),
+                make_set_update(stranger, 64, vec![0], vec![1]),
+            ),
+            make_set_update(consensus, 64, vec![0], vec![1]),
+        );
+        let filtered = filter_updates_for_global_receipt(&updates, &MockDb::default(), &[account]);
+        assert_eq!(filtered.node_updates.len(), 1);
+        let only = filtered.node_updates.keys().next().unwrap();
+        assert_eq!(db_node_key_to_node_id(only), Some(account));
+    }
+
+    #[test]
+    fn filter_for_global_receipt_keeps_owned_vault() {
+        let account = account_id(1);
+        let vault = fungible_vault_id(2);
+        let mut db = MockDb::default();
+        db.insert(&account, 64, vec![0], own_bytes(&vault));
+        let updates = merge(
+            make_set_update(account, 64, vec![0], vec![1]),
+            make_set_update(vault, 0, vec![0], vec![1]),
+        );
+        let filtered = filter_updates_for_global_receipt(&updates, &db, &[account]);
+        assert_eq!(filtered.node_updates.len(), 2);
+    }
+
+    // ── expand_nodes_with_owned_at_height ────────────────────────────────────
+
+    type HeightSubstates = Vec<(u8, DbSortKey, Vec<u8>)>;
+    type SubstateHistory = HashMap<(NodeId, BlockHeight), HeightSubstates>;
+
+    #[derive(Clone, Default)]
+    struct MockStore {
+        substates_at_height: SubstateHistory,
+        missing_height: bool,
+    }
+
+    impl SubstateDatabase for MockStore {
+        fn get_raw_substate_by_db_key(&self, _: &DbPartitionKey, _: &DbSortKey) -> Option<Vec<u8>> {
+            None
+        }
+        fn list_raw_values_from_db_key(
+            &self,
+            _: &DbPartitionKey,
+            _: Option<&DbSortKey>,
+        ) -> Box<dyn Iterator<Item = (DbSortKey, Vec<u8>)> + '_> {
+            Box::new(std::iter::empty())
+        }
+    }
+
+    impl SubstateStore for MockStore {
+        type Snapshot<'a> = Self;
+        fn snapshot(&self) -> Self::Snapshot<'_> {
+            self.clone()
+        }
+        fn jmt_height(&self) -> BlockHeight {
+            BlockHeight::GENESIS
+        }
+        fn state_root(&self) -> StateRoot {
+            StateRoot::ZERO
+        }
+        fn list_substates_for_node_at_height(
+            &self,
+            node_id: &NodeId,
+            block_height: BlockHeight,
+        ) -> Option<Vec<(u8, DbSortKey, Vec<u8>)>> {
+            if self.missing_height {
+                return None;
+            }
+            Some(
+                self.substates_at_height
+                    .get(&(*node_id, block_height))
+                    .cloned()
+                    .unwrap_or_default(),
+            )
+        }
+        fn generate_merkle_proofs(
+            &self,
+            _: &[Vec<u8>],
+            _: BlockHeight,
+        ) -> Option<MerkleInclusionProof> {
+            None
+        }
+    }
+
+    #[test]
+    fn expand_at_height_returns_none_when_unavailable() {
+        let store = MockStore {
+            missing_height: true,
+            ..Default::default()
+        };
+        assert!(
+            expand_nodes_with_owned_at_height(&store, &[account_id(1)], BlockHeight(5)).is_none()
+        );
+    }
+
+    #[test]
+    fn expand_at_height_includes_owned_vaults_sorted_dedup() {
+        let account = account_id(1);
+        let vault = fungible_vault_id(2);
+        let height = BlockHeight(5);
+        let mut store = MockStore::default();
+        store.substates_at_height.insert(
+            (account, height),
+            vec![(64, DbSortKey(vec![0]), own_bytes(&vault))],
+        );
+
+        // Pass `vault` in declared list too — must not duplicate after dedup.
+        let expanded =
+            expand_nodes_with_owned_at_height(&store, &[account, vault], height).expect("present");
+        let mut expected = vec![account, vault];
+        expected.sort();
+        assert_eq!(expanded, expected);
+    }
+
+    #[test]
+    fn expand_at_height_returns_declared_when_no_ownership() {
+        let account = account_id(1);
+        let store = MockStore::default(); // no substates at any height
+        let expanded =
+            expand_nodes_with_owned_at_height(&store, &[account], BlockHeight(5)).expect("present");
+        assert_eq!(expanded, vec![account]);
+    }
 }
