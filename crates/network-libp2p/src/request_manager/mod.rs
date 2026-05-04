@@ -31,7 +31,7 @@
 //! ```
 
 mod concurrency;
-mod peer_health;
+pub mod peer_health;
 mod retry;
 mod stream;
 mod timeout;

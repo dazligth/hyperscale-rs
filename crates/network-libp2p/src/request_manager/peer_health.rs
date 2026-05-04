@@ -11,7 +11,7 @@
 //!
 //! // Record outcomes as requests complete
 //! tracker.record_success(&peer_id, Duration::from_millis(50));
-//! tracker.record_failure(&peer_id, true); // timeout
+//! tracker.record_failure(&peer_id, FailureKind::Timeout);
 //!
 //! // Select best peer from candidates
 //! if let Some(peer) = tracker.select_peer(&candidates) {
@@ -24,6 +24,16 @@ use std::time::{Duration, Instant};
 use dashmap::DashMap;
 use libp2p::PeerId;
 use rand::{RngExt, rng};
+
+/// Why a request failed. Drives the EMA penalty: timeouts are common under
+/// packet loss and weighted half as severely as other errors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureKind {
+    /// Network timeout — likely transient (packet loss, congestion).
+    Timeout,
+    /// Hard error (decode failure, peer rejection, transport error).
+    Other,
+}
 
 /// Health metrics for a single peer.
 #[derive(Debug, Clone)]
@@ -87,21 +97,15 @@ impl PeerHealth {
             rtt_secs.mul_add(Self::EMA_ALPHA, self.rtt_ema_secs * (1.0 - Self::EMA_ALPHA));
     }
 
-    /// Record a failed request (timeout or error).
-    ///
-    /// `is_timeout` distinguishes network timeouts (less severe) from hard errors.
-    /// Timeouts are common under packet loss and don't necessarily indicate a bad peer.
-    pub fn record_failure(&mut self, is_timeout: bool) {
+    /// Record a failed request.
+    pub fn record_failure(&mut self, kind: FailureKind) {
         self.total_failures += 1;
         self.last_failure = Some(Instant::now());
         self.in_flight = self.in_flight.saturating_sub(1);
 
-        // Update success rate EMA toward 0.0
-        // Timeouts are weighted less severely than hard errors
-        let penalty = if is_timeout {
-            Self::EMA_ALPHA * 0.5
-        } else {
-            Self::EMA_ALPHA
+        let penalty = match kind {
+            FailureKind::Timeout => Self::EMA_ALPHA * 0.5,
+            FailureKind::Other => Self::EMA_ALPHA,
         };
         self.success_rate_ema *= 1.0 - penalty;
     }
@@ -191,11 +195,8 @@ impl PeerHealthTracker {
     }
 
     /// Record a failed request to a peer.
-    pub fn record_failure(&self, peer: &PeerId, is_timeout: bool) {
-        self.peers
-            .entry(*peer)
-            .or_default()
-            .record_failure(is_timeout);
+    pub fn record_failure(&self, peer: &PeerId, kind: FailureKind) {
+        self.peers.entry(*peer).or_default().record_failure(kind);
     }
 
     /// Record that a request was started to a peer.
@@ -435,7 +436,7 @@ mod tests {
         let mut health = PeerHealth::default();
         let initial_rate = health.success_rate_ema;
 
-        health.record_failure(false);
+        health.record_failure(FailureKind::Other);
 
         assert!(health.success_rate_ema < initial_rate);
         assert_eq!(health.total_failures, 1);
@@ -447,8 +448,8 @@ mod tests {
         let mut health_timeout = PeerHealth::default();
         let mut health_error = PeerHealth::default();
 
-        health_timeout.record_failure(true); // timeout
-        health_error.record_failure(false); // hard error
+        health_timeout.record_failure(FailureKind::Timeout);
+        health_error.record_failure(FailureKind::Other);
 
         // Timeout should have higher success rate (less penalty)
         assert!(health_timeout.success_rate_ema > health_error.success_rate_ema);
@@ -473,7 +474,7 @@ mod tests {
 
         // 20 consecutive failures
         for _ in 0..20 {
-            health.record_failure(false);
+            health.record_failure(FailureKind::Other);
         }
 
         // Should be close to 0.0
@@ -503,7 +504,7 @@ mod tests {
         health.record_success(Duration::from_millis(50));
         assert_eq!(health.in_flight, 1);
 
-        health.record_failure(true);
+        health.record_failure(FailureKind::Timeout);
         assert_eq!(health.in_flight, 0);
 
         // Shouldn't go negative
@@ -518,7 +519,7 @@ mod tests {
 
         for _ in 0..10 {
             healthy.record_success(Duration::from_millis(50));
-            unhealthy.record_failure(false);
+            unhealthy.record_failure(FailureKind::Other);
         }
 
         assert!(healthy.selection_weight() > unhealthy.selection_weight() * 2.0);
@@ -573,7 +574,7 @@ mod tests {
         // Make one peer healthy, one unhealthy
         for _ in 0..20 {
             tracker.record_success(&healthy_peer, Duration::from_millis(50));
-            tracker.record_failure(&unhealthy_peer, false);
+            tracker.record_failure(&unhealthy_peer, FailureKind::Other);
         }
 
         // Run selection many times, healthy should be selected more often
@@ -652,7 +653,7 @@ mod tests {
             tracker.record_success(&peer_a, Duration::from_millis(50));
         }
         for _ in 0..10 {
-            tracker.record_failure(&peer_b, false);
+            tracker.record_failure(&peer_b, FailureKind::Other);
         }
 
         let global_rate = tracker.global_success_rate();
@@ -685,7 +686,7 @@ mod tests {
 
         tracker.record_request_started(&peer_a);
         tracker.record_success(&peer_a, Duration::from_millis(50));
-        tracker.record_failure(&peer_b, true);
+        tracker.record_failure(&peer_b, FailureKind::Timeout);
 
         let stats = tracker.stats();
         assert_eq!(stats.tracked_peers, 2);
@@ -807,7 +808,7 @@ mod tests {
         let mut health = PeerHealth::default();
         // Drive success rate to near-zero
         for _ in 0..50 {
-            health.record_failure(false);
+            health.record_failure(FailureKind::Other);
         }
         // Weight should still be positive (floor of 0.05)
         assert!(health.selection_weight() > 0.0);

@@ -24,6 +24,7 @@ use crate::adapter::Libp2pAdapter;
 use crate::inbound_router::{InboundRouterHandle, spawn_inbound_router};
 use crate::notify_pool::NotifyStreamPool;
 use crate::request_manager::RequestManager;
+use crate::request_manager::peer_health::FailureKind;
 
 // ═══════════════════════════════════════════════════════════════════════
 // Libp2pNetwork
@@ -247,7 +248,8 @@ impl Network for Libp2pNetwork {
                         }
                     };
                     if matches!(verdict, ResponseVerdict::Reject) {
-                        rm.health_tracker().record_failure(&peer, false);
+                        rm.health_tracker()
+                            .record_failure(&peer, FailureKind::Other);
                         record_request_retry("app_rejected");
                     }
                 }

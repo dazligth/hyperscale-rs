@@ -12,6 +12,7 @@ use libp2p::PeerId;
 use tokio::time::sleep;
 use tracing::{debug, trace, warn};
 
+use super::peer_health::FailureKind;
 use super::{RequestError, RequestManager};
 use crate::adapter::NetworkError;
 
@@ -90,7 +91,8 @@ impl RequestManager {
                     attempts += 1;
                     record_request_retry("timeout");
 
-                    self.health.record_failure(&current_peer, true);
+                    self.health
+                        .record_failure(&current_peer, FailureKind::Timeout);
 
                     if current_peer_attempts >= self.config.retries_before_rotation {
                         // Rotate to next peer
@@ -136,7 +138,8 @@ impl RequestManager {
                     // Other error—record and rotate.
                     attempts += 1;
                     record_request_retry("error");
-                    self.health.record_failure(&current_peer, false);
+                    self.health
+                        .record_failure(&current_peer, FailureKind::Other);
 
                     warn!(
                         peer = ?current_peer,
