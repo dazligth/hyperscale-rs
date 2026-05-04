@@ -130,7 +130,7 @@ where
                         provisions.transactions.len().max(1),
                     );
                     return GetProvisionResponse {
-                        provisions: Some((*provisions).clone()),
+                        provisions: Some(provisions),
                     };
                 }
 

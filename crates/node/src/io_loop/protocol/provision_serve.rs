@@ -4,6 +4,7 @@ use hyperscale_messages::request::GetProvisionsRequest;
 use hyperscale_messages::response::GetProvisionResponse;
 use hyperscale_storage::{ChainReader, SubstateStore};
 use hyperscale_types::ShardGroupId;
+use std::sync::Arc;
 use tracing::warn;
 
 /// Serve an inbound provision request from a target shard needing our state.
@@ -106,12 +107,12 @@ pub fn serve_provision_request(
         .collect();
 
     GetProvisionResponse {
-        provisions: Some(hyperscale_types::Provisions::new(
+        provisions: Some(Arc::new(hyperscale_types::Provisions::new(
             local_shard,
             req.target_shard,
             req.block_height,
             proof,
             transactions,
-        )),
+        ))),
     }
 }

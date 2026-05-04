@@ -2,6 +2,7 @@
 
 use hyperscale_types::{MessageClass, NetworkMessage, Provisions};
 use sbor::prelude::BasicSbor;
+use std::sync::Arc;
 
 /// Response to a provision fetch request containing the provisions bundle.
 ///
@@ -18,7 +19,10 @@ pub struct GetProvisionResponse {
     /// - `None` — the source shard cannot serve this request (block not
     ///   found, or the historical state version has been garbage-collected).
     ///   The requester should try a different peer.
-    pub provisions: Option<Provisions>,
+    ///
+    /// `Arc`-wrapped to keep server-side cache hits and dedup-slot transit
+    /// from deep-cloning the merkle proof + per-tx entries.
+    pub provisions: Option<Arc<Provisions>>,
 }
 
 impl NetworkMessage for GetProvisionResponse {

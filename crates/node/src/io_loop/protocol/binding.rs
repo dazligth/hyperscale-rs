@@ -438,6 +438,8 @@ impl FetchBinding for ProvisionBinding {
                     });
                     return ResponseVerdict::Reject;
                 }
+                // Refcount is 1 right after decode, so this moves rather than clones.
+                let provisions = std::sync::Arc::unwrap_or_clone(provisions);
                 let _ = es.send(NodeInput::Protocol(Box::new(
                     ProtocolEvent::ProvisionsReceived { provisions },
                 )));
