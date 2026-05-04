@@ -11,15 +11,14 @@
 //! signature once and merkle proofs per state entry against the committed
 //! state root.
 
-use crate::expected::ExpectedProvisionTracker;
-use crate::pipeline::ProvisionPipeline;
-use crate::queue::QueuedProvisionBuffer;
-use crate::store::ProvisionStore;
-use crate::verified_headers::VerifiedHeaderBuffer;
+use std::sync::Arc;
+use std::time::Duration;
+
 use hyperscale_core::{Action, FetchAbandon, FetchOrigin, FetchPeers, FetchRequest, ProtocolEvent};
 use hyperscale_types::{
-    BlockHeight, CommittedBlockHeader, Hash, LocalTimestamp, ProvisionHash, ProvisionTxRoot,
-    Provisions, RETENTION_HORIZON, ShardGroupId, TopologySnapshot, compute_padded_merkle_root,
+    BlockHeight, CertifiedBlock, CommittedBlockHeader, Hash, LocalTimestamp, ProvisionHash,
+    ProvisionTxRoot, Provisions, RETENTION_HORIZON, ShardGroupId, TopologySnapshot,
+    compute_padded_merkle_root,
 };
 #[cfg(test)]
 use hyperscale_types::{
@@ -27,9 +26,13 @@ use hyperscale_types::{
     ValidatorId,
 };
 use serde::Deserialize;
-use std::sync::Arc;
-use std::time::Duration;
 use tracing::{debug, info, warn};
+
+use crate::expected::ExpectedProvisionTracker;
+use crate::pipeline::ProvisionPipeline;
+use crate::queue::QueuedProvisionBuffer;
+use crate::store::ProvisionStore;
+use crate::verified_headers::VerifiedHeaderBuffer;
 
 /// Default minimum dwell time verified provisions sit in the queue before
 /// the proposer can include them in a block. Gives shard peers time to
@@ -192,7 +195,7 @@ impl ProvisionCoordinator {
     pub fn on_block_committed(
         &mut self,
         topology: &TopologySnapshot,
-        certified: &hyperscale_types::CertifiedBlock,
+        certified: &CertifiedBlock,
     ) -> Vec<Action> {
         let mut actions: Vec<Action> = Vec::new();
         let block = &certified.block;
@@ -302,10 +305,7 @@ impl ProvisionCoordinator {
     /// Called when urgency overrides the default patience — sync completion
     /// (validator needs to catch up before `WAVE_TIMEOUT` runs out) and the
     /// execution advance gate stalling on missing data.
-    pub fn flush_expected_provisions(
-        &mut self,
-        topology: &hyperscale_types::TopologySnapshot,
-    ) -> Vec<Action> {
+    pub fn flush_expected_provisions(&mut self, topology: &TopologySnapshot) -> Vec<Action> {
         self.expected
             .flush_all()
             .into_iter()
@@ -683,12 +683,15 @@ impl ProvisionCoordinator {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use hyperscale_types::{
-        BlockHash, BlockHeader, Bls12381G1PrivateKey, Hash, MerkleInclusionProof,
-        QuorumCertificate, Round, TopologySnapshot, TxEntries, ValidatorInfo, ValidatorSet, WaveId,
-        WeightedTimestamp, bls_keypair_from_seed,
+        Block, BlockHash, BlockHeader, Bls12381G1PrivateKey, Hash, MerkleInclusionProof,
+        ProposerTimestamp, QuorumCertificate, Round, TopologySnapshot, TxEntries, ValidatorInfo,
+        ValidatorSet, WaveId, WeightedTimestamp, bls_keypair_from_seed,
     };
+    use proptest::bool::ANY as ANY_BOOL;
+    use proptest::collection::vec as prop_vec;
+
+    use super::*;
 
     fn make_test_topology(local_shard: ShardGroupId) -> TopologySnapshot {
         // Create deterministic BLS keypairs for 6 validators (2 shards × 3 validators)
@@ -744,7 +747,7 @@ mod tests {
         let mut header_arc = make_committed_header_with_targets(shard, height, vec![local_shard]);
         let header = Arc::get_mut(&mut header_arc).unwrap();
         let raw: Vec<Hash> = tx_hashes.iter().map(|h| h.into_raw()).collect();
-        let root = ProvisionTxRoot::from_raw(hyperscale_types::compute_padded_merkle_root(&raw));
+        let root = ProvisionTxRoot::from_raw(compute_padded_merkle_root(&raw));
         header.header.provision_tx_roots.insert(local_shard, root);
         header_arc
     }
@@ -1276,7 +1279,7 @@ mod tests {
             parent_block_hash: BlockHash::from_raw(Hash::from_bytes(b"parent")),
             parent_qc: QuorumCertificate::genesis(),
             proposer: ValidatorId(0),
-            timestamp: hyperscale_types::ProposerTimestamp(1000 + height.0),
+            timestamp: ProposerTimestamp(1000 + height.0),
             round: Round::INITIAL,
             is_fallback: false,
             state_root: StateRoot::from_raw(Hash::from_bytes(
@@ -1304,25 +1307,21 @@ mod tests {
 
     /// Make a minimal `Block` at the given height for `on_block_committed` calls.
     /// The attached QC's `weighted_timestamp_ms` is `height * TEST_BLOCK_INTERVAL_MS`.
-    fn make_block(height: BlockHeight) -> hyperscale_types::CertifiedBlock {
-        let mut header = hyperscale_types::BlockHeader::genesis(
-            ShardGroupId(0),
-            ValidatorId(0),
-            StateRoot::ZERO,
-        );
+    fn make_block(height: BlockHeight) -> CertifiedBlock {
+        let mut header = BlockHeader::genesis(ShardGroupId(0), ValidatorId(0), StateRoot::ZERO);
         header.height = height;
-        let block = hyperscale_types::Block::Live {
+        let block = Block::Live {
             header,
             transactions: vec![],
             certificates: vec![],
             provisions: vec![],
         };
-        let qc = hyperscale_types::QuorumCertificate {
+        let qc = QuorumCertificate {
             block_hash: block.hash(),
             weighted_timestamp: WeightedTimestamp(height.0 * TEST_BLOCK_INTERVAL_MS),
-            ..hyperscale_types::QuorumCertificate::genesis()
+            ..QuorumCertificate::genesis()
         };
-        hyperscale_types::CertifiedBlock::new_unchecked(block, qc)
+        CertifiedBlock::new_unchecked(block, qc)
     }
 
     #[test]
@@ -1996,10 +1995,10 @@ mod tests {
         fn prop_all_stores_empty_after_advancing_past_every_deadline(
             // Up to 16 batches, each with a source height in [1, 50] —
             // their source ts (height * 500ms) anchors the deadline.
-            source_heights in proptest::collection::vec(1u64..=50, 0..=16),
+            source_heights in prop_vec(1u64..=50, 0..=16),
             // Some batches will be left pending (no header arrives), some
             // will be verified. A bool per provisions picks the path.
-            verify_path in proptest::collection::vec(proptest::bool::ANY, 0..=16),
+            verify_path in prop_vec(ANY_BOOL, 0..=16),
         ) {
             let topology = make_test_topology(ShardGroupId(0));
             let mut coordinator = ProvisionCoordinator::new();

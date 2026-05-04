@@ -7,23 +7,29 @@
 //! 4. Recovery (catch-up traffic)
 //! 5. Bulk (transaction gossip, fetch-fallback-backed)
 
-use super::behaviour::{Behaviour, BehaviourEvent};
-use super::command::{MAX_COMMANDS_PER_DRAIN, SwarmCommand};
-use super::gossipsub::ValidationReport;
-use crate::config::VersionInteroperabilityMode;
-use dashmap::DashMap;
-use futures::StreamExt;
-use hyperscale_network::HandlerRegistry;
-use hyperscale_types::{ShardGroupId, ValidatorId};
-use libp2p::{
-    Multiaddr, PeerId as Libp2pPeerId, Swarm, gossipsub, identify, kad, swarm::SwarmEvent,
-};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+
+use dashmap::DashMap;
+use futures::StreamExt;
+use hyperscale_metrics::record_gossipsub_publish_failure;
+use hyperscale_network::HandlerRegistry;
+use hyperscale_types::{ShardGroupId, ValidatorId};
+use libp2p::gossipsub::{IdentTopic, PublishError};
+use libp2p::identify::Event as IdentifyEvent;
+use libp2p::kad::{BootstrapOk, Event as KadEvent, QueryResult};
+use libp2p::swarm::SwarmEvent;
+use libp2p::{Multiaddr, PeerId as Libp2pPeerId, Swarm};
 use tokio::sync::mpsc;
+use tokio::time::{MissedTickBehavior, interval};
 use tracing::{debug, info, trace, warn};
+
+use super::behaviour::{Behaviour, BehaviourEvent};
+use super::command::{MAX_COMMANDS_PER_DRAIN, SwarmCommand};
+use super::gossipsub::ValidationReport;
+use crate::config::VersionInteroperabilityMode;
 
 /// Interval for periodic maintenance tasks in the event loop.
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5);
@@ -67,8 +73,8 @@ pub(super) async fn run(
     let mut kademlia_bootstrapped = false;
 
     // Maintenance timer for periodic tasks (reconnection, Kademlia refresh)
-    let mut maintenance_interval = tokio::time::interval(MAINTENANCE_INTERVAL);
-    maintenance_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut maintenance_interval = interval(MAINTENANCE_INTERVAL);
+    maintenance_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     // Track last Kademlia refresh time
     let mut last_kademlia_refresh = std::time::Instant::now();
@@ -238,7 +244,7 @@ pub(super) async fn run(
                 );
 
                 // Handle Identify events — version check + trigger validator-bind
-                if let SwarmEvent::Behaviour(BehaviourEvent::Identify(identify::Event::Received { peer_id, info, .. })) = &event {
+                if let SwarmEvent::Behaviour(BehaviourEvent::Identify(IdentifyEvent::Received { peer_id, info, .. })) = &event {
                     let local_version = option_env!("HYPERSCALE_VERSION").unwrap_or("localdev");
 
                     if let Some(remote_version) = parse_hyperscale_version(&info.agent_version) {
@@ -354,7 +360,7 @@ pub(super) async fn run(
                 // Handle Kademlia events for peer discovery
                 if let SwarmEvent::Behaviour(BehaviourEvent::Kademlia(kad_event)) = &event {
                     match kad_event {
-                        kad::Event::RoutingUpdated { peer, addresses, .. } => {
+                        KadEvent::RoutingUpdated { peer, addresses, .. } => {
                             debug!(
                                 peer = %peer,
                                 num_addresses = addresses.len(),
@@ -367,8 +373,8 @@ pub(super) async fn run(
                                 }
                             }
                         }
-                        kad::Event::OutboundQueryProgressed { result, .. } => {
-                            if let kad::QueryResult::Bootstrap(Ok(kad::BootstrapOk { num_remaining, .. })) = result {
+                        KadEvent::OutboundQueryProgressed { result, .. } => {
+                            if let QueryResult::Bootstrap(Ok(BootstrapOk { num_remaining, .. })) = result {
                                 debug!(num_remaining = num_remaining, "Kademlia bootstrap progress");
                             }
                         }
@@ -400,7 +406,7 @@ pub(super) async fn run(
 fn handle_command(swarm: &mut Swarm<Behaviour>, cmd: SwarmCommand) {
     match cmd {
         SwarmCommand::Subscribe { topic } => {
-            let topic = gossipsub::IdentTopic::new(topic);
+            let topic = IdentTopic::new(topic);
             if let Err(e) = swarm.behaviour_mut().gossipsub.subscribe(&topic) {
                 warn!("Failed to subscribe to topic: {}", e);
             } else {
@@ -408,7 +414,7 @@ fn handle_command(swarm: &mut Swarm<Behaviour>, cmd: SwarmCommand) {
             }
         }
         SwarmCommand::Broadcast { topic, data, .. } => {
-            let topic_ident = gossipsub::IdentTopic::new(topic);
+            let topic_ident = IdentTopic::new(topic);
             let data_len = data.len();
 
             if let Err(e) = swarm
@@ -418,7 +424,7 @@ fn handle_command(swarm: &mut Swarm<Behaviour>, cmd: SwarmCommand) {
             {
                 // Duplicate errors are expected - multiple validators create the same
                 // certificate and try to gossip it. Gossipsub correctly deduplicates.
-                if matches!(e, gossipsub::PublishError::Duplicate) {
+                if matches!(e, PublishError::Duplicate) {
                     trace!(topic = %topic_ident, "Gossipsub duplicate (expected, already delivered)");
                 } else {
                     // Other errors are significant - messages may be lost
@@ -429,7 +435,7 @@ fn handle_command(swarm: &mut Swarm<Behaviour>, cmd: SwarmCommand) {
                         peers = swarm.connected_peers().count(),
                         "Failed to publish message to gossipsub topic - message may be lost"
                     );
-                    hyperscale_metrics::record_gossipsub_publish_failure(&topic_ident.to_string());
+                    record_gossipsub_publish_failure(&topic_ident.to_string());
                 }
             } else {
                 trace!(topic = %topic_ident, data_len, "Published message to gossipsub topic");

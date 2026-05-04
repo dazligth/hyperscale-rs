@@ -10,14 +10,15 @@
 //! within the staleness threshold — the I/O loop's
 //! `RemoteHeaderSyncProtocol` then runs sliding-window catch-up.
 
-use hyperscale_core::{Action, ProtocolEvent};
-use hyperscale_types::{
-    BlockHeight, Bls12381G1PublicKey, CommittedBlockHeader, REMOTE_HEADER_RETENTION, ShardGroupId,
-    TopologySnapshot, ValidatorId, WeightedTimestamp,
-};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+
+use hyperscale_core::{Action, ProtocolEvent};
+use hyperscale_types::{
+    BlockHeight, Bls12381G1PublicKey, CertifiedBlock, CommittedBlockHeader,
+    REMOTE_HEADER_RETENTION, ShardGroupId, TopologySnapshot, ValidatorId, WeightedTimestamp,
+};
 use tracing::{debug, info, trace, warn};
 
 /// How long to wait before raising the per-shard sync target for a remote
@@ -319,7 +320,7 @@ impl RemoteHeaderCoordinator {
     pub fn on_block_committed(
         &mut self,
         topology: &TopologySnapshot,
-        certified: &hyperscale_types::CertifiedBlock,
+        certified: &CertifiedBlock,
     ) -> Vec<Action> {
         let new_ts = certified.qc.weighted_timestamp;
         let first_commit = self.local_committed_ts == WeightedTimestamp::ZERO;
@@ -574,12 +575,15 @@ impl RemoteHeaderCoordinator {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use hyperscale_types::{
-        BlockHash, BlockHeader, CertificateRoot, Hash, LocalReceiptRoot, ProvisionsRoot,
-        QuorumCertificate, Round, ShardGroupId, StateRoot, TransactionRoot, ValidatorId,
-    };
     use std::collections::BTreeMap;
+
+    use hyperscale_types::{
+        BlockHash, BlockHeader, CertificateRoot, Hash, LocalReceiptRoot, ProposerTimestamp,
+        ProvisionsRoot, QuorumCertificate, Round, ShardGroupId, StateRoot, TransactionRoot,
+        ValidatorId,
+    };
+
+    use super::*;
 
     // Basic structural tests — full integration tests require TopologySnapshot
     // which is tested via node-level tests.
@@ -602,7 +606,7 @@ mod tests {
             parent_block_hash: BlockHash::ZERO,
             parent_qc: QuorumCertificate::genesis(),
             proposer: ValidatorId(0),
-            timestamp: hyperscale_types::ProposerTimestamp(1_234_567_890),
+            timestamp: ProposerTimestamp(1_234_567_890),
             round: Round::INITIAL,
             is_fallback: false,
             state_root: StateRoot::ZERO,

@@ -5,8 +5,9 @@
 //! tracked as `LocalTimestamp` (the `io_loop`'s monotonic local clock) so both
 //! production and simulation use the same paths.
 
-use hyperscale_types::LocalTimestamp;
 use std::time::Duration;
+
+use hyperscale_types::LocalTimestamp;
 
 /// A batch accumulator that collects items until a count or time limit is reached.
 ///

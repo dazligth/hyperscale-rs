@@ -1,9 +1,10 @@
 //! Configuration types for the simulator.
 
+use std::time::Duration;
+
 use hyperscale_network_memory::NetworkConfig;
 use hyperscale_spammer::SelectionMode;
 use radix_common::math::Decimal;
-use std::time::Duration;
 
 /// Configuration for a simulation run.
 #[derive(Clone, Debug)]

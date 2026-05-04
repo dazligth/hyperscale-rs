@@ -4,10 +4,12 @@
 //! proposals from the same triple — ready txs from mempool, finalized waves
 //! from execution, queued provisions — so the gather logic lives once here.
 
-use super::NodeStateMachine;
+use std::sync::Arc;
+
 use hyperscale_core::Action;
 use hyperscale_types::{FinalizedWave, Provisions, RoutableTransaction};
-use std::sync::Arc;
+
+use super::NodeStateMachine;
 
 /// Inputs gathered for building a block proposal.
 pub(super) struct ProposalInputs {

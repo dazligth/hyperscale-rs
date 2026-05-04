@@ -70,12 +70,13 @@ impl NetworkMessage for BlockHeaderNotification {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use hyperscale_types::{
         BlockHash, BlockHeight, CertificateRoot, Hash, LocalReceiptRoot, ProposerTimestamp,
         ProvisionsRoot, QuorumCertificate, Round, ShardGroupId, StateRoot, TransactionRoot, TxHash,
         ValidatorId,
     };
-    use std::collections::BTreeMap;
 
     use super::*;
 

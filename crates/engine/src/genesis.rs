@@ -16,7 +16,9 @@ use radix_common::math::Decimal;
 use radix_common::network::NetworkDefinition;
 use radix_common::prelude::Epoch;
 use radix_common::types::ComponentAddress;
-use radix_engine::system::bootstrap::{GenesisDataChunk, GenesisStakeAllocation, GenesisValidator};
+use radix_engine::system::bootstrap::{
+    GenesisDataChunk, GenesisReceiptExtractionHooks, GenesisStakeAllocation, GenesisValidator,
+};
 use radix_engine::updates::{BabylonSettings, ProtocolBuilder, ProtocolVersion};
 use radix_engine::vm::VmModules;
 use radix_engine_interface::blueprints::consensus_manager::ConsensusManagerConfig;
@@ -104,8 +106,9 @@ impl GenesisConfig {
     /// Panics if SBOR encoding of [`BabylonSettings`] fails — unreachable in
     /// practice; the type is fully Scrypto-encodable.
     pub fn cache_hash<H: std::hash::Hasher>(&self, hasher: &mut H) {
-        use radix_common::prelude::scrypto_encode;
         use std::hash::Hash;
+
+        use radix_common::prelude::scrypto_encode;
 
         let settings = self.to_babylon_settings();
         scrypto_encode(&settings)
@@ -166,7 +169,7 @@ where
     S: SubstateDatabase + CommittableSubstateDatabase,
 {
     let babylon_settings = config.to_babylon_settings();
-    let mut hooks = radix_engine::system::bootstrap::GenesisReceiptExtractionHooks::new();
+    let mut hooks = GenesisReceiptExtractionHooks::new();
     let vm_modules = VmModules::default();
 
     ProtocolBuilder::for_network(network)

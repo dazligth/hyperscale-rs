@@ -1,11 +1,14 @@
 //! Adaptive concurrency control for request management.
 
-use super::{RequestError, RequestManager, is_cross_shard, uses_relaxed_retry};
-use hyperscale_metrics as metrics;
-use hyperscale_types::MessageClass;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
+
+use hyperscale_metrics::{record_request_slot_wait, set_request_slots_in_flight};
+use hyperscale_types::MessageClass;
+use tokio::time::sleep;
 use tracing::{info, trace, warn};
+
+use super::{RequestError, RequestManager, is_cross_shard, uses_relaxed_retry};
 
 /// Pure admission decision: would a request of `class` be admitted right now?
 ///
@@ -119,8 +122,8 @@ impl RequestManager {
                 }
                 let idx = Self::class_index(class);
                 let class_now = self.per_class_in_flight[idx].fetch_add(1, Ordering::SeqCst) + 1;
-                metrics::set_request_slots_in_flight(class.as_str(), class_now);
-                metrics::record_request_slot_wait(class.as_str(), start.elapsed().as_secs_f64());
+                set_request_slots_in_flight(class.as_str(), class_now);
+                record_request_slot_wait(class.as_str(), start.elapsed().as_secs_f64());
                 return Ok(());
             }
 
@@ -135,11 +138,11 @@ impl RequestManager {
                     ?class,
                     "Timed out waiting for concurrency slot"
                 );
-                metrics::record_request_slot_wait(class.as_str(), start.elapsed().as_secs_f64());
+                record_request_slot_wait(class.as_str(), start.elapsed().as_secs_f64());
                 return Err(RequestError::Exhausted { attempts: 0 });
             }
 
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            sleep(Duration::from_millis(10)).await;
         }
     }
 
@@ -156,7 +159,7 @@ impl RequestManager {
         }
         let idx = Self::class_index(class);
         let class_now = self.per_class_in_flight[idx].fetch_sub(1, Ordering::SeqCst) - 1;
-        metrics::set_request_slots_in_flight(class.as_str(), class_now);
+        set_request_slots_in_flight(class.as_str(), class_now);
     }
 
     /// Reduce effective concurrency due to poor network conditions.

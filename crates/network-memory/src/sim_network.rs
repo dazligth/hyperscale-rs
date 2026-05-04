@@ -10,13 +10,16 @@
 //! encoding path. [`SimulatedNetwork::flush_gossip`](crate::SimulatedNetwork::flush_gossip)
 //! delivers due messages via each target's registered per-type gossip handler.
 
+use std::sync::{Arc, Mutex};
+
 use hyperscale_network::{
     GossipHandler, HandlerRegistry, Network, NotificationHandler, RequestError, RequestHandler,
     ResponseVerdict, TopicScope, compression,
 };
-use hyperscale_types::{NetworkMessage, Request, ShardGroupId, ShardMessage, ValidatorId};
-use sbor::basic_encode;
-use std::sync::{Arc, Mutex};
+use hyperscale_types::{
+    MessageClass, NetworkMessage, Request, ShardGroupId, ShardMessage, ValidatorId,
+};
+use sbor::{basic_decode, basic_encode};
 
 /// Target for an outbound message.
 #[derive(Debug, Clone)]
@@ -217,17 +220,17 @@ impl Network for SimNetworkAdapter {
         peers: &[ValidatorId],
         preferred_peer: Option<ValidatorId>,
         request: R,
-        _class_override: Option<hyperscale_types::MessageClass>,
+        _class_override: Option<MessageClass>,
         on_response: Box<dyn FnOnce(Result<R::Response, RequestError>) -> ResponseVerdict + Send>,
     ) {
         let request_bytes =
-            sbor::basic_encode(&request).expect("SimNetworkAdapter: failed to encode request");
+            basic_encode(&request).expect("SimNetworkAdapter: failed to encode request");
 
         // Wrap the typed callback: decode raw response bytes → R::Response
         let typed_callback: Box<
             dyn FnOnce(Result<Vec<u8>, RequestError>) -> ResponseVerdict + Send,
         > = Box::new(move |result| match result {
-            Ok(bytes) => match sbor::basic_decode::<R::Response>(&bytes) {
+            Ok(bytes) => match basic_decode::<R::Response>(&bytes) {
                 Ok(response) => on_response(Ok(response)),
                 Err(e) => on_response(Err(RequestError::PeerError(format!("decode error: {e:?}")))),
             },
@@ -246,16 +249,16 @@ impl Network for SimNetworkAdapter {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use hyperscale_messages::TransactionGossip;
-    use hyperscale_types::{
-        BlockHeight, ShardGroupId,
-        test_utils::{test_node, test_transaction_with_nodes},
-    };
     use std::sync::Mutex as StdMutex;
 
+    use hyperscale_messages::TransactionGossip;
+    use hyperscale_types::test_utils::{test_node, test_transaction_with_nodes};
+    use hyperscale_types::{BlockHeight, ShardGroupId};
+
+    use super::*;
+
     fn test_gossip() -> TransactionGossip {
-        TransactionGossip::from_arcs(vec![std::sync::Arc::new(test_transaction_with_nodes(
+        TransactionGossip::from_arcs(vec![Arc::new(test_transaction_with_nodes(
             &[1, 2, 3],
             vec![test_node(1)],
             vec![test_node(2)],
@@ -334,7 +337,7 @@ mod tests {
         // Encode a real request, call the raw handler, verify it works.
         let handler = adapter.registry.get_request("block.request").unwrap();
         let req = GetBlockRequest::new(BlockHeight(1), BlockHeight(1));
-        let req_bytes = sbor::basic_encode(&req).unwrap();
+        let req_bytes = basic_encode(&req).unwrap();
         let response_bytes = handler(&req_bytes);
         assert!(!response_bytes.is_empty());
     }
@@ -363,7 +366,7 @@ mod tests {
         assert!(!requests[0].request_bytes.is_empty());
 
         // Verify the request bytes decode correctly
-        let decoded: GetBlockRequest = sbor::basic_decode(&requests[0].request_bytes).unwrap();
+        let decoded: GetBlockRequest = basic_decode(&requests[0].request_bytes).unwrap();
         assert_eq!(decoded.height, BlockHeight(42));
     }
 
@@ -393,7 +396,7 @@ mod tests {
 
         // Simulate a successful response with SBOR-encoded bytes
         let response = GetBlockResponse::not_found();
-        let response_bytes = sbor::basic_encode(&response).unwrap();
+        let response_bytes = basic_encode(&response).unwrap();
         on_response(Ok(response_bytes));
 
         let captured = result.lock().unwrap().take().unwrap();

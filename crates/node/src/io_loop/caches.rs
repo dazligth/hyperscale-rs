@@ -12,12 +12,13 @@
 //! (`Continuation(FinalizedWavesAdmitted)`, validated transactions, terminal
 //! status), and handlers read them on remote-peer requests.
 
+use std::sync::Arc;
+
 use hyperscale_execution::ExecCertStore;
 use hyperscale_mempool::TxStore;
 use hyperscale_provisions::ProvisionStore;
 use hyperscale_types::{FinalizedWave, TransactionStatus, TxHash, WaveId};
 use quick_cache::sync::Cache as QuickCache;
-use std::sync::Arc;
 
 /// Default certificate cache capacity.
 pub(super) const DEFAULT_CERT_CACHE_SIZE: usize = 10_000;

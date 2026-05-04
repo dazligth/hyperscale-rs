@@ -1,14 +1,20 @@
 //! `SubstateStore` implementation for `RocksDbStorage`.
 
+use std::time::Instant;
+
+use hex::encode as hex_encode;
+use hyperscale_metrics::{record_storage_operation, record_storage_write};
+use hyperscale_storage::tree::proofs::generate_proof;
+use hyperscale_storage::{DbSortKey, JmtSnapshot, SubstateStore, VersionedStore};
+use hyperscale_types::{
+    Block, BlockHeight, MerkleInclusionProof, NodeId, QuorumCertificate, StateRoot,
+};
+use rocksdb::{WriteBatch, WriteOptions};
+
 use crate::core::RocksDbStorage;
 use crate::jmt_snapshot_store::SnapshotTreeStore;
+use crate::metadata::read_jmt_metadata;
 use crate::snapshot::RocksDbSnapshot;
-
-use hyperscale_metrics as metrics;
-use hyperscale_storage::{DbSortKey, JmtSnapshot, SubstateStore, VersionedStore};
-use hyperscale_types::{BlockHeight, NodeId};
-use rocksdb::WriteBatch;
-use std::time::Instant;
 
 impl SubstateStore for RocksDbStorage {
     type Snapshot<'a> = RocksDbSnapshot<'a>;
@@ -18,7 +24,7 @@ impl SubstateStore for RocksDbStorage {
         // snapshot's own LSN. Picking the version from a separate live
         // read would race with commits (see `snapshot_at` for details).
         let snapshot = self.db.snapshot();
-        let (current_version, _) = crate::metadata::read_jmt_metadata(&snapshot);
+        let (current_version, _) = read_jmt_metadata(&snapshot);
         RocksDbSnapshot {
             snapshot,
             db: &self.db,
@@ -31,7 +37,7 @@ impl SubstateStore for RocksDbStorage {
         BlockHeight(self.read_jmt_metadata().0)
     }
 
-    fn state_root(&self) -> hyperscale_types::StateRoot {
+    fn state_root(&self) -> StateRoot {
         let (_, root_hash) = self.read_jmt_metadata();
         root_hash
     }
@@ -44,7 +50,7 @@ impl SubstateStore for RocksDbStorage {
         // Take the snapshot first so bounds checks and the subsequent
         // reads all see one consistent LSN (see `snapshot_at` for why).
         let snapshot = self.db.snapshot();
-        let (current_version, _) = crate::metadata::read_jmt_metadata(&snapshot);
+        let (current_version, _) = read_jmt_metadata(&snapshot);
         if block_height.0 > current_version {
             return None;
         }
@@ -69,15 +75,11 @@ impl SubstateStore for RocksDbStorage {
         &self,
         storage_keys: &[Vec<u8>],
         block_height: BlockHeight,
-    ) -> Option<hyperscale_types::MerkleInclusionProof> {
+    ) -> Option<MerkleInclusionProof> {
         // Use a RocksDB snapshot for all reads so concurrent JMT GC cannot
         // delete nodes mid-proof-generation.
         let snapshot_store = SnapshotTreeStore::new(&self.db);
-        hyperscale_storage::tree::proofs::generate_proof(
-            &snapshot_store,
-            storage_keys,
-            block_height,
-        )
+        generate_proof(&snapshot_store, storage_keys, block_height)
     }
 }
 
@@ -91,7 +93,7 @@ impl VersionedStore for RocksDbStorage {
         // and returns post-commit StateCf values — a torn read.
         // Capturing both from the same snapshot gives one consistent view.
         let snapshot = self.db.snapshot();
-        let (current_version, _) = crate::metadata::read_jmt_metadata(&snapshot);
+        let (current_version, _) = read_jmt_metadata(&snapshot);
 
         // Retention invariant: below the configured floor we can't
         // serve historical reads reliably (history entries have been GC'd).
@@ -135,8 +137,8 @@ impl RocksDbStorage {
         &self,
         mut write_batch: WriteBatch,
         jmt_snapshot: &JmtSnapshot,
-        block: &hyperscale_types::Block,
-        qc: &hyperscale_types::QuorumCertificate,
+        block: &Block,
+        qc: &QuorumCertificate,
         sync: bool,
     ) -> bool {
         let _commit_guard = self.commit_lock.lock().unwrap();
@@ -176,7 +178,7 @@ impl RocksDbStorage {
 
         // Apply everything atomically. When batching multiple blocks, only
         // the final block sets sync=true — its fsync covers all prior WAL entries.
-        let mut write_opts = rocksdb::WriteOptions::default();
+        let mut write_opts = WriteOptions::default();
         write_opts.set_sync(sync);
 
         self.db.write_opt(write_batch, &write_opts).expect(
@@ -188,12 +190,12 @@ impl RocksDbStorage {
         // verification) hit the cache instead of deserializing from RocksDB.
 
         let elapsed = start.elapsed();
-        metrics::record_storage_write(elapsed.as_secs_f64());
-        metrics::record_storage_operation("apply_prepared_commit", elapsed.as_secs_f64());
+        record_storage_write(elapsed.as_secs_f64());
+        record_storage_operation("apply_prepared_commit", elapsed.as_secs_f64());
 
         tracing::debug!(
             new_version,
-            new_root = %hex::encode(new_root.as_raw().to_bytes()),
+            new_root = %hex_encode(new_root.as_raw().to_bytes()),
             nodes_count,
             stale_count,
             associations_count,

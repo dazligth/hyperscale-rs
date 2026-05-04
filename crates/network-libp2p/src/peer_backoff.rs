@@ -9,9 +9,10 @@
 //! [`RequestStreamPool`]: crate::RequestStreamPool
 //! [`NotifyStreamPool`]: crate::notify_pool
 
+use std::time::{Duration, Instant};
+
 use dashmap::DashMap;
 use libp2p::PeerId;
-use std::time::{Duration, Instant};
 
 /// Initial reconnection backoff after the first stream failure.
 pub const INITIAL_BACKOFF: Duration = Duration::from_millis(100);

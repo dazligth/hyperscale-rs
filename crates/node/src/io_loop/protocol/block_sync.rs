@@ -19,10 +19,12 @@
 //! - [`BlockSyncStateKind`] — high-level Idle/Syncing tag for status APIs
 //! - [`BlockSyncStatus`] — combined status snapshot (state + scope counters)
 
-use super::sync::{ScopeStatus, Sync, SyncBinding, SyncConfig, SyncInput, SyncOutput};
+use std::collections::HashSet;
+
 use hyperscale_types::BlockHeight;
 use serde::Serialize;
-use std::collections::HashSet;
+
+use super::sync::{ScopeStatus, Sync, SyncBinding, SyncConfig, SyncInput, SyncOutput};
 
 /// Configuration alias for block-sync.
 pub type BlockSyncConfig = SyncConfig;

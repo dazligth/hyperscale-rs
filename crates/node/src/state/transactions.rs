@@ -10,10 +10,12 @@
 //! Raw gossip arrivals enter `IoLoop` as `NodeInput::TransactionGossipReceived`
 //! and never reach the state machine; the validated form does.
 
-use super::NodeStateMachine;
+use std::sync::Arc;
+
 use hyperscale_core::{Action, ProtocolEvent};
 use hyperscale_types::RoutableTransaction;
-use std::sync::Arc;
+
+use super::NodeStateMachine;
 
 impl NodeStateMachine {
     /// Dispatch a transaction-category `ProtocolEvent`.
@@ -73,10 +75,12 @@ impl NodeStateMachine {
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::TestNode;
+    use std::sync::Arc;
+
     use hyperscale_core::{ProtocolEvent, StateMachine};
     use hyperscale_types::test_utils::{test_transaction, test_transaction_with_nodes};
-    use std::sync::Arc;
+
+    use super::super::test_support::TestNode;
 
     /// Validated gossip transactions are gated by the local-shard filter
     /// before reaching mempool. A tx with empty reads/writes never

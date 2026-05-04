@@ -1,9 +1,12 @@
 //! Read/write set extraction from Radix manifest instructions.
 
-use crate::NodeId;
-use radix_common::data::manifest::model::{ManifestGlobalAddress, ManifestPackageAddress};
-use radix_transactions::model::{InstructionV1, InstructionV2};
 use std::collections::HashSet;
+
+use radix_common::data::manifest::model::{ManifestGlobalAddress, ManifestPackageAddress};
+use radix_common::types::NodeId as RadixNodeId;
+use radix_transactions::model::{InstructionV1, InstructionV2};
+
+use crate::NodeId;
 
 /// Analyze V1 transaction instructions to extract accessed `NodeIds`.
 pub(super) fn analyze_instructions_v1(
@@ -234,7 +237,7 @@ fn is_system_package(node_id: &NodeId) -> bool {
         ROYALTY_MODULE_PACKAGE, TRANSACTION_PROCESSOR_PACKAGE, TRANSACTION_TRACKER_PACKAGE,
     };
 
-    let radix_node_id = radix_common::types::NodeId(node_id.0);
+    let radix_node_id = RadixNodeId(node_id.0);
     let well_known_packages = [
         PACKAGE_PACKAGE,
         RESOURCE_PACKAGE,
@@ -262,7 +265,7 @@ fn is_system_package(node_id: &NodeId) -> bool {
 fn is_system_component(node_id: &NodeId) -> bool {
     use radix_common::constants::{CONSENSUS_MANAGER, FAUCET, GENESIS_HELPER, TRANSACTION_TRACKER};
 
-    let radix_node_id = radix_common::types::NodeId(node_id.0);
+    let radix_node_id = RadixNodeId(node_id.0);
     let well_known_components = [
         CONSENSUS_MANAGER,
         GENESIS_HELPER,
@@ -283,7 +286,7 @@ fn is_system_resource(node_id: &NodeId) -> bool {
         SECP256K1_SIGNATURE_RESOURCE, SYSTEM_EXECUTION_RESOURCE, VALIDATOR_OWNER_BADGE, XRD,
     };
 
-    let radix_node_id = radix_common::types::NodeId(node_id.0);
+    let radix_node_id = RadixNodeId(node_id.0);
     let well_known_resources = [
         XRD,
         SECP256K1_SIGNATURE_RESOURCE,

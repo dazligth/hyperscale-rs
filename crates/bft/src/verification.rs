@@ -8,19 +8,20 @@
 //! transaction ordering, `waves` recomputation, cross-ancestor tx uniqueness)
 //! live in [`crate::validation`].
 
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+use hyperscale_core::{Action, VerificationKind};
 #[cfg(test)]
 use hyperscale_types::Hash;
 use hyperscale_types::{
     Block, BlockHash, BlockHeader, BlockHeight, BlockManifest, FinalizedWave, LocalReceiptRoot,
     ProvisionsRoot, StateRoot, TopologySnapshot,
 };
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use tracing::{debug, trace, warn};
 
 use crate::chain_view::ChainView;
 use crate::pending::PendingBlock;
-use hyperscale_core::{Action, VerificationKind};
 
 /// Block header pending QC signature verification.
 ///
@@ -1039,7 +1040,7 @@ impl VerificationPipeline {
     /// scenarios where multiple proposals share the same parent QC.
     pub fn cleanup(
         &mut self,
-        pending_blocks: &HashMap<BlockHash, crate::pending::PendingBlock>,
+        pending_blocks: &HashMap<BlockHash, PendingBlock>,
         committed_height: BlockHeight,
     ) {
         self.pending_qc_verifications
@@ -1108,13 +1109,15 @@ impl VerificationPipeline {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::pending::PendingBlock;
+    use std::collections::BTreeMap;
+
     use hyperscale_types::{
         CertificateRoot, LocalReceiptRoot, LocalTimestamp, ProposerTimestamp, QuorumCertificate,
         Round, RoutableTransaction, ShardGroupId, TransactionRoot, ValidatorId,
     };
-    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::pending::PendingBlock;
 
     fn header(height: BlockHeight, parent_block_hash: BlockHash, in_flight: u32) -> BlockHeader {
         BlockHeader {

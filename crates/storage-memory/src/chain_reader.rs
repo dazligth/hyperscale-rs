@@ -1,14 +1,15 @@
 //! `ChainReader` implementation for `SimStorage`.
 
-use crate::core::SimStorage;
+use std::sync::Arc;
 
 use hyperscale_storage::{BlockForSync, ChainReader};
 use hyperscale_types::{
-    BlockHash, BlockHeight, CertifiedBlock, CommittedBlockHeader, ConsensusReceipt,
+    BlockHash, BlockHeight, BlockManifest, CertifiedBlock, CommittedBlockHeader, ConsensusReceipt,
     ExecutionCertificate, ExecutionCertificateHash, QuorumCertificate, RoutableTransaction,
     ShardGroupId, TxHash, WaveCertificate, WaveId,
 };
-use std::sync::Arc;
+
+use crate::core::SimStorage;
 
 impl ChainReader for SimStorage {
     fn get_block(&self, height: BlockHeight) -> Option<CertifiedBlock> {
@@ -46,8 +47,7 @@ impl ChainReader for SimStorage {
             .get(&height)
             .cloned()
             .map(|certified| {
-                let provision_hashes =
-                    hyperscale_types::BlockManifest::from_block(&certified.block).provision_hashes;
+                let provision_hashes = BlockManifest::from_block(&certified.block).provision_hashes;
                 BlockForSync {
                     block: certified.block,
                     qc: certified.qc,

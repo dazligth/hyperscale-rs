@@ -13,30 +13,51 @@
 //! On each commit, the JMT is updated and a new state root hash is
 //! computed.
 
-use crate::column_families::{CfHandles, HOT_WRITE_COLUMN_FAMILIES, STATE_HISTORY_CF};
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+use hyperscale_jmt::{Node as JmtNode, NodeKey as JmtNodeKey, TreeReader};
+use hyperscale_metrics::record_storage_read;
+#[cfg(test)]
+use hyperscale_metrics::record_storage_write;
+#[cfg(test)]
+use hyperscale_storage::CommittableSubstateDatabase;
+use hyperscale_storage::{
+    BaseReadCache, DatabaseUpdate, DatabaseUpdates, DbPartitionKey, DbSortKey, DbSubstateValue,
+    GenesisCommit, JmtSnapshot, PartitionDatabaseUpdates, PartitionEntry, SubstateDatabase,
+    SubstateStore, tree,
+};
+use hyperscale_types::{Block, BlockHeight, QuorumCertificate, StateRoot};
+use rocksdb::{
+    BlockBasedOptions, Cache, ColumnFamilyDescriptor, DB, DBCompressionType, Options,
+    SliceTransform, WriteBatch,
+};
+use sbor::prelude::*;
+use tracing::field::Empty;
+use tracing::{Level, Span, instrument};
+
+use crate::column_families::{
+    CfHandles, HOT_WRITE_COLUMN_FAMILIES, JmtNodesCf, STATE_HISTORY_CF, StaleJmtNodesCf,
+    StaleStateHistoryCf, StateCf, StateHistoryCf,
+};
 use crate::config::RocksDbConfig;
 use crate::jmt_snapshot_store::SnapshotTreeStore;
-use crate::jmt_stored::{StoredNode, StoredNodeKey, VersionedStoredNode};
-use crate::typed_cf::{DbCodec, TypedCf};
+use crate::jmt_stored::{StaleTreePart, StoredNode, StoredNodeKey, VersionedStoredNode};
+use crate::metadata::{
+    read_jmt_metadata, write_committed_hash, write_committed_height, write_committed_qc,
+    write_jmt_metadata,
+};
+use crate::substate_key::partition_prefix;
+use crate::typed_cf::{
+    DbCodec, TypedCf, batch_delete, batch_put, batch_put_raw, get, multi_get, prefix_iter,
+};
+use crate::versioned_key::VersionedSubstateKeyCodec;
 
 /// Sort keys deleted by partition Reset operations, keyed by `(entity_key, partition_num)`.
 /// Passed to `put_at_version` so the JMT can reconstruct full storage keys and
 /// generate deletes for the hashed keys.
 pub type ResetOldKeys = std::collections::HashMap<(Vec<u8>, u8), Vec<DbSortKey>>;
-
-use hyperscale_jmt as jmt;
-use hyperscale_metrics as metrics;
-use hyperscale_storage::{
-    DatabaseUpdate, DatabaseUpdates, DbPartitionKey, DbSortKey, DbSubstateValue, JmtSnapshot,
-    PartitionDatabaseUpdates, PartitionEntry, SubstateDatabase,
-};
-use hyperscale_types::StateRoot;
-use rocksdb::{ColumnFamilyDescriptor, DB, Options, WriteBatch};
-use sbor::prelude::*;
-use std::path::Path;
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
-use tracing::{Level, instrument};
 
 /// RocksDB-based storage for production use.
 ///
@@ -118,9 +139,9 @@ impl RocksDbStorage {
         // Block cache and bloom filter — shared across ALL column families.
         // SST index/filter blocks are pinned inside this cache to prevent
         // unbounded heap growth as the database accumulates SST files.
-        let mut block_opts = rocksdb::BlockBasedOptions::default();
+        let mut block_opts = BlockBasedOptions::default();
         if let Some(cache_size) = config.block_cache_size {
-            let cache = rocksdb::Cache::new_lru_cache(cache_size);
+            let cache = Cache::new_lru_cache(cache_size);
             block_opts.set_block_cache(&cache);
         }
         if config.bloom_filter_bits > 0.0 {
@@ -151,13 +172,13 @@ impl RocksDbStorage {
         // Tiered compression: L0-L1 uncompressed (fast flushes, data gets
         // compacted away quickly), L2-L4 LZ4, L5+ Zstd.
         let tiered_compression = &[
-            rocksdb::DBCompressionType::None, // L0
-            rocksdb::DBCompressionType::None, // L1
-            rocksdb::DBCompressionType::Lz4,  // L2
-            rocksdb::DBCompressionType::Lz4,  // L3
-            rocksdb::DBCompressionType::Lz4,  // L4
-            rocksdb::DBCompressionType::Zstd, // L5
-            rocksdb::DBCompressionType::Zstd, // L6
+            DBCompressionType::None, // L0
+            DBCompressionType::None, // L1
+            DBCompressionType::Lz4,  // L2
+            DBCompressionType::Lz4,  // L3
+            DBCompressionType::Lz4,  // L4
+            DBCompressionType::Zstd, // L5
+            DBCompressionType::Zstd, // L6
         ];
 
         let cold_write_buffer_size: usize = 16 * 1024 * 1024; // 16MB
@@ -199,7 +220,7 @@ impl RocksDbStorage {
                 // without a prefix extractor — it just can't short-
                 // circuit SSTs via prefix bloom.
                 if name == STATE_HISTORY_CF {
-                    cf_opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(51));
+                    cf_opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(51));
                 }
 
                 ColumnFamilyDescriptor::new(name, cf_opts)
@@ -240,55 +261,44 @@ impl RocksDbStorage {
     // These resolve CfHandles and pass &self.db as the ReadableStore.
 
     /// Get a typed value from a column family.
-    pub(crate) fn cf_get<CF: crate::typed_cf::TypedCf>(&self, key: &CF::Key) -> Option<CF::Value> {
-        crate::typed_cf::get::<CF>(&*self.db, CF::handle(&self.cf()), key)
+    pub(crate) fn cf_get<CF: TypedCf>(&self, key: &CF::Key) -> Option<CF::Value> {
+        get::<CF>(&*self.db, CF::handle(&self.cf()), key)
     }
 
     /// Put a typed key/value into a `WriteBatch`.
-    pub(crate) fn cf_put<CF: crate::typed_cf::TypedCf>(
+    pub(crate) fn cf_put<CF: TypedCf>(
         &self,
         batch: &mut WriteBatch,
         key: &CF::Key,
         value: &CF::Value,
     ) {
-        crate::typed_cf::batch_put::<CF>(batch, CF::handle(&self.cf()), key, value);
+        batch_put::<CF>(batch, CF::handle(&self.cf()), key, value);
     }
 
     /// Put a typed key/value into a `WriteBatch`, using pre-serialized bytes if available.
-    pub(crate) fn cf_put_raw<CF: crate::typed_cf::TypedCf>(
+    pub(crate) fn cf_put_raw<CF: TypedCf>(
         &self,
         batch: &mut WriteBatch,
         key: &CF::Key,
         value: &CF::Value,
         raw_value: Option<&[u8]>,
     ) {
-        crate::typed_cf::batch_put_raw::<CF>(batch, CF::handle(&self.cf()), key, value, raw_value);
+        batch_put_raw::<CF>(batch, CF::handle(&self.cf()), key, value, raw_value);
     }
 
     /// Batch get typed values (`RocksDB` `multi_get_cf`).
-    pub(crate) fn cf_multi_get<CF: crate::typed_cf::TypedCf>(
-        &self,
-        keys: &[CF::Key],
-    ) -> Vec<Option<CF::Value>> {
-        crate::typed_cf::multi_get::<CF>(&*self.db, CF::handle(&self.cf()), keys)
+    pub(crate) fn cf_multi_get<CF: TypedCf>(&self, keys: &[CF::Key]) -> Vec<Option<CF::Value>> {
+        multi_get::<CF>(&*self.db, CF::handle(&self.cf()), keys)
     }
 
     /// Delete a typed key in a `WriteBatch`.
     #[allow(dead_code)]
-    pub(crate) fn cf_delete<CF: crate::typed_cf::TypedCf>(
-        &self,
-        batch: &mut WriteBatch,
-        key: &CF::Key,
-    ) {
-        crate::typed_cf::batch_delete::<CF>(batch, CF::handle(&self.cf()), key);
+    pub(crate) fn cf_delete<CF: TypedCf>(&self, batch: &mut WriteBatch, key: &CF::Key) {
+        batch_delete::<CF>(batch, CF::handle(&self.cf()), key);
     }
 
     /// Typed single put (immediate write, no batch).
-    pub(crate) fn cf_put_sync<CF: crate::typed_cf::TypedCf>(
-        &self,
-        key: &CF::Key,
-        value: &CF::Value,
-    ) {
+    pub(crate) fn cf_put_sync<CF: TypedCf>(&self, key: &CF::Key, value: &CF::Value) {
         let cf = CF::handle(&self.cf());
         let key_bytes = CF::KeyCodec::default().encode(key);
         let value_bytes = CF::ValueCodec::default().encode(value);
@@ -303,7 +313,7 @@ impl RocksDbStorage {
     /// `[version_BE_8B][root_hash_32B]`. Always hot in the memtable since
     /// they're written on every commit.
     pub(crate) fn read_jmt_metadata(&self) -> (u64, StateRoot) {
-        crate::metadata::read_jmt_metadata(&*self.db)
+        read_jmt_metadata(&*self.db)
     }
 
     /// Append JMT data from a snapshot to a `WriteBatch`.
@@ -323,9 +333,9 @@ impl RocksDbStorage {
         for (jmt_key, jmt_node) in &snapshot.nodes {
             let stored_key = StoredNodeKey::from_jmt(jmt_key);
             let stored_node = StoredNode::from_jmt(jmt_node);
-            crate::typed_cf::batch_put::<crate::column_families::JmtNodesCf>(
+            batch_put::<JmtNodesCf>(
                 batch,
-                crate::column_families::JmtNodesCf::handle(&cf),
+                JmtNodesCf::handle(&cf),
                 &stored_key,
                 &VersionedStoredNode::from_latest(stored_node),
             );
@@ -334,33 +344,33 @@ impl RocksDbStorage {
         // Stale nodes for deferred GC — keyed by the version at which they became stale.
         if !snapshot.stale_node_keys.is_empty() {
             // Wrap keys as StaleTreePart::Node for SBOR serialization.
-            let stale_parts: Vec<crate::jmt_stored::StaleTreePart> = snapshot
+            let stale_parts: Vec<StaleTreePart> = snapshot
                 .stale_node_keys
                 .iter()
-                .map(|k| crate::jmt_stored::StaleTreePart::Node(StoredNodeKey::from_jmt(k)))
+                .map(|k| StaleTreePart::Node(StoredNodeKey::from_jmt(k)))
                 .collect();
-            crate::typed_cf::batch_put::<crate::column_families::StaleJmtNodesCf>(
+            batch_put::<StaleJmtNodesCf>(
                 batch,
-                crate::column_families::StaleJmtNodesCf::handle(&cf),
+                StaleJmtNodesCf::handle(&cf),
                 &new_version,
                 &stale_parts,
             );
         }
 
         // JMT metadata — single key, atomic read.
-        crate::metadata::write_jmt_metadata(batch, new_version, snapshot.result_root);
+        write_jmt_metadata(batch, new_version, snapshot.result_root);
     }
 
     /// Append consensus metadata (`committed_height`, `committed_hash`, `committed_qc`)
     /// to a `WriteBatch` so it is persisted atomically with JMT + substate data.
     pub(crate) fn append_consensus_to_batch(
         batch: &mut WriteBatch,
-        block: &hyperscale_types::Block,
-        qc: &hyperscale_types::QuorumCertificate,
+        block: &Block,
+        qc: &QuorumCertificate,
     ) {
-        crate::metadata::write_committed_height(batch, block.height());
-        crate::metadata::write_committed_hash(batch, block.hash().as_raw());
-        crate::metadata::write_committed_qc(batch, qc);
+        write_committed_height(batch, block.height());
+        write_committed_hash(batch, block.hash().as_raw());
+        write_committed_qc(batch, qc);
     }
 
     /// Build a `WriteBatch` containing all substate puts/deletes from `updates`.
@@ -379,7 +389,7 @@ impl RocksDbStorage {
         updates: &DatabaseUpdates,
         version: u64,
         write_history: bool,
-        base_reads: Option<&hyperscale_storage::BaseReadCache>,
+        base_reads: Option<&BaseReadCache>,
     ) -> (WriteBatch, ResetOldKeys) {
         let mut batch = WriteBatch::default();
         let reset_old_keys = self.append_substate_writes_to_batch(
@@ -409,11 +419,8 @@ impl RocksDbStorage {
         updates: &DatabaseUpdates,
         version: u64,
         write_history: bool,
-        base_reads: Option<&hyperscale_storage::BaseReadCache>,
+        base_reads: Option<&BaseReadCache>,
     ) -> ResetOldKeys {
-        use crate::column_families::{StaleStateHistoryCf, StateCf, StateHistoryCf};
-        use crate::typed_cf::{DbCodec, batch_delete, batch_put, multi_get};
-
         let cf = self.cf();
         let state_cf = StateCf::handle(&cf);
         let history_cf = StateHistoryCf::handle(&cf);
@@ -562,7 +569,7 @@ impl RocksDbStorage {
         // Pass 2: emit history + state batch puts.
         // Accumulate the raw history keys written so we can record the
         // stale-set entry for this version in one shot.
-        let history_key_codec = crate::versioned_key::VersionedSubstateKeyCodec;
+        let history_key_codec = VersionedSubstateKeyCodec;
         let mut stale_history_keys: Vec<Vec<u8>> = Vec::new();
         for (op, prior_slot) in ops.into_iter().zip(priors) {
             let prior =
@@ -623,14 +630,11 @@ impl RocksDbStorage {
     /// Enumerate sort keys currently live in the given partition.
     /// Direct prefix scan on `StateCf` — one entry per key.
     fn list_partition_sort_keys(&self, partition_key: &DbPartitionKey) -> Vec<DbSortKey> {
-        use crate::column_families::StateCf;
-        use crate::typed_cf::{self, TypedCf};
-
         let cf = self.cf();
         let state_cf = StateCf::handle(&cf);
-        let partition_prefix = crate::substate_key::partition_prefix(partition_key);
+        let prefix = partition_prefix(partition_key);
 
-        typed_cf::prefix_iter::<StateCf>(&self.db, state_cf, &partition_prefix)
+        prefix_iter::<StateCf>(&self.db, state_cf, &prefix)
             .map(|((_pk, sk), _value)| sk)
             .collect()
     }
@@ -641,7 +645,7 @@ impl RocksDbStorage {
     /// with **no state-history entries** — genesis has no pre-state to
     /// preserve. Pair with [`Self::finalize_genesis_jmt`] to compute the JMT
     /// root over the same updates;
-    /// [`hyperscale_storage::GenesisCommit::install_genesis`] composes both.
+    /// [`GenesisCommit::install_genesis`] composes both.
     ///
     /// # Panics
     ///
@@ -685,7 +689,7 @@ impl RocksDbStorage {
         let snapshot_store = SnapshotTreeStore::new(&self.db);
 
         // parent=None, version=0: genesis is the first JMT state.
-        let (root, collected) = hyperscale_storage::tree::put_at_version(
+        let (root, collected) = tree::put_at_version(
             &snapshot_store,
             None,
             0,
@@ -695,9 +699,9 @@ impl RocksDbStorage {
         let jmt_snapshot = JmtSnapshot::from_collected_writes(
             collected,
             StateRoot::ZERO,
-            hyperscale_types::BlockHeight::GENESIS,
+            BlockHeight::GENESIS,
             root,
-            hyperscale_types::BlockHeight::GENESIS,
+            BlockHeight::GENESIS,
         );
 
         let mut batch = WriteBatch::default();
@@ -711,7 +715,7 @@ impl RocksDbStorage {
     }
 }
 
-impl hyperscale_storage::GenesisCommit for RocksDbStorage {
+impl GenesisCommit for RocksDbStorage {
     fn install_genesis(&self, merged: &DatabaseUpdates) -> StateRoot {
         Self::commit_substates_only(self, merged);
         Self::finalize_genesis_jmt(self, merged)
@@ -720,8 +724,8 @@ impl hyperscale_storage::GenesisCommit for RocksDbStorage {
 
 impl SubstateDatabase for RocksDbStorage {
     #[instrument(level = Level::DEBUG, skip_all, fields(
-        found = tracing::field::Empty,
-        latency_us = tracing::field::Empty,
+        found = Empty,
+        latency_us = Empty,
     ))]
     fn get_raw_substate_by_db_key(
         &self,
@@ -732,12 +736,12 @@ impl SubstateDatabase for RocksDbStorage {
         // the latest value for this key. Delegating to `snapshot()`
         // keeps a single read path.
         let start = Instant::now();
-        let result = <Self as hyperscale_storage::SubstateStore>::snapshot(self)
+        let result = <Self as SubstateStore>::snapshot(self)
             .get_raw_substate_by_db_key(partition_key, sort_key);
         let elapsed = start.elapsed();
-        metrics::record_storage_read(elapsed.as_secs_f64());
+        record_storage_read(elapsed.as_secs_f64());
 
-        let span = tracing::Span::current();
+        let span = Span::current();
         span.record("found", result.is_some());
         span.record(
             "latency_us",
@@ -754,27 +758,24 @@ impl SubstateDatabase for RocksDbStorage {
     ) -> Box<dyn Iterator<Item = PartitionEntry> + '_> {
         // Partition scan at current version. Same rationale as `get` —
         // one canonical read path through the snapshot.
-        let items: Vec<_> = <Self as hyperscale_storage::SubstateStore>::snapshot(self)
+        let items: Vec<_> = <Self as SubstateStore>::snapshot(self)
             .list_raw_values_from_db_key(partition_key, from_sort_key)
             .collect();
         Box::new(items.into_iter())
     }
 }
 
-impl jmt::TreeReader for RocksDbStorage {
-    fn get_node(&self, key: &jmt::NodeKey) -> Option<Arc<jmt::Node>> {
+impl TreeReader for RocksDbStorage {
+    fn get_node(&self, key: &JmtNodeKey) -> Option<Arc<JmtNode>> {
         let stored_key = StoredNodeKey::from_jmt(key);
-        self.cf_get::<crate::column_families::JmtNodesCf>(&stored_key)
+        self.cf_get::<JmtNodesCf>(&stored_key)
             .map(|v| Arc::new(v.into_latest().to_jmt()))
     }
 
-    fn get_root_key(&self, version: u64) -> Option<jmt::NodeKey> {
-        let root = jmt::NodeKey::root(version);
+    fn get_root_key(&self, version: u64) -> Option<JmtNodeKey> {
+        let root = JmtNodeKey::root(version);
         let stored_key = StoredNodeKey::from_jmt(&root);
-        if self
-            .cf_get::<crate::column_families::JmtNodesCf>(&stored_key)
-            .is_some()
-        {
+        if self.cf_get::<JmtNodesCf>(&stored_key).is_some() {
             Some(root)
         } else {
             None
@@ -798,11 +799,9 @@ impl RocksDbStorage {
     /// Panics if the commit lock is poisoned.
     #[instrument(level = Level::DEBUG, skip_all, fields(
         node_count = updates.node_updates.len(),
-        latency_us = tracing::field::Empty,
+        latency_us = Empty,
     ))]
     pub fn commit(&self, updates: &DatabaseUpdates) -> Result<(), StorageError> {
-        use hyperscale_types::BlockHeight;
-
         let _commit_guard = self.commit_lock.lock().unwrap();
 
         let start = Instant::now();
@@ -814,8 +813,7 @@ impl RocksDbStorage {
         // Version 0 with a non-zero root means genesis has been computed at version 0.
         // Only treat as "no parent" when the JMT is truly empty.
         let parent_version =
-            hyperscale_storage::tree::jmt_parent_height(BlockHeight(base_version), base_root)
-                .map(|h| h.0);
+            tree::jmt_parent_height(BlockHeight(base_version), base_root).map(|h| h.0);
         let new_version = base_version + 1;
 
         let (mut batch, reset_old_keys) = self.build_substate_write_batch(
@@ -825,7 +823,7 @@ impl RocksDbStorage {
             /* base_reads */ None,
         );
 
-        let (new_root, collected) = hyperscale_storage::tree::put_at_version(
+        let (new_root, collected) = tree::put_at_version(
             &snapshot_store,
             parent_version,
             new_version,
@@ -835,9 +833,9 @@ impl RocksDbStorage {
         let jmt_snapshot = JmtSnapshot::from_collected_writes(
             collected,
             base_root,
-            hyperscale_types::BlockHeight(base_version),
+            BlockHeight(base_version),
             new_root,
-            hyperscale_types::BlockHeight(new_version),
+            BlockHeight(new_version),
         );
 
         self.append_jmt_to_batch(&mut batch, &jmt_snapshot, new_version);
@@ -847,10 +845,10 @@ impl RocksDbStorage {
             .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
 
         let elapsed = start.elapsed();
-        metrics::record_storage_write(elapsed.as_secs_f64());
+        record_storage_write(elapsed.as_secs_f64());
 
         // Record span fields
-        let span = tracing::Span::current();
+        let span = Span::current();
         span.record(
             "latency_us",
             u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX),
@@ -862,7 +860,7 @@ impl RocksDbStorage {
 }
 
 #[cfg(test)]
-impl hyperscale_storage::CommittableSubstateDatabase for RocksDbStorage {
+impl CommittableSubstateDatabase for RocksDbStorage {
     fn commit(&mut self, updates: &DatabaseUpdates) {
         Self::commit(self, updates)
             .expect("Storage commit failed - cannot maintain consistent state");

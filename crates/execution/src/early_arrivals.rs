@@ -40,14 +40,13 @@
 //!   matching the sender-side deadline used by
 //!   [`OutboundExecCertTracker`](crate::outbound_certs::OutboundExecCertTracker).
 
-use hyperscale_types::{
-    ExecutionCertificate, ExecutionVote, TxHash, WAVE_TIMEOUT, WaveId, WeightedTimestamp,
-};
-#[cfg(test)]
-use hyperscale_types::{GlobalReceiptRoot, Hash};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
+
+use hyperscale_types::{
+    ExecutionCertificate, ExecutionVote, TxHash, WAVE_TIMEOUT, WaveId, WeightedTimestamp,
+};
 
 /// How long to retain unmatched early votes whose block never committed
 /// locally. Past `WAVE_TIMEOUT` from the vote's `vote_anchor_ts`, the wave
@@ -244,13 +243,16 @@ impl EarlyArrivalBuffer {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use hyperscale_types::{
-        BlockHash, BlockHeight, ExecutionOutcome, GlobalReceiptHash, ShardGroupId, SignerBitfield,
-        TxHash, TxOutcome, ValidatorId, bls_keypair_from_seed, exec_vote_message,
-        zero_bls_signature,
-    };
     use std::collections::BTreeSet;
+
+    use hyperscale_types::{
+        BlockHash, BlockHeight, ExecutionOutcome, GlobalReceiptHash, GlobalReceiptRoot, Hash,
+        RETENTION_HORIZON, ShardGroupId, SignerBitfield, TxHash, TxOutcome, ValidatorId,
+        bls_keypair_from_seed, exec_vote_message, zero_bls_signature,
+    };
+    use proptest::collection::vec as prop_vec;
+
+    use super::*;
 
     fn shard() -> ShardGroupId {
         ShardGroupId(0)
@@ -474,8 +476,7 @@ mod tests {
             &[tx_fresh],
         );
 
-        let horizon_ms =
-            u64::try_from(hyperscale_types::RETENTION_HORIZON.as_millis()).unwrap_or(u64::MAX);
+        let horizon_ms = u64::try_from(RETENTION_HORIZON.as_millis()).unwrap_or(u64::MAX);
         // now sits past the old EC's deadline but before the fresh one's.
         let now = ms(old_anchor.as_millis() + horizon_ms + 1);
         assert!(now.as_millis() < fresh_anchor.as_millis() + horizon_ms);
@@ -508,8 +509,8 @@ mod tests {
     proptest! {
         #[test]
         fn drain_votes_is_idempotent(
-            heights in proptest::collection::vec(0u64..20, 1..20),
-            anchors in proptest::collection::vec(0u64..10_000, 1..20),
+            heights in prop_vec(0u64..20, 1..20),
+            anchors in prop_vec(0u64..10_000, 1..20),
         ) {
             let mut b = EarlyArrivalBuffer::new();
             for (i, h) in heights.iter().enumerate() {
@@ -538,8 +539,8 @@ mod tests {
     proptest! {
         #[test]
         fn gc_preserves_fresh_entries(
-            heights in proptest::collection::vec(0u64..20, 1..10),
-            anchor_ms in proptest::collection::vec(0u64..1_000_000, 1..10),
+            heights in prop_vec(0u64..20, 1..10),
+            anchor_ms in prop_vec(0u64..1_000_000, 1..10),
             now_ms in 0u64..2_000_000,
         ) {
             let mut b = EarlyArrivalBuffer::new();

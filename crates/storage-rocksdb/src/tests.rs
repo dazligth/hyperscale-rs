@@ -1,19 +1,27 @@
-use crate::core::RocksDbStorage;
+use std::sync::Arc;
 
 use hyperscale_storage::test_helpers::{
-    make_database_update, make_mapped_database_update, make_test_block, make_test_qc,
-    make_test_wave_certificate,
+    make_database_update, make_mapped_database_update, make_test_block,
+    make_test_execution_certificate, make_test_qc, make_test_receipt, make_test_wave_certificate,
+    test_ec_storage_batch as helpers_test_ec_storage_batch,
+    test_ec_storage_roundtrip as helpers_test_ec_storage_roundtrip,
 };
 use hyperscale_storage::{
     ChainReader, ChainWriter, DatabaseUpdate, DatabaseUpdates, DbPartitionKey, DbSortKey,
-    NodeDatabaseUpdates, PartitionDatabaseUpdates, SubstateDatabase, SubstateStore,
+    NodeDatabaseUpdates, PartitionDatabaseUpdates, SubstateDatabase, SubstateStore, VersionedStore,
+    merge_database_updates, merge_into,
 };
 use hyperscale_types::{
-    BlockHash, BlockHeight, Hash, QuorumCertificate, Round, ShardGroupId, StateRoot, StoredReceipt,
-    TxHash, WeightedTimestamp,
+    Block, BlockHash, BlockHeight, ConsensusReceipt, FinalizedWave, GlobalReceiptHash, Hash,
+    ProposerTimestamp, QuorumCertificate, Round, ShardGroupId, StateRoot, StoredReceipt, TxHash,
+    WaveCertificate, WaveId, WeightedTimestamp,
 };
-use std::sync::Arc;
+use sbor::prelude::IndexMap;
 use tempfile::TempDir;
+
+use crate::column_families::STATE_HISTORY_CF;
+use crate::config::RocksDbConfig;
+use crate::core::RocksDbStorage;
 
 /// Helper: wrap `DatabaseUpdates` into a single `StoredReceipt` for test commit calls.
 fn updates_to_receipts(updates: &DatabaseUpdates) -> Vec<StoredReceipt> {
@@ -22,8 +30,8 @@ fn updates_to_receipts(updates: &DatabaseUpdates) -> Vec<StoredReceipt> {
     }
     vec![StoredReceipt {
         tx_hash: TxHash::ZERO,
-        consensus: Arc::new(hyperscale_types::ConsensusReceipt::Succeeded {
-            receipt_hash: hyperscale_types::GlobalReceiptHash::ZERO,
+        consensus: Arc::new(ConsensusReceipt::Succeeded {
+            receipt_hash: GlobalReceiptHash::ZERO,
             database_updates: updates.clone(),
             application_events: vec![],
         }),
@@ -32,7 +40,7 @@ fn updates_to_receipts(updates: &DatabaseUpdates) -> Vec<StoredReceipt> {
 }
 
 /// Helper: commit a block with empty updates and no ECs/receipts.
-fn commit_empty(storage: &RocksDbStorage, block: &hyperscale_types::Block, qc: &QuorumCertificate) {
+fn commit_empty(storage: &RocksDbStorage, block: &Block, qc: &QuorumCertificate) {
     storage.commit_block(&Arc::new(block.clone()), &Arc::new(qc.clone()));
 }
 
@@ -195,10 +203,7 @@ fn test_block_storage_and_retrieval() {
 
     let stored = storage.get_block(BlockHeight(1)).unwrap();
     assert_eq!(stored.block.height(), BlockHeight(1));
-    assert_eq!(
-        stored.block.header().timestamp,
-        hyperscale_types::ProposerTimestamp(1_000)
-    );
+    assert_eq!(stored.block.header().timestamp, ProposerTimestamp(1_000));
     assert_eq!(stored.qc.block_hash, block.hash());
 }
 
@@ -335,37 +340,37 @@ fn test_state_root_changes_on_commit() {
 
 /// Append a `FinalizedWave` to a block in place. Because `Block` is an enum,
 /// this replaces the whole value via `std::mem::replace`.
-fn push_wave(block: &mut hyperscale_types::Block, fw: Arc<hyperscale_types::FinalizedWave>) {
+fn push_wave(block: &mut Block, fw: Arc<FinalizedWave>) {
     let taken = std::mem::replace(
         block,
-        hyperscale_types::Block::Sealed {
+        Block::Sealed {
             header: block.header().clone(),
             transactions: vec![],
             certificates: vec![],
         },
     );
     *block = match taken {
-        hyperscale_types::Block::Live {
+        Block::Live {
             header,
             transactions,
             mut certificates,
             provisions,
         } => {
             certificates.push(fw);
-            hyperscale_types::Block::Live {
+            Block::Live {
                 header,
                 transactions,
                 certificates,
                 provisions,
             }
         }
-        hyperscale_types::Block::Sealed {
+        Block::Sealed {
             header,
             transactions,
             mut certificates,
         } => {
             certificates.push(fw);
-            hyperscale_types::Block::Sealed {
+            Block::Sealed {
                 header,
                 transactions,
                 certificates,
@@ -377,10 +382,10 @@ fn push_wave(block: &mut hyperscale_types::Block, fw: Arc<hyperscale_types::Fina
 /// Wrap receipts into a single `FinalizedWave` attached to `block.certificates`,
 /// so the new `commit_block` (which derives receipts from `block.certificates`)
 /// can apply them.
-fn attach_receipts(block: &mut hyperscale_types::Block, receipts: Vec<StoredReceipt>) {
-    let new_fw = Arc::new(hyperscale_types::FinalizedWave {
-        certificate: Arc::new(hyperscale_types::WaveCertificate {
-            wave_id: hyperscale_types::WaveId::new(
+fn attach_receipts(block: &mut Block, receipts: Vec<StoredReceipt>) {
+    let new_fw = Arc::new(FinalizedWave {
+        certificate: Arc::new(WaveCertificate {
+            wave_id: WaveId::new(
                 ShardGroupId(0),
                 block.height(),
                 std::collections::BTreeSet::new(),
@@ -392,34 +397,34 @@ fn attach_receipts(block: &mut hyperscale_types::Block, receipts: Vec<StoredRece
     // Take block out, mutate, and put back.
     let taken = std::mem::replace(
         block,
-        hyperscale_types::Block::Sealed {
+        Block::Sealed {
             header: block.header().clone(),
             transactions: vec![],
             certificates: vec![],
         },
     );
     *block = match taken {
-        hyperscale_types::Block::Live {
+        Block::Live {
             header,
             transactions,
             mut certificates,
             provisions,
         } => {
             certificates.push(new_fw);
-            hyperscale_types::Block::Live {
+            Block::Live {
                 header,
                 transactions,
                 certificates,
                 provisions,
             }
         }
-        hyperscale_types::Block::Sealed {
+        Block::Sealed {
             header,
             transactions,
             mut certificates,
         } => {
             certificates.push(new_fw);
-            hyperscale_types::Block::Sealed {
+            Block::Sealed {
                 header,
                 transactions,
                 certificates,
@@ -450,7 +455,7 @@ fn test_commit_block_multiple_certs() {
 
     let updates1 = make_mapped_database_update(1, 0, vec![10], vec![1]);
     let updates2 = make_mapped_database_update(2, 0, vec![20], vec![2]);
-    let merged = hyperscale_storage::merge_database_updates(&[updates1, updates2]);
+    let merged = merge_database_updates(&[updates1, updates2]);
     let mut block = make_test_block(BlockHeight(1));
     let receipts = updates_to_receipts(&merged);
     attach_receipts(&mut block, receipts);
@@ -513,28 +518,28 @@ fn test_commit_block_stores_certificates() {
     // Create a block that includes this certificate
     let block = make_test_block(BlockHeight(1));
     let block = match block {
-        hyperscale_types::Block::Live {
+        Block::Live {
             header,
             transactions,
             provisions,
             ..
-        } => hyperscale_types::Block::Live {
+        } => Block::Live {
             header,
             transactions,
-            certificates: vec![Arc::new(hyperscale_types::FinalizedWave {
+            certificates: vec![Arc::new(FinalizedWave {
                 certificate: cert,
                 receipts: vec![],
             })],
             provisions,
         },
-        hyperscale_types::Block::Sealed {
+        Block::Sealed {
             header,
             transactions,
             ..
-        } => hyperscale_types::Block::Sealed {
+        } => Block::Sealed {
             header,
             transactions,
-            certificates: vec![Arc::new(hyperscale_types::FinalizedWave {
+            certificates: vec![Arc::new(FinalizedWave {
                 certificate: cert,
                 receipts: vec![],
             })],
@@ -576,7 +581,7 @@ fn test_certificates_batch() {
     let result = storage.get_certificates_batch(&[id1.clone(), id2]);
     assert_eq!(result.len(), 2);
 
-    let missing = hyperscale_types::WaveId::new(
+    let missing = WaveId::new(
         ShardGroupId(99),
         BlockHeight(99),
         std::collections::BTreeSet::new(),
@@ -653,7 +658,7 @@ fn test_certificate_store_and_retrieve() {
 fn test_certificate_get_missing() {
     let temp_dir = TempDir::new().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path()).unwrap();
-    let missing = hyperscale_types::WaveId::new(
+    let missing = WaveId::new(
         ShardGroupId(99),
         BlockHeight(99),
         std::collections::BTreeSet::new(),
@@ -697,7 +702,7 @@ fn test_empty_commit_still_advances_version() {
     let temp_dir = TempDir::new().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path()).unwrap();
 
-    let updates = hyperscale_storage::DatabaseUpdates::default();
+    let updates = DatabaseUpdates::default();
     storage.commit(&updates).unwrap();
     assert_eq!(storage.jmt_height(), BlockHeight(1));
 }
@@ -778,7 +783,7 @@ fn test_blocks_survive_reopen() {
 #[test]
 fn test_receipt_survives_reopen() {
     let temp_dir = TempDir::new().unwrap();
-    let receipt = hyperscale_storage::test_helpers::make_test_receipt(55);
+    let receipt = make_test_receipt(55);
     let tx_hash = receipt.tx_hash;
 
     {
@@ -804,32 +809,32 @@ fn test_receipt_survives_reopen() {
 fn test_ec_storage_roundtrip() {
     let temp_dir = TempDir::new().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path()).unwrap();
-    hyperscale_storage::test_helpers::test_ec_storage_roundtrip(&storage);
+    helpers_test_ec_storage_roundtrip(&storage);
 }
 
 #[test]
 fn test_ec_storage_batch() {
     let temp_dir = TempDir::new().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path()).unwrap();
-    hyperscale_storage::test_helpers::test_ec_storage_batch(&storage);
+    helpers_test_ec_storage_batch(&storage);
 }
 
 #[test]
 fn test_ec_survives_reopen() {
     let temp_dir = TempDir::new().unwrap();
-    let ec = hyperscale_storage::test_helpers::make_test_execution_certificate(1, BlockHeight(1));
+    let ec = make_test_execution_certificate(1, BlockHeight(1));
 
     {
         let storage = RocksDbStorage::open(temp_dir.path()).unwrap();
-        let block = hyperscale_storage::test_helpers::make_test_block(BlockHeight(0));
-        let qc = hyperscale_storage::test_helpers::make_test_qc(&block);
+        let block = make_test_block(BlockHeight(0));
+        let qc = make_test_qc(&block);
         storage.commit_block(&Arc::new(block), &Arc::new(qc));
-        let mut block = hyperscale_storage::test_helpers::make_test_block(BlockHeight(1));
+        let mut block = make_test_block(BlockHeight(1));
         push_wave(
             &mut block,
-            Arc::new(hyperscale_types::FinalizedWave {
-                certificate: Arc::new(hyperscale_types::WaveCertificate {
-                    wave_id: hyperscale_types::WaveId::new(
+            Arc::new(FinalizedWave {
+                certificate: Arc::new(WaveCertificate {
+                    wave_id: WaveId::new(
                         ShardGroupId(0),
                         BlockHeight(1),
                         std::collections::BTreeSet::new(),
@@ -839,7 +844,7 @@ fn test_ec_survives_reopen() {
                 receipts: vec![],
             }),
         );
-        let qc = hyperscale_storage::test_helpers::make_test_qc(&block);
+        let qc = make_test_qc(&block);
         storage.commit_block(&Arc::new(block), &Arc::new(qc));
     }
 
@@ -856,13 +861,13 @@ fn test_ec_atomic_with_block_commit() {
     let temp_dir = TempDir::new().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path()).unwrap();
 
-    let ec = hyperscale_storage::test_helpers::make_test_execution_certificate(1, BlockHeight(1));
+    let ec = make_test_execution_certificate(1, BlockHeight(1));
     let mut block = make_test_block(BlockHeight(1));
     push_wave(
         &mut block,
-        Arc::new(hyperscale_types::FinalizedWave {
-            certificate: Arc::new(hyperscale_types::WaveCertificate {
-                wave_id: hyperscale_types::WaveId::new(
+        Arc::new(FinalizedWave {
+            certificate: Arc::new(WaveCertificate {
+                wave_id: WaveId::new(
                     ShardGroupId(0),
                     BlockHeight(1),
                     std::collections::BTreeSet::new(),
@@ -900,23 +905,23 @@ fn test_ec_atomic_with_block_commit() {
 fn rocks_commit_with(
     storage: &RocksDbStorage,
     updates: &DatabaseUpdates,
-    block: &hyperscale_types::Block,
+    block: &Block,
     qc: &QuorumCertificate,
 ) {
     let mut block = block.clone();
     if !updates.node_updates.is_empty() {
-        let receipt = hyperscale_types::StoredReceipt {
+        let receipt = StoredReceipt {
             tx_hash: TxHash::ZERO,
-            consensus: Arc::new(hyperscale_types::ConsensusReceipt::Succeeded {
-                receipt_hash: hyperscale_types::GlobalReceiptHash::ZERO,
+            consensus: Arc::new(ConsensusReceipt::Succeeded {
+                receipt_hash: GlobalReceiptHash::ZERO,
                 database_updates: updates.clone(),
                 application_events: vec![],
             }),
             metadata: None,
         };
-        let wave = Arc::new(hyperscale_types::FinalizedWave {
-            certificate: Arc::new(hyperscale_types::WaveCertificate {
-                wave_id: hyperscale_types::WaveId::new(
+        let wave = Arc::new(FinalizedWave {
+            certificate: Arc::new(WaveCertificate {
+                wave_id: WaveId::new(
                     ShardGroupId(0),
                     block.height(),
                     std::collections::BTreeSet::new(),
@@ -936,8 +941,6 @@ fn rocks_commit_with(
 /// after V" invariant end-to-end.
 #[test]
 fn test_state_history_create_delete_create() {
-    use hyperscale_storage::VersionedStore;
-
     let temp_dir = TempDir::new().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path()).unwrap();
 
@@ -984,7 +987,7 @@ fn test_state_history_create_delete_create() {
         vec![0xFF],
         DatabaseUpdate::Set(vec![0xFF]),
     );
-    hyperscale_storage::merge_into(&mut v1, &anchor);
+    merge_into(&mut v1, &anchor);
     storage.commit(&v1).unwrap();
 
     // V2: delete K.
@@ -1027,7 +1030,7 @@ fn test_state_history_create_delete_create() {
 #[should_panic(expected = "below retention floor")]
 fn test_snapshot_at_below_retention_panics() {
     let temp_dir = TempDir::new().unwrap();
-    let config = crate::config::RocksDbConfig {
+    let config = RocksDbConfig {
         jmt_history_length: 2,
         ..Default::default()
     };
@@ -1039,10 +1042,7 @@ fn test_snapshot_at_below_retention_panics() {
         commit_empty(&storage, &block, &qc);
     }
     // current=10, floor=8. V=1 is well below floor.
-    let _snap = <RocksDbStorage as hyperscale_storage::VersionedStore>::snapshot_at(
-        &storage,
-        BlockHeight(1),
-    );
+    let _snap = <RocksDbStorage as VersionedStore>::snapshot_at(&storage, BlockHeight(1));
 }
 
 /// `list_substates_for_node_at_height` is an external-facing API — it
@@ -1052,7 +1052,7 @@ fn test_list_substates_at_height_respects_retention() {
     use hyperscale_types::NodeId;
 
     let temp_dir = TempDir::new().unwrap();
-    let config = crate::config::RocksDbConfig {
+    let config = RocksDbConfig {
         jmt_history_length: 2,
         ..Default::default()
     };
@@ -1102,8 +1102,6 @@ fn test_list_substates_at_height_respects_retention() {
 /// so historical reads see the pre-reset contents.
 #[test]
 fn test_reset_partition_captures_history_for_all_removed_keys() {
-    use hyperscale_storage::VersionedStore;
-
     let temp_dir = TempDir::new().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path()).unwrap();
 
@@ -1141,7 +1139,7 @@ fn test_reset_partition_captures_history_for_all_removed_keys() {
     // V2: reset to D/E only.
     {
         let mut updates = DatabaseUpdates::default();
-        let mut new_values = sbor::prelude::IndexMap::new();
+        let mut new_values = IndexMap::new();
         new_values.insert(DbSortKey(vec![0xD1]), vec![0xDD]);
         new_values.insert(DbSortKey(vec![0xE1]), vec![0xEE]);
         updates.node_updates.insert(
@@ -1208,7 +1206,7 @@ fn test_genesis_skips_history_entries() {
     let history_count = {
         let cf = storage
             .db
-            .cf_handle(crate::column_families::STATE_HISTORY_CF)
+            .cf_handle(STATE_HISTORY_CF)
             .expect("state_history CF exists");
         let mut iter = storage.db.raw_iterator_cf(cf);
         iter.seek_to_first();

@@ -1,10 +1,14 @@
 //! Inbound provision-request handling for cross-shard fetches.
 
+use std::sync::Arc;
+
+use hyperscale_engine::fetch_state_entries;
 use hyperscale_messages::request::GetProvisionsRequest;
 use hyperscale_messages::response::GetProvisionResponse;
 use hyperscale_storage::{ChainReader, SubstateStore};
-use hyperscale_types::ShardGroupId;
-use std::sync::Arc;
+use hyperscale_types::{
+    MerkleInclusionProof, Provisions, ShardGroupId, StateEntry, TxEntries, TxHash, shard_for_node,
+};
 use tracing::warn;
 
 /// Serve an inbound provision request from a target shard needing our state.
@@ -35,7 +39,7 @@ pub fn serve_provision_request(
     let all_txs = block.transactions().iter();
 
     // Phase 1: Fetch state entries for all matching transactions.
-    let mut per_tx: Vec<(hyperscale_types::TxHash, Vec<hyperscale_types::StateEntry>)> = Vec::new();
+    let mut per_tx: Vec<(TxHash, Vec<StateEntry>)> = Vec::new();
     let mut all_storage_keys: Vec<Vec<u8>> = Vec::new();
 
     for tx in all_txs {
@@ -44,9 +48,7 @@ pub fn serve_provision_request(
             .declared_reads
             .iter()
             .chain(tx.declared_writes.iter())
-            .any(|node_id| {
-                hyperscale_types::shard_for_node(node_id, num_shards) == req.target_shard
-            });
+            .any(|node_id| shard_for_node(node_id, num_shards) == req.target_shard);
         if !involves_target {
             continue;
         }
@@ -55,7 +57,7 @@ pub fn serve_provision_request(
             .declared_reads
             .iter()
             .chain(tx.declared_writes.iter())
-            .filter(|&node_id| hyperscale_types::shard_for_node(node_id, num_shards) == local_shard)
+            .filter(|&node_id| shard_for_node(node_id, num_shards) == local_shard)
             .copied()
             .collect();
         owned_nodes.sort();
@@ -65,9 +67,7 @@ pub fn serve_provision_request(
             continue;
         }
 
-        let Some(entries) =
-            hyperscale_engine::fetch_state_entries(storage, &owned_nodes, jmt_height)
-        else {
+        let Some(entries) = fetch_state_entries(storage, &owned_nodes, jmt_height) else {
             warn!(
                 block_height = req.block_height.0,
                 jmt_height = jmt_height.0,
@@ -85,7 +85,7 @@ pub fn serve_provision_request(
     all_storage_keys.sort();
     all_storage_keys.dedup();
     let proof = if per_tx.is_empty() {
-        hyperscale_types::MerkleInclusionProof::dummy()
+        MerkleInclusionProof::dummy()
     } else if let Some(p) = storage.generate_merkle_proofs(&all_storage_keys, jmt_height) {
         p
     } else {
@@ -99,7 +99,7 @@ pub fn serve_provision_request(
     // Phase 3: Build the bundle.
     let transactions = per_tx
         .into_iter()
-        .map(|(tx_hash, entries)| hyperscale_types::TxEntries {
+        .map(|(tx_hash, entries)| TxEntries {
             tx_hash,
             entries,
             target_nodes: vec![],
@@ -107,7 +107,7 @@ pub fn serve_provision_request(
         .collect();
 
     GetProvisionResponse {
-        provisions: Some(Arc::new(hyperscale_types::Provisions::new(
+        provisions: Some(Arc::new(Provisions::new(
             local_shard,
             req.target_shard,
             req.block_height,

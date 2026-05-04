@@ -1,7 +1,8 @@
 //! `CommittedBlockHeader` — block header paired with the QC that committed it.
 
-use crate::{BlockHash, BlockHeader, BlockHeight, QuorumCertificate, ShardGroupId, StateRoot};
 use sbor::prelude::*;
+
+use crate::{BlockHash, BlockHeader, BlockHeight, QuorumCertificate, ShardGroupId, StateRoot};
 
 /// A block header paired with the QC that committed it.
 ///

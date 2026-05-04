@@ -22,7 +22,7 @@
 //! }
 //! ```
 
-use hyperscale_types::RoutableTransaction;
+use hyperscale_types::{RoutableTransaction, TxHash};
 use radix_common::network::NetworkDefinition;
 use radix_transactions::errors::TransactionValidationError;
 use radix_transactions::validation::TransactionValidator;
@@ -147,7 +147,7 @@ impl TransactionValidation {
     pub fn validate_with_hash(
         &self,
         tx: &RoutableTransaction,
-    ) -> (hyperscale_types::TxHash, Result<(), ValidationError>) {
+    ) -> (TxHash, Result<(), ValidationError>) {
         let hash = tx.hash();
         let result = self.validate_transaction(tx);
         (hash, result)
@@ -164,7 +164,7 @@ impl TransactionValidation {
 #[derive(Debug)]
 pub struct BatchValidationResult {
     /// Transaction hash.
-    pub tx_hash: hyperscale_types::TxHash,
+    pub tx_hash: TxHash,
     /// Validation result.
     pub result: Result<(), ValidationError>,
 }
@@ -194,13 +194,16 @@ impl TransactionValidation {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::time::Duration;
+
     use hyperscale_types::{
         TimestampRange, WeightedTimestamp, generate_ed25519_keypair, routable_from_notarized_v1,
+        sign_and_notarize,
     };
     use radix_common::network::NetworkDefinition;
     use radix_transactions::builder::ManifestBuilder;
-    use std::time::Duration;
+
+    use super::*;
 
     fn wide_validity_range() -> TimestampRange {
         TimestampRange::new(
@@ -237,8 +240,7 @@ mod tests {
         let manifest = ManifestBuilder::new().drop_all_proofs().build();
 
         // Sign and notarize
-        let notarized =
-            hyperscale_types::sign_and_notarize(manifest, &network, 1, &signer).unwrap();
+        let notarized = sign_and_notarize(manifest, &network, 1, &signer).unwrap();
 
         // Convert to RoutableTransaction
         let routable: RoutableTransaction =
@@ -258,8 +260,7 @@ mod tests {
         let signer = generate_ed25519_keypair();
 
         let manifest = ManifestBuilder::new().drop_all_proofs().build();
-        let notarized =
-            hyperscale_types::sign_and_notarize(manifest, &network, 1, &signer).unwrap();
+        let notarized = sign_and_notarize(manifest, &network, 1, &signer).unwrap();
         let routable: RoutableTransaction =
             routable_from_notarized_v1(notarized, wide_validity_range()).unwrap();
         let expected_hash = routable.hash();
@@ -280,10 +281,8 @@ mod tests {
         let manifest1 = ManifestBuilder::new().drop_all_proofs().build();
         let manifest2 = ManifestBuilder::new().drop_all_proofs().build();
 
-        let notarized1 =
-            hyperscale_types::sign_and_notarize(manifest1, &network, 1, &signer).unwrap();
-        let notarized2 =
-            hyperscale_types::sign_and_notarize(manifest2, &network, 2, &signer).unwrap();
+        let notarized1 = sign_and_notarize(manifest1, &network, 1, &signer).unwrap();
+        let notarized2 = sign_and_notarize(manifest2, &network, 2, &signer).unwrap();
 
         let routable1: RoutableTransaction =
             routable_from_notarized_v1(notarized1, wide_validity_range()).unwrap();

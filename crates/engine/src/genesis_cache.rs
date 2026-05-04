@@ -6,17 +6,18 @@
 //! in-memory store and reuse the merged [`DatabaseUpdates`] across every
 //! node and every test in the same process.
 
-use crate::genesis::{GenesisConfig, bootstrap};
+use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeMap, HashMap};
+use std::hash::{Hash, Hasher};
+use std::sync::{Arc, Mutex, OnceLock};
+
 use hyperscale_storage::{
     CommittableSubstateDatabase, DatabaseUpdate, DatabaseUpdates, DbPartitionKey, DbSortKey,
     DbSubstateValue, PartitionDatabaseUpdates, PartitionEntry, SubstateDatabase, merge_into,
 };
 use radix_common::network::NetworkDefinition;
-use std::collections::BTreeMap;
-use std::collections::HashMap;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-use std::sync::{Arc, Mutex, OnceLock};
+
+use crate::genesis::{GenesisConfig, bootstrap};
 
 static CACHE: OnceLock<Mutex<HashMap<u64, Arc<DatabaseUpdates>>>> = OnceLock::new();
 

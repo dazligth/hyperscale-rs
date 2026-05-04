@@ -8,19 +8,26 @@
 //! `CommittableSubstateDatabase`) for `Arc<RocksDbStorage>` directly.
 //! This newtype sidesteps that while providing zero-cost delegation.
 
+use std::sync::Arc;
+
+use hyperscale_jmt::{Node as JmtNode, NodeKey as JmtNodeKey, TreeReader};
+#[cfg(test)]
+use hyperscale_storage::CommittableSubstateDatabase;
+use hyperscale_storage::{
+    BaseReadCache, BlockForSync, ChainReader, ChainWriter, DatabaseUpdates, DbPartitionKey,
+    DbSortKey, DbSubstateValue, GenesisCommit, JmtSnapshot, PartitionEntry, SubstateDatabase,
+    SubstateStore, VersionedStore,
+};
+use hyperscale_types::{
+    Block, BlockHash, BlockHeight, CertifiedBlock, CommittedBlockHeader, ConsensusReceipt,
+    ExecutionCertificate, ExecutionCertificateHash, FinalizedWave, MerkleInclusionProof, NodeId,
+    QuorumCertificate, RoutableTransaction, ShardGroupId, StateRoot, TxHash, WaveCertificate,
+    WaveId,
+};
+
 use crate::chain_writer::RocksDbPreparedCommit;
 use crate::core::RocksDbStorage;
 use crate::snapshot::RocksDbSnapshot;
-
-use hyperscale_storage::{
-    BlockForSync, DbPartitionKey, DbSortKey, DbSubstateValue, PartitionEntry, SubstateDatabase,
-    SubstateStore,
-};
-use hyperscale_types::{
-    BlockHash, BlockHeight, CertifiedBlock, ExecutionCertificateHash, NodeId, QuorumCertificate,
-    RoutableTransaction, ShardGroupId, StateRoot, TxHash, WaveCertificate, WaveId,
-};
-use std::sync::Arc;
 
 /// Shared `RocksDB` storage handle with full storage trait implementations.
 ///
@@ -76,18 +83,15 @@ impl SubstateDatabase for SharedStorage {
 }
 
 #[cfg(test)]
-impl hyperscale_storage::CommittableSubstateDatabase for SharedStorage {
-    fn commit(&mut self, updates: &hyperscale_storage::DatabaseUpdates) {
+impl CommittableSubstateDatabase for SharedStorage {
+    fn commit(&mut self, updates: &DatabaseUpdates) {
         RocksDbStorage::commit(&self.0, updates)
             .expect("Storage commit failed - cannot maintain consistent state");
     }
 }
 
-impl hyperscale_storage::GenesisCommit for SharedStorage {
-    fn install_genesis(
-        &self,
-        merged: &hyperscale_storage::DatabaseUpdates,
-    ) -> hyperscale_types::StateRoot {
+impl GenesisCommit for SharedStorage {
+    fn install_genesis(&self, merged: &DatabaseUpdates) -> StateRoot {
         self.0.commit_substates_only(merged);
         self.0.finalize_genesis_jmt(merged)
     }
@@ -107,7 +111,7 @@ impl SubstateStore for SharedStorage {
         self.0.jmt_height()
     }
 
-    fn state_root(&self) -> hyperscale_types::StateRoot {
+    fn state_root(&self) -> StateRoot {
         self.0.state_root()
     }
 
@@ -124,34 +128,31 @@ impl SubstateStore for SharedStorage {
         &self,
         storage_keys: &[Vec<u8>],
         block_height: BlockHeight,
-    ) -> Option<hyperscale_types::MerkleInclusionProof> {
+    ) -> Option<MerkleInclusionProof> {
         self.0.generate_merkle_proofs(storage_keys, block_height)
     }
 }
 
-impl hyperscale_storage::VersionedStore for SharedStorage {
+impl VersionedStore for SharedStorage {
     fn snapshot_at(&self, height: BlockHeight) -> Self::Snapshot<'_> {
         self.0.snapshot_at(height)
     }
 }
 
-impl hyperscale_jmt::TreeReader for SharedStorage {
-    fn get_node(
-        &self,
-        key: &hyperscale_jmt::NodeKey,
-    ) -> Option<std::sync::Arc<hyperscale_jmt::Node>> {
+impl TreeReader for SharedStorage {
+    fn get_node(&self, key: &JmtNodeKey) -> Option<Arc<JmtNode>> {
         self.0.get_node(key)
     }
 
-    fn get_root_key(&self, version: u64) -> Option<hyperscale_jmt::NodeKey> {
+    fn get_root_key(&self, version: u64) -> Option<JmtNodeKey> {
         self.0.get_root_key(version)
     }
 }
 
-impl hyperscale_storage::ChainWriter for SharedStorage {
+impl ChainWriter for SharedStorage {
     type PreparedCommit = RocksDbPreparedCommit;
 
-    fn jmt_snapshot(prepared: &Self::PreparedCommit) -> &hyperscale_storage::JmtSnapshot {
+    fn jmt_snapshot(prepared: &Self::PreparedCommit) -> &JmtSnapshot {
         &prepared.jmt_snapshot
     }
 
@@ -159,10 +160,10 @@ impl hyperscale_storage::ChainWriter for SharedStorage {
         &self,
         parent_state_root: StateRoot,
         parent_block_height: BlockHeight,
-        finalized_waves: &[std::sync::Arc<hyperscale_types::FinalizedWave>],
+        finalized_waves: &[Arc<FinalizedWave>],
         block_height: BlockHeight,
-        pending_snapshots: &[std::sync::Arc<hyperscale_storage::JmtSnapshot>],
-        base_reads: Option<&hyperscale_storage::BaseReadCache>,
+        pending_snapshots: &[Arc<JmtSnapshot>],
+        base_reads: Option<&BaseReadCache>,
     ) -> (StateRoot, Self::PreparedCommit) {
         self.0.prepare_block_commit(
             parent_state_root,
@@ -176,20 +177,12 @@ impl hyperscale_storage::ChainWriter for SharedStorage {
 
     fn commit_prepared_blocks(
         &self,
-        blocks: Vec<(
-            Self::PreparedCommit,
-            Arc<hyperscale_types::Block>,
-            Arc<hyperscale_types::QuorumCertificate>,
-        )>,
-    ) -> Vec<hyperscale_types::StateRoot> {
+        blocks: Vec<(Self::PreparedCommit, Arc<Block>, Arc<QuorumCertificate>)>,
+    ) -> Vec<StateRoot> {
         self.0.commit_prepared_blocks(blocks)
     }
 
-    fn commit_block(
-        &self,
-        block: &Arc<hyperscale_types::Block>,
-        qc: &Arc<hyperscale_types::QuorumCertificate>,
-    ) -> hyperscale_types::StateRoot {
+    fn commit_block(&self, block: &Arc<Block>, qc: &Arc<QuorumCertificate>) -> StateRoot {
         self.0.commit_block(block, qc)
     }
 
@@ -198,16 +191,13 @@ impl hyperscale_storage::ChainWriter for SharedStorage {
     }
 }
 
-impl hyperscale_storage::ChainReader for SharedStorage {
+impl ChainReader for SharedStorage {
     fn get_block(&self, height: BlockHeight) -> Option<CertifiedBlock> {
         self.0.get_block(height)
     }
 
-    fn get_committed_header(
-        &self,
-        height: BlockHeight,
-    ) -> Option<hyperscale_types::CommittedBlockHeader> {
-        hyperscale_storage::ChainReader::get_committed_header(&*self.0, height)
+    fn get_committed_header(&self, height: BlockHeight) -> Option<CommittedBlockHeader> {
+        ChainReader::get_committed_header(&*self.0, height)
     }
 
     fn committed_height(&self) -> BlockHeight {
@@ -223,7 +213,7 @@ impl hyperscale_storage::ChainReader for SharedStorage {
     }
 
     fn get_block_for_sync(&self, height: BlockHeight) -> Option<BlockForSync> {
-        hyperscale_storage::ChainReader::get_block_for_sync(&*self.0, height)
+        ChainReader::get_block_for_sync(&*self.0, height)
     }
 
     fn get_transactions_batch(&self, hashes: &[TxHash]) -> Vec<RoutableTransaction> {
@@ -234,17 +224,14 @@ impl hyperscale_storage::ChainReader for SharedStorage {
         self.0.get_certificates_batch(ids)
     }
 
-    fn get_consensus_receipt(
-        &self,
-        tx_hash: &TxHash,
-    ) -> Option<Arc<hyperscale_types::ConsensusReceipt>> {
+    fn get_consensus_receipt(&self, tx_hash: &TxHash) -> Option<Arc<ConsensusReceipt>> {
         self.0.get_consensus_receipt(tx_hash)
     }
 
     fn get_execution_certificates_by_height(
         &self,
         block_height: BlockHeight,
-    ) -> Vec<hyperscale_types::ExecutionCertificate> {
+    ) -> Vec<ExecutionCertificate> {
         self.0.get_execution_certificates_by_height(block_height)
     }
 

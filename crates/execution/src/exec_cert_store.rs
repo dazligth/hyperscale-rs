@@ -32,9 +32,10 @@
 //! [`ExecutionCoordinator::remove_finalized_wave`]: crate::ExecutionCoordinator::remove_finalized_wave
 //! [`Storage::get_execution_certificates_by_height`]: hyperscale_storage::Storage::get_execution_certificates_by_height
 
+use std::sync::Arc;
+
 use hyperscale_types::{ExecutionCertificate, WaveId};
 use papaya::HashMap;
-use std::sync::Arc;
 
 /// Shared, content-addressed store of aggregated [`ExecutionCertificate`]s
 /// awaiting block commit.
@@ -95,12 +96,14 @@ impl Default for ExecCertStore {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::collections::BTreeSet;
+
     use hyperscale_types::{
         BlockHeight, GlobalReceiptRoot, ShardGroupId, SignerBitfield, WeightedTimestamp,
         zero_bls_signature,
     };
-    use std::collections::BTreeSet;
+
+    use super::*;
 
     fn cert(block_height: u64) -> Arc<ExecutionCertificate> {
         let wave_id = WaveId::new(ShardGroupId(0), BlockHeight(block_height), BTreeSet::new());

@@ -1,8 +1,9 @@
 //! Provision fetch response for fallback recovery.
 
+use std::sync::Arc;
+
 use hyperscale_types::{MessageClass, NetworkMessage, Provisions};
 use sbor::prelude::BasicSbor;
-use std::sync::Arc;
 
 /// Response to a provision fetch request containing the provisions bundle.
 ///
@@ -37,14 +38,16 @@ impl NetworkMessage for GetProvisionResponse {
 
 #[cfg(test)]
 mod tests {
+    use sbor::{basic_decode, basic_encode};
+
     use super::*;
 
     #[test]
     fn test_sbor_roundtrip_unavailable() {
         let response = GetProvisionResponse { provisions: None };
 
-        let encoded = sbor::basic_encode(&response).unwrap();
-        let decoded: GetProvisionResponse = sbor::basic_decode(&encoded).unwrap();
+        let encoded = basic_encode(&response).unwrap();
+        let decoded: GetProvisionResponse = basic_decode(&encoded).unwrap();
         assert_eq!(response, decoded);
     }
 }

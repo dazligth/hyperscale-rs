@@ -18,11 +18,12 @@
 //! from the same validator at the same `(height, round)` for a different
 //! block is equivocation; a vote at a later round is a legitimate revote.
 
+use std::collections::HashMap;
+
 use hyperscale_core::Action;
 use hyperscale_types::{
     BlockHash, BlockHeader, BlockHeight, BlockVote, Round, TopologySnapshot, ValidatorId,
 };
-use std::collections::HashMap;
 use tracing::{info, trace, warn};
 
 pub use crate::vote_set::VoteSet;
@@ -437,11 +438,12 @@ pub enum RecordResult {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use hyperscale_types::{
-        CertificateRoot, Hash, LocalReceiptRoot, ProvisionsRoot, QuorumCertificate, ShardGroupId,
-        StateRoot, TransactionRoot, ValidatorId,
+        CertificateRoot, Hash, LocalReceiptRoot, ProposerTimestamp, ProvisionsRoot,
+        QuorumCertificate, ShardGroupId, StateRoot, TransactionRoot, ValidatorId,
     };
+
+    use super::*;
 
     fn make_header(height: BlockHeight) -> BlockHeader {
         BlockHeader {
@@ -450,7 +452,7 @@ mod tests {
             parent_block_hash: BlockHash::from_raw(Hash::from_bytes(b"parent")),
             parent_qc: QuorumCertificate::genesis(),
             proposer: ValidatorId(0),
-            timestamp: hyperscale_types::ProposerTimestamp(1_234_567_890),
+            timestamp: ProposerTimestamp(1_234_567_890),
             round: Round::INITIAL,
             is_fallback: false,
             state_root: StateRoot::ZERO,
@@ -705,10 +707,12 @@ mod tests {
 
 #[cfg(test)]
 mod properties {
-    use super::*;
+    use std::collections::HashMap;
+
     use hyperscale_types::Hash;
     use proptest::prelude::*;
-    use std::collections::HashMap;
+
+    use super::*;
 
     /// Arbitrary received-vote event, drawn from a small key space so multiple
     /// events are likely to collide on `(height, voter)` and stress the

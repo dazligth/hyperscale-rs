@@ -12,6 +12,8 @@
 //! The size prefix is part of LZ4's framing - it stores the original
 //! uncompressed size so decompression can pre-allocate the output buffer.
 
+use lz4_flex::block::uncompressed_size;
+use lz4_flex::{compress_prepend_size, decompress_size_prepended};
 use thiserror::Error;
 
 /// Maximum decompressed payload size (64 MB).
@@ -41,7 +43,7 @@ pub enum CompressionError {
 #[inline]
 #[must_use]
 pub fn compress(data: &[u8]) -> Vec<u8> {
-    lz4_flex::compress_prepend_size(data)
+    compress_prepend_size(data)
 }
 
 /// Decompress data received from the network.
@@ -57,7 +59,7 @@ pub fn compress(data: &[u8]) -> Vec<u8> {
 /// rejects the payload.
 #[inline]
 pub fn decompress(data: &[u8]) -> Result<Vec<u8>, CompressionError> {
-    let (claimed_size, _) = lz4_flex::block::uncompressed_size(data)
+    let (claimed_size, _) = uncompressed_size(data)
         .map_err(|e| CompressionError::DecompressionFailed(e.to_string()))?;
 
     if claimed_size > MAX_DECOMPRESSED_SIZE {
@@ -67,7 +69,7 @@ pub fn decompress(data: &[u8]) -> Result<Vec<u8>, CompressionError> {
         ));
     }
 
-    lz4_flex::decompress_size_prepended(data)
+    decompress_size_prepended(data)
         .map_err(|e| CompressionError::DecompressionFailed(e.to_string()))
 }
 

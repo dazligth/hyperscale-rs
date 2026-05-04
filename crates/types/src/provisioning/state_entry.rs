@@ -1,8 +1,10 @@
 //! State-related types for cross-shard execution.
 
-use crate::{BlockHeight, Hash, NodeId, ShardGroupId, TxHash};
-use sbor::prelude::*;
 use std::sync::Arc;
+
+use sbor::prelude::*;
+
+use crate::{BlockHeight, Hash, NodeId, ShardGroupId, TxHash};
 
 // ============================================================================
 // State entry types with pre-computed storage keys

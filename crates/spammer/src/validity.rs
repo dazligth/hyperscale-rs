@@ -5,9 +5,10 @@
 //! use their own wall clock; the 60s default range absorbs sub-second
 //! skew between submitter and chain.
 
-use hyperscale_types::{TimestampRange, WeightedTimestamp};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use hyperscale_types::{TimestampRange, WeightedTimestamp};
 
 /// Default forward budget for spammer-submitted transactions.
 ///

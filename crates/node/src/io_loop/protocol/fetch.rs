@@ -19,11 +19,14 @@
 //! request; the chunking machinery handles that as a special case of a
 //! one-element batch.
 
-use hyperscale_core::{FetchOrigin, FetchPeers};
-use hyperscale_metrics as metrics;
 use std::collections::{BTreeMap, HashMap};
 use std::hash::Hash;
 use std::sync::Arc;
+
+use hyperscale_core::{FetchOrigin, FetchPeers};
+use hyperscale_metrics::{
+    record_fetch_abandoned, record_fetch_completed, record_fetch_retried, record_fetch_started,
+};
 use tracing::{debug, trace};
 
 /// Tunables for a [`Fetch`] instance.
@@ -203,7 +206,7 @@ impl<Id: Eq + Hash + Ord + Clone + std::fmt::Debug> Fetch<Id> {
         }
         if added > 0 {
             for _ in 0..added {
-                metrics::record_fetch_started(self.kind);
+                record_fetch_started(self.kind);
             }
             debug!(count = added, "Started id fetch");
         }
@@ -222,7 +225,7 @@ impl<Id: Eq + Hash + Ord + Clone + std::fmt::Debug> Fetch<Id> {
         }
         if released > 0 {
             for _ in 0..released {
-                metrics::record_fetch_retried(self.kind);
+                record_fetch_retried(self.kind);
             }
             trace!(count = released, "Id fetch chunk failed");
         }
@@ -233,8 +236,8 @@ impl<Id: Eq + Hash + Ord + Clone + std::fmt::Debug> Fetch<Id> {
         for id in ids {
             if self.pending.remove(id).is_some() {
                 match kind {
-                    DropKind::Admitted => metrics::record_fetch_completed(self.kind),
-                    DropKind::Abandoned => metrics::record_fetch_abandoned(self.kind),
+                    DropKind::Admitted => record_fetch_completed(self.kind),
+                    DropKind::Abandoned => record_fetch_abandoned(self.kind),
                 }
             }
         }
@@ -309,8 +312,9 @@ impl<Id: Eq + Hash + Ord + Clone + std::fmt::Debug> Fetch<Id> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use hyperscale_types::{Hash, TxHash, ValidatorId};
+
+    use super::*;
 
     fn tx(n: u8) -> TxHash {
         TxHash::from_raw(Hash::from_bytes(&[n; 32]))

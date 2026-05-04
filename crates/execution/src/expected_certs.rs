@@ -51,11 +51,12 @@
 //! [`retain_if_shard_needed`](ExpectedCertTracker::retain_if_shard_needed),
 //! because the tracker cannot see the wave set.
 
+use std::collections::{HashMap, HashSet};
+use std::time::Duration;
+
 use hyperscale_types::{
     BlockHeight, ShardGroupId, TxHash, WAVE_TIMEOUT, WaveId, WeightedTimestamp,
 };
-use std::collections::{HashMap, HashSet};
-use std::time::Duration;
 
 /// How long to wait before the first fallback request. Anchored on the
 /// committing QC's `weighted_timestamp_ms`, so the window stays meaningful
@@ -293,6 +294,9 @@ impl ExpectedCertTracker {
 
 #[cfg(test)]
 mod tests {
+    use hyperscale_types::Hash;
+    use proptest::collection::vec as prop_vec;
+
     use super::*;
 
     fn wave(height: u64) -> WaveId {
@@ -331,7 +335,7 @@ mod tests {
     }
 
     fn tx(seed: u8) -> TxHash {
-        TxHash::from_raw(hyperscale_types::Hash::from_bytes(&[seed; 32]))
+        TxHash::from_raw(Hash::from_bytes(&[seed; 32]))
     }
 
     #[test]
@@ -751,9 +755,9 @@ mod tests {
     proptest! {
         #[test]
         fn fulfilled_before_deadline_never_triggers_fallback(
-            heights in proptest::collection::vec(0u64..20, 1..10),
-            fulfill_indices in proptest::collection::vec(0u64..100, 0..10),
-            timeouts in proptest::collection::vec(0u64..100_000, 1..10),
+            heights in prop_vec(0u64..20, 1..10),
+            fulfill_indices in prop_vec(0u64..100, 0..10),
+            timeouts in prop_vec(0u64..100_000, 1..10),
         ) {
             let mut t = ExpectedCertTracker::new();
             let shard = ShardGroupId(1);

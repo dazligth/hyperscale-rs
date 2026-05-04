@@ -4,22 +4,26 @@
 //! `WaveCertificate`, `Block`, and `QuorumCertificate` so that
 //! storage-memory and storage-rocksdb tests can share a single source of truth.
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+
+use hyperscale_types::{
+    ApplicationEvent, Block, BlockHash, BlockHeader, BlockHeight, Bls12381G2Signature,
+    CertificateRoot, ConsensusReceipt, ExecutionCertificate, ExecutionMetadata, ExecutionOutcome,
+    FeeSummary, FinalizedWave, GlobalReceiptHash, GlobalReceiptRoot, Hash, LocalReceiptRoot,
+    LogLevel, NodeId, ProposerTimestamp, ProvisionsRoot, QuorumCertificate, Round, ShardGroupId,
+    SignerBitfield, StateRoot, StoredReceipt, TransactionRoot, TxHash, TxOutcome, ValidatorId,
+    WaveCertificate, WaveId, WeightedTimestamp, zero_bls_signature,
+};
+use indexmap::IndexMap;
+use radix_common::prelude::DatabaseUpdate;
+use radix_common::types::{NodeId as RadixNodeId, PartitionNumber};
+use radix_substate_store_interface::db_key_mapper::{DatabaseKeyMapper, SpreadPrefixKeyMapper};
+
 use crate::{
     ChainReader, ChainWriter, DatabaseUpdates, DbSortKey, NodeDatabaseUpdates,
     PartitionDatabaseUpdates,
 };
-use hyperscale_types::{
-    ApplicationEvent, Block, BlockHash, BlockHeader, BlockHeight, Bls12381G2Signature,
-    CertificateRoot, ExecutionCertificate, ExecutionMetadata, ExecutionOutcome, FeeSummary,
-    FinalizedWave, GlobalReceiptHash, GlobalReceiptRoot, Hash, LocalReceiptRoot, LogLevel, NodeId,
-    ProposerTimestamp, ProvisionsRoot, QuorumCertificate, Round, ShardGroupId, SignerBitfield,
-    StateRoot, StoredReceipt, TransactionRoot, TxHash, TxOutcome, ValidatorId, WaveCertificate,
-    WaveId, WeightedTimestamp, zero_bls_signature,
-};
-use radix_common::prelude::DatabaseUpdate;
-use radix_substate_store_interface::db_key_mapper::{DatabaseKeyMapper, SpreadPrefixKeyMapper};
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 
 /// Build a `DatabaseUpdates` containing a single `Set` operation.
 #[must_use]
@@ -60,8 +64,8 @@ pub fn make_mapped_database_update(
     sort_key: Vec<u8>,
     value: Vec<u8>,
 ) -> DatabaseUpdates {
-    let radix_node_id = radix_common::types::NodeId(NodeId([node_seed; 30]).0);
-    let radix_partition = radix_common::types::PartitionNumber(partition);
+    let radix_node_id = RadixNodeId(NodeId([node_seed; 30]).0);
+    let radix_partition = PartitionNumber(partition);
     let db_node_key = SpreadPrefixKeyMapper::to_db_node_key(&radix_node_id);
     let db_partition_num = SpreadPrefixKeyMapper::to_db_partition_num(radix_partition);
     let db_sort_key = DbSortKey(sort_key);
@@ -72,7 +76,7 @@ pub fn make_mapped_database_update(
         .partition_updates
         .entry(db_partition_num)
         .or_insert_with(|| PartitionDatabaseUpdates::Delta {
-            substate_updates: indexmap::IndexMap::new(),
+            substate_updates: IndexMap::new(),
         });
     if let PartitionDatabaseUpdates::Delta { substate_updates } = partition_updates {
         substate_updates.insert(db_sort_key, DatabaseUpdate::Set(value));
@@ -144,8 +148,8 @@ pub fn make_test_qc(block: &Block) -> QuorumCertificate {
 #[must_use]
 pub fn make_test_receipt(seed: u8) -> StoredReceipt {
     let tx_hash = TxHash::from_raw(Hash::from_bytes(&[seed; 32]));
-    let consensus = hyperscale_types::ConsensusReceipt::Succeeded {
-        receipt_hash: hyperscale_types::GlobalReceiptHash::ZERO,
+    let consensus = ConsensusReceipt::Succeeded {
+        receipt_hash: GlobalReceiptHash::ZERO,
         database_updates: DatabaseUpdates::default(),
         application_events: vec![ApplicationEvent {
             type_id: vec![seed],

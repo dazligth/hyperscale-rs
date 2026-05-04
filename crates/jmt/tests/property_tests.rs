@@ -14,7 +14,8 @@
 use std::collections::BTreeMap;
 
 use hyperscale_jmt::{
-    Blake3Hasher, EMPTY_HASH, Hash, Key, MemoryStore, NodeKey, Tree, TreeReader, ValueHash,
+    Blake3Hasher, EMPTY_HASH, Hash, Key, MemoryStore, MultiProof, NodeKey, Tree, TreeReader,
+    ValueHash,
 };
 use proptest::prelude::*;
 
@@ -361,7 +362,7 @@ proptest! {
         let proof = Jmt::prove(&store, &root, &query).unwrap();
 
         let bytes = proof.encode();
-        let decoded = hyperscale_jmt::MultiProof::decode(&bytes).unwrap();
+        let decoded = MultiProof::decode(&bytes).unwrap();
         prop_assert_eq!(&proof, &decoded);
 
         // Re-verify with the same expected claims the original proof

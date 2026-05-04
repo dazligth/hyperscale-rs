@@ -7,18 +7,23 @@
 //! Concurrency is bounded by a global semaphore and per-peer counters to
 //! prevent any single peer (or flood of peers) from exhausting handler capacity.
 
-use crate::adapter::{Libp2pAdapter, NOTIFY_PROTOCOL, REQUEST_PROTOCOL};
-use crate::stream_framing::{self, FrameError, MAX_FRAME_SIZE};
-use dashmap::DashMap;
-use futures::{AsyncWriteExt, StreamExt};
-use hyperscale_metrics as metrics;
-use hyperscale_network::HandlerRegistry;
-use libp2p::{PeerId, Stream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
-use tokio::sync::Semaphore;
-use tracing::{debug, warn};
+
+use dashmap::DashMap;
+use futures::{AsyncWriteExt, StreamExt};
+use hyperscale_metrics::{record_libp2p_bandwidth, set_inbound_streams_in_use};
+use hyperscale_network::HandlerRegistry;
+use libp2p::{PeerId, Stream};
+use tokio::spawn;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::task::{JoinHandle, spawn_blocking};
+use tokio::time::timeout;
+use tracing::{debug, error, info, warn};
+
+use crate::adapter::{Libp2pAdapter, NOTIFY_PROTOCOL, REQUEST_PROTOCOL};
+use crate::stream_framing::{self, FrameError, MAX_FRAME_SIZE};
 
 /// Timeout for reading requests and writing responses on streams.
 const STREAM_IO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -86,9 +91,9 @@ impl PeerRateState {
 /// aborted when the `JoinHandle`s are dropped.
 pub struct InboundRouterHandle {
     #[allow(dead_code)]
-    request_handle: tokio::task::JoinHandle<()>,
+    request_handle: JoinHandle<()>,
     #[allow(dead_code)]
-    notify_handle: tokio::task::JoinHandle<()>,
+    notify_handle: JoinHandle<()>,
 }
 
 /// Routes inbound requests to per-type handlers via the handler registry.
@@ -125,21 +130,21 @@ impl InboundRouter {
         let request_handle = {
             let router = router.clone();
             let mut control = adapter.stream_control();
-            tokio::spawn(async move {
+            spawn(async move {
                 let mut incoming = match control.accept(REQUEST_PROTOCOL) {
                     Ok(incoming) => incoming,
                     Err(e) => {
-                        tracing::error!(error = ?e, "Failed to register request protocol");
+                        error!(error = ?e, "Failed to register request protocol");
                         return;
                     }
                 };
 
-                tracing::info!("InboundRouter: request loop started");
+                info!("InboundRouter: request loop started");
 
                 while let Some((peer_id, stream)) = incoming.next().await {
                     if let Some(permit) = router.try_admit(&peer_id) {
                         let router_clone = router.clone();
-                        tokio::spawn(async move {
+                        spawn(async move {
                             let _permit = permit;
                             let result = router_clone.handle_request_stream(peer_id, stream).await;
                             router_clone.decrement_peer_count(&peer_id);
@@ -158,7 +163,7 @@ impl InboundRouter {
                     }
                 }
 
-                tracing::info!("InboundRouter: request loop shutting down");
+                info!("InboundRouter: request loop shutting down");
             })
         };
 
@@ -166,21 +171,21 @@ impl InboundRouter {
         let notify_handle = {
             let router = router;
             let mut control = adapter.stream_control();
-            tokio::spawn(async move {
+            spawn(async move {
                 let mut incoming = match control.accept(NOTIFY_PROTOCOL) {
                     Ok(incoming) => incoming,
                     Err(e) => {
-                        tracing::error!(error = ?e, "Failed to register notify protocol");
+                        error!(error = ?e, "Failed to register notify protocol");
                         return;
                     }
                 };
 
-                tracing::info!("InboundRouter: notification loop started");
+                info!("InboundRouter: notification loop started");
 
                 while let Some((peer_id, stream)) = incoming.next().await {
                     if let Some(permit) = router.try_admit(&peer_id) {
                         let router_clone = router.clone();
-                        tokio::spawn(async move {
+                        spawn(async move {
                             let _permit = permit;
                             let result = router_clone
                                 .handle_notification_stream(peer_id, stream)
@@ -201,7 +206,7 @@ impl InboundRouter {
                     }
                 }
 
-                tracing::info!("InboundRouter: notification loop shutting down");
+                info!("InboundRouter: notification loop shutting down");
             })
         };
 
@@ -215,7 +220,7 @@ impl InboundRouter {
     /// per-peer concurrency, and global concurrency limits (in that order).
     ///
     /// Returns `Some(permit)` if admitted, `None` if rejected.
-    fn try_admit(self: &Arc<Self>, peer_id: &PeerId) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    fn try_admit(self: &Arc<Self>, peer_id: &PeerId) -> Option<OwnedSemaphorePermit> {
         // ── Failure-rate cooldown check ──
         if let Some(mut state) = self.per_peer_failures.get_mut(peer_id)
             && let Some(until) = state.cooldown_until
@@ -279,7 +284,7 @@ impl InboundRouter {
     fn update_inbound_gauge(&self) {
         let in_use =
             MAX_INBOUND_CONCURRENT.saturating_sub(self.global_semaphore.available_permits());
-        metrics::set_inbound_streams_in_use("all", in_use);
+        set_inbound_streams_in_use("all", in_use);
     }
 
     /// Record a stream failure for a peer. If failures exceed the threshold
@@ -340,7 +345,7 @@ impl InboundRouter {
     ) -> Result<(), StreamError> {
         loop {
             // Read the next request frame (idle timeout between requests).
-            let read_result = tokio::time::timeout(
+            let read_result = timeout(
                 PERSISTENT_STREAM_IDLE_TIMEOUT,
                 stream_framing::read_typed_frame(&mut stream, MAX_FRAME_SIZE),
             )
@@ -362,7 +367,7 @@ impl InboundRouter {
                 }
             };
 
-            metrics::record_libp2p_bandwidth(req_wire_bytes as u64, 0);
+            record_libp2p_bandwidth(req_wire_bytes as u64, 0);
 
             // Look up the per-type request handler.
             let handler = self
@@ -374,12 +379,12 @@ impl InboundRouter {
             // Handlers like provision.request do heavy work (merkle proof
             // generation) that would starve the async runtime if run on a
             // worker thread.
-            let response_sbor = tokio::task::spawn_blocking(move || handler(&sbor_payload))
+            let response_sbor = spawn_blocking(move || handler(&sbor_payload))
                 .await
                 .expect("request handler task panicked");
 
             // Write length-prefixed compressed response with timeout.
-            let resp_wire_bytes = tokio::time::timeout(
+            let resp_wire_bytes = timeout(
                 STREAM_IO_TIMEOUT,
                 stream_framing::write_frame(&mut stream, &response_sbor),
             )
@@ -387,7 +392,7 @@ impl InboundRouter {
             .map_err(|_| StreamError::Timeout)?
             .map_err(StreamError::Io)?;
 
-            metrics::record_libp2p_bandwidth(0, resp_wire_bytes as u64);
+            record_libp2p_bandwidth(0, resp_wire_bytes as u64);
         }
     }
 
@@ -402,7 +407,7 @@ impl InboundRouter {
         mut stream: Stream,
     ) -> Result<(), StreamError> {
         loop {
-            let read_result = tokio::time::timeout(
+            let read_result = timeout(
                 PERSISTENT_STREAM_IDLE_TIMEOUT,
                 stream_framing::read_typed_frame(&mut stream, MAX_FRAME_SIZE),
             )
@@ -427,11 +432,11 @@ impl InboundRouter {
                 }
             };
 
-            metrics::record_libp2p_bandwidth(wire_bytes as u64, 0);
+            record_libp2p_bandwidth(wire_bytes as u64, 0);
 
             // Look up the per-type notification handler.
             if let Some(handler) = self.registry.get_notification(&type_id) {
-                tokio::spawn(async move { handler(sbor_payload) });
+                spawn(async move { handler(sbor_payload) });
             } else {
                 warn!(
                     peer = %peer,

@@ -12,11 +12,13 @@
 //! caches the resulting `DatabaseUpdates` and applies them when the
 //! `WaveCertificate` is included in a committed block.
 
-use crate::output::ExecutionOutput;
+use std::sync::Arc;
+
 use hyperscale_storage::SubstateDatabase;
 use hyperscale_types::{RoutableTransaction, ShardGroupId, StateProvision};
 use radix_common::network::NetworkDefinition;
-use std::sync::Arc;
+
+use crate::output::ExecutionOutput;
 
 /// Trait abstracting transaction execution.
 ///

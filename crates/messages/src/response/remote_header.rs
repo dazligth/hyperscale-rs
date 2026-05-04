@@ -29,14 +29,16 @@ impl NetworkMessage for GetRemoteHeadersResponse {
 
 #[cfg(test)]
 mod tests {
+    use sbor::{basic_decode, basic_encode};
+
     use super::*;
 
     #[test]
     fn test_sbor_roundtrip_empty() {
         let response = GetRemoteHeadersResponse { headers: vec![] };
 
-        let encoded = sbor::basic_encode(&response).unwrap();
-        let decoded: GetRemoteHeadersResponse = sbor::basic_decode(&encoded).unwrap();
+        let encoded = basic_encode(&response).unwrap();
+        let decoded: GetRemoteHeadersResponse = basic_decode(&encoded).unwrap();
         assert_eq!(response, decoded);
     }
 }

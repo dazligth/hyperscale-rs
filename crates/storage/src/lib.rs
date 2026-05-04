@@ -38,6 +38,7 @@ pub mod test_helpers;
 pub use chain_reader::{BlockForSync, ChainReader};
 pub use chain_writer::ChainWriter;
 pub use genesis::GenesisCommit;
+use hyperscale_jmt::TreeReader;
 pub use overlay::{SubstateDbLookup, SubstateLookup};
 pub use pending_chain::{BaseReadCache, ChainEntry, PendingChain, SubstateView};
 pub use store::{SubstateStore, VersionedStore};
@@ -56,24 +57,12 @@ pub use writes::{
 /// proposal building, provision handlers), bound on the specific traits
 /// directly so the signature reflects what the function actually touches.
 pub trait Storage:
-    ChainWriter
-    + SubstateStore
-    + VersionedStore
-    + ChainReader
-    + hyperscale_jmt::TreeReader
-    + Send
-    + Sync
+    ChainWriter + SubstateStore + VersionedStore + ChainReader + TreeReader + Send + Sync
 {
 }
 
 impl<S> Storage for S where
-    S: ChainWriter
-        + SubstateStore
-        + VersionedStore
-        + ChainReader
-        + hyperscale_jmt::TreeReader
-        + Send
-        + Sync
+    S: ChainWriter + SubstateStore + VersionedStore + ChainReader + TreeReader + Send + Sync
 {
 }
 

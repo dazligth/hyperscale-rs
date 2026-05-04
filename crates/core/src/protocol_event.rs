@@ -5,13 +5,14 @@
 //! and never reach the state machine. This provides type-level enforcement of the
 //! boundary between protocol logic and I/O orchestration.
 
+use std::sync::Arc;
+
 use hyperscale_types::{
     Block, BlockHash, BlockHeader, BlockHeight, BlockManifest, BlockVote, CertifiedBlock,
     CommittedBlockHeader, ExecutionCertificate, ExecutionVote, FinalizedWave, Provisions,
-    QuorumCertificate, Round, RoutableTransaction, ShardGroupId, TxOutcome, ValidatorId, WaveId,
-    WeightedTimestamp,
+    QuorumCertificate, Round, RoutableTransaction, ShardGroupId, StoredReceipt, TxOutcome,
+    ValidatorId, WaveId, WeightedTimestamp,
 };
-use std::sync::Arc;
 
 /// How a node learned about the certifying QC that commits a given block.
 ///
@@ -304,7 +305,7 @@ pub enum ProtocolEvent {
         wave_id: WaveId,
         /// Per-tx stored receipts (consensus portion + metadata) ready
         /// to be persisted alongside the wave's commit.
-        results: Vec<hyperscale_types::StoredReceipt>,
+        results: Vec<StoredReceipt>,
         /// Per-tx outcomes extracted on the handler thread for vote signing.
         tx_outcomes: Vec<TxOutcome>,
     },

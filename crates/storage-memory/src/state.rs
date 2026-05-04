@@ -2,19 +2,20 @@
 //!
 //! Contains the internal state structures protected by `RwLocks` in `SimStorage`.
 
-use crate::tree_store::SimTreeStore;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
-use hyperscale_jmt as jmt;
+use hyperscale_jmt::NodeKey;
 use hyperscale_storage::{
     DatabaseUpdate, DatabaseUpdates, DbPartitionKey, JmtSnapshot, PartitionDatabaseUpdates, keys,
 };
 use hyperscale_types::{
     BlockHash, BlockHeight, CertifiedBlock, ConsensusReceipt, ExecutionCertificate,
     ExecutionCertificateHash, ExecutionMetadata, QuorumCertificate, RoutableTransaction,
-    ShardGroupId, StateRoot, TxHash, WaveCertificate, WaveId,
+    ShardGroupId, StateRoot, StoredReceipt, TxHash, WaveCertificate, WaveId,
 };
-use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
+
+use crate::tree_store::SimTreeStore;
 
 // ═══════════════════════════════════════════════════════════════════════
 // Shared substate + JMT state (single RwLock)
@@ -33,7 +34,7 @@ pub struct SharedState {
     pub current_block_height: BlockHeight,
     pub current_root_hash: StateRoot,
     /// Leaf-key → substate-value associations for historical queries.
-    pub associations: HashMap<jmt::NodeKey, Vec<u8>>,
+    pub associations: HashMap<NodeKey, Vec<u8>>,
     /// Current value per `storage_key`. Absent key = no value. This is
     /// the authoritative source of truth for reads at the current tip.
     pub current_state: BTreeMap<Vec<u8>, Vec<u8>>,
@@ -145,7 +146,7 @@ impl ConsensusState {
     }
 
     /// Insert a slice of stored receipts into the consensus + metadata maps.
-    pub(crate) fn insert_receipts(&mut self, receipts: &[hyperscale_types::StoredReceipt]) {
+    pub(crate) fn insert_receipts(&mut self, receipts: &[StoredReceipt]) {
         for receipt in receipts {
             self.consensus_receipts
                 .insert(receipt.tx_hash, Arc::clone(&receipt.consensus));

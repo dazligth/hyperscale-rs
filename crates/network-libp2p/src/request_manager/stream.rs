@@ -3,10 +3,11 @@
 //! Delegates to the shared [`RequestStreamPool`], which multiplexes
 //! request/response pairs over a persistent stream per peer.
 
-use super::RequestManager;
-use crate::adapter::NetworkError;
 use hyperscale_types::MessageClass;
 use libp2p::PeerId;
+
+use super::RequestManager;
+use crate::adapter::NetworkError;
 
 impl RequestManager {
     /// Send a request to `peer` and await the response.

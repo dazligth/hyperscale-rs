@@ -1,11 +1,19 @@
 //! `ChainWriter` implementation for `SimStorage`.
 
+use std::sync::Arc;
+
+use hyperscale_storage::tree::{
+    OverlayTreeReader, jmt_parent_height, noop_jmt_snapshot, put_at_version,
+};
+use hyperscale_storage::{
+    BaseReadCache, ChainWriter, DatabaseUpdates, JmtSnapshot, merge_updates_from_receipts,
+};
+use hyperscale_types::{
+    Block, BlockHeight, CertifiedBlock, FinalizedWave, QuorumCertificate, StateRoot, StoredReceipt,
+};
+
 use crate::core::SimStorage;
 use crate::state::apply_updates;
-
-use hyperscale_storage::{ChainWriter, DatabaseUpdates, JmtSnapshot};
-use hyperscale_types::{BlockHeight, CertifiedBlock, StateRoot, StoredReceipt};
-use std::sync::Arc;
 
 /// Precomputed commit work for a `SimStorage` block commit.
 ///
@@ -20,7 +28,7 @@ pub struct SimPreparedCommit {
 impl ChainWriter for SimStorage {
     type PreparedCommit = SimPreparedCommit;
 
-    fn jmt_snapshot(prepared: &Self::PreparedCommit) -> &hyperscale_storage::JmtSnapshot {
+    fn jmt_snapshot(prepared: &Self::PreparedCommit) -> &JmtSnapshot {
         &prepared.snapshot
     }
 
@@ -28,12 +36,12 @@ impl ChainWriter for SimStorage {
         &self,
         parent_state_root: StateRoot,
         parent_block_height: BlockHeight,
-        finalized_waves: &[Arc<hyperscale_types::FinalizedWave>],
+        finalized_waves: &[Arc<FinalizedWave>],
         block_height: BlockHeight,
-        pending_snapshots: &[Arc<hyperscale_storage::JmtSnapshot>],
+        pending_snapshots: &[Arc<JmtSnapshot>],
         // Memory backend already keeps state in-memory — the priors
         // hint is irrelevant to its perf and is ignored.
-        _base_reads: Option<&hyperscale_storage::BaseReadCache>,
+        _base_reads: Option<&BaseReadCache>,
     ) -> (StateRoot, Self::PreparedCommit) {
         let receipts: Vec<StoredReceipt> = finalized_waves
             .iter()
@@ -45,7 +53,7 @@ impl ChainWriter for SimStorage {
         // would fail if the parent's tree nodes aren't in the store yet.
         if receipts.is_empty() {
             let s = self.state.read().unwrap();
-            let snapshot = hyperscale_storage::tree::noop_jmt_snapshot(
+            let snapshot = noop_jmt_snapshot(
                 &s.tree_store,
                 pending_snapshots,
                 parent_state_root,
@@ -64,18 +72,16 @@ impl ChainWriter for SimStorage {
         // Read lock: compute speculative JMT root.
         let s = self.state.read().unwrap();
 
-        let parent_version =
-            hyperscale_storage::tree::jmt_parent_height(parent_block_height, parent_state_root)
-                .map(|h| h.0);
+        let parent_version = jmt_parent_height(parent_block_height, parent_state_root).map(|h| h.0);
 
         // Collect per-receipt DatabaseUpdates references — no merge needed.
-        let per_receipt_updates: Vec<&hyperscale_storage::DatabaseUpdates> = receipts
+        let per_receipt_updates: Vec<&DatabaseUpdates> = receipts
             .iter()
             .filter_map(|r| r.consensus.database_updates())
             .collect();
 
         let (result_root, collected) = if pending_snapshots.is_empty() {
-            hyperscale_storage::tree::put_at_version(
+            put_at_version(
                 &s.tree_store,
                 parent_version,
                 block_height.0,
@@ -83,9 +89,8 @@ impl ChainWriter for SimStorage {
                 &std::collections::HashMap::new(),
             )
         } else {
-            let overlay =
-                hyperscale_storage::tree::OverlayTreeReader::new(&s.tree_store, pending_snapshots);
-            hyperscale_storage::tree::put_at_version(
+            let overlay = OverlayTreeReader::new(&s.tree_store, pending_snapshots);
+            put_at_version(
                 &overlay,
                 parent_version,
                 block_height.0,
@@ -105,7 +110,7 @@ impl ChainWriter for SimStorage {
         drop(s); // Release read lock
 
         // Merge for commit-time substate writes (off the state_root critical path).
-        let merged_updates = hyperscale_storage::merge_updates_from_receipts(&receipts);
+        let merged_updates = merge_updates_from_receipts(&receipts);
 
         let prepared = SimPreparedCommit {
             snapshot,
@@ -119,11 +124,7 @@ impl ChainWriter for SimStorage {
     #[allow(clippy::significant_drop_tightening)] // every locked op needs the lock
     fn commit_prepared_blocks(
         &self,
-        blocks: Vec<(
-            Self::PreparedCommit,
-            Arc<hyperscale_types::Block>,
-            Arc<hyperscale_types::QuorumCertificate>,
-        )>,
+        blocks: Vec<(Self::PreparedCommit, Arc<Block>, Arc<QuorumCertificate>)>,
     ) -> Vec<StateRoot> {
         blocks
             .into_iter()
@@ -182,17 +183,13 @@ impl ChainWriter for SimStorage {
             .collect()
     }
 
-    fn commit_block(
-        &self,
-        block: &Arc<hyperscale_types::Block>,
-        qc: &Arc<hyperscale_types::QuorumCertificate>,
-    ) -> StateRoot {
+    fn commit_block(&self, block: &Arc<Block>, qc: &Arc<QuorumCertificate>) -> StateRoot {
         let receipts: Vec<StoredReceipt> = block
             .certificates()
             .iter()
             .flat_map(|fw| fw.receipts.iter().cloned())
             .collect();
-        let merged_updates = hyperscale_storage::merge_updates_from_receipts(&receipts);
+        let merged_updates = merge_updates_from_receipts(&receipts);
         self.commit_block_inner(&merged_updates, block, qc, &receipts)
     }
 }
@@ -202,8 +199,8 @@ impl SimStorage {
     fn commit_block_inner(
         &self,
         merged_updates: &DatabaseUpdates,
-        block: &Arc<hyperscale_types::Block>,
-        qc: &Arc<hyperscale_types::QuorumCertificate>,
+        block: &Arc<Block>,
+        qc: &Arc<QuorumCertificate>,
         receipts: &[StoredReceipt],
     ) -> StateRoot {
         let block_height = block.height();
@@ -225,13 +222,10 @@ impl SimStorage {
             /* write_history */ true,
         );
 
-        let parent_version = hyperscale_storage::tree::jmt_parent_height(
-            s.current_block_height,
-            s.current_root_hash,
-        )
-        .map(|h| h.0);
+        let parent_version =
+            jmt_parent_height(s.current_block_height, s.current_root_hash).map(|h| h.0);
 
-        let (new_root, collected) = hyperscale_storage::tree::put_at_version(
+        let (new_root, collected) = put_at_version(
             &s.tree_store,
             parent_version,
             block_height.0,
@@ -240,8 +234,7 @@ impl SimStorage {
         );
 
         for (key, node) in &collected.nodes {
-            s.tree_store
-                .insert(key.clone(), std::sync::Arc::clone(node));
+            s.tree_store.insert(key.clone(), Arc::clone(node));
         }
         // NOTE: stale JMT nodes are NOT deleted — see apply_jmt_snapshot comment.
         // Historical roots must be retained for provision proof generation at

@@ -16,7 +16,7 @@
 //! placed at the divergence point. This keeps tree depth proportional
 //! to `log_ARITY(n_active)` rather than the full key bit-width.
 
-use crate::hasher::{EMPTY_HASH, Hash};
+use crate::hasher::{EMPTY_HASH, Hash, Hasher};
 
 /// Fixed 32-byte key. Callers hash variable-length application keys to
 /// 32 bytes before calling into the tree.
@@ -306,7 +306,7 @@ impl Node {
     /// Hash of this node. For internal nodes this is pre-computed and
     /// cached; for leaves it's recomputed on demand.
     #[must_use]
-    pub fn hash<H: crate::hasher::Hasher>(&self) -> Hash {
+    pub fn hash<H: Hasher>(&self) -> Hash {
         match self {
             Self::Internal(n) => n.hash,
             Self::Leaf(n) => H::hash_leaf(&n.key, &n.value_hash),
@@ -331,14 +331,14 @@ pub struct InternalNode {
 impl InternalNode {
     /// Construct an internal node and pre-compute its hash.
     #[must_use]
-    pub fn new<H: crate::hasher::Hasher>(children: Vec<Option<Child>>) -> Self {
+    pub fn new<H: Hasher>(children: Vec<Option<Child>>) -> Self {
         let hash = Self::compute_hash::<H>(&children);
         Self { children, hash }
     }
 
     /// Hash an internal node's children without constructing one.
     #[must_use]
-    pub fn compute_hash<H: crate::hasher::Hasher>(children: &[Option<Child>]) -> Hash {
+    pub fn compute_hash<H: Hasher>(children: &[Option<Child>]) -> Hash {
         let flat: Vec<Hash> = children
             .iter()
             .map(|c| c.as_ref().map_or(EMPTY_HASH, |c| c.hash))

@@ -1,7 +1,8 @@
 //! Network configuration types.
 
-use libp2p::Multiaddr;
 use std::time::Duration;
+
+use libp2p::Multiaddr;
 
 /// Configuration for the libp2p network adapter.
 ///

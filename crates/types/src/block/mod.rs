@@ -21,7 +21,11 @@ pub use block::Block;
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::Arc;
+
     use super::*;
+    use crate::test_utils::test_validity_range;
     use crate::{
         BlockHash, BlockHeader, BlockHeight, Bls12381G2Signature, CertificateRoot,
         ExecutionCertificate, ExecutionOutcome, FinalizedWave, GlobalReceiptHash,
@@ -31,8 +35,6 @@ mod tests {
         compute_certificate_root, compute_transaction_root, generate_ed25519_keypair,
         routable_from_notarized_v1, sign_and_notarize,
     };
-    use std::collections::{BTreeMap, BTreeSet};
-    use std::sync::Arc;
 
     #[test]
     fn test_block_header_hash_deterministic() {
@@ -87,10 +89,7 @@ mod tests {
         let network = NetworkDefinition::simulator();
         let key = generate_ed25519_keypair();
         let notarized = sign_and_notarize(manifest, &network, 1, &key).unwrap();
-        let tx = Arc::new(
-            routable_from_notarized_v1(notarized, crate::test_utils::test_validity_range())
-                .unwrap(),
-        );
+        let tx = Arc::new(routable_from_notarized_v1(notarized, test_validity_range()).unwrap());
 
         let root1 = compute_transaction_root(std::slice::from_ref(&tx));
         let root2 = compute_transaction_root(std::slice::from_ref(&tx));

@@ -4,9 +4,15 @@
 //! the key type, value type, and their encodings. The [`DbCodec`] trait abstracts
 //! encode/decode so the same type can use different encodings in different CFs.
 
-use hyperscale_types::BlockHeight;
-use rocksdb::{ColumnFamily, WriteBatch};
 use std::marker::PhantomData;
+
+use hyperscale_types::{BlockHeight, Hash, QuorumCertificate, StateRoot};
+use rocksdb::{ColumnFamily, DB, DBRawIteratorWithThreadMode, Snapshot, WriteBatch};
+use sbor::prelude::{BasicDecode, BasicEncode};
+use sbor::{basic_decode, basic_encode};
+
+use crate::column_families::CfHandles;
+use crate::jmt_stored::{StoredNodeKey, encode_key};
 
 // ─── Codec trait ──────────────────────────────────────────────────────────────
 
@@ -36,16 +42,16 @@ impl<T> Default for SborCodec<T> {
 
 impl<T> DbCodec<T> for SborCodec<T>
 where
-    T: sbor::prelude::BasicEncode + sbor::prelude::BasicDecode,
+    T: BasicEncode + BasicDecode,
 {
     fn encode_to(&self, value: &T, buf: &mut Vec<u8>) {
         // basic_encode returns a Vec; append it to buf.
-        let encoded = sbor::basic_encode(value).expect("SBOR encoding must succeed");
+        let encoded = basic_encode(value).expect("SBOR encoding must succeed");
         buf.extend_from_slice(&encoded);
     }
 
     fn decode(&self, bytes: &[u8]) -> T {
-        sbor::basic_decode(bytes).expect("SBOR decoding must succeed")
+        basic_decode(bytes).expect("SBOR decoding must succeed")
     }
 }
 
@@ -68,13 +74,13 @@ impl DbCodec<u64> for BeU64Codec {
 #[derive(Default)]
 pub struct HashCodec;
 
-impl DbCodec<hyperscale_types::Hash> for HashCodec {
-    fn encode_to(&self, value: &hyperscale_types::Hash, buf: &mut Vec<u8>) {
+impl DbCodec<Hash> for HashCodec {
+    fn encode_to(&self, value: &Hash, buf: &mut Vec<u8>) {
         buf.extend_from_slice(value.as_bytes());
     }
 
-    fn decode(&self, bytes: &[u8]) -> hyperscale_types::Hash {
-        hyperscale_types::Hash::from_hash_bytes(bytes)
+    fn decode(&self, bytes: &[u8]) -> Hash {
+        Hash::from_hash_bytes(bytes)
     }
 }
 
@@ -96,13 +102,13 @@ impl DbCodec<Vec<u8>> for RawCodec {
 #[derive(Default)]
 pub struct JmtKeyCodec;
 
-impl DbCodec<crate::jmt_stored::StoredNodeKey> for JmtKeyCodec {
-    fn encode_to(&self, value: &crate::jmt_stored::StoredNodeKey, buf: &mut Vec<u8>) {
-        let encoded = crate::jmt_stored::encode_key(value);
+impl DbCodec<StoredNodeKey> for JmtKeyCodec {
+    fn encode_to(&self, value: &StoredNodeKey, buf: &mut Vec<u8>) {
+        let encoded = encode_key(value);
         buf.extend_from_slice(&encoded);
     }
 
-    fn decode(&self, _bytes: &[u8]) -> crate::jmt_stored::StoredNodeKey {
+    fn decode(&self, _bytes: &[u8]) -> StoredNodeKey {
         // JMT keys are only encoded for writes/lookups, never decoded from raw bytes
         // in our codebase (the decode path goes through SBOR for the node values).
         unimplemented!("JMT key decoding not needed — keys are write-only in RocksDB")
@@ -137,7 +143,7 @@ pub trait TypedCf {
     ///
     /// Each implementation is a single field access — the compiler verifies
     /// the mapping at build time, so there's no runtime string dispatch.
-    fn handle<'a>(cf: &crate::column_families::CfHandles<'a>) -> &'a rocksdb::ColumnFamily;
+    fn handle<'a>(cf: &CfHandles<'a>) -> &'a ColumnFamily;
 }
 
 // ─── ReadableStore trait ─────────────────────────────────────────────────────
@@ -154,7 +160,7 @@ pub trait ReadableStore {
     fn raw_get(&self, key: &[u8]) -> Option<Vec<u8>>;
 }
 
-impl ReadableStore for rocksdb::DB {
+impl ReadableStore for DB {
     fn raw_get_cf(&self, cf: &ColumnFamily, key: &[u8]) -> Option<Vec<u8>> {
         self.get_cf(cf, key).expect("BFT CRITICAL: read failed")
     }
@@ -172,7 +178,7 @@ impl ReadableStore for rocksdb::DB {
     }
 }
 
-impl ReadableStore for rocksdb::Snapshot<'_> {
+impl ReadableStore for Snapshot<'_> {
     fn raw_get_cf(&self, cf: &ColumnFamily, key: &[u8]) -> Option<Vec<u8>> {
         self.get_cf(cf, key)
             .expect("BFT CRITICAL: snapshot read failed")
@@ -270,7 +276,7 @@ pub fn batch_delete<CF: TypedCf>(batch: &mut WriteBatch, cf: &ColumnFamily, key:
 /// Iterates all entries from the beginning, decoding each key/value through
 /// the CF's codecs. Use for small or bounded CFs (votes, stale JMT nodes).
 pub fn iter_all<'a, CF: TypedCf>(
-    db: &'a rocksdb::DB,
+    db: &'a DB,
     cf: &ColumnFamily,
 ) -> impl Iterator<Item = (CF::Key, CF::Value)> + 'a {
     let mut iter = db.raw_iterator_cf(cf);
@@ -284,7 +290,7 @@ pub fn iter_all<'a, CF: TypedCf>(
 /// prefix range. The end bound is computed by incrementing the last byte
 /// of the prefix (standard `RocksDB` prefix scan pattern).
 pub fn prefix_iter<'a, CF: TypedCf>(
-    db: &'a rocksdb::DB,
+    db: &'a DB,
     cf: &ColumnFamily,
     prefix: &[u8],
 ) -> impl Iterator<Item = (CF::Key, CF::Value)> + 'a {
@@ -296,7 +302,7 @@ pub fn prefix_iter<'a, CF: TypedCf>(
 /// Like [`prefix_iter`], but seeks to `start` instead of the prefix.
 /// `start` must be >= `prefix`. The end bound is still `next_prefix(prefix)`.
 pub fn prefix_iter_from<'a, CF: TypedCf>(
-    db: &'a rocksdb::DB,
+    db: &'a DB,
     cf: &ColumnFamily,
     prefix: &[u8],
     start: &[u8],
@@ -311,7 +317,7 @@ pub fn prefix_iter_from<'a, CF: TypedCf>(
 ///
 /// Same as [`prefix_iter`] but reads from a point-in-time snapshot.
 pub fn prefix_iter_snap<'a, CF: TypedCf>(
-    snapshot: &'a rocksdb::Snapshot<'_>,
+    snapshot: &'a Snapshot<'_>,
     cf: &ColumnFamily,
     prefix: &[u8],
 ) -> impl Iterator<Item = (CF::Key, CF::Value)> + 'a {
@@ -320,7 +326,7 @@ pub fn prefix_iter_snap<'a, CF: TypedCf>(
 
 /// Typed prefix-scan iterator over a `RocksDB` snapshot with custom seek position.
 pub fn prefix_iter_from_snap<'a, CF: TypedCf>(
-    snapshot: &'a rocksdb::Snapshot<'_>,
+    snapshot: &'a Snapshot<'_>,
     cf: &ColumnFamily,
     prefix: &[u8],
     start: &[u8],
@@ -334,7 +340,7 @@ pub fn prefix_iter_from_snap<'a, CF: TypedCf>(
 /// Convert a raw iterator (already seeked) into a typed iterator that yields
 /// all remaining entries.
 fn raw_iter_to_typed<CF: TypedCf>(
-    mut iter: rocksdb::DBRawIteratorWithThreadMode<'_, rocksdb::DB>,
+    mut iter: DBRawIteratorWithThreadMode<'_, DB>,
 ) -> impl Iterator<Item = (CF::Key, CF::Value)> + '_ {
     let key_codec = CF::KeyCodec::default();
     let value_codec = CF::ValueCodec::default();
@@ -362,7 +368,7 @@ fn raw_iter_to_typed<CF: TypedCf>(
 /// Convert a raw iterator (already seeked) into a typed iterator bounded by
 /// an exclusive end key. `None` end means unbounded (iterate to end).
 fn bounded_iter_to_typed<CF: TypedCf>(
-    mut iter: rocksdb::DBRawIteratorWithThreadMode<'_, rocksdb::DB>,
+    mut iter: DBRawIteratorWithThreadMode<'_, DB>,
     end: Option<Vec<u8>>,
 ) -> impl Iterator<Item = (CF::Key, CF::Value)> + '_ {
     let key_codec = CF::KeyCodec::default();
@@ -465,18 +471,16 @@ impl DbCodec<BlockHeight> for BlockHeightCodec {
 #[derive(Default)]
 pub struct JmtMetadataCodec;
 
-impl DbCodec<(u64, hyperscale_types::StateRoot)> for JmtMetadataCodec {
-    fn encode_to(&self, value: &(u64, hyperscale_types::StateRoot), buf: &mut Vec<u8>) {
+impl DbCodec<(u64, StateRoot)> for JmtMetadataCodec {
+    fn encode_to(&self, value: &(u64, StateRoot), buf: &mut Vec<u8>) {
         buf.extend_from_slice(&value.0.to_be_bytes());
         buf.extend_from_slice(&value.1.as_raw().to_bytes());
     }
 
-    fn decode(&self, bytes: &[u8]) -> (u64, hyperscale_types::StateRoot) {
+    fn decode(&self, bytes: &[u8]) -> (u64, StateRoot) {
         assert!(bytes.len() == 40, "jmt:metadata must be 40 bytes");
         let version = u64::from_be_bytes(bytes[..8].try_into().unwrap());
-        let root_hash = hyperscale_types::StateRoot::from_raw(
-            hyperscale_types::Hash::from_hash_bytes(&bytes[8..40]),
-        );
+        let root_hash = StateRoot::from_raw(Hash::from_hash_bytes(&bytes[8..40]));
         (version, root_hash)
     }
 }
@@ -493,20 +497,20 @@ impl MetadataEntry for CommittedHeightEntry {
 pub struct CommittedHashEntry;
 impl MetadataEntry for CommittedHashEntry {
     const KEY: &'static [u8] = b"chain:committed_hash";
-    type Value = hyperscale_types::Hash;
+    type Value = Hash;
     type Codec = HashCodec;
 }
 
 pub struct CommittedQcEntry;
 impl MetadataEntry for CommittedQcEntry {
     const KEY: &'static [u8] = b"chain:committed_qc";
-    type Value = hyperscale_types::QuorumCertificate;
-    type Codec = SborCodec<hyperscale_types::QuorumCertificate>;
+    type Value = QuorumCertificate;
+    type Codec = SborCodec<QuorumCertificate>;
 }
 
 pub struct JmtMetadataEntry;
 impl MetadataEntry for JmtMetadataEntry {
     const KEY: &'static [u8] = b"jmt:metadata";
-    type Value = (u64, hyperscale_types::StateRoot);
+    type Value = (u64, StateRoot);
     type Codec = JmtMetadataCodec;
 }

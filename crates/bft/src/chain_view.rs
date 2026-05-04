@@ -10,13 +10,14 @@
 //! no mutations. It's a lens, not a sub-machine. The underlying fields live
 //! on `BftCoordinator` / `CommitPipeline` / `PendingBlock` just as before.
 
+use std::collections::{HashMap, HashSet};
+
 #[cfg(test)]
 use hyperscale_types::Hash;
 use hyperscale_types::{
     Block, BlockHash, BlockHeader, BlockHeight, ProvisionHash, QuorumCertificate, StateRoot,
     TxHash, WaveId,
 };
-use std::collections::{HashMap, HashSet};
 use tracing::warn;
 
 use crate::pending::PendingBlock;
@@ -163,12 +164,14 @@ impl ChainView<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::collections::BTreeMap;
+
     use hyperscale_types::{
         BlockManifest, CertificateRoot, LocalReceiptRoot, LocalTimestamp, ProposerTimestamp,
         ProvisionsRoot, Round, ShardGroupId, TransactionRoot, ValidatorId, WeightedTimestamp,
     };
-    use std::collections::BTreeMap;
+
+    use super::*;
 
     fn make_header(height: u8, parent_block_hash: BlockHash) -> BlockHeader {
         BlockHeader {

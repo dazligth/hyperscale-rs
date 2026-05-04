@@ -10,12 +10,17 @@
 //!    feed memory metrics. Designed to run off-thread via `spawn_blocking`
 //!    so the I/O loop never blocks on compaction-pressured `RocksDB` reads.
 
-use crate::io_loop::IoLoop;
 use hyperscale_dispatch::Dispatch;
 use hyperscale_engine::Engine;
-use hyperscale_metrics as metrics;
+use hyperscale_metrics::{
+    MemoryMetrics, set_backpressure_active, set_bft_round, set_fetch_in_flight, set_in_flight,
+    set_lock_contention, set_memory_metrics, set_mempool_size, set_sync_blocks_behind,
+    set_sync_in_progress, set_sync_round_in_flight, set_view_changes, set_view_syncs,
+};
 use hyperscale_network::Network;
 use hyperscale_storage::{ChainWriter, Storage};
+
+use crate::io_loop::IoLoop;
 
 /// Lightweight snapshot of `io_loop` state for metrics recording.
 ///
@@ -48,7 +53,7 @@ pub struct MetricsSnapshot {
     pub fetch_local_provision: usize,
     pub fetch_exec_cert: usize,
     pub fetch_finalized_wave: usize,
-    pub memory: metrics::MemoryMetrics,
+    pub memory: MemoryMetrics,
 }
 
 /// Record a [`MetricsSnapshot`] to the metrics backend.
@@ -57,31 +62,31 @@ pub struct MetricsSnapshot {
 /// the `RocksDB` property queries for storage memory usage. Designed to
 /// run off the pinned thread via `spawn_blocking`.
 pub fn record_metrics<S: ChainWriter>(snapshot: MetricsSnapshot, storage: &S) {
-    metrics::set_bft_round(snapshot.bft_round);
-    metrics::set_view_changes(snapshot.view_changes);
-    metrics::set_view_syncs(snapshot.view_syncs);
-    metrics::set_mempool_size(snapshot.mempool_size);
-    metrics::set_lock_contention(snapshot.contention_ratio);
-    metrics::set_in_flight(snapshot.in_flight);
-    metrics::set_backpressure_active(snapshot.backpressure_active);
-    metrics::set_sync_blocks_behind("block", snapshot.blocks_behind);
-    metrics::set_sync_in_progress("block", snapshot.is_syncing);
-    metrics::set_sync_round_in_flight("block", snapshot.block_sync_round_in_flight);
-    metrics::set_sync_blocks_behind("remote_header", snapshot.remote_header_blocks_behind);
-    metrics::set_sync_in_progress("remote_header", snapshot.remote_header_is_syncing);
-    metrics::set_sync_round_in_flight("remote_header", snapshot.remote_header_round_in_flight);
-    metrics::set_fetch_in_flight("transaction", snapshot.fetch_transaction);
-    metrics::set_fetch_in_flight("provision", snapshot.fetch_provision);
-    metrics::set_fetch_in_flight("local_provision", snapshot.fetch_local_provision);
-    metrics::set_fetch_in_flight("exec_cert", snapshot.fetch_exec_cert);
-    metrics::set_fetch_in_flight("finalized_wave", snapshot.fetch_finalized_wave);
+    set_bft_round(snapshot.bft_round);
+    set_view_changes(snapshot.view_changes);
+    set_view_syncs(snapshot.view_syncs);
+    set_mempool_size(snapshot.mempool_size);
+    set_lock_contention(snapshot.contention_ratio);
+    set_in_flight(snapshot.in_flight);
+    set_backpressure_active(snapshot.backpressure_active);
+    set_sync_blocks_behind("block", snapshot.blocks_behind);
+    set_sync_in_progress("block", snapshot.is_syncing);
+    set_sync_round_in_flight("block", snapshot.block_sync_round_in_flight);
+    set_sync_blocks_behind("remote_header", snapshot.remote_header_blocks_behind);
+    set_sync_in_progress("remote_header", snapshot.remote_header_is_syncing);
+    set_sync_round_in_flight("remote_header", snapshot.remote_header_round_in_flight);
+    set_fetch_in_flight("transaction", snapshot.fetch_transaction);
+    set_fetch_in_flight("provision", snapshot.fetch_provision);
+    set_fetch_in_flight("local_provision", snapshot.fetch_local_provision);
+    set_fetch_in_flight("exec_cert", snapshot.fetch_exec_cert);
+    set_fetch_in_flight("finalized_wave", snapshot.fetch_finalized_wave);
 
     // RocksDB property queries — potentially slow under compaction pressure.
     let (rocksdb_bc, rocksdb_mt) = storage.memory_usage_bytes();
     let mut memory = snapshot.memory;
     memory.rocksdb_block_cache_usage_bytes = rocksdb_bc;
     memory.rocksdb_memtable_usage_bytes = rocksdb_mt;
-    metrics::set_memory_metrics(&memory);
+    set_memory_metrics(&memory);
 }
 
 impl<S, N, D, E> IoLoop<S, N, D, E>
@@ -134,7 +139,7 @@ where
             fetch_local_provision: proto.local_provision_in_flight,
             fetch_exec_cert: proto.exec_cert_in_flight,
             fetch_finalized_wave: proto.finalized_wave_in_flight,
-            memory: metrics::MemoryMetrics {
+            memory: MemoryMetrics {
                 // BFT
                 bft_pending_blocks: bft_mem.pending_blocks,
                 bft_vote_sets: bft_mem.vote_sets,

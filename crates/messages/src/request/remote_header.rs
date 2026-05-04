@@ -4,9 +4,10 @@
 //! tip with one round-trip per batch instead of one per missing height.
 //! Any validator in the source shard can serve this from local storage.
 
-use crate::response::GetRemoteHeadersResponse;
 use hyperscale_types::{BlockHeight, MessageClass, NetworkMessage, Request, ShardGroupId};
 use sbor::prelude::BasicSbor;
+
+use crate::response::GetRemoteHeadersResponse;
 
 /// Server-enforced upper bound on `count`. Sized to match the block-sync
 /// window so the two protocols share batch granularity.
@@ -45,6 +46,8 @@ impl Request for GetRemoteHeadersRequest {
 
 #[cfg(test)]
 mod tests {
+    use sbor::{basic_decode, basic_encode};
+
     use super::*;
 
     #[test]
@@ -55,8 +58,8 @@ mod tests {
             count: 16,
         };
 
-        let encoded = sbor::basic_encode(&request).unwrap();
-        let decoded: GetRemoteHeadersRequest = sbor::basic_decode(&encoded).unwrap();
+        let encoded = basic_encode(&request).unwrap();
+        let decoded: GetRemoteHeadersRequest = basic_decode(&encoded).unwrap();
         assert_eq!(request, decoded);
     }
 }

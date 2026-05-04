@@ -1,8 +1,9 @@
 //! Provision fetch request for fallback recovery.
 
-use crate::response::GetProvisionResponse;
 use hyperscale_types::{BlockHeight, MessageClass, NetworkMessage, Request, ShardGroupId};
 use sbor::prelude::BasicSbor;
+
+use crate::response::GetProvisionResponse;
 
 /// Request to fetch missing provisions from a source shard.
 ///
@@ -35,6 +36,8 @@ impl Request for GetProvisionsRequest {
 
 #[cfg(test)]
 mod tests {
+    use sbor::{basic_decode, basic_encode};
+
     use super::*;
 
     #[test]
@@ -44,8 +47,8 @@ mod tests {
             target_shard: ShardGroupId(1),
         };
 
-        let encoded = sbor::basic_encode(&request).unwrap();
-        let decoded: GetProvisionsRequest = sbor::basic_decode(&encoded).unwrap();
+        let encoded = basic_encode(&request).unwrap();
+        let decoded: GetProvisionsRequest = basic_decode(&encoded).unwrap();
         assert_eq!(request, decoded);
     }
 }

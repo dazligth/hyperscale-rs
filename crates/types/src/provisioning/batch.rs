@@ -1,11 +1,18 @@
 //! Per-block bundle of transaction provisions with a shared merkle proof.
 
+use std::collections::HashSet;
+use std::fmt::{self, Debug, Formatter};
+
+use sbor::prelude::*;
+use sbor::{
+    Categorize, Decode, DecodeError, Decoder, Describe, Encode, EncodeError, Encoder,
+    NoCustomTypeKind, NoCustomValueKind, RustTypeId, TypeData, TypeKind, ValueKind,
+};
+
 use crate::{
     BlockHeight, Hash, MerkleInclusionProof, NodeId, ProvisionHash, RETENTION_HORIZON,
     ShardGroupId, StateEntry, TxEntries, TxHash, WeightedTimestamp,
 };
-use sbor::prelude::*;
-use std::collections::HashSet;
 
 /// All provisions from a single source block, scoped to a single target shard.
 ///
@@ -40,8 +47,8 @@ pub struct Provisions {
     hash: ProvisionHash,
 }
 
-impl std::fmt::Debug for Provisions {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Debug for Provisions {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("Provision")
             .field("hash", &self.hash)
             .field("source_shard", &self.source_shard)
@@ -74,14 +81,12 @@ impl PartialEq for Provisions {
 impl Eq for Provisions {}
 
 // Manual SBOR: the cached hash is derived, not serialized.
-impl<E: sbor::Encoder<sbor::NoCustomValueKind>> sbor::Encode<sbor::NoCustomValueKind, E>
-    for Provisions
-{
-    fn encode_value_kind(&self, encoder: &mut E) -> Result<(), sbor::EncodeError> {
-        encoder.write_value_kind(sbor::ValueKind::Tuple)
+impl<E: Encoder<NoCustomValueKind>> Encode<NoCustomValueKind, E> for Provisions {
+    fn encode_value_kind(&self, encoder: &mut E) -> Result<(), EncodeError> {
+        encoder.write_value_kind(ValueKind::Tuple)
     }
 
-    fn encode_body(&self, encoder: &mut E) -> Result<(), sbor::EncodeError> {
+    fn encode_body(&self, encoder: &mut E) -> Result<(), EncodeError> {
         encoder.write_size(5)?;
         encoder.encode(&self.source_shard)?;
         encoder.encode(&self.target_shard)?;
@@ -92,17 +97,15 @@ impl<E: sbor::Encoder<sbor::NoCustomValueKind>> sbor::Encode<sbor::NoCustomValue
     }
 }
 
-impl<D: sbor::Decoder<sbor::NoCustomValueKind>> sbor::Decode<sbor::NoCustomValueKind, D>
-    for Provisions
-{
+impl<D: Decoder<NoCustomValueKind>> Decode<NoCustomValueKind, D> for Provisions {
     fn decode_body_with_value_kind(
         decoder: &mut D,
-        value_kind: sbor::ValueKind<sbor::NoCustomValueKind>,
-    ) -> Result<Self, sbor::DecodeError> {
-        decoder.check_preloaded_value_kind(value_kind, sbor::ValueKind::Tuple)?;
+        value_kind: ValueKind<NoCustomValueKind>,
+    ) -> Result<Self, DecodeError> {
+        decoder.check_preloaded_value_kind(value_kind, ValueKind::Tuple)?;
         let length = decoder.read_size()?;
         if length != 5 {
-            return Err(sbor::DecodeError::UnexpectedSize {
+            return Err(DecodeError::UnexpectedSize {
                 expected: 5,
                 actual: length,
             });
@@ -130,17 +133,17 @@ impl<D: sbor::Decoder<sbor::NoCustomValueKind>> sbor::Decode<sbor::NoCustomValue
     }
 }
 
-impl sbor::Categorize<sbor::NoCustomValueKind> for Provisions {
-    fn value_kind() -> sbor::ValueKind<sbor::NoCustomValueKind> {
-        sbor::ValueKind::Tuple
+impl Categorize<NoCustomValueKind> for Provisions {
+    fn value_kind() -> ValueKind<NoCustomValueKind> {
+        ValueKind::Tuple
     }
 }
 
-impl sbor::Describe<sbor::NoCustomTypeKind> for Provisions {
-    const TYPE_ID: sbor::RustTypeId = sbor::RustTypeId::novel_with_code("Provision", &[], &[]);
+impl Describe<NoCustomTypeKind> for Provisions {
+    const TYPE_ID: RustTypeId = RustTypeId::novel_with_code("Provision", &[], &[]);
 
-    fn type_data() -> sbor::TypeData<sbor::NoCustomTypeKind, sbor::RustTypeId> {
-        sbor::TypeData::unnamed(sbor::TypeKind::Any)
+    fn type_data() -> TypeData<NoCustomTypeKind, RustTypeId> {
+        TypeData::unnamed(TypeKind::Any)
     }
 }
 
@@ -201,24 +204,19 @@ impl Provisions {
         // Encode the content fields (excluding the hash itself) for hashing.
         let mut bytes = Vec::new();
         bytes.extend_from_slice(
-            &sbor::basic_encode(&source_shard)
-                .expect("ShardGroupId serialization should never fail"),
+            &basic_encode(&source_shard).expect("ShardGroupId serialization should never fail"),
         );
         bytes.extend_from_slice(
-            &sbor::basic_encode(&target_shard)
-                .expect("ShardGroupId serialization should never fail"),
+            &basic_encode(&target_shard).expect("ShardGroupId serialization should never fail"),
         );
         bytes.extend_from_slice(
-            &sbor::basic_encode(&block_height)
-                .expect("BlockHeight serialization should never fail"),
+            &basic_encode(&block_height).expect("BlockHeight serialization should never fail"),
         );
         bytes.extend_from_slice(
-            &sbor::basic_encode(proof)
-                .expect("MerkleInclusionProof serialization should never fail"),
+            &basic_encode(proof).expect("MerkleInclusionProof serialization should never fail"),
         );
         bytes.extend_from_slice(
-            &sbor::basic_encode(transactions)
-                .expect("Vec<TxEntries> serialization should never fail"),
+            &basic_encode(transactions).expect("Vec<TxEntries> serialization should never fail"),
         );
         ProvisionHash::from_raw(Hash::from_bytes(&bytes))
     }
@@ -308,8 +306,8 @@ mod tests {
             vec![],
         );
 
-        let bytes = sbor::basic_encode(&original).unwrap();
-        let decoded: Provisions = sbor::basic_decode(&bytes).unwrap();
+        let bytes = basic_encode(&original).unwrap();
+        let decoded: Provisions = basic_decode(&bytes).unwrap();
         assert_eq!(original, decoded);
         assert_eq!(decoded.target_shard, ShardGroupId(2));
     }
@@ -341,8 +339,8 @@ mod tests {
             }],
         );
 
-        let bytes = sbor::basic_encode(&provisions).unwrap();
-        let decoded: Provisions = sbor::basic_decode(&bytes).unwrap();
+        let bytes = basic_encode(&provisions).unwrap();
+        let decoded: Provisions = basic_decode(&bytes).unwrap();
         assert_eq!(provisions, decoded);
     }
 
@@ -370,8 +368,8 @@ mod tests {
     #[test]
     fn test_merkle_inclusion_proof_roundtrip() {
         let proof = MerkleInclusionProof::new(vec![1, 2, 3, 4, 5]);
-        let bytes = sbor::basic_encode(&proof).unwrap();
-        let decoded: MerkleInclusionProof = sbor::basic_decode(&bytes).unwrap();
+        let bytes = basic_encode(&proof).unwrap();
+        let decoded: MerkleInclusionProof = basic_decode(&bytes).unwrap();
         assert_eq!(proof, decoded);
     }
 }

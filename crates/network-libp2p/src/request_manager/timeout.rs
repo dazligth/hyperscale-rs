@@ -1,12 +1,14 @@
 //! Timeout and backoff computation based on peer RTT history.
 
+use std::time::Duration;
+
+use hyperscale_types::MessageClass;
+use libp2p::PeerId;
+
 use super::{
     MAX_STREAM_TIMEOUT, MIN_STREAM_TIMEOUT_COLD, MIN_STREAM_TIMEOUT_WARM, RequestManager,
     STREAM_TIMEOUT_RTT_MULTIPLIER, uses_relaxed_retry,
 };
-use hyperscale_types::MessageClass;
-use libp2p::PeerId;
-use std::time::Duration;
 
 /// Compute stream timeout from optional RTT EMA.
 ///

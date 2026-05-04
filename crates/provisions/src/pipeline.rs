@@ -17,10 +17,12 @@
 //! No topology, no time source. Inputs are `WeightedTimestamp` and the
 //! coordinator decides when to call each method.
 
-use crate::store::ProvisionStore;
-use hyperscale_types::{BlockHeight, ProvisionHash, Provisions, ShardGroupId, WeightedTimestamp};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+
+use hyperscale_types::{BlockHeight, ProvisionHash, Provisions, ShardGroupId, WeightedTimestamp};
+
+use crate::store::ProvisionStore;
 
 type Key = (ShardGroupId, BlockHeight);
 
@@ -152,8 +154,9 @@ impl ProvisionPipeline {
 
 #[cfg(test)]
 mod tests {
+    use hyperscale_types::{Hash, MerkleInclusionProof, TxEntries, TxHash};
+
     use super::*;
-    use hyperscale_types::{MerkleInclusionProof, TxEntries, TxHash};
 
     fn ts(ms: u64) -> WeightedTimestamp {
         WeightedTimestamp::from_millis(ms)
@@ -166,7 +169,7 @@ mod tests {
             height,
             MerkleInclusionProof::dummy(),
             vec![TxEntries {
-                tx_hash: TxHash::from_raw(hyperscale_types::Hash::from_bytes(&[seed])),
+                tx_hash: TxHash::from_raw(Hash::from_bytes(&[seed])),
                 entries: vec![],
                 target_nodes: vec![],
             }],

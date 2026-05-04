@@ -1,16 +1,23 @@
 //! Execution handler functions shared between production and simulation runners.
 
-use hyperscale_core::{Action, CrossShardExecutionRequest};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+use hyperscale_core::{
+    Action, ActionContext, CrossShardExecutionRequest, NodeInput, ProtocolEvent,
+};
+use hyperscale_engine::Engine;
+use hyperscale_messages::{ExecutionCertificatesNotification, ExecutionVotesNotification};
+use hyperscale_metrics::record_execution_latency;
+use hyperscale_network::Network;
+use hyperscale_storage::{Storage, SubstateStore, SubstateView};
 use hyperscale_types::{
     BlockHash, Bls12381G1PublicKey, Bls12381G2Signature, ExecutionCertificate, ExecutionVote,
     GlobalReceiptRoot, RoutableTransaction, SignerBitfield, StateProvision, StateRoot,
     StoredReceipt, TxHash, ValidatorId, WaveId, WeightedTimestamp, batch_verify_bls_same_message,
-    exec_vote_message, verify_bls12381_v1, zero_bls_signature,
+    exec_cert_batch_message, exec_vote_batch_message, exec_vote_message, verify_bls12381_v1,
+    zero_bls_signature,
 };
-#[cfg(test)]
-use hyperscale_types::{GlobalReceiptHash, Hash};
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
 use crate::wave_state::WaveState;
 
@@ -247,16 +254,12 @@ pub(crate) fn build_dispatch_action(
 /// the [`Engine`](hyperscale_engine::Engine) breaks its "one result per input
 /// transaction" contract.
 #[allow(clippy::too_many_lines)] // single dispatch over execution-owned Action variants
-pub fn handle_action<S, E, N>(action: Action, ctx: &hyperscale_core::ActionContext<'_, S, E, N>)
+pub fn handle_action<S, E, N>(action: Action, ctx: &ActionContext<'_, S, E, N>)
 where
-    S: hyperscale_storage::Storage,
-    E: hyperscale_engine::Engine,
-    N: hyperscale_network::Network,
+    S: Storage,
+    E: Engine,
+    N: Network,
 {
-    use hyperscale_core::{NodeInput, ProtocolEvent};
-    use hyperscale_metrics as metrics;
-    use hyperscale_storage::SubstateStore;
-
     match action {
         Action::AggregateExecutionCertificate {
             wave_id,
@@ -310,8 +313,7 @@ where
             let local_shard = ctx.topology_snapshot.local_shard();
             let num_shards = ctx.topology_snapshot.num_shards();
             let view = ctx.pending_chain.view_at(block_hash);
-            let view_snap =
-                <hyperscale_storage::SubstateView<_> as SubstateStore>::snapshot(&*view);
+            let view_snap = <SubstateView<_> as SubstateStore>::snapshot(&*view);
             let output = ctx.executor.execute_single_shard(
                 &view_snap,
                 transactions.as_slice(),
@@ -323,7 +325,7 @@ where
                 .into_iter()
                 .map(|tx| (tx.outcome(), StoredReceipt::from(tx)))
                 .unzip();
-            metrics::record_execution_latency(start.elapsed().as_secs_f64());
+            record_execution_latency(start.elapsed().as_secs_f64());
             (ctx.notify)(NodeInput::Protocol(Box::new(
                 ProtocolEvent::ExecutionBatchCompleted {
                     wave_id,
@@ -341,8 +343,7 @@ where
             let local_shard = ctx.topology_snapshot.local_shard();
             let num_shards = ctx.topology_snapshot.num_shards();
             let view = ctx.pending_chain.view_at(block_hash);
-            let view_snap =
-                <hyperscale_storage::SubstateView<_> as SubstateStore>::snapshot(&*view);
+            let view_snap = <SubstateView<_> as SubstateStore>::snapshot(&*view);
             let (tx_outcomes, results): (Vec<_>, Vec<_>) = requests
                 .iter()
                 .map(|req| {
@@ -361,7 +362,7 @@ where
                     (tx.outcome(), StoredReceipt::from(tx))
                 })
                 .unzip();
-            metrics::record_execution_latency(start.elapsed().as_secs_f64());
+            record_execution_latency(start.elapsed().as_secs_f64());
             (ctx.notify)(NodeInput::Protocol(Box::new(
                 ProtocolEvent::ExecutionBatchCompleted {
                     wave_id,
@@ -384,7 +385,7 @@ where
             let local_shard = ctx.topology_snapshot.local_shard();
             let validator_id = ctx.topology_snapshot.local_validator_id();
             let tx_count = u32::try_from(tx_outcomes.len()).unwrap_or(u32::MAX);
-            let msg = hyperscale_types::exec_vote_message(
+            let msg = exec_vote_message(
                 vote_anchor_ts,
                 &wave_id,
                 local_shard,
@@ -407,23 +408,17 @@ where
 
             // Send vote to the wave leader (unicast).
             if leader != validator_id {
-                let batch_msg = hyperscale_types::exec_vote_batch_message(
-                    local_shard,
-                    std::slice::from_ref(&vote),
-                );
+                let batch_msg = exec_vote_batch_message(local_shard, std::slice::from_ref(&vote));
                 let batch_sig = ctx.signing_key.sign_v1(&batch_msg);
-                let batch = hyperscale_messages::ExecutionVotesNotification::new(
-                    vec![vote.clone()],
-                    validator_id,
-                    batch_sig,
-                );
+                let batch =
+                    ExecutionVotesNotification::new(vec![vote.clone()], validator_id, batch_sig);
                 ctx.network.notify(&[leader], &batch);
             }
 
             // Feed own vote to state machine only if we are the leader.
             if leader == validator_id {
-                (ctx.notify)(hyperscale_core::NodeInput::Protocol(Box::new(
-                    hyperscale_core::ProtocolEvent::ExecutionVoteReceived { vote },
+                (ctx.notify)(NodeInput::Protocol(Box::new(
+                    ProtocolEvent::ExecutionVoteReceived { vote },
                 )));
             }
         }
@@ -433,13 +428,10 @@ where
             certificate,
             recipients,
         } => {
-            let cert = std::sync::Arc::unwrap_or_clone(certificate);
-            let msg = hyperscale_types::exec_cert_batch_message(
-                cert.shard_group_id(),
-                std::slice::from_ref(&cert),
-            );
+            let cert = Arc::unwrap_or_clone(certificate);
+            let msg = exec_cert_batch_message(cert.shard_group_id(), std::slice::from_ref(&cert));
             let sig = ctx.signing_key.sign_v1(&msg);
-            let batch = hyperscale_messages::ExecutionCertificatesNotification::new(
+            let batch = ExecutionCertificatesNotification::new(
                 vec![cert],
                 ctx.topology_snapshot.local_validator_id(),
                 sig,
@@ -453,12 +445,15 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use hyperscale_types::{
-        BlockHeight, Bls12381G1PrivateKey, ExecutionOutcome, ShardGroupId, TxOutcome,
-        bls_keypair_from_seed, test_utils::test_transaction,
-    };
     use std::collections::BTreeSet;
+
+    use hyperscale_types::test_utils::test_transaction;
+    use hyperscale_types::{
+        BlockHeight, Bls12381G1PrivateKey, ExecutionOutcome, GlobalReceiptHash, Hash, ShardGroupId,
+        TxOutcome, bls_keypair_from_seed,
+    };
+
+    use super::*;
 
     fn shard() -> ShardGroupId {
         ShardGroupId(0)

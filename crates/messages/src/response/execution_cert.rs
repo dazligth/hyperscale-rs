@@ -1,8 +1,9 @@
 //! Execution certificate fetch response for fallback recovery.
 
+use std::sync::Arc;
+
 use hyperscale_types::{ExecutionCertificate, MessageClass, NetworkMessage};
 use sbor::prelude::BasicSbor;
-use std::sync::Arc;
 
 /// Response to an execution certificate fetch request.
 ///
@@ -34,6 +35,8 @@ impl NetworkMessage for GetExecutionCertsResponse {
 
 #[cfg(test)]
 mod tests {
+    use sbor::{basic_decode, basic_encode};
+
     use super::*;
 
     #[test]
@@ -42,8 +45,8 @@ mod tests {
             certificates: Some(vec![]),
         };
 
-        let encoded = sbor::basic_encode(&response).unwrap();
-        let decoded: GetExecutionCertsResponse = sbor::basic_decode(&encoded).unwrap();
+        let encoded = basic_encode(&response).unwrap();
+        let decoded: GetExecutionCertsResponse = basic_decode(&encoded).unwrap();
         assert_eq!(response, decoded);
     }
 
@@ -51,8 +54,8 @@ mod tests {
     fn test_sbor_roundtrip_unavailable() {
         let response = GetExecutionCertsResponse { certificates: None };
 
-        let encoded = sbor::basic_encode(&response).unwrap();
-        let decoded: GetExecutionCertsResponse = sbor::basic_decode(&encoded).unwrap();
+        let encoded = basic_encode(&response).unwrap();
+        let decoded: GetExecutionCertsResponse = basic_decode(&encoded).unwrap();
         assert_eq!(response, decoded);
     }
 }

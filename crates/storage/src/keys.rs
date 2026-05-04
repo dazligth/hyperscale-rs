@@ -7,6 +7,7 @@
 //! functions to produce compatible keys.
 
 use hyperscale_types::NodeId;
+use radix_common::types::NodeId as RadixNodeId;
 use radix_substate_store_interface::db_key_mapper::{DatabaseKeyMapper, SpreadPrefixKeyMapper};
 use radix_substate_store_interface::interface::{DbPartitionKey, DbSortKey};
 
@@ -61,7 +62,7 @@ pub fn node_prefix(node_id: &NodeId) -> Vec<u8> {
 /// Get the `db_node_key` (entity key) for a `NodeId`.
 #[must_use]
 pub fn node_entity_key(node_id: &NodeId) -> Vec<u8> {
-    let radix_node_id = radix_common::types::NodeId(node_id.0);
+    let radix_node_id = RadixNodeId(node_id.0);
     SpreadPrefixKeyMapper::to_db_node_key(&radix_node_id)
 }
 

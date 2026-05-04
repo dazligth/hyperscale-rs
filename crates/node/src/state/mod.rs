@@ -11,15 +11,18 @@ mod transactions;
 #[cfg(test)]
 mod test_support;
 
+use std::sync::Arc;
+
 use hyperscale_bft::{BftConfig, BftCoordinator, RecoveredState};
 use hyperscale_core::{Action, ProtocolEvent, StateMachine};
 use hyperscale_execution::ExecutionCoordinator;
 use hyperscale_mempool::{MempoolConfig, MempoolCoordinator};
-use hyperscale_provisions::{OutboundProvisionTracker, ProvisionConfig, ProvisionCoordinator};
+use hyperscale_provisions::{
+    OutboundProvisionTracker, ProvisionConfig, ProvisionCoordinator, ProvisionStore,
+};
 use hyperscale_remote_headers::RemoteHeaderCoordinator;
 use hyperscale_topology::TopologyCoordinator;
 use hyperscale_types::{Block, LocalTimestamp, ShardGroupId, StateRoot, TopologySnapshot};
-use std::sync::Arc;
 use tracing::instrument;
 
 /// Index type for simulation-only node routing.
@@ -97,7 +100,7 @@ impl NodeStateMachine {
         recovered: RecoveredState,
         mempool_config: MempoolConfig,
         provision_config: ProvisionConfig,
-        provision_store: Arc<hyperscale_provisions::ProvisionStore>,
+        provision_store: Arc<ProvisionStore>,
     ) -> Self {
         Self {
             node_index,

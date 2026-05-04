@@ -3,12 +3,13 @@
 //! Abstracts block, certificate, vote, and metadata reads.
 //! All methods take `&self` — implementations use interior mutability.
 
+use std::sync::Arc;
+
 use hyperscale_types::{
     Block, BlockHash, BlockHeight, CertifiedBlock, CommittedBlockHeader, ConsensusReceipt,
     ExecutionCertificate, ExecutionCertificateHash, ProvisionHash, QuorumCertificate,
     RoutableTransaction, ShardGroupId, TxHash, WaveCertificate, WaveId,
 };
-use std::sync::Arc;
 
 /// A sync-ready block retrieved from storage.
 ///

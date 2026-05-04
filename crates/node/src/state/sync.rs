@@ -6,8 +6,9 @@
 //! provisions flush their expected sets so we can immediately
 //! participate in execution for blocks within the `WAVE_TIMEOUT` window.
 
-use super::NodeStateMachine;
 use hyperscale_core::{Action, ProtocolEvent};
+
+use super::NodeStateMachine;
 
 impl NodeStateMachine {
     /// Dispatch a sync-category `ProtocolEvent`.
@@ -40,16 +41,18 @@ impl NodeStateMachine {
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::TestNode;
-    use crate::assert_emits;
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+
     use hyperscale_core::{Action, FetchRequest, ProtocolEvent, StateMachine};
     use hyperscale_test_helpers::make_live_block;
     use hyperscale_types::{
-        BlockHash, BlockHeight, CommittedBlockHeader, QuorumCertificate, ShardGroupId, ValidatorId,
-        WaveId,
+        Block, BlockHash, BlockHeight, CommittedBlockHeader, QuorumCertificate, ShardGroupId,
+        ValidatorId, WaveId,
     };
-    use std::collections::BTreeSet;
-    use std::sync::Arc;
+
+    use super::super::test_support::TestNode;
+    use crate::assert_emits;
 
     /// `BlockSyncComplete` fans out to BFT, remote-headers, and
     /// provisions in one pass. The provisions flush is the most
@@ -75,7 +78,7 @@ mod tests {
             vec![],
             vec![],
         );
-        if let hyperscale_types::Block::Live { ref mut header, .. } = block {
+        if let Block::Live { ref mut header, .. } = block {
             header.waves = vec![wave];
         }
         let committed_header = Arc::new(CommittedBlockHeader::new(

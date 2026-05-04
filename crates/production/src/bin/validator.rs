@@ -43,34 +43,51 @@
 //! listen_addr = "0.0.0.0:9090"
 //! ```
 
-use anyhow::{Context, Result, bail};
-use arc_swap::ArcSwap;
-use clap::Parser;
-use hyperscale_bft::BftConfig;
-use hyperscale_dispatch_pooled::{PooledDispatch, ThreadPoolConfig};
-use hyperscale_mempool::MempoolConfig;
-use hyperscale_network_libp2p::{Libp2pConfig, VersionInteroperabilityMode};
-use hyperscale_production::rpc::{MempoolSnapshot, NodeStatusState, RpcServer, RpcServerConfig};
-use hyperscale_production::{ProductionRunner, TelemetryConfig, init_telemetry};
-use hyperscale_provisions::ProvisionConfig;
-use hyperscale_storage_rocksdb::{RocksDbConfig, RocksDbStorage};
-use hyperscale_topology::TopologyCoordinator;
-use hyperscale_types::{
-    Bls12381G1PrivateKey, Bls12381G1PublicKey, ShardGroupId, ValidatorId, ValidatorInfo,
-    ValidatorSet, bls_keypair_from_seed, generate_bls_keypair,
-};
-use radix_common::network::NetworkDefinition;
-use radix_common::prelude::AddressBech32Decoder;
-use serde::Deserialize;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
+
+use anyhow::{Context, Result, bail};
+use arc_swap::ArcSwap;
+use clap::Parser;
+use hex::{decode as hex_decode, encode as hex_encode};
+use hyperscale_bft::BftConfig;
+use hyperscale_dispatch_pooled::{PooledDispatch, ThreadPoolConfig};
+use hyperscale_engine::GenesisConfig as EngineGenesisConfig;
+use hyperscale_mempool::MempoolConfig;
+use hyperscale_network_libp2p::{Libp2pConfig, VersionInteroperabilityMode};
+use hyperscale_production::rpc::{MempoolSnapshot, NodeStatusState, RpcServer, RpcServerConfig};
+use hyperscale_production::{
+    ProductionRunner, SyncStatus, TelemetryConfig, TelemetryGuard, init_telemetry,
+};
+use hyperscale_provisions::ProvisionConfig;
+use hyperscale_storage_rocksdb::{
+    CompressionType as RocksCompressionType, RocksDbConfig, RocksDbStorage,
+};
+use hyperscale_topology::TopologyCoordinator;
+use hyperscale_types::{
+    Bls12381G1PrivateKey, Bls12381G1PublicKey, ShardGroupId, ValidatorId, ValidatorInfo,
+    ValidatorSet, bls_keypair_from_seed, generate_bls_keypair,
+};
+use igd_next::aio::tokio::search_gateway;
+use igd_next::{PortMappingProtocol, SearchOptions};
+use libp2p::Multiaddr;
+use libp2p::multiaddr::Protocol;
+use radix_common::network::NetworkDefinition;
+use radix_common::prelude::AddressBech32Decoder;
+use serde::Deserialize;
+use tokio::runtime::{Builder as RuntimeBuilder, Handle as TokioHandle};
 use tokio::signal;
+use tokio::task::spawn;
+use toml::from_str as toml_from_str;
 use tracing::{info, trace, warn};
-use tracing_subscriber::EnvFilter;
+use tracing_appender::non_blocking as wrap_non_blocking;
+use tracing_appender::non_blocking::WorkerGuard;
+use tracing_appender::rolling::never;
+use tracing_subscriber::{EnvFilter, fmt};
 
 /// Hyperscale Validator Node
 ///
@@ -348,7 +365,7 @@ pub enum CompressionType {
     Zstd,
 }
 
-impl From<CompressionType> for hyperscale_storage_rocksdb::CompressionType {
+impl From<CompressionType> for RocksCompressionType {
     fn from(ct: CompressionType) -> Self {
         match ct {
             CompressionType::None => Self::None,
@@ -564,7 +581,7 @@ impl ValidatorConfig {
         let contents = fs::read_to_string(path)
             .with_context(|| format!("Failed to read config file: {}", path.display()))?;
 
-        toml::from_str(&contents)
+        toml_from_str(&contents)
             .with_context(|| format!("Failed to parse config file: {}", path.display()))
     }
 
@@ -602,7 +619,7 @@ impl ValidatorConfig {
 
 /// Format a public key as a hex string.
 fn format_public_key(pk: &Bls12381G1PublicKey) -> String {
-    hex::encode(pk.to_vec())
+    hex_encode(pk.to_vec())
 }
 
 /// Load or generate a signing keypair.
@@ -610,7 +627,7 @@ fn format_public_key(pk: &Bls12381G1PublicKey) -> String {
 /// The key file stores a 32-byte seed that deterministically generates the keypair.
 /// This seed can be stored as raw bytes or hex-encoded.
 fn load_or_generate_keypair(key_path: Option<&PathBuf>) -> Result<Bls12381G1PrivateKey> {
-    use rand::Rng;
+    use rand::{Rng, rng};
 
     let Some(path) = key_path else {
         warn!("No key path specified, generating ephemeral keypair");
@@ -624,7 +641,7 @@ fn load_or_generate_keypair(key_path: Option<&PathBuf>) -> Result<Bls12381G1Priv
         // Try to decode as hex first, then as raw bytes
         let decoded = if key_bytes.len() == 64 {
             // Likely hex-encoded (64 hex chars = 32 bytes)
-            hex::decode(&key_bytes).with_context(|| "Failed to decode hex key")?
+            hex_decode(&key_bytes).with_context(|| "Failed to decode hex key")?
         } else if key_bytes.len() == 32 {
             // Raw bytes
             key_bytes
@@ -647,7 +664,7 @@ fn load_or_generate_keypair(key_path: Option<&PathBuf>) -> Result<Bls12381G1Priv
 
         // Generate random seed
         let mut seed = [0u8; 32];
-        rand::rng().fill_bytes(&mut seed);
+        rng().fill_bytes(&mut seed);
 
         let keypair = bls_keypair_from_seed(&seed);
 
@@ -693,7 +710,7 @@ fn build_topology(
                     local_keypair.public_key()
                 } else {
                     // Parse hex-encoded public key (BLS12-381 only)
-                    let key_bytes = hex::decode(&v.public_key).with_context(|| {
+                    let key_bytes = hex_decode(&v.public_key).with_context(|| {
                         format!("Invalid hex public key for validator {}", v.id)
                     })?;
 
@@ -775,15 +792,16 @@ fn build_topology(
 ///
 /// Converts the TOML-friendly genesis config (with string addresses and balances)
 /// to the engine's `GenesisConfig` type.
-fn build_engine_genesis_config(config: &GenesisConfig) -> Result<hyperscale_engine::GenesisConfig> {
+fn build_engine_genesis_config(config: &GenesisConfig) -> Result<EngineGenesisConfig> {
+    use std::str::FromStr;
+
     use radix_common::math::Decimal;
     use radix_common::types::ComponentAddress;
-    use std::str::FromStr;
 
     let network = NetworkDefinition::simulator();
     let decoder = AddressBech32Decoder::new(&network);
 
-    let mut engine_config = hyperscale_engine::GenesisConfig::test_default();
+    let mut engine_config = EngineGenesisConfig::test_default();
 
     // Convert XRD balances
     for entry in &config.xrd_balances {
@@ -899,7 +917,7 @@ fn build_bft_config(config: &ConsensusConfig) -> BftConfig {
 
 /// Build network configuration from TOML config.
 fn build_network_config(config: &NetworkConfig) -> Result<Libp2pConfig> {
-    let listen_addr: libp2p::Multiaddr = config
+    let listen_addr: Multiaddr = config
         .listen_addr
         .parse()
         .with_context(|| format!("Invalid listen address: {}", config.listen_addr))?;
@@ -909,7 +927,7 @@ fn build_network_config(config: &NetworkConfig) -> Result<Libp2pConfig> {
     // Calculate default TCP fallback port if enabled but not specified (UDP port + 21500)
     let tcp_fallback_port = if config.tcp_fallback_enabled && config.tcp_fallback_port.is_none() {
         listen_addr.iter().find_map(|p| match p {
-            libp2p::multiaddr::Protocol::Udp(port) => Some(port + 21500),
+            Protocol::Udp(port) => Some(port + 21500),
             _ => None,
         })
     } else {
@@ -928,7 +946,7 @@ fn build_network_config(config: &NetworkConfig) -> Result<Libp2pConfig> {
                 return None;
             }
 
-            let parsed = addr.parse::<libp2p::Multiaddr>().ok().or_else(|| {
+            let parsed = addr.parse::<Multiaddr>().ok().or_else(|| {
                 warn!("Invalid bootstrap peer address: {}", addr);
                 None
             })?;
@@ -1027,7 +1045,7 @@ async fn setup_upnp(config: &NetworkConfig) {
     };
 
     // Parse listen address to get the port
-    let listen_addr_parsed: libp2p::Multiaddr = match config.listen_addr.parse() {
+    let listen_addr_parsed: Multiaddr = match config.listen_addr.parse() {
         Ok(addr) => addr,
         Err(e) => {
             warn!("Failed to parse listen address for UPnP: {}", e);
@@ -1037,14 +1055,14 @@ async fn setup_upnp(config: &NetworkConfig) {
 
     let mut quic_port = None;
     for protocol in &listen_addr_parsed {
-        if let libp2p::multiaddr::Protocol::Udp(port) = protocol {
+        if let Protocol::Udp(port) = protocol {
             quic_port = Some(port);
             break;
         }
     }
 
     // Use igd-next for UPnP
-    match igd_next::aio::tokio::search_gateway(igd_next::SearchOptions::default()).await {
+    match search_gateway(SearchOptions::default()).await {
         Ok(gateway) => {
             let external_ip = match gateway.get_external_ip().await {
                 Ok(ip) => ip,
@@ -1060,7 +1078,7 @@ async fn setup_upnp(config: &NetworkConfig) {
                 let local_addr = SocketAddr::new(local_ip, port);
                 match gateway
                     .add_port(
-                        igd_next::PortMappingProtocol::UDP,
+                        PortMappingProtocol::UDP,
                         port,
                         local_addr,
                         60 * 60, // 1 hour lease
@@ -1082,7 +1100,7 @@ async fn setup_upnp(config: &NetworkConfig) {
                 let local_addr = SocketAddr::new(local_ip, port);
                 match gateway
                     .add_port(
-                        igd_next::PortMappingProtocol::TCP,
+                        PortMappingProtocol::TCP,
                         port,
                         local_addr,
                         60 * 60, // 1 hour lease
@@ -1113,7 +1131,7 @@ fn main() -> Result<()> {
 
     // Build tokio runtime with configurable worker threads.
     // io_threads = 0 means auto (tokio default: one thread per CPU core).
-    let mut rt_builder = tokio::runtime::Builder::new_multi_thread();
+    let mut rt_builder = RuntimeBuilder::new_multi_thread();
     rt_builder.enable_all();
     if config.threads.io_threads > 0 {
         rt_builder.worker_threads(config.threads.io_threads);
@@ -1132,8 +1150,8 @@ async fn async_main(cli: Cli, config: ValidatorConfig) -> Result<()> {
     // Otherwise, use basic fmt subscriber.
     #[allow(dead_code)]
     enum UnifiedGuard {
-        Telemetry(hyperscale_production::TelemetryGuard),
-        Basic(Option<tracing_appender::non_blocking::WorkerGuard>),
+        Telemetry(TelemetryGuard),
+        Basic(Option<WorkerGuard>),
     }
 
     let _log_guard = if config.telemetry.enabled {
@@ -1149,7 +1167,7 @@ async fn async_main(cli: Cli, config: ValidatorConfig) -> Result<()> {
         UnifiedGuard::Telemetry(init_telemetry(&telemetry_config)?)
     } else {
         // Basic logging without OTLP export
-        let builder = tracing_subscriber::fmt();
+        let builder = fmt();
 
         let inner_guard = if let Some(log_file) = &config.telemetry.log_file {
             if let Some(parent) = log_file.parent() {
@@ -1165,11 +1183,11 @@ async fn async_main(cli: Cli, config: ValidatorConfig) -> Result<()> {
                 .unwrap_or_else(|| std::path::Path::new("."))
                 .to_path_buf();
 
-            let file_appender = tracing_appender::rolling::never(directory, file_name);
-            let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+            let file_appender = never(directory, file_name);
+            let (non_blocking_writer, guard) = wrap_non_blocking(file_appender);
 
             builder
-                .with_writer(non_blocking)
+                .with_writer(non_blocking_writer)
                 .with_ansi(false) // Disable ANSI colors in file logs
                 .with_target(true)
                 .with_thread_ids(true)
@@ -1250,7 +1268,7 @@ async fn async_main(cli: Cli, config: ValidatorConfig) -> Result<()> {
 
     // Initialize dispatch pools
     let dispatch = Arc::new(
-        PooledDispatch::new(thread_config, tokio::runtime::Handle::current())
+        PooledDispatch::new(thread_config, TokioHandle::current())
             .context("Failed to initialize thread pools")?,
     );
 
@@ -1264,9 +1282,7 @@ async fn async_main(cli: Cli, config: ValidatorConfig) -> Result<()> {
     // Create shared RPC state objects used by both runner and RPC server.
     let rpc_ready = Arc::new(AtomicBool::new(false));
     // Use ArcSwap for lock-free reads of sync status from HTTP handlers
-    let rpc_sync_status = Arc::new(ArcSwap::new(Arc::new(
-        hyperscale_production::SyncStatus::default(),
-    )));
+    let rpc_sync_status = Arc::new(ArcSwap::new(Arc::new(SyncStatus::default())));
     let rpc_node_status = Arc::new(ArcSwap::new(Arc::new(NodeStatusState {
         validator_id: config.node.validator_id,
         shard: config.node.shard,
@@ -1347,7 +1363,7 @@ async fn async_main(cli: Cli, config: ValidatorConfig) -> Result<()> {
     let shutdown_handle = runner.shutdown_handle();
 
     // Spawn shutdown signal handler
-    tokio::spawn(async move {
+    spawn(async move {
         let ctrl_c = async {
             signal::ctrl_c()
                 .await

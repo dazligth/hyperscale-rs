@@ -1,7 +1,13 @@
 //! Persisted receipt — consensus portion plus optional local metadata.
 
-use crate::{ConsensusReceipt, ExecutionMetadata, TxHash};
 use std::sync::Arc;
+
+use sbor::{
+    Categorize, Decode, DecodeError, Decoder, Describe, Encode, EncodeError, Encoder,
+    NoCustomTypeKind, NoCustomValueKind, RustTypeId, TypeData, TypeKind, ValueKind,
+};
+
+use crate::{ConsensusReceipt, ExecutionMetadata, TxHash};
 
 /// A persisted receipt: consensus-bound portion paired with optional
 /// local-only metadata.
@@ -39,14 +45,12 @@ impl StoredReceipt {
     }
 }
 
-impl<E: sbor::Encoder<sbor::NoCustomValueKind>> sbor::Encode<sbor::NoCustomValueKind, E>
-    for StoredReceipt
-{
-    fn encode_value_kind(&self, encoder: &mut E) -> Result<(), sbor::EncodeError> {
-        encoder.write_value_kind(sbor::ValueKind::Tuple)
+impl<E: Encoder<NoCustomValueKind>> Encode<NoCustomValueKind, E> for StoredReceipt {
+    fn encode_value_kind(&self, encoder: &mut E) -> Result<(), EncodeError> {
+        encoder.write_value_kind(ValueKind::Tuple)
     }
 
-    fn encode_body(&self, encoder: &mut E) -> Result<(), sbor::EncodeError> {
+    fn encode_body(&self, encoder: &mut E) -> Result<(), EncodeError> {
         encoder.write_size(3)?;
         encoder.encode(&self.tx_hash)?;
         encoder.encode(self.consensus.as_ref())?;
@@ -55,17 +59,15 @@ impl<E: sbor::Encoder<sbor::NoCustomValueKind>> sbor::Encode<sbor::NoCustomValue
     }
 }
 
-impl<D: sbor::Decoder<sbor::NoCustomValueKind>> sbor::Decode<sbor::NoCustomValueKind, D>
-    for StoredReceipt
-{
+impl<D: Decoder<NoCustomValueKind>> Decode<NoCustomValueKind, D> for StoredReceipt {
     fn decode_body_with_value_kind(
         decoder: &mut D,
-        value_kind: sbor::ValueKind<sbor::NoCustomValueKind>,
-    ) -> Result<Self, sbor::DecodeError> {
-        decoder.check_preloaded_value_kind(value_kind, sbor::ValueKind::Tuple)?;
+        value_kind: ValueKind<NoCustomValueKind>,
+    ) -> Result<Self, DecodeError> {
+        decoder.check_preloaded_value_kind(value_kind, ValueKind::Tuple)?;
         let length = decoder.read_size()?;
         if length != 3 {
-            return Err(sbor::DecodeError::UnexpectedSize {
+            return Err(DecodeError::UnexpectedSize {
                 expected: 3,
                 actual: length,
             });
@@ -81,17 +83,17 @@ impl<D: sbor::Decoder<sbor::NoCustomValueKind>> sbor::Decode<sbor::NoCustomValue
     }
 }
 
-impl sbor::Categorize<sbor::NoCustomValueKind> for StoredReceipt {
-    fn value_kind() -> sbor::ValueKind<sbor::NoCustomValueKind> {
-        sbor::ValueKind::Tuple
+impl Categorize<NoCustomValueKind> for StoredReceipt {
+    fn value_kind() -> ValueKind<NoCustomValueKind> {
+        ValueKind::Tuple
     }
 }
 
-impl sbor::Describe<sbor::NoCustomTypeKind> for StoredReceipt {
-    const TYPE_ID: sbor::RustTypeId = sbor::RustTypeId::novel_with_code("StoredReceipt", &[], &[]);
+impl Describe<NoCustomTypeKind> for StoredReceipt {
+    const TYPE_ID: RustTypeId = RustTypeId::novel_with_code("StoredReceipt", &[], &[]);
 
-    fn type_data() -> sbor::TypeData<sbor::NoCustomTypeKind, sbor::RustTypeId> {
-        sbor::TypeData::unnamed(sbor::TypeKind::Any)
+    fn type_data() -> TypeData<NoCustomTypeKind, RustTypeId> {
+        TypeData::unnamed(TypeKind::Any)
     }
 }
 

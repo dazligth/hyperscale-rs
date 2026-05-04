@@ -10,6 +10,9 @@
 //! - Deterministic - same seed always produces same results
 //! - Inline execution - Radix Engine runs synchronously (not in thread pool)
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use hyperscale_core::NodeInput;
 use hyperscale_network_memory::NetworkConfig;
 use hyperscale_simulation::SimulationRunner;
@@ -24,8 +27,6 @@ use radix_common::math::Decimal;
 use radix_common::network::NetworkDefinition;
 use radix_common::types::ComponentAddress;
 use radix_transactions::builder::ManifestBuilder;
-use std::sync::Arc;
-use std::time::Duration;
 use tracing_test::traced_test;
 
 /// Create a basic single-shard network configuration.

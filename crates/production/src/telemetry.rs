@@ -4,23 +4,40 @@
 //! The architecture instruments the production runner while preserving
 //! state machine determinism.
 
-use crate::status::SyncStatus;
-use arc_swap::ArcSwap;
-use axum::{Router, response::IntoResponse, routing::get};
-use opentelemetry::trace::TracerProvider as _;
-use opentelemetry_otlp::WithExportConfig;
-use opentelemetry_sdk::{
-    Resource,
-    trace::{RandomIdGenerator, Sampler, SdkTracerProvider},
-};
-use opentelemetry_semantic_conventions::resource::{SERVICE_NAME, SERVICE_VERSION};
-use serde::Serialize;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+use arc_swap::ArcSwap;
+use axum::http::StatusCode;
+use axum::http::header::CONTENT_TYPE;
+use axum::response::IntoResponse;
+use axum::routing::get;
+use axum::{Json, Router, serve};
+use hyperscale_metrics_prometheus::encode_metrics;
+use opentelemetry::KeyValue;
+use opentelemetry::trace::TracerProvider as _;
+use opentelemetry_otlp::{ExporterBuildError, SpanExporter, WithExportConfig};
+use opentelemetry_sdk::Resource;
+use opentelemetry_sdk::error::OTelSdkError;
+use opentelemetry_sdk::trace::{RandomIdGenerator, Sampler, SdkTracerProvider};
+use opentelemetry_semantic_conventions::resource::{SERVICE_NAME, SERVICE_VERSION};
+use serde::Serialize;
 use thiserror::Error;
+use tokio::net::TcpListener;
+use tokio::task::{JoinHandle, spawn, spawn_blocking};
+use tokio::time::timeout;
+use tracing::subscriber::{SetGlobalDefaultError, set_global_default};
+use tracing_appender::non_blocking as wrap_non_blocking;
+use tracing_appender::non_blocking::WorkerGuard;
+use tracing_appender::rolling::never;
 use tracing_opentelemetry::OpenTelemetryLayer;
-use tracing_subscriber::{EnvFilter, Layer, Registry, layer::SubscriberExt};
+use tracing_subscriber::fmt::layer as fmt_layer;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::{EnvFilter, Layer, Registry};
+
+use crate::status::SyncStatus;
 
 /// Provider for sync status, used by the telemetry HTTP server.
 pub type SyncStatusProvider = Arc<ArcSwap<SyncStatus>>;
@@ -30,15 +47,15 @@ pub type SyncStatusProvider = Arc<ArcSwap<SyncStatus>>;
 pub enum TelemetryError {
     /// The OTLP exporter could not be constructed (e.g. invalid endpoint URL).
     #[error("Failed to build OTLP exporter: {0}")]
-    ExporterBuild(#[from] opentelemetry_otlp::ExporterBuildError),
+    ExporterBuild(#[from] ExporterBuildError),
 
     /// The `OpenTelemetry` SDK reported an internal error.
     #[error("OpenTelemetry SDK error: {0}")]
-    OtelSdk(#[from] opentelemetry_sdk::error::OTelSdkError),
+    OtelSdk(#[from] OTelSdkError),
 
     /// The global tracing subscriber was already set by another component.
     #[error("Failed to set global subscriber: {0}")]
-    SetSubscriber(#[from] tracing::subscriber::SetGlobalDefaultError),
+    SetSubscriber(#[from] SetGlobalDefaultError),
 
     /// I/O error while binding the metrics HTTP listener or preparing the log file.
     #[error("Failed to bind metrics port: {0}")]
@@ -61,7 +78,7 @@ pub struct TelemetryConfig {
     /// Additional resource attributes.
     pub resource_attributes: Vec<(String, String)>,
     /// Optional log file path. If provided, logs are written to this file instead of stdout.
-    pub log_file: Option<std::path::PathBuf>,
+    pub log_file: Option<PathBuf>,
 }
 
 impl Default for TelemetryConfig {
@@ -101,12 +118,12 @@ impl Default for TelemetryConfig {
 pub fn init_telemetry(config: &TelemetryConfig) -> Result<TelemetryGuard, TelemetryError> {
     // Build resource attributes
     let mut resource_attrs = vec![
-        opentelemetry::KeyValue::new(SERVICE_NAME, config.service_name.clone()),
-        opentelemetry::KeyValue::new(SERVICE_VERSION, env!("CARGO_PKG_VERSION")),
+        KeyValue::new(SERVICE_NAME, config.service_name.clone()),
+        KeyValue::new(SERVICE_VERSION, env!("CARGO_PKG_VERSION")),
     ];
 
     for (key, value) in &config.resource_attributes {
-        resource_attrs.push(opentelemetry::KeyValue::new(key.clone(), value.clone()));
+        resource_attrs.push(KeyValue::new(key.clone(), value.clone()));
     }
 
     let resource = Resource::builder().with_attributes(resource_attrs).build();
@@ -118,7 +135,7 @@ pub fn init_telemetry(config: &TelemetryConfig) -> Result<TelemetryGuard, Teleme
     // Optional OTLP tracing layer
     let (otel_layer, tracer_provider) = if let Some(endpoint) = &config.otlp_endpoint {
         // Note: build() validates URL format but connection is lazy
-        let exporter = opentelemetry_otlp::SpanExporter::builder()
+        let exporter = SpanExporter::builder()
             .with_tonic()
             .with_endpoint(endpoint)
             .build()?;
@@ -157,23 +174,21 @@ pub fn init_telemetry(config: &TelemetryConfig) -> Result<TelemetryGuard, Teleme
             .to_string();
         let directory = log_file
             .parent()
-            .unwrap_or_else(|| std::path::Path::new("."))
+            .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
 
-        let file_appender = tracing_appender::rolling::never(directory, file_name);
-        let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+        let file_appender = never(directory, file_name);
+        let (non_blocking_writer, guard) = wrap_non_blocking(file_appender);
 
-        let layer = tracing_subscriber::fmt::layer()
-            .with_writer(non_blocking)
+        let layer = fmt_layer()
+            .with_writer(non_blocking_writer)
             .with_ansi(false) // Disable ANSI colors in file logs
             .with_target(true)
             .with_thread_ids(true);
 
         (layer.boxed(), Some(guard))
     } else {
-        let layer = tracing_subscriber::fmt::layer()
-            .with_target(true)
-            .with_thread_ids(true);
+        let layer = fmt_layer().with_target(true).with_thread_ids(true);
         (layer.boxed(), None)
     };
 
@@ -183,7 +198,7 @@ pub fn init_telemetry(config: &TelemetryConfig) -> Result<TelemetryGuard, Teleme
         .with(fmt_layer)
         .with(otel_layer);
 
-    tracing::subscriber::set_global_default(subscriber)?;
+    set_global_default(subscriber)?;
 
     // Start Prometheus metrics endpoint if enabled
     let (prometheus_handle, ready_flag, sync_status) = if config.prometheus_enabled {
@@ -214,11 +229,11 @@ pub fn init_telemetry(config: &TelemetryConfig) -> Result<TelemetryGuard, Teleme
 /// before dropping. The `Drop` impl provides a fallback but cannot flush async.
 pub struct TelemetryGuard {
     tracer_provider: Option<SdkTracerProvider>,
-    prometheus_handle: Option<tokio::task::JoinHandle<()>>,
+    prometheus_handle: Option<JoinHandle<()>>,
     ready_flag: Option<Arc<AtomicBool>>,
     sync_status: Option<SyncStatusProvider>,
     #[allow(dead_code)] // kept alive to keep the non-blocking log appender worker running
-    appender_guard: Option<tracing_appender::non_blocking::WorkerGuard>,
+    appender_guard: Option<WorkerGuard>,
 }
 
 impl TelemetryGuard {
@@ -239,9 +254,9 @@ impl TelemetryGuard {
 
         // Flush pending spans with timeout
         if let Some(provider) = self.tracer_provider.take() {
-            let _ = tokio::time::timeout(
+            let _ = timeout(
                 Duration::from_secs(5),
-                tokio::task::spawn_blocking(move || {
+                spawn_blocking(move || {
                     let _ = provider.shutdown();
                 }),
             )
@@ -256,7 +271,7 @@ impl TelemetryGuard {
 
     /// Set the Prometheus server handle (called internally).
     #[allow(dead_code)]
-    pub(crate) fn set_prometheus_handle(&mut self, handle: tokio::task::JoinHandle<()>) {
+    pub(crate) fn set_prometheus_handle(&mut self, handle: JoinHandle<()>) {
         self.prometheus_handle = Some(handle);
     }
 
@@ -295,8 +310,8 @@ fn start_metrics_server(
     port: u16,
     ready_flag: Arc<AtomicBool>,
     sync_status: SyncStatusProvider,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+) -> JoinHandle<()> {
+    spawn(async move {
         let ready_flag_clone = ready_flag.clone();
         let sync_status_clone = sync_status.clone();
 
@@ -315,7 +330,7 @@ fn start_metrics_server(
         let addr = SocketAddr::from(([0, 0, 0, 0], port));
         tracing::info!(port, "Starting metrics server on http://{}", addr);
 
-        let listener = match tokio::net::TcpListener::bind(addr).await {
+        let listener = match TcpListener::bind(addr).await {
             Ok(l) => l,
             Err(e) => {
                 tracing::error!(error = ?e, port, "Failed to bind metrics server");
@@ -323,22 +338,20 @@ fn start_metrics_server(
             }
         };
 
-        if let Err(e) = axum::serve(listener, app).await {
+        if let Err(e) = serve(listener, app).await {
             tracing::error!(error = ?e, "Metrics server error");
         }
     })
 }
 
 /// Handler for `/metrics` - returns Prometheus metrics.
-async fn metrics_handler() -> impl axum::response::IntoResponse {
-    match hyperscale_metrics_prometheus::encode_metrics() {
-        Ok((content_type, buffer)) => {
-            ([(axum::http::header::CONTENT_TYPE, content_type)], buffer).into_response()
-        }
+async fn metrics_handler() -> impl IntoResponse {
+    match encode_metrics() {
+        Ok((content_type, buffer)) => ([(CONTENT_TYPE, content_type)], buffer).into_response(),
         Err(e) => {
             tracing::error!(error = %e, "Failed to encode metrics");
             (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to encode metrics",
             )
                 .into_response()
@@ -350,8 +363,8 @@ async fn metrics_handler() -> impl axum::response::IntoResponse {
 ///
 /// Returns 200 OK if the server is running. This indicates the process is alive
 /// but not necessarily ready to serve traffic.
-async fn health_handler() -> impl axum::response::IntoResponse {
-    axum::Json(HealthResponse { status: "ok" })
+async fn health_handler() -> impl IntoResponse {
+    Json(HealthResponse { status: "ok" })
 }
 
 /// Handler for `/ready` - readiness probe.
@@ -359,19 +372,19 @@ async fn health_handler() -> impl axum::response::IntoResponse {
 /// Returns 200 OK if the node is ready to participate in consensus.
 /// Returns 503 Service Unavailable if still initializing.
 #[allow(clippy::unused_async)] // axum::Handler requires fns returning a Future
-async fn ready_handler(ready_flag: Arc<AtomicBool>) -> impl axum::response::IntoResponse {
+async fn ready_handler(ready_flag: Arc<AtomicBool>) -> impl IntoResponse {
     if ready_flag.load(Ordering::SeqCst) {
         (
-            axum::http::StatusCode::OK,
-            axum::Json(ReadyResponse {
+            StatusCode::OK,
+            Json(ReadyResponse {
                 status: "ready",
                 ready: true,
             }),
         )
     } else {
         (
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            axum::Json(ReadyResponse {
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ReadyResponse {
                 status: "not_ready",
                 ready: false,
             }),
@@ -383,9 +396,9 @@ async fn ready_handler(ready_flag: Arc<AtomicBool>) -> impl axum::response::Into
 ///
 /// Returns the current sync status as JSON.
 #[allow(clippy::unused_async)] // axum::Handler requires fns returning a Future
-async fn sync_status_handler(sync_status: SyncStatusProvider) -> impl axum::response::IntoResponse {
+async fn sync_status_handler(sync_status: SyncStatusProvider) -> impl IntoResponse {
     let status = sync_status.load();
-    axum::Json((**status).clone())
+    Json((**status).clone())
 }
 
 /// Response for health endpoint.
@@ -415,8 +428,12 @@ impl Drop for TelemetryGuard {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use axum::body::{Body, to_bytes};
+    use axum::http::Request;
+    use serde_json::{Value, from_slice};
     use tower::ServiceExt;
+
+    use super::*;
 
     #[test]
     fn test_default_config() {
@@ -440,19 +457,17 @@ mod tests {
         let ready_flag = Arc::new(AtomicBool::new(false));
         let app = Router::new().route("/health", get(health_handler));
 
-        let response = axum::http::Request::builder()
+        let response = Request::builder()
             .uri("/health")
-            .body(axum::body::Body::empty())
+            .body(Body::empty())
             .unwrap();
 
         let response = app.oneshot(response).await.unwrap();
 
-        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(response.into_body(), 1024)
-            .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let body = to_bytes(response.into_body(), 1024).await.unwrap();
+        let json: Value = from_slice(&body).unwrap();
         assert_eq!(json["status"], "ok");
 
         // Suppress unused variable warning
@@ -466,22 +481,17 @@ mod tests {
 
         let app = Router::new().route("/ready", get(move || ready_handler(flag_clone.clone())));
 
-        let response = axum::http::Request::builder()
+        let response = Request::builder()
             .uri("/ready")
-            .body(axum::body::Body::empty())
+            .body(Body::empty())
             .unwrap();
 
         let response = app.oneshot(response).await.unwrap();
 
-        assert_eq!(
-            response.status(),
-            axum::http::StatusCode::SERVICE_UNAVAILABLE
-        );
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 
-        let body = axum::body::to_bytes(response.into_body(), 1024)
-            .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let body = to_bytes(response.into_body(), 1024).await.unwrap();
+        let json: Value = from_slice(&body).unwrap();
         assert_eq!(json["status"], "not_ready");
         assert_eq!(json["ready"], false);
     }
@@ -493,19 +503,17 @@ mod tests {
 
         let app = Router::new().route("/ready", get(move || ready_handler(flag_clone.clone())));
 
-        let response = axum::http::Request::builder()
+        let response = Request::builder()
             .uri("/ready")
-            .body(axum::body::Body::empty())
+            .body(Body::empty())
             .unwrap();
 
         let response = app.oneshot(response).await.unwrap();
 
-        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(response.into_body(), 1024)
-            .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let body = to_bytes(response.into_body(), 1024).await.unwrap();
+        let json: Value = from_slice(&body).unwrap();
         assert_eq!(json["status"], "ready");
         assert_eq!(json["ready"], true);
     }
@@ -514,28 +522,26 @@ mod tests {
     async fn test_metrics_endpoint() {
         let app = Router::new().route("/metrics", get(metrics_handler));
 
-        let response = axum::http::Request::builder()
+        let response = Request::builder()
             .uri("/metrics")
-            .body(axum::body::Body::empty())
+            .body(Body::empty())
             .unwrap();
 
         let response = app.oneshot(response).await.unwrap();
 
-        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::OK);
 
         // Check content type is Prometheus text format
         let content_type = response
             .headers()
-            .get(axum::http::header::CONTENT_TYPE)
+            .get(CONTENT_TYPE)
             .unwrap()
             .to_str()
             .unwrap();
         assert!(content_type.contains("text/plain"));
 
         // Body should be valid (even if empty metrics)
-        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-            .await
-            .unwrap();
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         // Prometheus format is text-based, should be valid UTF-8
         let _text = std::str::from_utf8(&body).expect("Metrics should be valid UTF-8");
     }
@@ -567,7 +573,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_sync_status_endpoint() {
-        use crate::status::SyncStatus;
         use hyperscale_node::BlockSyncStateKind;
 
         let sync_status = Arc::new(ArcSwap::new(Arc::new(SyncStatus {
@@ -586,19 +591,17 @@ mod tests {
             get(move || sync_status_handler(status_clone.clone())),
         );
 
-        let response = axum::http::Request::builder()
+        let response = Request::builder()
             .uri("/system/sync-status")
-            .body(axum::body::Body::empty())
+            .body(Body::empty())
             .unwrap();
 
         let response = app.oneshot(response).await.unwrap();
 
-        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(response.into_body(), 1024)
-            .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let body = to_bytes(response.into_body(), 1024).await.unwrap();
+        let json: Value = from_slice(&body).unwrap();
 
         assert_eq!(json["state"], "syncing");
         assert_eq!(json["current_height"], 100);

@@ -24,12 +24,13 @@
 //! Anchored on `WeightedTimestamp` from the committing QC so every
 //! validator decides identically when to re-broadcast or evict.
 
-use hyperscale_types::{
-    ExecutionCertificate, ShardGroupId, ValidatorId, WaveId, WeightedTimestamp,
-};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+
+use hyperscale_types::{
+    ExecutionCertificate, ShardGroupId, ValidatorId, WaveId, WeightedTimestamp,
+};
 use tracing::{debug, warn};
 
 /// Minimum gap between re-broadcasts of the same EC to the same target.
@@ -205,11 +206,12 @@ impl OutboundExecutionCertificateTracker {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use hyperscale_types::{
         BlockHeight, Bls12381G2Signature, GlobalReceiptRoot, Hash, RETENTION_HORIZON,
         SignerBitfield,
     };
+
+    use super::*;
 
     fn ts(ms: u64) -> WeightedTimestamp {
         WeightedTimestamp::from_millis(ms)

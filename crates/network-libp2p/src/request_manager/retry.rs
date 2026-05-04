@@ -3,14 +3,17 @@
 //! Implements request-centric retry: retries the same peer first (packet loss
 //! is probabilistic), only rotating after a threshold of failures.
 
-use super::{RequestError, RequestManager};
-use crate::adapter::NetworkError;
+use std::time::{Duration, Instant};
+
 use bytes::Bytes;
-use hyperscale_metrics as metrics;
+use hyperscale_metrics::{increment_dispatch_failures, record_request_retry};
 use hyperscale_types::MessageClass;
 use libp2p::PeerId;
-use std::time::{Duration, Instant};
+use tokio::time::sleep;
 use tracing::{debug, trace, warn};
+
+use super::{RequestError, RequestManager};
+use crate::adapter::NetworkError;
 
 impl RequestManager {
     #[allow(clippy::too_many_lines)] // single retry/backoff/peer-rotation loop; splitting would scatter shared state
@@ -85,7 +88,7 @@ impl RequestManager {
                     // Retry same peer first before rotating.
                     current_peer_attempts += 1;
                     attempts += 1;
-                    metrics::record_request_retry("timeout");
+                    record_request_retry("timeout");
 
                     self.health.record_failure(&current_peer, true);
 
@@ -116,7 +119,7 @@ impl RequestManager {
                     }
 
                     // Backoff before retry
-                    tokio::time::sleep(backoff).await;
+                    sleep(backoff).await;
                     backoff = Duration::from_secs_f64(
                         (backoff.as_secs_f64() * self.config.backoff_multiplier)
                             .min(self.config.max_backoff.as_secs_f64()),
@@ -132,7 +135,7 @@ impl RequestManager {
                 Err(e) => {
                     // Other error—record and rotate.
                     attempts += 1;
-                    metrics::record_request_retry("error");
+                    record_request_retry("error");
                     self.health.record_failure(&current_peer, false);
 
                     warn!(
@@ -152,7 +155,7 @@ impl RequestManager {
 
             // Check if we've exhausted all attempts
             if attempts >= self.config.max_total_attempts {
-                metrics::increment_dispatch_failures(request_desc);
+                increment_dispatch_failures(request_desc);
                 warn!(
                     attempts,
                     max = self.config.max_total_attempts,
@@ -167,13 +170,14 @@ impl RequestManager {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::request_manager::{RequestManager, RequestManagerConfig};
-    use crate::request_pool::RequestPool;
     use std::collections::VecDeque;
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::{Arc, Mutex};
+
+    use super::*;
+    use crate::request_manager::{RequestManager, RequestManagerConfig};
+    use crate::request_pool::RequestPool;
 
     /// Deterministic stand-in for `RequestStreamPool`. Pre-programmed with a
     /// queue of responses; records every send call so tests can assert on

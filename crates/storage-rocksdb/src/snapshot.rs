@@ -6,15 +6,17 @@
 //! value is the value at V. If no such entry exists, `StateCf[K]` was
 //! stable since V and is the answer.
 
-use crate::column_families::{CfHandles, StateCf, StateHistoryCf};
-use crate::substate_key;
-use crate::typed_cf::{DbCodec, SborCodec, TypedCf};
+use std::collections::HashMap;
+
 use hyperscale_storage::{
     DbPartitionKey, DbSortKey, DbSubstateValue, PartitionEntry, SubstateDatabase,
 };
 use hyperscale_types::NodeId;
 use rocksdb::{DB, ReadOptions, Snapshot};
-use std::collections::HashMap;
+
+use crate::column_families::{CfHandles, StateCf, StateHistoryCf};
+use crate::substate_key;
+use crate::typed_cf::{DbCodec, SborCodec, TypedCf, get, prefix_iter_snap};
 
 /// Length of the version suffix on each state-history key (`u64` big-endian).
 const VERSION_LEN: usize = 8;
@@ -51,7 +53,7 @@ impl RocksDbSnapshot<'_> {
 
         if self.version >= self.current_version {
             // Trivial: direct prefix scan on StateCf.
-            return crate::typed_cf::prefix_iter_snap::<StateCf>(&self.snapshot, state_cf, prefix)
+            return prefix_iter_snap::<StateCf>(&self.snapshot, state_cf, prefix)
                 .map(|((pk, sk), value)| {
                     let mut k = pk.node_key;
                     k.push(pk.partition_num);
@@ -99,9 +101,7 @@ impl RocksDbSnapshot<'_> {
         }
 
         // Pass 2: fill in unchanged keys from StateCf.
-        for ((pk, sk), value) in
-            crate::typed_cf::prefix_iter_snap::<StateCf>(&self.snapshot, state_cf, prefix)
-        {
+        for ((pk, sk), value) in prefix_iter_snap::<StateCf>(&self.snapshot, state_cf, prefix) {
             let mut k = pk.node_key;
             k.push(pk.partition_num);
             k.extend_from_slice(&sk.0);
@@ -148,7 +148,7 @@ impl SubstateDatabase for RocksDbSnapshot<'_> {
 
         // Current-tip fast path: single StateCf read, no history seek.
         if self.version >= self.current_version {
-            return crate::typed_cf::get::<StateCf>(&self.snapshot, state_cf, &state_key);
+            return get::<StateCf>(&self.snapshot, state_cf, &state_key);
         }
 
         // Historical path: try StateHistoryCf first, fall back to StateCf
@@ -185,7 +185,7 @@ impl SubstateDatabase for RocksDbSnapshot<'_> {
         // No history entry for K after V → K unchanged since V → StateCf
         // is authoritative. This is the only path that pays for both a
         // history seek and a StateCf read.
-        crate::typed_cf::get::<StateCf>(&self.snapshot, state_cf, &state_key)
+        get::<StateCf>(&self.snapshot, state_cf, &state_key)
     }
 
     fn list_raw_values_from_db_key(

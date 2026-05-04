@@ -1,22 +1,31 @@
 //! Spammer runner that orchestrates transaction generation and submission.
 
-use crate::accounts::{AccountPartition, AccountPool};
-use crate::client::{RpcClient, RpcError};
-use crate::config::SpammerConfig;
-use crate::latency::{LatencyReport, LatencyTracker};
-use crate::workloads::TransferWorkload;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+
 use futures::future::join_all;
-use hyperscale_types::{RoutableTransaction, ShardGroupId, routable_from_notarized_v1};
+use hyperscale_types::{
+    RoutableTransaction, ShardGroupId, routable_from_notarized_v1, sign_and_notarize,
+};
 use radix_common::math::Decimal;
 use radix_common::network::NetworkDefinition;
 use radix_common::types::ComponentAddress;
 use rand::{Rng, RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use tokio::spawn;
+use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
+
+use crate::accounts::{
+    AccountPartition, AccountPool, AccountPoolError, FundedAccount, SelectionMode,
+};
+use crate::client::{RpcClient, RpcError};
+use crate::config::{ConfigError, SpammerConfig};
+use crate::latency::{LatencyReport, LatencyTracker};
+use crate::validity::validity_range_for_now;
+use crate::workloads::TransferWorkload;
 
 /// Transaction spammer that submits to real network endpoints.
 ///
@@ -92,8 +101,8 @@ impl Spammer {
         let cancel_clone = cancel.clone();
 
         // Spawn a task to cancel after duration
-        tokio::spawn(async move {
-            tokio::time::sleep(duration).await;
+        spawn(async move {
+            sleep(duration).await;
             cancel_clone.cancel();
         });
 
@@ -226,7 +235,7 @@ impl Spammer {
             }
 
             // Sleep to maintain target TPS
-            tokio::time::sleep(batch_interval).await;
+            sleep(batch_interval).await;
         }
     }
 
@@ -258,7 +267,7 @@ impl Spammer {
             workers = num_workers,
             accounts_per_partition = partitions
                 .first()
-                .map_or(0, super::accounts::AccountPartition::total_accounts),
+                .map_or(0, AccountPartition::total_accounts),
             "Starting spammer (multi-threaded mode)"
         );
 
@@ -275,7 +284,7 @@ impl Spammer {
                 latency_tracker: self
                     .latency_tracker
                     .as_ref()
-                    .map(super::latency::LatencyTracker::clone_tracker),
+                    .map(LatencyTracker::clone_tracker),
                 config: WorkerConfig {
                     num_shards: num_shards as u64,
                     validators_per_shard: self.config.validators_per_shard,
@@ -289,7 +298,7 @@ impl Spammer {
             };
 
             let cancel = cancel.clone();
-            let handle = tokio::spawn(async move {
+            let handle = spawn(async move {
                 worker.run(cancel).await;
             });
             handles.push(handle);
@@ -300,11 +309,11 @@ impl Spammer {
         let latency_tracker_for_progress = self
             .latency_tracker
             .as_ref()
-            .map(super::latency::LatencyTracker::clone_tracker);
+            .map(LatencyTracker::clone_tracker);
         let progress_interval = self.config.progress_interval;
         let cancel_for_progress = cancel.clone();
 
-        let progress_handle = tokio::spawn(async move {
+        let progress_handle = spawn(async move {
             let mut last_progress = Instant::now();
             loop {
                 if cancel_for_progress.is_cancelled() {
@@ -321,7 +330,7 @@ impl Spammer {
                     last_progress = Instant::now();
                 }
 
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                sleep(Duration::from_millis(100)).await;
             }
         });
 
@@ -443,7 +452,7 @@ impl Spammer {
                 return Ok(());
             }
 
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            sleep(Duration::from_millis(500)).await;
         }
 
         Err(SpammerError::NodesNotReady)
@@ -489,7 +498,7 @@ struct WorkerConfig {
     batch_size: usize,
     batch_interval: Duration,
     cross_shard_ratio: f64,
-    selection_mode: crate::accounts::SelectionMode,
+    selection_mode: SelectionMode,
     network: NetworkDefinition,
     latency_sample_rate: f64,
 }
@@ -559,7 +568,7 @@ impl Worker {
             }
 
             // Sleep to maintain target TPS
-            tokio::time::sleep(self.config.batch_interval).await;
+            sleep(self.config.batch_interval).await;
         }
     }
 
@@ -603,7 +612,7 @@ impl Worker {
 /// Workload generator that uses `AccountPartition` (mutable, no locks).
 struct PartitionWorkload {
     cross_shard_ratio: f64,
-    selection_mode: crate::accounts::SelectionMode,
+    selection_mode: SelectionMode,
     amount: Decimal,
     network: NetworkDefinition,
 }
@@ -612,7 +621,7 @@ impl PartitionWorkload {
     fn new(network: NetworkDefinition) -> Self {
         Self {
             cross_shard_ratio: 0.0,
-            selection_mode: crate::accounts::SelectionMode::NoContention,
+            selection_mode: SelectionMode::NoContention,
             amount: Decimal::from(100u32),
             network,
         }
@@ -623,7 +632,7 @@ impl PartitionWorkload {
         self
     }
 
-    const fn with_selection_mode(mut self, mode: crate::accounts::SelectionMode) -> Self {
+    const fn with_selection_mode(mut self, mode: SelectionMode) -> Self {
         self.selection_mode = mode;
         self
     }
@@ -694,8 +703,8 @@ impl PartitionWorkload {
 
     fn build_transfer(
         &self,
-        from: &crate::accounts::FundedAccount,
-        to: &crate::accounts::FundedAccount,
+        from: &FundedAccount,
+        to: &FundedAccount,
     ) -> Option<RoutableTransaction> {
         use radix_common::constants::XRD;
         use radix_transactions::builder::ManifestBuilder;
@@ -708,7 +717,7 @@ impl PartitionWorkload {
 
         let nonce = from.next_nonce();
 
-        let Ok(notarized) = hyperscale_types::sign_and_notarize(
+        let Ok(notarized) = sign_and_notarize(
             manifest,
             &self.network,
             u32::try_from(nonce).unwrap_or(u32::MAX),
@@ -717,7 +726,7 @@ impl PartitionWorkload {
             return None;
         };
 
-        routable_from_notarized_v1(notarized, crate::validity::validity_range_for_now()).ok()
+        routable_from_notarized_v1(notarized, validity_range_for_now()).ok()
     }
 }
 
@@ -813,11 +822,11 @@ impl SpammerReport {
 pub enum SpammerError {
     /// The provided [`SpammerConfig`] failed validation.
     #[error("Configuration error: {0}")]
-    Config(#[from] crate::config::ConfigError),
+    Config(#[from] ConfigError),
 
     /// The underlying account pool could not be generated.
     #[error("Account generation failed: {0}")]
-    AccountGeneration(#[from] crate::accounts::AccountPoolError),
+    AccountGeneration(#[from] AccountPoolError),
 
     /// An RPC call to a configured node failed.
     #[error("RPC error: {0}")]

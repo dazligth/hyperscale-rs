@@ -49,8 +49,9 @@ impl ShardMessage for SyncCompleteAnnouncement {}
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use hyperscale_types::zero_bls_signature;
+
+    use super::*;
 
     #[test]
     fn test_sync_complete_announcement() {

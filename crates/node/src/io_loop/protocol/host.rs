@@ -4,6 +4,11 @@
 //! block-sync and remote-header-sync state machines. Lifting these out of
 //! `IoLoop` makes "what the I/O loop is orchestrating" explicit.
 
+use std::time::Instant;
+
+use hyperscale_core::ProtocolEvent;
+use hyperscale_types::{BlockHeight, ShardGroupId};
+
 use super::binding::{
     ExecCertBinding, ExecCertFetch, FetchBinding, FinalizedWaveBinding, FinalizedWaveFetch,
     LocalProvisionBinding, LocalProvisionFetch, ProvisionBinding, ProvisionFetch,
@@ -15,8 +20,6 @@ use super::remote_header_sync::{
     self, RemoteHeaderSyncInput, RemoteHeaderSyncOutput, RemoteHeaderSyncProtocol,
 };
 use crate::config::NodeConfig;
-use hyperscale_core::ProtocolEvent;
-use std::time::Instant;
 
 /// Sync + per-payload fetch protocols owned by the I/O loop.
 pub struct ProtocolHost {
@@ -119,8 +122,8 @@ impl ProtocolHost {
     /// admitted a header at `height` for `source_shard`.
     pub fn on_remote_header_admitted(
         &mut self,
-        source_shard: hyperscale_types::ShardGroupId,
-        height: hyperscale_types::BlockHeight,
+        source_shard: ShardGroupId,
+        height: BlockHeight,
     ) -> Vec<RemoteHeaderSyncOutput> {
         self.remote_header_sync
             .handle(RemoteHeaderSyncInput::Admitted {

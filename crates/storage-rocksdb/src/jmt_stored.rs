@@ -13,7 +13,12 @@
 // methods (`from_jmt`/`to_jmt`/`version()`/`path_bits()`) say what they do.
 #![allow(missing_docs)]
 
-use hyperscale_jmt as jmt;
+#[cfg(test)]
+use hyperscale_jmt::NibblePath;
+use hyperscale_jmt::{
+    Child, ChildKind, Hash as JmtHash, InternalNode, Key as JmtKey, LeafNode, Node, NodeKey,
+    PathDecodeError,
+};
 use sbor::prelude::*;
 
 /// Version = block height.
@@ -27,7 +32,7 @@ const BACKEND_ARITY: usize = 1 << BACKEND_ARITY_BITS as usize;
 // StoredNodeKey
 // ============================================================
 
-/// SBOR-serializable form of [`jmt::NodeKey`]. Carries the path's bit
+/// SBOR-serializable form of [`NodeKey`]. Carries the path's bit
 /// length explicitly so sub-byte paths (binary trees) roundtrip cleanly.
 #[derive(
     Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd, BasicCategorize, BasicEncode, BasicDecode,
@@ -42,7 +47,7 @@ pub struct StoredNodeKey {
 
 impl StoredNodeKey {
     #[must_use]
-    pub fn from_jmt(key: &jmt::NodeKey) -> Self {
+    pub fn from_jmt(key: &NodeKey) -> Self {
         Self {
             version: key.version,
             path_bits: key.path.len(),
@@ -52,14 +57,14 @@ impl StoredNodeKey {
 
     /// # Errors
     ///
-    /// Returns [`jmt::PathDecodeError`] if `path_bits` and `path_bytes`
+    /// Returns [`PathDecodeError`] if `path_bits` and `path_bytes`
     /// disagree (e.g. corrupted storage).
-    pub fn to_jmt(&self) -> Result<jmt::NodeKey, jmt::PathDecodeError> {
+    pub fn to_jmt(&self) -> Result<NodeKey, PathDecodeError> {
         let mut encoded = Vec::with_capacity(8 + 2 + self.path_bytes.len());
         encoded.extend_from_slice(&self.version.to_be_bytes());
         encoded.extend_from_slice(&self.path_bits.to_be_bytes());
         encoded.extend_from_slice(&self.path_bytes);
-        jmt::NodeKey::decode(&encoded)
+        NodeKey::decode(&encoded)
     }
 
     #[must_use]
@@ -117,7 +122,7 @@ impl VersionedStoredNode {
     }
 }
 
-/// SBOR-serializable mirror of [`jmt::Node`].
+/// SBOR-serializable mirror of [`Node`].
 #[derive(Clone, PartialEq, Eq, Hash, Debug, BasicCategorize, BasicEncode, BasicDecode)]
 pub enum StoredNode {
     Internal(StoredInternalNode),
@@ -169,9 +174,9 @@ pub enum StaleTreePart {
 
 impl StoredNode {
     #[must_use]
-    pub fn from_jmt(node: &jmt::Node) -> Self {
+    pub fn from_jmt(node: &Node) -> Self {
         match node {
-            jmt::Node::Internal(internal) => {
+            Node::Internal(internal) => {
                 let children: Vec<StoredChildEntry> = internal
                     .children
                     .iter()
@@ -182,7 +187,7 @@ impl StoredNode {
                             bucket: u8::try_from(bucket).unwrap_or(u8::MAX),
                             version: c.version,
                             hash: c.hash.to_vec(),
-                            is_leaf: matches!(c.kind, jmt::ChildKind::Leaf),
+                            is_leaf: matches!(c.kind, ChildKind::Leaf),
                         })
                     })
                     .collect();
@@ -191,14 +196,14 @@ impl StoredNode {
                     hash: internal.hash.to_vec(),
                 })
             }
-            jmt::Node::Leaf(leaf) => Self::Leaf(StoredLeafNode {
+            Node::Leaf(leaf) => Self::Leaf(StoredLeafNode {
                 key: leaf.key.to_vec(),
                 value_hash: leaf.value_hash.to_vec(),
             }),
         }
     }
 
-    /// Convert back to a `jmt::Node`.
+    /// Convert back to a `Node`.
     ///
     /// # Panics
     ///
@@ -206,33 +211,33 @@ impl StoredNode {
     /// if a stored child bucket exceeds the backend arity. All three
     /// indicate storage corruption and are not recoverable.
     #[must_use]
-    pub fn to_jmt(&self) -> jmt::Node {
+    pub fn to_jmt(&self) -> Node {
         match self {
             Self::Internal(internal) => {
-                let mut dense: Vec<Option<jmt::Child>> = vec![None; BACKEND_ARITY];
+                let mut dense: Vec<Option<Child>> = vec![None; BACKEND_ARITY];
                 for entry in &internal.children {
                     let kind = if entry.is_leaf {
-                        jmt::ChildKind::Leaf
+                        ChildKind::Leaf
                     } else {
-                        jmt::ChildKind::Internal
+                        ChildKind::Internal
                     };
                     let bucket = entry.bucket as usize;
                     assert!(
                         bucket < BACKEND_ARITY,
                         "stored child bucket {bucket} exceeds backend arity {BACKEND_ARITY}"
                     );
-                    dense[bucket] = Some(jmt::Child {
+                    dense[bucket] = Some(Child {
                         version: entry.version,
                         hash: hash_from_bytes(&entry.hash),
                         kind,
                     });
                 }
-                jmt::Node::Internal(jmt::InternalNode {
+                Node::Internal(InternalNode {
                     children: dense,
                     hash: hash_from_bytes(&internal.hash),
                 })
             }
-            Self::Leaf(leaf) => jmt::Node::Leaf(jmt::LeafNode {
+            Self::Leaf(leaf) => Node::Leaf(LeafNode {
                 key: key_from_bytes(&leaf.key),
                 value_hash: hash_from_bytes(&leaf.value_hash),
             }),
@@ -240,7 +245,7 @@ impl StoredNode {
     }
 }
 
-fn hash_from_bytes(bytes: &[u8]) -> jmt::Hash {
+fn hash_from_bytes(bytes: &[u8]) -> JmtHash {
     let mut out = [0u8; 32];
     assert!(
         bytes.len() == 32,
@@ -251,7 +256,7 @@ fn hash_from_bytes(bytes: &[u8]) -> jmt::Hash {
     out
 }
 
-fn key_from_bytes(bytes: &[u8]) -> jmt::Key {
+fn key_from_bytes(bytes: &[u8]) -> JmtKey {
     let mut out = [0u8; 32];
     assert!(
         bytes.len() == 32,
@@ -264,16 +269,17 @@ fn key_from_bytes(bytes: &[u8]) -> jmt::Key {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use hyperscale_jmt::{Blake3Hasher, InternalNode as JmtInternal, LeafNode as JmtLeaf};
+
+    use super::*;
 
     #[test]
     fn roundtrip_leaf() {
-        let leaf = jmt::Node::Leaf(JmtLeaf::new([1u8; 32], [2u8; 32]));
+        let leaf = Node::Leaf(JmtLeaf::new([1u8; 32], [2u8; 32]));
         let stored = StoredNode::from_jmt(&leaf);
         let back = stored.to_jmt();
         match (leaf, back) {
-            (jmt::Node::Leaf(a), jmt::Node::Leaf(b)) => {
+            (Node::Leaf(a), Node::Leaf(b)) => {
                 assert_eq!(a.key, b.key);
                 assert_eq!(a.value_hash, b.value_hash);
             }
@@ -284,23 +290,23 @@ mod tests {
     #[test]
     fn roundtrip_internal() {
         // Build a minimal internal node with two children.
-        let children: Vec<Option<jmt::Child>> = vec![
-            Some(jmt::Child {
+        let children: Vec<Option<Child>> = vec![
+            Some(Child {
                 version: 1,
                 hash: [0xAA; 32],
-                kind: jmt::ChildKind::Leaf,
+                kind: ChildKind::Leaf,
             }),
-            Some(jmt::Child {
+            Some(Child {
                 version: 2,
                 hash: [0xBB; 32],
-                kind: jmt::ChildKind::Internal,
+                kind: ChildKind::Internal,
             }),
         ];
-        let internal = jmt::Node::Internal(JmtInternal::new::<Blake3Hasher>(children));
+        let internal = Node::Internal(JmtInternal::new::<Blake3Hasher>(children));
         let stored = StoredNode::from_jmt(&internal);
         let back = stored.to_jmt();
         match (&internal, &back) {
-            (jmt::Node::Internal(a), jmt::Node::Internal(b)) => {
+            (Node::Internal(a), Node::Internal(b)) => {
                 assert_eq!(a.hash, b.hash);
                 assert_eq!(a.children.len(), b.children.len());
                 for (ca, cb) in a.children.iter().zip(b.children.iter()) {
@@ -318,7 +324,7 @@ mod tests {
 
     #[test]
     fn stored_node_key_roundtrip() {
-        let jmt_key = jmt::NodeKey::new(42, jmt::NibblePath::from_key_prefix(&[0xAB; 32], 13));
+        let jmt_key = NodeKey::new(42, NibblePath::from_key_prefix(&[0xAB; 32], 13));
         let stored = StoredNodeKey::from_jmt(&jmt_key);
         let back = stored.to_jmt().unwrap();
         assert_eq!(jmt_key.version, back.version);
@@ -328,8 +334,8 @@ mod tests {
 
     #[test]
     fn encode_key_sorts_by_version_then_path() {
-        let a = encode_key(&StoredNodeKey::from_jmt(&jmt::NodeKey::root(1)));
-        let b = encode_key(&StoredNodeKey::from_jmt(&jmt::NodeKey::root(2)));
+        let a = encode_key(&StoredNodeKey::from_jmt(&NodeKey::root(1)));
+        let b = encode_key(&StoredNodeKey::from_jmt(&NodeKey::root(2)));
         assert!(a < b);
     }
 }

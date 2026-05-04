@@ -19,9 +19,10 @@
 //! (deadline sweeps, receipt-time stamping, etc.) — keeping them
 //! co-located with the timestamp-driven sweeps that update them.
 
-use hyperscale_types::{BlockHeight, ShardGroupId, ValidatorId, WeightedTimestamp};
 use std::collections::BTreeMap;
 use std::time::Duration;
+
+use hyperscale_types::{BlockHeight, ShardGroupId, ValidatorId, WeightedTimestamp};
 use tracing::warn;
 
 /// How long to wait before falling back to peer-fetch for missing
@@ -214,8 +215,9 @@ impl Default for ExpectedProvisionTracker {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use hyperscale_types::RETENTION_HORIZON;
+
+    use super::*;
 
     fn ts(ms: u64) -> WeightedTimestamp {
         WeightedTimestamp::from_millis(ms)

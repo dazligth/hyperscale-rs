@@ -36,15 +36,18 @@ mod retry;
 mod stream;
 mod timeout;
 
-use crate::adapter::NetworkError;
-use crate::request_pool::RequestPool;
-use bytes::Bytes;
-use libp2p::PeerId;
-use peer_health::{PeerHealthConfig, PeerHealthTracker};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+
+use bytes::Bytes;
+use hyperscale_types::MessageClass;
+use libp2p::PeerId;
+use peer_health::{PeerHealthConfig, PeerHealthTracker};
 use thiserror::Error;
+
+use crate::adapter::NetworkError;
+use crate::request_pool::RequestPool;
 
 /// Maximum timeout for stream operations.
 const MAX_STREAM_TIMEOUT: Duration = Duration::from_secs(10);
@@ -96,11 +99,8 @@ pub enum RequestError {
 /// retries with shorter backoff to absorb packet loss without falling
 /// behind on the BFT or cross-shard hot paths.
 #[must_use]
-pub const fn uses_relaxed_retry(class: hyperscale_types::MessageClass) -> bool {
-    matches!(
-        class,
-        hyperscale_types::MessageClass::Recovery | hyperscale_types::MessageClass::Bulk
-    )
+pub const fn uses_relaxed_retry(class: MessageClass) -> bool {
+    matches!(class, MessageClass::Recovery | MessageClass::Bulk)
 }
 
 /// Whether a class is in the cross-shard reservation tier.
@@ -110,14 +110,15 @@ pub const fn uses_relaxed_retry(class: hyperscale_types::MessageClass) -> bool {
 /// storm during topology churn cannot starve the BFT hot path
 /// (`Consensus`, `BlockCompletion`).
 #[must_use]
-pub const fn is_cross_shard(class: hyperscale_types::MessageClass) -> bool {
-    matches!(class, hyperscale_types::MessageClass::CrossShardProgress)
+pub const fn is_cross_shard(class: MessageClass) -> bool {
+    matches!(class, MessageClass::CrossShardProgress)
 }
 
 #[cfg(test)]
 mod retry_regime_tests {
-    use super::uses_relaxed_retry;
     use hyperscale_types::MessageClass;
+
+    use super::uses_relaxed_retry;
 
     #[test]
     fn consensus_uses_tight_retry() {
@@ -286,13 +287,13 @@ impl RequestManager {
     /// Map a `MessageClass` onto the index used by `per_class_in_flight`.
     /// Mirrors the enum discriminant order in `crates/types/src/network.rs`.
     #[inline]
-    pub(super) const fn class_index(class: hyperscale_types::MessageClass) -> usize {
+    pub(super) const fn class_index(class: MessageClass) -> usize {
         match class {
-            hyperscale_types::MessageClass::Consensus => 0,
-            hyperscale_types::MessageClass::BlockCompletion => 1,
-            hyperscale_types::MessageClass::CrossShardProgress => 2,
-            hyperscale_types::MessageClass::Recovery => 3,
-            hyperscale_types::MessageClass::Bulk => 4,
+            MessageClass::Consensus => 0,
+            MessageClass::BlockCompletion => 1,
+            MessageClass::CrossShardProgress => 2,
+            MessageClass::Recovery => 3,
+            MessageClass::Bulk => 4,
         }
     }
 
@@ -322,7 +323,7 @@ impl RequestManager {
         request_desc: String,
         type_id: &'static str,
         sbor_data: Vec<u8>,
-        class: hyperscale_types::MessageClass,
+        class: MessageClass,
     ) -> Result<(PeerId, Bytes), RequestError> {
         self.acquire_slot(class).await?;
 

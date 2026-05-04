@@ -5,22 +5,24 @@
 // `u32::MAX`); the casts between them are domain-sized.
 #![allow(clippy::cast_possible_truncation)]
 
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashSet};
+use std::sync::Arc;
+use std::time::Duration;
+
+use hyperscale_network::{HandlerRegistry, RequestError, ResponseVerdict, compression};
+use hyperscale_types::{ShardGroupId, ValidatorId};
+use rand::RngExt;
+use rand::seq::SliceRandom;
+use rand_chacha::ChaCha8Rng;
+use tracing::{debug, trace};
+
 use crate::NodeIndex;
 use crate::fault::{Decision, FaultBuilder, FaultInjector, MessageContext, Tier};
 use crate::sim_network::{
     BroadcastTarget, OutboxEntry, PendingNotification, PendingRequest, SimNetworkAdapter,
 };
 use crate::traffic::NetworkTrafficAnalyzer;
-use hyperscale_network::{HandlerRegistry, RequestError, ResponseVerdict};
-use hyperscale_types::{ShardGroupId, ValidatorId};
-use rand::RngExt;
-use rand::seq::SliceRandom;
-use rand_chacha::ChaCha8Rng;
-use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashSet};
-use std::sync::Arc;
-use std::time::Duration;
-use tracing::{debug, trace};
 
 /// Configuration for simulated network.
 #[derive(Debug, Clone)]
@@ -637,7 +639,7 @@ impl SimulatedNetwork {
                 data,
             } = notification;
 
-            let payload = match hyperscale_network::compression::decompress(&data) {
+            let payload = match compression::decompress(&data) {
                 Ok(p) => p,
                 Err(e) => {
                     tracing::warn!(
@@ -727,7 +729,7 @@ impl SimulatedNetwork {
             }
         };
 
-        let payload = match hyperscale_network::compression::decompress(&entry.data) {
+        let payload = match compression::decompress(&entry.data) {
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!(
@@ -957,11 +959,12 @@ impl SimulatedNetwork {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use hyperscale_network::{Network, RawRequestHandler};
     use rand::SeedableRng;
 
-    type SharedRequestResult =
-        Arc<std::sync::Mutex<Option<Result<Vec<u8>, hyperscale_network::RequestError>>>>;
+    use super::*;
+
+    type SharedRequestResult = Arc<std::sync::Mutex<Option<Result<Vec<u8>, RequestError>>>>;
 
     #[test]
     fn test_shard_assignment() {
@@ -1204,7 +1207,7 @@ mod tests {
     /// the `SimulatedNetwork` infrastructure (partitions, latency), not the
     /// typed handler registration API.
     fn register_echo(adapter: &SimNetworkAdapter, type_id: &'static str) {
-        let handler: Arc<hyperscale_network::RawRequestHandler> =
+        let handler: Arc<RawRequestHandler> =
             Arc::new(|payload: &[u8]| -> Vec<u8> { payload.to_vec() });
         adapter.registry.register_raw_request(type_id, handler);
     }
@@ -1285,10 +1288,7 @@ mod tests {
 
         // Error callbacks are immediate — no flush needed
         let captured = result.lock().unwrap().take().unwrap();
-        assert!(matches!(
-            captured,
-            Err(hyperscale_network::RequestError::PeerUnreachable(_))
-        ));
+        assert!(matches!(captured, Err(RequestError::PeerUnreachable(_))));
     }
 
     #[test]
@@ -1313,10 +1313,7 @@ mod tests {
 
         // Error callbacks are immediate
         let captured = result.lock().unwrap().take().unwrap();
-        assert!(matches!(
-            captured,
-            Err(hyperscale_network::RequestError::PeerUnreachable(_))
-        ));
+        assert!(matches!(captured, Err(RequestError::PeerUnreachable(_))));
     }
 
     #[test]
@@ -1337,10 +1334,7 @@ mod tests {
 
         // Error callbacks are immediate
         let captured = result.lock().unwrap().take().unwrap();
-        assert!(matches!(
-            captured,
-            Err(hyperscale_network::RequestError::PeerError(_))
-        ));
+        assert!(matches!(captured, Err(RequestError::PeerError(_))));
     }
 
     #[test]
@@ -1354,8 +1348,7 @@ mod tests {
 
         // Register handler that returns empty (directly on registry)
         let adapter1 = network.create_adapter(1);
-        let handler: Arc<hyperscale_network::RawRequestHandler> =
-            Arc::new(|_: &[u8]| -> Vec<u8> { vec![] });
+        let handler: Arc<RawRequestHandler> = Arc::new(|_: &[u8]| -> Vec<u8> { vec![] });
         adapter1
             .registry
             .register_raw_request("test.request", handler);
@@ -1366,9 +1359,7 @@ mod tests {
 
         // Error callbacks are immediate
         let captured = result.lock().unwrap().take().unwrap();
-        assert!(
-            matches!(captured, Err(hyperscale_network::RequestError::PeerError(ref s)) if s.contains("empty"))
-        );
+        assert!(matches!(captured, Err(RequestError::PeerError(ref s)) if s.contains("empty")));
     }
 
     #[test]
@@ -1417,10 +1408,7 @@ mod tests {
 
         // Error callbacks are immediate
         let captured = result.lock().unwrap().take().unwrap();
-        assert!(matches!(
-            captured,
-            Err(hyperscale_network::RequestError::PeerUnreachable(_))
-        ));
+        assert!(matches!(captured, Err(RequestError::PeerUnreachable(_))));
     }
 
     #[test]
@@ -1460,7 +1448,7 @@ mod tests {
 
     /// Helper: create a wire-encoded (LZ4-compressed) outbox entry.
     fn make_gossip_entry(target: BroadcastTarget) -> OutboxEntry {
-        let data = hyperscale_network::compression::compress(b"test gossip payload");
+        let data = compression::compress(b"test gossip payload");
         OutboxEntry {
             target,
             message_type: "test.gossip",
@@ -1803,10 +1791,8 @@ mod tests {
         use hyperscale_messages::TransactionGossip;
         use hyperscale_network::GossipVerdict;
         use hyperscale_network::registry::RawGossipHandler;
-        use hyperscale_types::{
-            ShardGroupId,
-            test_utils::{test_node, test_transaction_with_nodes},
-        };
+        use hyperscale_types::ShardGroupId;
+        use hyperscale_types::test_utils::{test_node, test_transaction_with_nodes};
 
         let mut network = SimulatedNetwork::new(NetworkConfig {
             validators_per_shard: 2,
@@ -1837,10 +1823,12 @@ mod tests {
         let adapter0 = network.create_adapter(0);
 
         // Node 0 broadcasts a transaction via its adapter
-        let gossip = TransactionGossip::from_arcs(vec![std::sync::Arc::new(
-            test_transaction_with_nodes(&[1, 2, 3], vec![test_node(1)], vec![test_node(2)]),
-        )]);
-        hyperscale_network::Network::broadcast_to_shard(&adapter0, ShardGroupId(0), &gossip);
+        let gossip = TransactionGossip::from_arcs(vec![Arc::new(test_transaction_with_nodes(
+            &[1, 2, 3],
+            vec![test_node(1)],
+            vec![test_node(2)],
+        ))]);
+        Network::broadcast_to_shard(&adapter0, ShardGroupId(0), &gossip);
 
         // Drain and deliver via accept_gossip + flush_gossip
         let entries = adapter0.drain_outbox();

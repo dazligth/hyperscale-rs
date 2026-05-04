@@ -34,11 +34,12 @@
     clippy::cast_sign_loss
 )]
 
-use crate::NodeIndex;
 use std::collections::HashMap;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+
+use crate::NodeIndex;
 
 /// Network traffic analyzer for bandwidth estimation.
 ///

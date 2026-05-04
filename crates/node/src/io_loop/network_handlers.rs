@@ -1,17 +1,28 @@
 //! Network handler registration (gossip, notifications, requests).
 
-use super::IoLoop;
-use super::verify::{resolve_sender_key, verify_bls_with_metrics, verify_sender_signature};
 use hyperscale_core::{NodeInput, ProtocolEvent};
 use hyperscale_dispatch::Dispatch;
 use hyperscale_engine::Engine;
-use hyperscale_messages::{
-    BlockHeaderNotification, BlockVoteNotification, ExecutionCertificatesNotification,
-    ExecutionVotesNotification, TransactionGossip,
+use hyperscale_messages::request::{
+    GetExecutionCertsRequest, GetFinalizedWavesRequest, GetLocalProvisionsRequest,
 };
+use hyperscale_messages::response::{
+    GetExecutionCertsResponse, GetFinalizedWavesResponse, GetLocalProvisionsResponse,
+    GetProvisionResponse,
+};
+use hyperscale_messages::{
+    BlockHeaderNotification, BlockVoteNotification, CommittedBlockHeaderGossip,
+    ExecutionCertificatesNotification, ExecutionVotesNotification, ProvisionsNotification,
+    TransactionGossip,
+};
+use hyperscale_metrics::record_fetch_response_sent;
 use hyperscale_network::Network;
 use hyperscale_storage::Storage;
+use hyperscale_types::{ExecutionCertificate, FinalizedWave, WaveId};
 use tracing::warn;
+
+use super::IoLoop;
+use super::verify::{resolve_sender_key, verify_bls_with_metrics, verify_sender_signature};
 
 impl<S, N, D, E> IoLoop<S, N, D, E>
 where
@@ -26,17 +37,19 @@ where
     /// the serving function in the corresponding protocol module.
     #[allow(clippy::too_many_lines)] // single registration table; one closure per request type
     pub(super) fn register_request_handler(&self) {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        use hyperscale_messages::request::{
+            GetBlockRequest, GetProvisionsRequest, GetRemoteHeadersRequest, GetTransactionsRequest,
+        };
+
         use crate::io_loop::protocol::block_serve::serve_block_request;
         use crate::io_loop::protocol::provision_serve::serve_provision_request;
         use crate::io_loop::protocol::remote_header_serve::serve_remote_headers_request;
         use crate::io_loop::protocol::transaction_serve::serve_transaction_request;
-        use hyperscale_messages::request::{
-            GetBlockRequest, GetProvisionsRequest, GetRemoteHeadersRequest, GetTransactionsRequest,
-        };
-        use std::collections::HashMap;
-        use std::sync::Arc;
 
-        type ProvisionResponse = hyperscale_messages::response::GetProvisionResponse;
+        type ProvisionResponse = GetProvisionResponse;
         type ProvisionWaiter = Arc<(
             std::sync::Mutex<Option<ProvisionResponse>>,
             std::sync::Condvar,
@@ -114,8 +127,6 @@ where
 
         self.network
             .register_request_handler::<GetProvisionsRequest>(move |req: GetProvisionsRequest| {
-                use hyperscale_messages::response::GetProvisionResponse;
-
                 let cache_key = (req.block_height.0, req.target_shard.0);
 
                 // Outbound fast path: if we still hold the exact batch we
@@ -125,10 +136,7 @@ where
                 if let Some(provisions) =
                     outbound_cache.get_outbound(req.block_height, req.target_shard)
                 {
-                    hyperscale_metrics::record_fetch_response_sent(
-                        "provision",
-                        provisions.transactions.len().max(1),
-                    );
+                    record_fetch_response_sent("provision", provisions.transactions.len().max(1));
                     return GetProvisionResponse {
                         provisions: Some(provisions),
                     };
@@ -139,10 +147,7 @@ where
                     let guard = dedup.lock().unwrap();
                     if let Some(cached) = guard.cache.get(&cache_key) {
                         if let Some(p) = &cached.provisions {
-                            hyperscale_metrics::record_fetch_response_sent(
-                                "provision",
-                                p.transactions.len().max(1),
-                            );
+                            record_fetch_response_sent("provision", p.transactions.len().max(1));
                         }
                         return cached.clone();
                     }
@@ -187,10 +192,7 @@ where
                 let response =
                     serve_provision_request(&*storage, topo.local_shard(), topo.num_shards(), &req);
                 if let Some(p) = &response.provisions {
-                    hyperscale_metrics::record_fetch_response_sent(
-                        "provision",
-                        p.transactions.len(),
-                    );
+                    record_fetch_response_sent("provision", p.transactions.len());
                 }
 
                 if response.provisions.is_some() {
@@ -212,10 +214,8 @@ where
 
         let provision_store = Arc::clone(&self.caches.provision_store);
         self.network
-            .register_request_handler::<hyperscale_messages::request::GetLocalProvisionsRequest>(
-                move |req: hyperscale_messages::request::GetLocalProvisionsRequest| {
-                    use hyperscale_messages::response::GetLocalProvisionsResponse;
-
+            .register_request_handler::<GetLocalProvisionsRequest>(
+                move |req: GetLocalProvisionsRequest| {
                     let mut provisions = Vec::with_capacity(req.batch_hashes.len());
                     for h in &req.batch_hashes {
                         if let Some(b) = provision_store.get(h) {
@@ -232,12 +232,10 @@ where
         let fw_cache = Arc::clone(&self.caches.finalized_wave);
         let fw_storage = Arc::clone(&self.storage);
         self.network
-            .register_request_handler::<hyperscale_messages::request::GetFinalizedWavesRequest>(
-                move |req: hyperscale_messages::request::GetFinalizedWavesRequest| {
-                    use hyperscale_messages::response::GetFinalizedWavesResponse;
-
-                    let mut waves: Vec<Arc<hyperscale_types::FinalizedWave>> = Vec::new();
-                    let mut missing: Vec<hyperscale_types::WaveId> = Vec::new();
+            .register_request_handler::<GetFinalizedWavesRequest>(
+                move |req: GetFinalizedWavesRequest| {
+                    let mut waves: Vec<Arc<FinalizedWave>> = Vec::new();
+                    let mut missing: Vec<WaveId> = Vec::new();
                     for id in &req.wave_ids {
                         if let Some(fw) = fw_cache.get(id) {
                             waves.push(fw);
@@ -254,11 +252,9 @@ where
                     if !missing.is_empty() {
                         let certs = fw_storage.get_certificates_batch(&missing);
                         for cert in certs {
-                            if let Some(fw) =
-                                hyperscale_types::FinalizedWave::reconstruct(Arc::new(cert), |h| {
-                                    fw_storage.get_consensus_receipt(h)
-                                })
-                            {
+                            if let Some(fw) = FinalizedWave::reconstruct(Arc::new(cert), |h| {
+                                fw_storage.get_consensus_receipt(h)
+                            }) {
                                 waves.push(Arc::new(fw));
                             }
                         }
@@ -273,11 +269,9 @@ where
         let exec_cert_store = Arc::clone(&self.caches.exec_cert_store);
         let storage = Arc::clone(&self.storage);
         self.network
-            .register_request_handler::<hyperscale_messages::request::GetExecutionCertsRequest>(
-                move |req: hyperscale_messages::request::GetExecutionCertsRequest| {
-                    use hyperscale_messages::response::GetExecutionCertsResponse;
-
-                    let mut certs: Vec<Arc<hyperscale_types::ExecutionCertificate>> = Vec::new();
+            .register_request_handler::<GetExecutionCertsRequest>(
+                move |req: GetExecutionCertsRequest| {
+                    let mut certs: Vec<Arc<ExecutionCertificate>> = Vec::new();
                     for wave_id in &req.wave_ids {
                         if let Some(cert) = exec_cert_store.get(wave_id) {
                             certs.push(cert);
@@ -302,7 +296,7 @@ where
                     if certs.is_empty() {
                         GetExecutionCertsResponse { certificates: None }
                     } else {
-                        hyperscale_metrics::record_fetch_response_sent("exec_cert", certs.len());
+                        record_fetch_response_sent("exec_cert", certs.len());
                         GetExecutionCertsResponse {
                             certificates: Some(certs),
                         }
@@ -344,9 +338,9 @@ where
         let tx = self.event_sender.clone();
         let topology = self.topology_snapshot.clone();
         self.network
-            .register_gossip_handler::<hyperscale_messages::CommittedBlockHeaderGossip>(
+            .register_gossip_handler::<CommittedBlockHeaderGossip>(
                 TopicScope::Global,
-                move |gossip: hyperscale_messages::CommittedBlockHeaderGossip| -> GossipVerdict {
+                move |gossip: CommittedBlockHeaderGossip| -> GossipVerdict {
                     let sender = gossip.sender;
                     let header_shard = gossip.committed_header.header.shard_group_id;
                     let topo = topology.load();
@@ -429,14 +423,14 @@ where
         let tx = self.event_sender.clone();
         let topology = self.topology_snapshot.clone();
         self.network
-            .register_notification_handler::<hyperscale_messages::ProvisionsNotification>(
-                move |notification: hyperscale_messages::ProvisionsNotification| {
+            .register_notification_handler::<ProvisionsNotification>(
+                move |notification: ProvisionsNotification| {
                     let topo = topology.load();
 
                     // Drop provisions not destined for our shard before paying
                     // the BLS verification cost. Catches misroutes and spam early.
                     if notification.provisions.target_shard != topo.local_shard() {
-                        tracing::warn!(
+                        warn!(
                             source_shard = notification.provisions.source_shard.0,
                             target_shard = notification.provisions.target_shard.0,
                             local_shard = topo.local_shard().0,

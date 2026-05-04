@@ -1,8 +1,9 @@
 //! Per-tx execution outcome ([`TxOutcome`]) and the [`ExecutionOutcome`] enum
 //! carried inside execution certificates.
 
-use crate::{GlobalReceiptHash, TxHash};
 use sbor::prelude::*;
+
+use crate::{GlobalReceiptHash, TxHash};
 
 /// Per-transaction execution outcome within a wave.
 ///

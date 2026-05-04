@@ -26,12 +26,13 @@
 //! `try_propose` in the same tick — closing the on-qc-formed re-inclusion
 //! race without a separate bridge buffer.
 
-use hyperscale_types::{
-    FinalizedWave, ProvisionHash, Provisions, RoutableTransaction, TxHash, WaveId,
-    WeightedTimestamp,
-};
 use std::collections::HashMap;
 use std::sync::Arc;
+
+use hyperscale_types::{
+    FinalizedWave, ProvisionHash, Provisions, RETENTION_HORIZON, RoutableTransaction, TxHash,
+    WaveId, WeightedTimestamp,
+};
 
 #[allow(clippy::struct_field_names)] // shared `_retention` postfix is the artifact-tier convention
 pub struct CommitDedupIndex {
@@ -89,7 +90,7 @@ impl CommitDedupIndex {
         provisions: &[Arc<Provisions>],
         local_committed_ts: WeightedTimestamp,
     ) {
-        let deadline = local_committed_ts.plus(hyperscale_types::RETENTION_HORIZON);
+        let deadline = local_committed_ts.plus(RETENTION_HORIZON);
         for batch in provisions {
             self.provision_retention
                 .entry(batch.hash())
@@ -135,9 +136,14 @@ impl CommitDedupIndex {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use hyperscale_test_helpers::make_finalized_wave;
     use hyperscale_types::test_utils::test_notarized_transaction_v1;
-    use hyperscale_types::{BlockHeight, Hash, TimestampRange, routable_from_notarized_v1};
+    use hyperscale_types::{
+        BlockHeight, Hash, MerkleInclusionProof, ShardGroupId, TimestampRange, TransactionDecision,
+        TxEntries, routable_from_notarized_v1,
+    };
+
+    use super::*;
 
     /// Build a test tx whose `validity_range.end_timestamp_exclusive == end_ms`.
     fn tx_with_end(seed: u8, end_ms: u64) -> Arc<RoutableTransaction> {
@@ -147,17 +153,16 @@ mod tests {
     }
 
     fn make_fw(height: u64) -> Arc<FinalizedWave> {
-        Arc::new(hyperscale_test_helpers::make_finalized_wave(
+        Arc::new(make_finalized_wave(
             BlockHeight(height),
             TxHash::from_raw(Hash::from_bytes(
                 &[u8::try_from(height).unwrap_or(u8::MAX); 32],
             )),
-            hyperscale_types::TransactionDecision::Accept,
+            TransactionDecision::Accept,
         ))
     }
 
     fn make_provisions(seed: u8) -> Arc<Provisions> {
-        use hyperscale_types::{MerkleInclusionProof, ShardGroupId, TxEntries};
         let tx_hash = TxHash::from_raw(Hash::from_bytes(&[seed; 32]));
         Arc::new(Provisions::new(
             ShardGroupId(0),
@@ -251,7 +256,7 @@ mod tests {
         assert!(idx.contains_provision(&p.hash()));
 
         let past = now
-            .plus(hyperscale_types::RETENTION_HORIZON)
+            .plus(RETENTION_HORIZON)
             .plus(std::time::Duration::from_millis(1));
         idx.prune(past);
         assert!(!idx.contains_provision(&p.hash()));

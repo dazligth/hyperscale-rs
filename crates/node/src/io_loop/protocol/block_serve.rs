@@ -5,14 +5,15 @@
 //! provisions (when the block is still inside the wave-execution window)
 //! or serve the persisted `Sealed` shape.
 
-use hyperscale_messages::request::GetBlockRequest;
-use hyperscale_messages::response::{ElidedCertifiedBlock, GetBlockResponse};
-use hyperscale_metrics as metrics;
-use hyperscale_provisions::ProvisionStore;
-use hyperscale_storage::ChainReader;
-use hyperscale_types::{Provisions, WAVE_TIMEOUT};
 use std::sync::Arc;
 use std::time::Duration;
+
+use hyperscale_messages::request::GetBlockRequest;
+use hyperscale_messages::response::{ElidedCertifiedBlock, GetBlockResponse};
+use hyperscale_metrics::record_sync_response_error;
+use hyperscale_provisions::ProvisionStore;
+use hyperscale_storage::{BlockForSync, ChainReader};
+use hyperscale_types::{Provisions, WAVE_TIMEOUT};
 use tracing::trace;
 
 /// Retention margin beyond `WAVE_TIMEOUT` for the serve decision.
@@ -49,7 +50,7 @@ pub fn serve_block_request(
         target_height = req.target_height.0,
         "Handling block sync request"
     );
-    let Some(hyperscale_storage::BlockForSync {
+    let Some(BlockForSync {
         block,
         qc,
         provision_hashes,
@@ -88,7 +89,7 @@ pub fn serve_block_request(
             height = req.height.0,
             "Cache miss for provisions inside live window — serving sealed"
         );
-        metrics::record_sync_response_error("block", "provision_cache_miss");
+        record_sync_response_error("block", "provision_cache_miss");
         GetBlockResponse::found(ElidedCertifiedBlock::elide(&block, qc, &req.inventory))
     }
 }

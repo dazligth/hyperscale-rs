@@ -12,11 +12,13 @@
 //! hyperscale-sim -s 4 -v 5 -d 120 --cross-shard-ratio 0.3
 //! ```
 
+use std::time::Duration;
+
 use clap::Parser;
 use hyperscale_simulator::{Simulator, SimulatorConfig, WorkloadConfig};
-use std::time::Duration;
+use rand::random;
 use tracing::info;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{EnvFilter, fmt};
 
 /// Hyperscale Simulator
 ///
@@ -69,7 +71,7 @@ struct Args {
 
 fn main() {
     // Initialize tracing
-    tracing_subscriber::fmt()
+    fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| EnvFilter::new("warn,hyperscale_simulator=info")),
@@ -89,7 +91,7 @@ fn main() {
         }
     });
 
-    let seed = args.seed.unwrap_or_else(rand::random);
+    let seed = args.seed.unwrap_or_else(random);
 
     info!(
         shards = args.shards,

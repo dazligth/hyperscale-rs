@@ -1,8 +1,13 @@
 //! Transaction decision/status enums and the parser used by RPC string forms.
 
-use crate::BlockHeight;
+use std::error::Error as StdError;
+use std::fmt::{self, Display};
+use std::str::FromStr;
+
 use sbor::prelude::*;
 use thiserror::Error;
+
+use crate::BlockHeight;
 
 /// Final decision for a transaction after cross-shard coordination.
 ///
@@ -74,8 +79,8 @@ impl TransactionStatus {
     }
 }
 
-impl std::fmt::Display for TransactionStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for TransactionStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Pending => write!(f, "pending"),
             Self::Committed(height) => write!(f, "committed({})", height.0),
@@ -92,7 +97,7 @@ impl std::fmt::Display for TransactionStatus {
     }
 }
 
-impl std::str::FromStr for TransactionStatus {
+impl FromStr for TransactionStatus {
     type Err = TransactionStatusParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -155,8 +160,8 @@ pub enum TransactionStatusParseError {
     InvalidValue(String),
 }
 
-impl std::fmt::Display for TransactionStatusParseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for TransactionStatusParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnknownStatus(s) => write!(f, "unknown status: {s}"),
             Self::InvalidFormat(s) => write!(f, "invalid format: {s}"),
@@ -166,7 +171,7 @@ impl std::fmt::Display for TransactionStatusParseError {
     }
 }
 
-impl std::error::Error for TransactionStatusParseError {}
+impl StdError for TransactionStatusParseError {}
 
 /// Transaction error types.
 #[derive(Debug, Error)]

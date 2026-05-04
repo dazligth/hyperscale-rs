@@ -1,8 +1,9 @@
 //! Local provisions fetch response (intra-shard DA).
 
+use std::sync::Arc;
+
 use hyperscale_types::{MessageClass, NetworkMessage, Provisions};
 use sbor::prelude::BasicSbor;
-use std::sync::Arc;
 
 /// Response to a local provisions fetch request.
 ///

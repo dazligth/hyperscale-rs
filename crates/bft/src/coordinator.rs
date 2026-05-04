@@ -76,25 +76,34 @@ pub struct BftMemoryStats {
 /// Index type for simulation-only node routing.
 /// Production uses `ValidatorId` (from message signatures) and `PeerId` (libp2p).
 pub type NodeIndex = u32;
-#[cfg(test)]
-use hyperscale_types::Hash;
-use hyperscale_types::{
-    Block, BlockHeader, BlockHeight, BlockManifest, BlockVote, CertifiedBlock, FinalizedWave,
-    Provisions, QuorumCertificate, Round, RoutableTransaction, StateRoot, TopologySnapshot, TxHash,
-};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+
+use hyperscale_core::VerificationKind;
+use hyperscale_types::{
+    Block, BlockHeader, BlockHeight, BlockManifest, BlockVote, CertifiedBlock,
+    CommittedBlockHeader, FinalizedWave, Provisions, QuorumCertificate, Round, RoutableTransaction,
+    StateRoot, TopologySnapshot, TxHash,
+};
+use tracing::field::Empty;
 use tracing::{debug, info, instrument, trace, warn};
 
-use crate::block_sync::{BlockSyncManager, BlockSyncVerificationResult};
+use crate::block_sync::{
+    BlockSyncHealthDecision, BlockSyncManager, BlockSyncVerificationResult, IngestOutcome,
+};
 use crate::chain_view::ChainView;
 use crate::commit_dedup::CommitDedupIndex;
 use crate::commit_pipeline::CommitPipeline;
 use crate::config::BftConfig;
-use crate::pending::PendingBlock;
-use crate::proposal::{ProposalKind, ProposalTracker, TakeResult};
-use crate::verification::{InFlightCheck, VerificationPipeline};
+use crate::lookups::{committee_public_keys, vote_recipients};
+use crate::pending::{PendingBlock, check_fetches};
+use crate::proposal::{
+    ProposalKind, ProposalTracker, TakeResult, assemble_build_action, dispatch_or_defer,
+    select_finalized_waves, select_provisions, select_transactions,
+};
+use crate::validation::{validate_block_for_vote, validate_header};
+use crate::verification::{InFlightCheck, ReadyStateRootVerification, VerificationPipeline};
 use crate::view_change::ViewChangeController;
 use crate::vote_keeper::{LockDecision, VoteKeeper};
 
@@ -380,13 +389,11 @@ impl BftCoordinator {
         certified: CertifiedBlock,
     ) -> Vec<Action> {
         match self.block_sync.ingest(certified, self.committed_height) {
-            crate::block_sync::IngestOutcome::Drop => vec![],
-            crate::block_sync::IngestOutcome::Submit(certified) => {
+            IngestOutcome::Drop => vec![],
+            IngestOutcome::Submit(certified) => {
                 self.submit_synced_block_for_verification(topology, *certified)
             }
-            crate::block_sync::IngestOutcome::Buffered => {
-                self.try_drain_buffered_synced_blocks(topology)
-            }
+            IngestOutcome::Buffered => self.try_drain_buffered_synced_blocks(topology),
         }
     }
 
@@ -741,18 +748,18 @@ impl BftCoordinator {
         // this block. The one-block lag (this block's own QC may carry a
         // slightly later timestamp) is bounded by MAX_VALIDITY_RANGE.
         let validity_anchor = parent_qc.weighted_timestamp;
-        let transactions = crate::proposal::select_transactions(
+        let transactions = select_transactions(
             ready_txs,
             &qc_chain_tx_hashes,
             &self.dedup_index,
             validity_anchor,
         );
-        let (finalized_waves, finalized_tx_count) = crate::proposal::select_finalized_waves(
+        let (finalized_waves, finalized_tx_count) = select_finalized_waves(
             finalized_waves,
             &qc_chain_cert_hashes,
             self.config.max_finalized_transactions_per_block,
         );
-        let provisions = crate::proposal::select_provisions(
+        let provisions = select_provisions(
             provisions,
             &qc_chain_provision_hashes,
             self.config.max_provision_transactions_per_block,
@@ -852,14 +859,8 @@ impl BftCoordinator {
         round: Round,
         kind: ProposalKind,
     ) -> Vec<Action> {
-        let plan = crate::proposal::assemble_build_action(
-            topology,
-            &self.chain_view(),
-            height,
-            round,
-            self.now,
-            kind,
-        );
+        let plan =
+            assemble_build_action(topology, &self.chain_view(), height, round, self.now, kind);
 
         info!(
             validator = ?topology.local_validator_id(),
@@ -872,7 +873,7 @@ impl BftCoordinator {
             self.record_leader_activity();
         }
 
-        crate::proposal::dispatch_or_defer(
+        dispatch_or_defer(
             &mut self.proposal,
             &mut self.verification,
             plan.parent_block_hash,
@@ -1131,7 +1132,7 @@ impl BftCoordinator {
     /// Validate the header; logs and returns `true` if the caller should
     /// reject (short-circuit with empty actions).
     fn reject_invalid_header(&self, topology: &TopologySnapshot, header: &BlockHeader) -> bool {
-        if let Err(e) = crate::validation::validate_header(
+        if let Err(e) = validate_header(
             topology,
             header,
             self.committed_height,
@@ -1331,7 +1332,7 @@ impl BftCoordinator {
             }
 
             // Collect public keys for verification
-            let Some(public_keys) = crate::lookups::committee_public_keys(topology) else {
+            let Some(public_keys) = committee_public_keys(topology) else {
                 warn!("Failed to collect public keys for QC verification");
                 return vec![];
             };
@@ -1472,7 +1473,7 @@ impl BftCoordinator {
     ) -> bool {
         let (qc_chain_cert_ids, qc_chain_tx_hashes, qc_chain_provision_hashes) =
             self.collect_qc_chain_hashes(block.header().parent_block_hash);
-        if let Err(e) = crate::validation::validate_block_for_vote(
+        if let Err(e) = validate_block_for_vote(
             topology,
             block,
             &qc_chain_tx_hashes,
@@ -1495,7 +1496,7 @@ impl BftCoordinator {
     #[tracing::instrument(level = "debug", skip(self), fields(
         height = height.0,
         round = round.0,
-        sign_us = tracing::field::Empty,
+        sign_us = Empty,
     ))]
     fn create_vote(
         &mut self,
@@ -1527,7 +1528,7 @@ impl BftCoordinator {
             "Emitting vote (signing delegated to crypto pool)"
         );
 
-        let next_proposers = crate::lookups::vote_recipients(topology, height, round);
+        let next_proposers = vote_recipients(topology, height, round);
 
         // Emit SignAndBroadcastBlockVote — the io_loop signs on the consensus
         // crypto pool, broadcasts, and feeds the signed vote back for local
@@ -1723,12 +1724,10 @@ impl BftCoordinator {
     pub fn on_block_root_verified(
         &mut self,
         topology: &TopologySnapshot,
-        kind: hyperscale_core::VerificationKind,
+        kind: VerificationKind,
         block_hash: BlockHash,
         valid: bool,
     ) -> Vec<Action> {
-        use hyperscale_core::VerificationKind;
-
         let pipeline_ok = match kind {
             VerificationKind::StateRoot => {
                 self.verification.on_state_root_verified(block_hash, valid)
@@ -2376,8 +2375,7 @@ impl BftCoordinator {
         // proposer is Byzantine/slow, the RemoteHeaderCoordinator will detect
         // the liveness timeout and trigger a fallback fetch.
         if block.header().proposer == topology.local_validator_id() {
-            let committed_header =
-                hyperscale_types::CommittedBlockHeader::new(block.header().clone(), qc);
+            let committed_header = CommittedBlockHeader::new(block.header().clone(), qc);
             actions.push(Action::BroadcastCommittedBlockHeader { committed_header });
         }
 
@@ -2401,7 +2399,7 @@ impl BftCoordinator {
             return self.apply_synced_block(topology, certified);
         }
 
-        let Some(public_keys) = crate::lookups::committee_public_keys(topology) else {
+        let Some(public_keys) = committee_public_keys(topology) else {
             warn!("Failed to collect public keys for synced block QC verification");
             return vec![];
         };
@@ -2962,7 +2960,7 @@ impl BftCoordinator {
             return vec![];
         }
 
-        crate::pending::check_fetches(
+        check_fetches(
             &self.pending_blocks,
             topology,
             self.now,
@@ -2988,8 +2986,8 @@ impl BftCoordinator {
             self.pending_blocks.len(),
             self.view_change.view_changes,
         ) {
-            crate::block_sync::BlockSyncHealthDecision::Idle => vec![],
-            crate::block_sync::BlockSyncHealthDecision::TriggerSync { target_height } => {
+            BlockSyncHealthDecision::Idle => vec![],
+            BlockSyncHealthDecision::TriggerSync { target_height } => {
                 self.start_block_sync(topology, target_height)
             }
         }
@@ -3002,9 +3000,7 @@ impl BftCoordinator {
     /// Drain state root verifications that are ready to dispatch. Thin
     /// wrapper over [`VerificationPipeline::drain_ready_state_root_verifications`]
     /// that supplies the chain view and pending-block map.
-    pub fn drain_ready_state_root_verifications(
-        &mut self,
-    ) -> Vec<crate::verification::ReadyStateRootVerification> {
+    pub fn drain_ready_state_root_verifications(&mut self) -> Vec<ReadyStateRootVerification> {
         let chain = ChainView {
             committed_height: self.committed_height,
             committed_hash: self.committed_hash,
@@ -3241,13 +3237,18 @@ impl BftCoordinator {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use hyperscale_types::{
-        Bls12381G1PrivateKey, CertificateRoot, LocalReceiptRoot, ProvisionsRoot, ShardGroupId,
-        SignerBitfield, TopologySnapshot, TransactionRoot, ValidatorId, ValidatorInfo,
-        ValidatorSet, WeightedTimestamp, generate_bls_keypair, zero_bls_signature,
-    };
     use std::collections::BTreeMap;
+
+    use hyperscale_core::Action;
+    use hyperscale_types::{
+        Bls12381G1PrivateKey, CertificateRoot, Hash, LocalReceiptRoot, ProvisionsRoot,
+        RoutableTransaction, ShardGroupId, SignerBitfield, TopologySnapshot, TransactionRoot,
+        ValidatorId, ValidatorInfo, ValidatorSet, WeightedTimestamp, generate_bls_keypair,
+        test_utils, zero_bls_signature,
+    };
+
+    use super::*;
+    use crate::validation::validate_no_duplicate_transactions;
 
     fn make_test_state() -> (BftCoordinator, TopologySnapshot) {
         make_test_state_with_validators(4)
@@ -3359,9 +3360,6 @@ mod tests {
 
     #[test]
     fn test_qc_signature_verification_delegates_to_runner() {
-        use hyperscale_core::Action;
-        use hyperscale_types::SignerBitfield;
-
         let (mut state, topology) = make_multi_validator_state_at(1);
         state.set_time(LocalTimestamp::from_millis(100_000));
 
@@ -3402,9 +3400,6 @@ mod tests {
 
     #[test]
     fn test_qc_signature_verified_success_triggers_vote() {
-        use hyperscale_core::Action;
-        use hyperscale_types::SignerBitfield;
-
         let (mut state, topology) = make_multi_validator_state_at(1);
         state.set_time(LocalTimestamp::from_millis(100_000));
 
@@ -3450,12 +3445,8 @@ mod tests {
         );
 
         // State root completes — now we vote.
-        let after_roots = state.on_block_root_verified(
-            &topology,
-            hyperscale_core::VerificationKind::StateRoot,
-            block_hash,
-            true,
-        );
+        let after_roots =
+            state.on_block_root_verified(&topology, VerificationKind::StateRoot, block_hash, true);
         assert!(
             after_roots
                 .iter()
@@ -3465,8 +3456,6 @@ mod tests {
 
     #[test]
     fn test_qc_signature_verified_failure_rejects_block() {
-        use hyperscale_types::SignerBitfield;
-
         let (mut state, topology) = make_multi_validator_state_at(1);
         state.set_time(LocalTimestamp::from_millis(100_000));
 
@@ -3507,8 +3496,6 @@ mod tests {
 
     #[test]
     fn test_genesis_qc_skips_verification() {
-        use hyperscale_core::Action;
-
         let (mut state, topology) = make_multi_validator_state_at(1);
 
         state.set_time(LocalTimestamp::from_millis(100_000));
@@ -3539,8 +3526,6 @@ mod tests {
 
     #[test]
     fn test_advance_round_proposer_broadcasts() {
-        use hyperscale_core::Action;
-
         // Local = ValidatorId(2) is proposer at (1, 1) since (1+1)%4 = 2.
         let (mut state, topology) = make_multi_validator_state_at(2);
         state.set_time(LocalTimestamp::from_millis(100_000));
@@ -3775,7 +3760,7 @@ mod tests {
         let header = make_header_at_height(BlockHeight(1), state.now.as_millis());
 
         assert!(
-            crate::validation::validate_header(
+            validate_header(
                 &topology,
                 &header,
                 state.committed_height,
@@ -3795,7 +3780,7 @@ mod tests {
             ..make_header_at_height(BlockHeight(1), state.now.as_millis())
         };
 
-        let result = crate::validation::validate_header(
+        let result = validate_header(
             &topology,
             &header,
             state.committed_height,
@@ -4012,8 +3997,6 @@ mod tests {
     fn test_qc_verification_caching_skips_redundant_verification() {
         // When the same parent QC appears in multiple block headers (e.g. after a
         // view change), we verify it once and hit the cache for subsequent blocks.
-        use hyperscale_core::Action;
-        use hyperscale_types::SignerBitfield;
 
         let (mut state, topology) = make_multi_validator_state_at(0);
         state.set_time(LocalTimestamp::from_millis(100_000));
@@ -4089,12 +4072,11 @@ mod tests {
     // Helpers retained for no-duplicate-transactions walk tests below
     // ═══════════════════════════════════════════════════════════════════════════
 
-    fn make_test_tx_with_seed(seed: u8) -> Arc<hyperscale_types::RoutableTransaction> {
-        use hyperscale_types::test_utils;
+    fn make_test_tx_with_seed(seed: u8) -> Arc<RoutableTransaction> {
         Arc::new(test_utils::test_transaction(seed))
     }
 
-    fn sort_txs_by_hash(txs: &mut [Arc<hyperscale_types::RoutableTransaction>]) {
+    fn sort_txs_by_hash(txs: &mut [Arc<RoutableTransaction>]) {
         txs.sort_by_key(|tx| tx.hash());
     }
 
@@ -4123,7 +4105,7 @@ mod tests {
         assert!(state.is_block_syncing());
 
         // Ready txs must be dropped — sync blocks are always empty.
-        let ready_txs = vec![Arc::new(hyperscale_types::test_utils::test_transaction(1))];
+        let ready_txs = vec![Arc::new(test_utils::test_transaction(1))];
         let actions = state.try_propose(&topology, &ready_txs, vec![], vec![]);
 
         let proposal = actions
@@ -4472,11 +4454,7 @@ mod tests {
 
         let result = {
             let (_, qc_chain, _) = state.collect_qc_chain_hashes(block.header().parent_block_hash);
-            crate::validation::validate_no_duplicate_transactions(
-                &block,
-                &qc_chain,
-                &state.dedup_index,
-            )
+            validate_no_duplicate_transactions(&block, &qc_chain, &state.dedup_index)
         };
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("already in QC chain ancestor"));
@@ -4522,11 +4500,7 @@ mod tests {
             {
                 let (_, qc_chain, _) =
                     state.collect_qc_chain_hashes(block.header().parent_block_hash);
-                crate::validation::validate_no_duplicate_transactions(
-                    &block,
-                    &qc_chain,
-                    &state.dedup_index,
-                )
+                validate_no_duplicate_transactions(&block, &qc_chain, &state.dedup_index)
             }
             .is_ok()
         );

@@ -22,11 +22,16 @@
 //! `signing_message()` method pattern. The signing message is constructed
 //! by prepending the domain tag to the serialized content.
 
+use blake3::Hasher;
+
 #[cfg(test)]
 use crate::Hash;
 #[cfg(test)]
 use crate::TxHash;
-use crate::{BlockHash, BlockHeight, GlobalReceiptRoot, Provisions, Round, ShardGroupId, WaveId};
+use crate::{
+    BlockHash, BlockHeight, ExecutionCertificate, ExecutionVote, GlobalReceiptRoot, Provisions,
+    Round, ShardGroupId, WaveId, WeightedTimestamp,
+};
 
 /// Domain tag for BFT block votes.
 ///
@@ -127,7 +132,7 @@ pub const DOMAIN_STATE_PROVISION_BATCH: &[u8] = b"STATE_PROVISION_BATCH";
 /// verification while binding the signature to the specific bundle contents.
 #[must_use]
 pub fn state_provisions_message(provisions: &Provisions) -> Vec<u8> {
-    let mut hasher = blake3::Hasher::new();
+    let mut hasher = Hasher::new();
     for tx in &provisions.transactions {
         hasher.update(tx.tx_hash.as_bytes());
     }
@@ -192,7 +197,7 @@ pub const DOMAIN_EXEC_CERT_BATCH: &[u8] = b"EXEC_CERT_BATCH";
 /// the message deterministic regardless of construction order.
 #[must_use]
 pub fn exec_vote_message(
-    vote_anchor_ts: crate::WeightedTimestamp,
+    vote_anchor_ts: WeightedTimestamp,
     wave_id: &WaveId,
     shard_group: ShardGroupId,
     global_receipt_root: &GlobalReceiptRoot,
@@ -221,11 +226,8 @@ pub fn exec_vote_message(
 
 /// Build the signing message for an execution vote batch gossip.
 #[must_use]
-pub fn exec_vote_batch_message(
-    shard_group: ShardGroupId,
-    votes: &[crate::ExecutionVote],
-) -> Vec<u8> {
-    let mut hasher = blake3::Hasher::new();
+pub fn exec_vote_batch_message(shard_group: ShardGroupId, votes: &[ExecutionVote]) -> Vec<u8> {
+    let mut hasher = Hasher::new();
     for v in votes {
         hasher.update(v.global_receipt_root.as_raw().as_bytes());
     }
@@ -242,9 +244,9 @@ pub fn exec_vote_batch_message(
 #[must_use]
 pub fn exec_cert_batch_message(
     shard_group: ShardGroupId,
-    certificates: &[crate::ExecutionCertificate],
+    certificates: &[ExecutionCertificate],
 ) -> Vec<u8> {
-    let mut hasher = blake3::Hasher::new();
+    let mut hasher = Hasher::new();
     for c in certificates {
         hasher.update(c.global_receipt_root.as_raw().as_bytes());
     }

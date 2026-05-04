@@ -33,20 +33,25 @@ pub mod vote;
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        Attempt, BlockHeight, Bls12381G2Signature, DatabaseUpdates, ExecutionCertificate,
-        ExecutionCertificateHash, ExecutionOutcome, FinalizedWave, GlobalReceiptHash,
-        GlobalReceiptRoot, Hash, NodeId, ProvisionTxRoot, ReceiptValidationError, ShardGroupId,
-        SignerBitfield, StoredReceipt, TopologySnapshot, TxHash, TxOutcome, ValidatorId,
-        ValidatorInfo, ValidatorSet, WaveCertificate, WaveId, WaveReceiptHash, WeightedTimestamp,
-        compute_global_receipt_root, compute_global_receipt_root_with_proof,
-        compute_padded_merkle_root, compute_provision_tx_roots, decode_wave_cert_vec,
-        encode_wave_cert_vec, generate_bls_keypair, test_utils::test_transaction_with_nodes,
-        tx_outcome_leaf, wave_leader, wave_leader_at,
-    };
-    use sbor::prelude::*;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeSet, HashSet};
     use std::sync::Arc;
+
+    use sbor::prelude::*;
+    use sbor::{BASIC_SBOR_V1_MAX_DEPTH, BasicDecoder, BasicEncoder};
+
+    use crate::test_utils::test_transaction_with_nodes;
+    use crate::{
+        Attempt, BlockHeight, Bls12381G2Signature, ConsensusReceipt, DatabaseUpdates,
+        ExecutionCertificate, ExecutionCertificateHash, ExecutionOutcome, FinalizedWave,
+        GlobalReceiptHash, GlobalReceiptRoot, Hash, NodeId, ProvisionTxRoot, RETENTION_HORIZON,
+        ReceiptValidationError, ShardGroupId, SignerBitfield, StoredReceipt, TopologySnapshot,
+        TxHash, TxOutcome, ValidatorId, ValidatorInfo, ValidatorSet, WaveCertificate, WaveId,
+        WaveReceiptHash, WeightedTimestamp, compute_global_receipt_root,
+        compute_global_receipt_root_with_proof, compute_padded_merkle_root,
+        compute_provision_tx_roots, decode_wave_cert_vec, encode_wave_cert_vec,
+        generate_bls_keypair, tx_outcome_leaf, verify_merkle_inclusion, wave_leader,
+        wave_leader_at,
+    };
 
     /// Build a 2-shard topology with validator 0 on shard 0.
     fn two_shard_topology() -> TopologySnapshot {
@@ -229,7 +234,7 @@ mod tests {
             assert_eq!(leaf_hash, expected_leaf, "Leaf hash mismatch for index {i}");
 
             assert!(
-                crate::verify_merkle_inclusion(root.into_raw(), leaf_hash, &siblings, leaf_index),
+                verify_merkle_inclusion(root.into_raw(), leaf_hash, &siblings, leaf_index),
                 "Proof failed for index {i}"
             );
         }
@@ -311,10 +316,7 @@ mod tests {
     #[test]
     fn ec_deadline_is_vote_anchor_ts_plus_retention_horizon() {
         let ec = make_test_wave_ec(0, 1);
-        assert_eq!(
-            ec.deadline(),
-            ec.vote_anchor_ts.plus(crate::RETENTION_HORIZON)
-        );
+        assert_eq!(ec.deadline(), ec.vote_anchor_ts.plus(RETENTION_HORIZON));
     }
 
     fn make_test_wave_ec(shard: u64, seed: u8) -> Arc<ExecutionCertificate> {
@@ -382,11 +384,11 @@ mod tests {
 
         // Encode
         let mut buf = Vec::new();
-        let mut encoder = sbor::BasicEncoder::new(&mut buf, sbor::BASIC_SBOR_V1_MAX_DEPTH);
+        let mut encoder = BasicEncoder::new(&mut buf, BASIC_SBOR_V1_MAX_DEPTH);
         encode_wave_cert_vec(&mut encoder, &certs).unwrap();
 
         // Decode
-        let mut decoder = sbor::BasicDecoder::new(&buf, sbor::BASIC_SBOR_V1_MAX_DEPTH);
+        let mut decoder = BasicDecoder::new(&buf, BASIC_SBOR_V1_MAX_DEPTH);
         let result = decode_wave_cert_vec(&mut decoder, 100).unwrap();
 
         assert_eq!(result.len(), 2);
@@ -418,7 +420,7 @@ mod tests {
             ValidatorId(4),
         ];
         let wave_id = make_wave_id(0, BlockHeight(100), &[1]);
-        let mut leaders: std::collections::HashSet<ValidatorId> = std::collections::HashSet::new();
+        let mut leaders: HashSet<ValidatorId> = HashSet::new();
         for attempt in 0..4 {
             leaders.insert(wave_leader_at(&wave_id, Attempt(attempt), &committee));
         }
@@ -463,8 +465,8 @@ mod tests {
         ))
     }
 
-    fn make_success_receipt() -> Arc<crate::ConsensusReceipt> {
-        Arc::new(crate::ConsensusReceipt::Succeeded {
+    fn make_success_receipt() -> Arc<ConsensusReceipt> {
+        Arc::new(ConsensusReceipt::Succeeded {
             receipt_hash: GlobalReceiptHash::ZERO,
             database_updates: DatabaseUpdates::default(),
             application_events: vec![],
@@ -618,7 +620,7 @@ mod tests {
             receipts: vec![
                 StoredReceipt {
                     tx_hash: tx_a,
-                    consensus: Arc::new(crate::ConsensusReceipt::Succeeded {
+                    consensus: Arc::new(ConsensusReceipt::Succeeded {
                         receipt_hash: GlobalReceiptHash::ZERO,
                         database_updates: DatabaseUpdates::default(),
                         application_events: vec![],
@@ -627,7 +629,7 @@ mod tests {
                 },
                 StoredReceipt {
                     tx_hash: tx_c,
-                    consensus: std::sync::Arc::new(crate::ConsensusReceipt::Failed),
+                    consensus: Arc::new(ConsensusReceipt::Failed),
                     metadata: None,
                 },
             ],
@@ -653,7 +655,7 @@ mod tests {
             }),
             receipts: vec![StoredReceipt {
                 tx_hash: tx_a,
-                consensus: std::sync::Arc::new(crate::ConsensusReceipt::Failed),
+                consensus: Arc::new(ConsensusReceipt::Failed),
                 metadata: None,
             }],
         };
@@ -679,7 +681,7 @@ mod tests {
             }),
             receipts: vec![StoredReceipt {
                 tx_hash: tx_a,
-                consensus: Arc::new(crate::ConsensusReceipt::Succeeded {
+                consensus: Arc::new(ConsensusReceipt::Succeeded {
                     receipt_hash: GlobalReceiptHash::ZERO,
                     database_updates: DatabaseUpdates::default(),
                     application_events: vec![],
@@ -713,7 +715,7 @@ mod tests {
             }),
             receipts: vec![StoredReceipt {
                 tx_hash: tx_a,
-                consensus: Arc::new(crate::ConsensusReceipt::Succeeded {
+                consensus: Arc::new(ConsensusReceipt::Succeeded {
                     receipt_hash,
                     database_updates: DatabaseUpdates::default(),
                     application_events: vec![],
@@ -766,7 +768,7 @@ mod tests {
             }),
             receipts: vec![StoredReceipt {
                 tx_hash: tx_a,
-                consensus: Arc::new(crate::ConsensusReceipt::Succeeded {
+                consensus: Arc::new(ConsensusReceipt::Succeeded {
                     receipt_hash: GlobalReceiptHash::ZERO,
                     database_updates: DatabaseUpdates::default(),
                     application_events: vec![],
@@ -798,7 +800,7 @@ mod tests {
             }),
             receipts: vec![StoredReceipt {
                 tx_hash: tx_b,
-                consensus: Arc::new(crate::ConsensusReceipt::Succeeded {
+                consensus: Arc::new(ConsensusReceipt::Succeeded {
                     receipt_hash: GlobalReceiptHash::ZERO,
                     database_updates: DatabaseUpdates::default(),
                     application_events: vec![],

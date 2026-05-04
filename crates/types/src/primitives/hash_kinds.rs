@@ -139,9 +139,10 @@ hash_newtype!(
 
 #[cfg(test)]
 mod tests {
+    use sbor::prelude::*;
+
     use super::*;
     use crate::Hash;
-    use sbor::prelude::*;
 
     #[test]
     fn sbor_encoding_is_identical_to_inner_hash() {

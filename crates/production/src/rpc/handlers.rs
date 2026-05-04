@@ -1,22 +1,29 @@
 //! HTTP request handlers for the RPC API.
 
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+
+use axum::Json;
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::http::header::CONTENT_TYPE;
+use axum::response::IntoResponse;
+use hex::{decode as hex_decode, encode as hex_encode};
+use hyperscale_core::NodeInput;
+use hyperscale_metrics::{
+    record_transaction_rejected, record_tx_ingress_rejected_pending_limit,
+    record_tx_ingress_rejected_syncing,
+};
+use hyperscale_metrics_prometheus::encode_metrics;
+use hyperscale_types::{Hash, RoutableTransaction, TransactionDecision, TransactionStatus, TxHash};
+use sbor::prelude::basic_decode;
+
 use super::state::RpcState;
 use super::types::{
     HealthResponse, MempoolStatusResponse, NodeStatusResponse, ReadyResponse,
     SubmitTransactionRequest, SubmitTransactionResponse, SyncStatusResponse,
     TransactionStatusResponse,
 };
-use axum::{
-    Json,
-    extract::{Path, State},
-    http::StatusCode,
-    response::IntoResponse,
-};
-use hyperscale_core::NodeInput;
-use hyperscale_metrics as metrics;
-use hyperscale_types::{Hash, RoutableTransaction, TransactionDecision, TransactionStatus, TxHash};
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Health & Readiness Handlers
@@ -54,10 +61,8 @@ pub async fn ready_handler(State(state): State<RpcState>) -> impl IntoResponse {
 
 /// Handler for `GET /metrics` - Prometheus metrics.
 pub async fn metrics_handler() -> impl IntoResponse {
-    match hyperscale_metrics_prometheus::encode_metrics() {
-        Ok((content_type, buffer)) => {
-            ([(axum::http::header::CONTENT_TYPE, content_type)], buffer).into_response()
-        }
+    match encode_metrics() {
+        Ok((content_type, buffer)) => ([(CONTENT_TYPE, content_type)], buffer).into_response(),
         Err(e) => {
             tracing::error!(error = %e, "Failed to encode metrics");
             (
@@ -144,7 +149,7 @@ pub async fn submit_transaction_handler(
         Err(rejection) => return rejection,
     };
 
-    let hash = hex::encode(transaction.hash().as_bytes());
+    let hash = hex_encode(transaction.hash().as_bytes());
     let tx_arc = Arc::new(transaction);
 
     // Submit directly to IoLoop via crossbeam channel.
@@ -236,7 +241,7 @@ fn check_backpressure(state: &RpcState) -> Option<(StatusCode, Json<SubmitTransa
     if let Some(threshold) = state.sync_backpressure_threshold {
         let sync_status = state.sync_status.load();
         if sync_status.blocks_behind > threshold {
-            metrics::record_tx_ingress_rejected_syncing();
+            record_tx_ingress_rejected_syncing();
             return Some((
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(SubmitTransactionResponse {
@@ -254,7 +259,7 @@ fn check_backpressure(state: &RpcState) -> Option<(StatusCode, Json<SubmitTransa
     let snapshot = state.mempool_snapshot.load();
 
     if !snapshot.accepting_rpc_transactions {
-        metrics::record_transaction_rejected("in_flight_limit");
+        record_transaction_rejected("in_flight_limit");
         return Some((
             StatusCode::SERVICE_UNAVAILABLE,
             Json(SubmitTransactionResponse {
@@ -266,7 +271,7 @@ fn check_backpressure(state: &RpcState) -> Option<(StatusCode, Json<SubmitTransa
     }
 
     if snapshot.at_pending_limit {
-        metrics::record_tx_ingress_rejected_pending_limit();
+        record_tx_ingress_rejected_pending_limit();
         return Some((
             StatusCode::SERVICE_UNAVAILABLE,
             Json(SubmitTransactionResponse {
@@ -284,7 +289,7 @@ fn check_backpressure(state: &RpcState) -> Option<(StatusCode, Json<SubmitTransa
         .iter()
         .find(|&(_, &count)| threshold > 0 && count >= threshold)
     {
-        metrics::record_transaction_rejected("remote_shard_congestion");
+        record_transaction_rejected("remote_shard_congestion");
         return Some((
             StatusCode::SERVICE_UNAVAILABLE,
             Json(SubmitTransactionResponse {
@@ -305,8 +310,8 @@ fn check_backpressure(state: &RpcState) -> Option<(StatusCode, Json<SubmitTransa
 fn decode_transaction(
     transaction_hex: &str,
 ) -> Result<RoutableTransaction, (StatusCode, Json<SubmitTransactionResponse>)> {
-    let tx_bytes = hex::decode(transaction_hex).map_err(|e| {
-        metrics::record_transaction_rejected("invalid_hex");
+    let tx_bytes = hex_decode(transaction_hex).map_err(|e| {
+        record_transaction_rejected("invalid_hex");
         (
             StatusCode::BAD_REQUEST,
             Json(SubmitTransactionResponse {
@@ -317,8 +322,8 @@ fn decode_transaction(
         )
     })?;
 
-    sbor::prelude::basic_decode(&tx_bytes).map_err(|e| {
-        metrics::record_transaction_rejected("invalid_format");
+    basic_decode(&tx_bytes).map_err(|e| {
+        record_transaction_rejected("invalid_format");
         (
             StatusCode::BAD_REQUEST,
             Json(SubmitTransactionResponse {
@@ -372,26 +377,37 @@ pub async fn mempool_handler(State(state): State<RpcState>) -> impl IntoResponse
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::rpc::state::{MempoolSnapshot, NodeStatusState};
-    use crate::status::SyncStatus;
-    use arc_swap::ArcSwap;
-    use axum::{Router, body::Body, http::Request};
-    use hyperscale_types::{BlockHeight, TransactionDecision};
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
     use std::time::Instant;
+
+    use arc_swap::ArcSwap;
+    use axum::Router;
+    use axum::body::{Body, to_bytes};
+    use axum::http::Request;
+    use axum::routing::{get, post};
+    use crossbeam::channel::unbounded;
+    use hyperscale_node::BlockSyncStateKind;
+    use hyperscale_types::test_utils::test_transaction;
+    use hyperscale_types::{BlockHeight, TransactionDecision};
+    use quick_cache::sync::Cache;
+    use sbor::prelude::basic_encode;
+    use serde_json::{from_slice, to_string};
     use tower::ServiceExt;
 
+    use super::*;
+    use crate::rpc::state::{MempoolSnapshot, NodeStatusState};
+    use crate::status::SyncStatus;
+
     fn create_test_state() -> RpcState {
-        let (tx_submission_tx, _rx) = crossbeam::channel::unbounded();
+        let (tx_submission_tx, _rx) = unbounded();
         RpcState {
             ready: Arc::new(AtomicBool::new(false)),
             sync_status: Arc::new(ArcSwap::new(Arc::new(SyncStatus::default()))),
             node_status: Arc::new(ArcSwap::new(Arc::new(NodeStatusState::default()))),
             tx_submission_tx,
             start_time: Instant::now(),
-            tx_status_cache: Arc::new(quick_cache::sync::Cache::new(1000)),
+            tx_status_cache: Arc::new(Cache::new(1000)),
             mempool_snapshot: Arc::new(ArcSwap::new(Arc::new(MempoolSnapshot::default()))),
             sync_backpressure_threshold: Some(10),
         }
@@ -404,7 +420,7 @@ mod tests {
     #[tokio::test]
     async fn test_health_handler() {
         let app = Router::new()
-            .route("/health", axum::routing::get(health_handler))
+            .route("/health", get(health_handler))
             .with_state(create_test_state());
 
         let response = app
@@ -424,7 +440,7 @@ mod tests {
     async fn test_ready_handler_not_ready() {
         let state = create_test_state();
         let app = Router::new()
-            .route("/ready", axum::routing::get(ready_handler))
+            .route("/ready", get(ready_handler))
             .with_state(state);
 
         let response = app
@@ -445,7 +461,7 @@ mod tests {
         let state = create_test_state();
         state.ready.store(true, Ordering::SeqCst);
         let app = Router::new()
-            .route("/ready", axum::routing::get(ready_handler))
+            .route("/ready", get(ready_handler))
             .with_state(state);
 
         let response = app
@@ -513,10 +529,10 @@ mod tests {
     async fn test_get_transaction_not_found() {
         let state = create_test_state();
         let app = Router::new()
-            .route("/tx/{hash}", axum::routing::get(get_transaction_handler))
+            .route("/tx/{hash}", get(get_transaction_handler))
             .with_state(state);
 
-        let tx_hash = hex::encode([0u8; 32]);
+        let tx_hash = hex_encode([0u8; 32]);
         let response = app
             .oneshot(
                 Request::builder()
@@ -534,7 +550,7 @@ mod tests {
     async fn test_get_transaction_invalid_hex() {
         let state = create_test_state();
         let app = Router::new()
-            .route("/tx/{hash}", axum::routing::get(get_transaction_handler))
+            .route("/tx/{hash}", get(get_transaction_handler))
             .with_state(state);
 
         let response = app
@@ -555,7 +571,7 @@ mod tests {
         let state = create_test_state();
         // Create a hash from some input bytes
         let tx_hash = TxHash::from_raw(Hash::from_bytes(&[0x12; 32]));
-        let tx_hash_hex = hex::encode(tx_hash.as_raw().as_bytes());
+        let tx_hash_hex = hex_encode(tx_hash.as_raw().as_bytes());
 
         // Insert a transaction into the cache
         state
@@ -563,7 +579,7 @@ mod tests {
             .insert(tx_hash, TransactionStatus::Pending);
 
         let app = Router::new()
-            .route("/tx/{hash}", axum::routing::get(get_transaction_handler))
+            .route("/tx/{hash}", get(get_transaction_handler))
             .with_state(state);
 
         let response = app
@@ -579,10 +595,8 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         // Parse response and verify status
-        let body = axum::body::to_bytes(response.into_body(), 1024)
-            .await
-            .unwrap();
-        let resp: TransactionStatusResponse = serde_json::from_slice(&body).unwrap();
+        let body = to_bytes(response.into_body(), 1024).await.unwrap();
+        let resp: TransactionStatusResponse = from_slice(&body).unwrap();
         assert_eq!(resp.status, "pending");
         assert_eq!(resp.hash, tx_hash_hex);
     }
@@ -595,7 +609,7 @@ mod tests {
     async fn test_mempool_handler_default() {
         let state = create_test_state();
         let app = Router::new()
-            .route("/mempool", axum::routing::get(mempool_handler))
+            .route("/mempool", get(mempool_handler))
             .with_state(state);
 
         let response = app
@@ -624,7 +638,7 @@ mod tests {
         }));
 
         let app = Router::new()
-            .route("/mempool", axum::routing::get(mempool_handler))
+            .route("/mempool", get(mempool_handler))
             .with_state(state);
 
         let response = app
@@ -640,10 +654,8 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         // Parse response body
-        let body = axum::body::to_bytes(response.into_body(), 1024)
-            .await
-            .unwrap();
-        let resp: MempoolStatusResponse = serde_json::from_slice(&body).unwrap();
+        let body = to_bytes(response.into_body(), 1024).await.unwrap();
+        let resp: MempoolStatusResponse = from_slice(&body).unwrap();
 
         assert_eq!(resp.pending_count, 10);
         assert_eq!(resp.in_flight_count, 5);
@@ -656,11 +668,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_submit_rejected_when_syncing() {
-        let (tx_submission_tx, _rx) = crossbeam::channel::unbounded();
+        let (tx_submission_tx, _rx) = unbounded();
 
         // Create state with node that is 20 blocks behind (threshold is 10)
-        let sync_status = crate::status::SyncStatus {
-            state: hyperscale_node::BlockSyncStateKind::Syncing,
+        let sync_status = SyncStatus {
+            state: BlockSyncStateKind::Syncing,
             current_height: 80,
             target_height: Some(100),
             blocks_behind: 20,
@@ -675,18 +687,18 @@ mod tests {
             node_status: Arc::new(ArcSwap::new(Arc::new(NodeStatusState::default()))),
             tx_submission_tx,
             start_time: Instant::now(),
-            tx_status_cache: Arc::new(quick_cache::sync::Cache::new(1000)),
+            tx_status_cache: Arc::new(Cache::new(1000)),
             mempool_snapshot: Arc::new(ArcSwap::new(Arc::new(MempoolSnapshot::default()))),
             sync_backpressure_threshold: Some(10),
         };
 
         let app = Router::new()
-            .route("/tx", axum::routing::post(submit_transaction_handler))
+            .route("/tx", post(submit_transaction_handler))
             .with_state(state);
 
         // Submit a valid transaction (we expect it to be rejected due to sync)
-        let tx = hyperscale_types::test_utils::test_transaction(1);
-        let tx_hex = hex::encode(sbor::prelude::basic_encode(&tx).unwrap());
+        let tx = test_transaction(1);
+        let tx_hex = hex_encode(basic_encode(&tx).unwrap());
 
         let response = app
             .oneshot(
@@ -695,7 +707,7 @@ mod tests {
                     .uri("/tx")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        serde_json::to_string(&SubmitTransactionRequest {
+                        to_string(&SubmitTransactionRequest {
                             transaction_hex: tx_hex,
                         })
                         .unwrap(),
@@ -709,21 +721,19 @@ mod tests {
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 
         // Parse response and check error message
-        let body = axum::body::to_bytes(response.into_body(), 1024)
-            .await
-            .unwrap();
-        let resp: SubmitTransactionResponse = serde_json::from_slice(&body).unwrap();
+        let body = to_bytes(response.into_body(), 1024).await.unwrap();
+        let resp: SubmitTransactionResponse = from_slice(&body).unwrap();
         assert!(!resp.accepted);
         assert!(resp.error.unwrap().contains("syncing"));
     }
 
     #[tokio::test]
     async fn test_submit_accepted_when_caught_up() {
-        let (tx_submission_tx, _rx) = crossbeam::channel::unbounded();
+        let (tx_submission_tx, _rx) = unbounded();
 
         // Create state with node that is only 5 blocks behind (under threshold of 10)
-        let sync_status = crate::status::SyncStatus {
-            state: hyperscale_node::BlockSyncStateKind::Syncing,
+        let sync_status = SyncStatus {
+            state: BlockSyncStateKind::Syncing,
             current_height: 95,
             target_height: Some(100),
             blocks_behind: 5,
@@ -738,18 +748,18 @@ mod tests {
             node_status: Arc::new(ArcSwap::new(Arc::new(NodeStatusState::default()))),
             tx_submission_tx,
             start_time: Instant::now(),
-            tx_status_cache: Arc::new(quick_cache::sync::Cache::new(1000)),
+            tx_status_cache: Arc::new(Cache::new(1000)),
             mempool_snapshot: Arc::new(ArcSwap::new(Arc::new(MempoolSnapshot::default()))),
             sync_backpressure_threshold: Some(10),
         };
 
         let app = Router::new()
-            .route("/tx", axum::routing::post(submit_transaction_handler))
+            .route("/tx", post(submit_transaction_handler))
             .with_state(state);
 
         // Submit a valid transaction
-        let tx = hyperscale_types::test_utils::test_transaction(1);
-        let tx_hex = hex::encode(sbor::prelude::basic_encode(&tx).unwrap());
+        let tx = test_transaction(1);
+        let tx_hex = hex_encode(basic_encode(&tx).unwrap());
 
         let response = app
             .oneshot(
@@ -758,7 +768,7 @@ mod tests {
                     .uri("/tx")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        serde_json::to_string(&SubmitTransactionRequest {
+                        to_string(&SubmitTransactionRequest {
                             transaction_hex: tx_hex,
                         })
                         .unwrap(),

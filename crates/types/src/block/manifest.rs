@@ -1,10 +1,11 @@
 //! Hash-level block contents (`BlockManifest`) and denormalized storage form
 //! (`BlockMetadata`).
 
+use sbor::prelude::*;
+
 use crate::{
     Block, BlockHash, BlockHeader, BlockHeight, ProvisionHash, QuorumCertificate, TxHash, WaveId,
 };
-use sbor::prelude::*;
 
 /// Hash-level description of a block's contents (transactions and certificates).
 ///

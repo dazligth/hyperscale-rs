@@ -2,17 +2,16 @@
 //!
 //! Verifies that the simulator can run a simple workload and collect metrics.
 
-use hyperscale_simulator::{Simulator, SimulatorConfig, WorkloadConfig};
 use std::time::Duration;
+
+use hyperscale_simulator::{Simulator, SimulatorConfig, WorkloadConfig};
+use tracing_subscriber::fmt;
 
 /// Run a simple single-shard simulation.
 #[test]
 fn test_single_shard_simulation() {
     // Initialize tracing for debugging
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter("info")
-        .with_test_writer()
-        .try_init();
+    let _ = fmt().with_env_filter("info").with_test_writer().try_init();
 
     // Configure simulation: 1 shard, 4 validators
     let config = SimulatorConfig::new(1, 4)
@@ -57,10 +56,7 @@ fn test_single_shard_simulation() {
 /// Run a multi-shard simulation with cross-shard transactions.
 #[test]
 fn test_multi_shard_simulation() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter("info")
-        .with_test_writer()
-        .try_init();
+    let _ = fmt().with_env_filter("info").with_test_writer().try_init();
 
     // Configure simulation: 2 shards, 3 validators each
     let config = SimulatorConfig::new(2, 3)
@@ -96,10 +92,7 @@ fn test_multi_shard_simulation() {
 /// Test that determinism works - same seed produces same results.
 #[test]
 fn test_determinism() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter("warn")
-        .with_test_writer()
-        .try_init();
+    let _ = fmt().with_env_filter("warn").with_test_writer().try_init();
 
     let config = SimulatorConfig::new(1, 4)
         .with_accounts_per_shard(20)

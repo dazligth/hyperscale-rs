@@ -16,9 +16,10 @@
 //! building, which iterates the store to include finalized waves in block
 //! order.
 
-use hyperscale_types::{BloomFilter, DEFAULT_FPR, FinalizedWave, TxHash, WaveCertificate, WaveId};
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
+
+use hyperscale_types::{BloomFilter, DEFAULT_FPR, FinalizedWave, TxHash, WaveCertificate, WaveId};
 
 pub struct FinalizedWaveStore {
     waves: BTreeMap<WaveId, FinalizedWave>,
@@ -108,13 +109,15 @@ impl FinalizedWaveStore {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::collections::BTreeSet;
+
     use hyperscale_types::{
         BlockHeight, ExecutionCertificate, ExecutionOutcome, GlobalReceiptHash, GlobalReceiptRoot,
         Hash, ShardGroupId, SignerBitfield, TxHash, TxOutcome, WeightedTimestamp,
         zero_bls_signature,
     };
-    use std::collections::BTreeSet;
+
+    use super::*;
 
     fn make_wave_id(block_height: u64) -> WaveId {
         WaveId {

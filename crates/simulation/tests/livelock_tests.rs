@@ -6,22 +6,23 @@
 //! - Normal cross-shard execution → WC(Accept)
 //! - Execution timeout → abort intent → WC(Aborted)
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use hyperscale_core::NodeInput;
 use hyperscale_network_memory::NetworkConfig;
 use hyperscale_simulation::SimulationRunner;
 use hyperscale_types::test_utils::test_validity_range;
 use hyperscale_types::{
     Ed25519PrivateKey, NodeId, RoutableTransaction, ShardGroupId, TransactionDecision,
-    TransactionStatus, ed25519_keypair_from_seed, routable_from_notarized_v1, shard_for_node,
-    sign_and_notarize,
+    TransactionStatus, TxHash, ed25519_keypair_from_seed, routable_from_notarized_v1,
+    shard_for_node, sign_and_notarize,
 };
 use radix_common::constants::XRD;
 use radix_common::math::Decimal;
 use radix_common::network::NetworkDefinition;
 use radix_common::types::ComponentAddress;
 use radix_transactions::builder::ManifestBuilder;
-use std::sync::Arc;
-use std::time::Duration;
 use tracing_test::traced_test;
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -106,7 +107,7 @@ fn cross_shard_transfer(
 /// Returns the final status (or None if evicted/not found).
 fn poll_until_terminal(
     runner: &mut SimulationRunner,
-    tx_hash: hyperscale_types::TxHash,
+    tx_hash: TxHash,
     node_index: u32,
     max_iterations: usize,
     step: Duration,

@@ -1,10 +1,11 @@
 //! Merkle root computation helpers for the per-block fields in [`BlockHeader`].
 
+use std::sync::Arc;
+
 use crate::{
     CertificateRoot, FinalizedWave, Hash, LocalReceiptRoot, ProvisionsRoot, RoutableTransaction,
     StoredReceipt, TransactionRoot, compute_merkle_root, compute_padded_merkle_root,
 };
-use std::sync::Arc;
 
 /// Compute the receipt merkle root for a block's finalized waves.
 ///

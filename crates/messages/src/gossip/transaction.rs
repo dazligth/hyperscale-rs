@@ -8,9 +8,15 @@
 //! v1.2's IDONTWANT threshold larger messages activate cross-mesh dedup
 //! that single-tx messages were too small to trigger.
 
-use crate::trace_context::TraceContext;
-use hyperscale_types::{MessageClass, NetworkMessage, RoutableTransaction, ShardMessage};
 use std::sync::Arc;
+
+use hyperscale_types::{MessageClass, NetworkMessage, RoutableTransaction, ShardMessage};
+use sbor::{
+    Categorize, Decode, DecodeError, Decoder, Describe, Encode, EncodeError, Encoder,
+    NoCustomTypeKind, NoCustomValueKind, RustTypeId, TypeData, TypeKind, ValueKind,
+};
+
+use crate::trace_context::TraceContext;
 
 /// Gossips a batch of transactions to a single destination shard.
 ///
@@ -82,29 +88,25 @@ impl Eq for TransactionGossip {}
 // BasicSbor; we (de)serialize the inner data through parallel vecs).
 // ============================================================================
 
-impl<E: sbor::Encoder<sbor::NoCustomValueKind>> sbor::Encode<sbor::NoCustomValueKind, E>
-    for TransactionGossip
-{
-    fn encode_value_kind(&self, encoder: &mut E) -> Result<(), sbor::EncodeError> {
-        encoder.write_value_kind(sbor::ValueKind::Tuple)
+impl<E: Encoder<NoCustomValueKind>> Encode<NoCustomValueKind, E> for TransactionGossip {
+    fn encode_value_kind(&self, encoder: &mut E) -> Result<(), EncodeError> {
+        encoder.write_value_kind(ValueKind::Tuple)
     }
 
-    fn encode_body(&self, encoder: &mut E) -> Result<(), sbor::EncodeError> {
+    fn encode_body(&self, encoder: &mut E) -> Result<(), EncodeError> {
         encoder.write_size(2)?; // 2 fields
 
-        encoder.write_value_kind(sbor::ValueKind::Array)?;
-        encoder.write_value_kind(<RoutableTransaction as sbor::Categorize<
-            sbor::NoCustomValueKind,
-        >>::value_kind())?;
+        encoder.write_value_kind(ValueKind::Array)?;
+        encoder.write_value_kind(
+            <RoutableTransaction as Categorize<NoCustomValueKind>>::value_kind(),
+        )?;
         encoder.write_size(self.transactions.len())?;
         for tx in &self.transactions {
             encoder.encode_deeper_body(tx.as_ref())?;
         }
 
-        encoder.write_value_kind(sbor::ValueKind::Array)?;
-        encoder.write_value_kind(<TraceContext as sbor::Categorize<
-            sbor::NoCustomValueKind,
-        >>::value_kind())?;
+        encoder.write_value_kind(ValueKind::Array)?;
+        encoder.write_value_kind(<TraceContext as Categorize<NoCustomValueKind>>::value_kind())?;
         encoder.write_size(self.trace_contexts.len())?;
         for trace in &self.trace_contexts {
             encoder.encode_deeper_body(trace)?;
@@ -114,23 +116,21 @@ impl<E: sbor::Encoder<sbor::NoCustomValueKind>> sbor::Encode<sbor::NoCustomValue
     }
 }
 
-impl<D: sbor::Decoder<sbor::NoCustomValueKind>> sbor::Decode<sbor::NoCustomValueKind, D>
-    for TransactionGossip
-{
+impl<D: Decoder<NoCustomValueKind>> Decode<NoCustomValueKind, D> for TransactionGossip {
     fn decode_body_with_value_kind(
         decoder: &mut D,
-        value_kind: sbor::ValueKind<sbor::NoCustomValueKind>,
-    ) -> Result<Self, sbor::DecodeError> {
-        decoder.check_preloaded_value_kind(value_kind, sbor::ValueKind::Tuple)?;
+        value_kind: ValueKind<NoCustomValueKind>,
+    ) -> Result<Self, DecodeError> {
+        decoder.check_preloaded_value_kind(value_kind, ValueKind::Tuple)?;
         let length = decoder.read_size()?;
         if length != 2 {
-            return Err(sbor::DecodeError::UnexpectedSize {
+            return Err(DecodeError::UnexpectedSize {
                 expected: 2,
                 actual: length,
             });
         }
 
-        decoder.read_and_check_value_kind(sbor::ValueKind::Array)?;
+        decoder.read_and_check_value_kind(ValueKind::Array)?;
         let elem_kind = decoder.read_value_kind()?;
         let tx_count = decoder.read_size()?;
         let mut transactions = Vec::with_capacity(tx_count);
@@ -139,11 +139,11 @@ impl<D: sbor::Decoder<sbor::NoCustomValueKind>> sbor::Decode<sbor::NoCustomValue
             transactions.push(Arc::new(tx));
         }
 
-        decoder.read_and_check_value_kind(sbor::ValueKind::Array)?;
+        decoder.read_and_check_value_kind(ValueKind::Array)?;
         let trace_elem_kind = decoder.read_value_kind()?;
         let trace_count = decoder.read_size()?;
         if trace_count != tx_count {
-            return Err(sbor::DecodeError::UnexpectedSize {
+            return Err(DecodeError::UnexpectedSize {
                 expected: tx_count,
                 actual: trace_count,
             });
@@ -162,18 +162,17 @@ impl<D: sbor::Decoder<sbor::NoCustomValueKind>> sbor::Decode<sbor::NoCustomValue
     }
 }
 
-impl sbor::Categorize<sbor::NoCustomValueKind> for TransactionGossip {
-    fn value_kind() -> sbor::ValueKind<sbor::NoCustomValueKind> {
-        sbor::ValueKind::Tuple
+impl Categorize<NoCustomValueKind> for TransactionGossip {
+    fn value_kind() -> ValueKind<NoCustomValueKind> {
+        ValueKind::Tuple
     }
 }
 
-impl sbor::Describe<sbor::NoCustomTypeKind> for TransactionGossip {
-    const TYPE_ID: sbor::RustTypeId =
-        sbor::RustTypeId::novel_with_code("TransactionGossip", &[], &[]);
+impl Describe<NoCustomTypeKind> for TransactionGossip {
+    const TYPE_ID: RustTypeId = RustTypeId::novel_with_code("TransactionGossip", &[], &[]);
 
-    fn type_data() -> sbor::TypeData<sbor::NoCustomTypeKind, sbor::RustTypeId> {
-        sbor::TypeData::unnamed(sbor::TypeKind::Any)
+    fn type_data() -> TypeData<NoCustomTypeKind, RustTypeId> {
+        TypeData::unnamed(TypeKind::Any)
     }
 }
 
@@ -193,9 +192,10 @@ impl ShardMessage for TransactionGossip {}
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     use hyperscale_types::test_utils::{test_node, test_transaction_with_nodes};
+    use sbor::{basic_decode, basic_encode};
+
+    use super::*;
 
     #[test]
     fn from_arcs_carries_transactions_and_default_traces() {
@@ -241,8 +241,8 @@ mod tests {
             .collect();
         let original = TransactionGossip::from_arcs(txs);
 
-        let bytes = sbor::basic_encode(&original).expect("encode");
-        let decoded: TransactionGossip = sbor::basic_decode(&bytes).expect("decode");
+        let bytes = basic_encode(&original).expect("encode");
+        let decoded: TransactionGossip = basic_decode(&bytes).expect("decode");
 
         assert_eq!(original, decoded);
         assert_eq!(decoded.len(), 5);
@@ -251,8 +251,8 @@ mod tests {
     #[test]
     fn sbor_roundtrip_empty() {
         let original = TransactionGossip::from_arcs(vec![]);
-        let bytes = sbor::basic_encode(&original).expect("encode");
-        let decoded: TransactionGossip = sbor::basic_decode(&bytes).expect("decode");
+        let bytes = basic_encode(&original).expect("encode");
+        let decoded: TransactionGossip = basic_decode(&bytes).expect("decode");
         assert_eq!(original, decoded);
         assert!(decoded.is_empty());
     }

@@ -3,13 +3,19 @@
 //! Provides infrastructure for measuring end-to-end transaction latency by
 //! tracking submitted transactions and polling for their completion status.
 
-use crate::client::RpcClient;
-use dashmap::DashMap;
-use hdrhistogram::Histogram;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+
+use dashmap::DashMap;
+use hdrhistogram::Histogram;
+use parking_lot::Mutex;
+use tokio::spawn;
+use tokio::task::JoinHandle;
+use tokio::time::sleep;
 use tracing::debug;
+
+use crate::client::RpcClient;
 
 /// Tracks in-flight transactions and measures their latency.
 ///
@@ -23,7 +29,7 @@ pub struct LatencyTracker {
     in_flight: Arc<DashMap<String, (Instant, usize)>>,
     /// Latency histogram (microseconds).
     /// Uses `parking_lot::Mutex` which is faster than `tokio::sync::Mutex` for short critical sections.
-    histogram: Arc<parking_lot::Mutex<Histogram<u64>>>,
+    histogram: Arc<Mutex<Histogram<u64>>>,
     /// Completion counts - using atomics for lock-free updates.
     stats: Arc<LatencyStats>,
     /// Poll interval for checking transaction status.
@@ -31,7 +37,7 @@ pub struct LatencyTracker {
     /// RPC clients for polling.
     clients: Vec<RpcClient>,
     /// Handle to the polling task.
-    poll_handle: Option<tokio::task::JoinHandle<()>>,
+    poll_handle: Option<JoinHandle<()>>,
 }
 
 /// Statistics collected during latency tracking.
@@ -74,7 +80,7 @@ impl LatencyTracker {
     pub fn new(clients: Vec<RpcClient>, poll_interval: Duration) -> Self {
         Self {
             in_flight: Arc::new(DashMap::new()),
-            histogram: Arc::new(parking_lot::Mutex::new(
+            histogram: Arc::new(Mutex::new(
                 Histogram::new(3).expect("histogram creation should succeed"),
             )),
             stats: Arc::new(LatencyStats::default()),
@@ -92,9 +98,9 @@ impl LatencyTracker {
         let poll_interval = self.poll_interval;
         let clients = self.clients.clone();
 
-        let handle = tokio::spawn(async move {
+        let handle = spawn(async move {
             loop {
-                tokio::time::sleep(poll_interval).await;
+                sleep(poll_interval).await;
 
                 // Collect keys to check - this is a quick read that doesn't block writers
                 let to_check: Vec<(String, Instant, usize)> = in_flight
@@ -179,7 +185,7 @@ impl LatencyTracker {
     /// Any transactions still in-flight are counted as timed out.
     pub async fn finalize(mut self, timeout: Duration) -> LatencyReport {
         // Wait for any in-flight transactions to complete
-        tokio::time::sleep(timeout).await;
+        sleep(timeout).await;
 
         // Stop the polling task
         self.stop_polling();

@@ -4,8 +4,9 @@
 //! and outbound provision tracking (broadcasts the local shard issued, and
 //! the remote ECs that ack them).
 
-use super::NodeStateMachine;
 use hyperscale_core::{Action, ProtocolEvent};
+
+use super::NodeStateMachine;
 
 impl NodeStateMachine {
     /// Dispatch a provision-category `ProtocolEvent`.
@@ -55,12 +56,14 @@ impl NodeStateMachine {
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::TestNode;
+    use std::sync::Arc;
+
     use hyperscale_core::{Action, ProtocolEvent, StateMachine};
     use hyperscale_types::{
         BlockHeight, MerkleInclusionProof, Provisions, ShardGroupId, WeightedTimestamp,
     };
-    use std::sync::Arc;
+
+    use super::super::test_support::TestNode;
 
     /// `ProvisionsAdmitted` latches a proposal-retry the same way
     /// `TransactionsAdmitted` does. Verify the latch+post-dispatch chain

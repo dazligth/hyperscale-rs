@@ -1,26 +1,33 @@
 //! Action processing and dispatch.
 
-use super::IoLoop;
-use super::TimerOp;
-use super::block_commit::{AccumulateDecision, PendingCommit};
-use crate::io_loop::protocol::binding::{
-    ExecCertBinding, FinalizedWaveBinding, LocalProvisionBinding, ProvisionBinding,
-    TransactionBinding,
-};
-use crate::io_loop::protocol::block_sync::BlockSyncInput;
-use crate::io_loop::protocol::fetch::FetchInput;
+use std::sync::Arc;
+
+use hyperscale_bft::action_handlers::handle_action as handle_bft_action;
 use hyperscale_core::{
     Action, ActionContext, CommitSource, FetchAbandon, FetchRequest, NodeInput, PreparedBlock,
     ProtocolEvent, StateMachine,
 };
 use hyperscale_dispatch::Dispatch;
 use hyperscale_engine::Engine;
-use hyperscale_metrics as metrics;
-use hyperscale_network::Network;
-use hyperscale_storage::{ChainWriter, Storage};
-use hyperscale_types::{Block, BlockHeight, QuorumCertificate, StateRoot, TxHash, ValidatorId};
-use std::sync::Arc;
+use hyperscale_execution::action_handlers::handle_action as handle_execution_action;
+use hyperscale_metrics::record_transaction_finalized;
+use hyperscale_network::{Network, ValidatorKeyMap};
+use hyperscale_provisions::action_handlers::handle_action as handle_provisions_action;
+use hyperscale_storage::{ChainEntry, ChainWriter, Storage};
+use hyperscale_types::{
+    Block, BlockHeight, CertifiedBlock, ConsensusReceipt, FinalizedWave, QuorumCertificate,
+    StateRoot, TopologySnapshot, TransactionStatus, TxHash, ValidatorId,
+};
 use tracing::{debug, error, trace, warn};
+
+use super::block_commit::{AccumulateDecision, PendingCommit};
+use super::{IoLoop, TimerOp};
+use crate::io_loop::protocol::binding::{
+    ExecCertBinding, FinalizedWaveBinding, LocalProvisionBinding, ProvisionBinding,
+    TransactionBinding,
+};
+use crate::io_loop::protocol::block_sync::BlockSyncInput;
+use crate::io_loop::protocol::fetch::FetchInput;
 impl<S, N, D, E> IoLoop<S, N, D, E>
 where
     S: Storage,
@@ -179,7 +186,7 @@ where
     fn handle_emit_transaction_status(
         &mut self,
         tx_hash: TxHash,
-        status: hyperscale_types::TransactionStatus,
+        status: TransactionStatus,
         cross_shard: bool,
         submitted_locally: bool,
     ) {
@@ -207,17 +214,17 @@ where
                     );
                 }
             }
-            metrics::record_transaction_finalized(latency_secs, cross_shard);
+            record_transaction_finalized(latency_secs, cross_shard);
         }
         self.caches.tx_status.insert(tx_hash, status.clone());
         self.emitted_statuses.push((tx_hash, status));
     }
 
-    fn handle_topology_changed(&self, topology: &Arc<hyperscale_types::TopologySnapshot>) {
+    fn handle_topology_changed(&self, topology: &Arc<TopologySnapshot>) {
         self.topology_snapshot.store(Arc::clone(topology));
 
         // Push updated validator keys to the network layer for bind verification.
-        let keys: hyperscale_network::ValidatorKeyMap = topology
+        let keys: ValidatorKeyMap = topology
             .global_validator_set()
             .validators
             .iter()
@@ -286,8 +293,7 @@ where
             let pending_snapshots = view.pending_snapshots().to_vec();
 
             // Inline JMT computation (no commit_lock — only reads).
-            let finalized_waves: Vec<Arc<hyperscale_types::FinalizedWave>> =
-                block.certificates().to_vec();
+            let finalized_waves: Vec<Arc<FinalizedWave>> = block.certificates().to_vec();
             let (computed_root, prepared) = view.prepare_block_commit(
                 parent_state_root,
                 parent_block_height,
@@ -335,13 +341,13 @@ where
             // Insert JMT snapshot into PendingChain so child blocks'
             // VerifyStateRoot can find this block's tree nodes via the overlay.
             let jmt_snapshot = Arc::new(S::jmt_snapshot(&prepared).clone());
-            let receipts: Vec<Arc<hyperscale_types::ConsensusReceipt>> = finalized_waves
+            let receipts: Vec<Arc<ConsensusReceipt>> = finalized_waves
                 .iter()
                 .flat_map(|fw| fw.consensus_receipts())
                 .collect();
             self.pending_chain.insert(
                 block_hash,
-                hyperscale_storage::ChainEntry {
+                ChainEntry {
                     parent_block_hash: block.header().parent_block_hash,
                     height,
                     receipts,
@@ -390,7 +396,7 @@ where
                     .handle(BlockSyncInput::Admitted { scope: (), height });
                 self.process_block_sync_outputs(outputs);
                 if let Some((block, qc)) = notify_now {
-                    let certified = hyperscale_types::CertifiedBlock::new_unchecked(
+                    let certified = CertifiedBlock::new_unchecked(
                         Arc::unwrap_or_clone(block),
                         Arc::unwrap_or_clone(qc),
                     );
@@ -519,7 +525,7 @@ where
                 let jmt_snapshot = Arc::new(S::jmt_snapshot(&prepared).clone());
                 pending_chain_for_commit.insert(
                     block_hash,
-                    hyperscale_storage::ChainEntry {
+                    ChainEntry {
                         parent_block_hash,
                         height: block_height,
                         receipts,
@@ -554,7 +560,7 @@ where
                 | Action::BroadcastBlockHeader { .. }
                 | Action::SignAndBroadcastBlockVote { .. }
                 | Action::BroadcastCommittedBlockHeader { .. } => {
-                    hyperscale_bft::action_handlers::handle_action(action, &ctx);
+                    handle_bft_action(action, &ctx);
                 }
 
                 Action::AggregateExecutionCertificate { .. }
@@ -564,11 +570,11 @@ where
                 | Action::ExecuteCrossShardTransactions { .. }
                 | Action::SignAndSendExecutionVote { .. }
                 | Action::BroadcastExecutionCertificate { .. } => {
-                    hyperscale_execution::action_handlers::handle_action(action, &ctx);
+                    handle_execution_action(action, &ctx);
                 }
 
                 Action::VerifyProvisions { .. } | Action::FetchAndBroadcastProvisions { .. } => {
-                    hyperscale_provisions::action_handlers::handle_action(action, &ctx);
+                    handle_provisions_action(action, &ctx);
                 }
 
                 _ => {}

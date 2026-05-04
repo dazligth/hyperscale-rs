@@ -14,13 +14,14 @@
 //! emit — full content, empty fallback, empty sync — so a single
 //! build-and-dispatch helper can drive them uniformly.
 
+use std::collections::HashSet;
+use std::sync::Arc;
+
 use hyperscale_core::Action;
 use hyperscale_types::{
     BlockHash, BlockHeight, FinalizedWave, LocalTimestamp, ProposerTimestamp, ProvisionHash,
     Provisions, Round, RoutableTransaction, TopologySnapshot, TxHash, WaveId, WeightedTimestamp,
 };
-use std::collections::HashSet;
-use std::sync::Arc;
 use tracing::debug;
 
 use crate::chain_view::ChainView;
@@ -402,8 +403,12 @@ pub fn dispatch_or_defer(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::time::Duration;
+
+    use hyperscale_types::test_utils::test_notarized_transaction_v1;
+    use hyperscale_types::{TimestampRange, routable_from_notarized_v1};
+
+    use super::*;
 
     #[test]
     fn start_records_pending_slot() {
@@ -498,9 +503,6 @@ mod tests {
     }
 
     // ─── select_transactions: validity-window filter ───────────────────
-
-    use hyperscale_types::test_utils::test_notarized_transaction_v1;
-    use hyperscale_types::{TimestampRange, routable_from_notarized_v1};
 
     fn ts(ms: u64) -> WeightedTimestamp {
         WeightedTimestamp::from_millis(ms)

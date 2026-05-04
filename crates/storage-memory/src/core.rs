@@ -8,15 +8,16 @@
 //! `state_history` to find the smallest write after V; its prior value
 //! is the state at V.
 
-use crate::state::{ConsensusState, SharedState, apply_updates};
-
-use hyperscale_storage::{
-    DatabaseUpdates, DbPartitionKey, DbSortKey, DbSubstateValue, PartitionEntry, SubstateDatabase,
-};
-#[cfg(test)]
-use hyperscale_types::WaveCertificate;
-use hyperscale_types::{BlockHeight, StateRoot};
 use std::sync::{Arc, RwLock};
+
+use hyperscale_storage::tree::put_at_version;
+use hyperscale_storage::{
+    DatabaseUpdates, DbPartitionKey, DbSortKey, DbSubstateValue, GenesisCommit, PartitionEntry,
+    SubstateDatabase, SubstateStore,
+};
+use hyperscale_types::{BlockHeight, StateRoot};
+
+use crate::state::{ConsensusState, SharedState, apply_updates};
 
 /// In-memory storage for simulation and testing.
 ///
@@ -112,84 +113,12 @@ impl SimStorage {
         self.state.read().unwrap().current_state.is_empty()
     }
 
-    /// Atomically commit a certificate and its state writes.
-    ///
-    /// Applies database updates and stores certificate metadata.
-    /// JMT is deferred to block commit — this mirrors the production
-    /// `RocksDbStorage::commit_certificate_with_writes()` to ensure DST
-    /// catches timing bugs where code incorrectly assumes state is available
-    /// before certificate persistence.
-    ///
-    /// # Panics
-    ///
-    /// Panics if either internal `RwLock` is poisoned.
-    #[cfg(test)]
-    #[allow(clippy::significant_drop_tightening)] // both reads need the lock
-    pub fn commit_certificate_with_writes(
-        &self,
-        certificate: &WaveCertificate,
-        updates: &hyperscale_storage::DatabaseUpdates,
-    ) {
-        {
-            let mut s = self.state.write().unwrap();
-            let ver = s.current_block_height.0;
-            apply_updates(&mut s, updates, ver, /* write_history */ true);
-        }
-        self.consensus
-            .write()
-            .unwrap()
-            .certificates
-            .insert(certificate.wave_id.clone(), certificate.clone());
-    }
-
-    /// Test helper: commits database updates with auto-incrementing JMT version.
-    /// Not used in production (use `commit_block` instead).
-    ///
-    /// Computes JMT updates and applies them to the tree store, resolving
-    /// leaf-substate associations for historical reads.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the internal `RwLock` is poisoned.
-    #[cfg(test)]
-    pub fn commit_shared(&self, updates: &DatabaseUpdates) {
-        let mut s = self.state.write().unwrap();
-
-        let new_version = s.current_block_height.0 + 1;
-
-        // Apply substate updates first (visible for association resolution below).
-        apply_updates(&mut s, updates, new_version, /* write_history */ true);
-
-        let parent_version = hyperscale_storage::tree::jmt_parent_height(
-            s.current_block_height,
-            s.current_root_hash,
-        )
-        .map(|h| h.0);
-        let (new_root, collected) = hyperscale_storage::tree::put_at_version(
-            &s.tree_store,
-            parent_version,
-            new_version,
-            &[updates],
-            &std::collections::HashMap::new(),
-        );
-
-        for (key, node) in &collected.nodes {
-            s.tree_store.insert(key.clone(), Arc::clone(node));
-        }
-        for stale_key in &collected.stale_node_keys {
-            s.tree_store.remove(stale_key);
-        }
-
-        s.current_block_height = BlockHeight(new_version);
-        s.current_root_hash = new_root;
-    }
-
     /// Write substate data at version 0 (no JMT computation).
     ///
     /// Genesis-install primitive: writes land in `current_state` at version 0
     /// with **no state-history entries** — genesis has no pre-state to
     /// preserve. Pair with [`Self::finalize_genesis_jmt`] to compute the JMT
-    /// root over the same updates; [`hyperscale_storage::GenesisCommit::install_genesis`]
+    /// root over the same updates; [`GenesisCommit::install_genesis`]
     /// composes both.
     ///
     /// # Panics
@@ -224,7 +153,7 @@ impl SimStorage {
         );
 
         // parent=None, version=0: genesis is the first JMT state.
-        let (root, collected) = hyperscale_storage::tree::put_at_version(
+        let (root, collected) = put_at_version(
             &s.tree_store,
             None,
             0,
@@ -246,7 +175,7 @@ impl SimStorage {
     }
 }
 
-impl hyperscale_storage::GenesisCommit for SimStorage {
+impl GenesisCommit for SimStorage {
     fn install_genesis(&self, merged: &DatabaseUpdates) -> StateRoot {
         Self::commit_substates_only(self, merged);
         Self::finalize_genesis_jmt(self, merged)
@@ -261,8 +190,7 @@ impl SubstateDatabase for SimStorage {
     ) -> Option<DbSubstateValue> {
         // Default-version snapshot (= current committed tip) reads the
         // latest value from `current_state`.
-        <Self as hyperscale_storage::SubstateStore>::snapshot(self)
-            .get_raw_substate_by_db_key(partition_key, sort_key)
+        <Self as SubstateStore>::snapshot(self).get_raw_substate_by_db_key(partition_key, sort_key)
     }
 
     fn list_raw_values_from_db_key(
@@ -270,16 +198,9 @@ impl SubstateDatabase for SimStorage {
         partition_key: &DbPartitionKey,
         from_sort_key: Option<&DbSortKey>,
     ) -> Box<dyn Iterator<Item = PartitionEntry> + '_> {
-        let items: Vec<_> = <Self as hyperscale_storage::SubstateStore>::snapshot(self)
+        let items: Vec<_> = <Self as SubstateStore>::snapshot(self)
             .list_raw_values_from_db_key(partition_key, from_sort_key)
             .collect();
         Box::new(items.into_iter())
-    }
-}
-
-#[cfg(test)]
-impl hyperscale_storage::CommittableSubstateDatabase for SimStorage {
-    fn commit(&mut self, updates: &DatabaseUpdates) {
-        self.commit_shared(updates);
     }
 }

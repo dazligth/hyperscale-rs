@@ -13,18 +13,16 @@
 //!
 //! Errors are returned as human-readable strings so the caller can log a
 //! single diagnostic line at the rejection site.
-use crate::commit_dedup::CommitDedupIndex;
-use crate::config::BftConfig;
-use hyperscale_types::{
-    Block, BlockHeader, BlockHeight, LocalTimestamp, ProvisionHash, RoutableTransaction,
-    TopologySnapshot, TxHash, VotePower, WaveId,
-};
-#[cfg(test)]
-use hyperscale_types::{
-    CertificateRoot, Hash, LocalReceiptRoot, ProvisionsRoot, StateRoot, TransactionRoot,
-};
 use std::collections::HashSet;
 use std::sync::Arc;
+
+use hyperscale_types::{
+    Block, BlockHeader, BlockHeight, LocalTimestamp, ProvisionHash, RoutableTransaction,
+    TopologySnapshot, TxHash, VotePower, WaveId, compute_waves,
+};
+
+use crate::commit_dedup::CommitDedupIndex;
+use crate::config::BftConfig;
 
 /// Validate block header structure, proposer, and parent QC quorum. Returns
 /// `Err(..)` with a human-readable reason on any check failure.
@@ -143,7 +141,7 @@ pub fn validate_transaction_ordering(block: &Block) -> Result<(), String> {
 /// its transactions. Prevents a Byzantine proposer from lying about which
 /// waves exist.
 pub fn validate_waves(topology: &TopologySnapshot, block: &Block) -> Result<(), String> {
-    let expected = hyperscale_types::compute_waves(topology, block.height(), block.transactions());
+    let expected = compute_waves(topology, block.height(), block.transactions());
 
     if block.header().waves != expected {
         return Err(format!(
@@ -293,13 +291,18 @@ fn verify_hash_sorted(txs: &[Arc<RoutableTransaction>], section: &str) -> Result
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use hyperscale_test_helpers::TestCommittee;
-    use hyperscale_types::{
-        BlockHash, BlockHeader, ProposerTimestamp, QuorumCertificate, Round, RoutableTransaction,
-        ShardGroupId, ValidatorId, ValidatorInfo, ValidatorSet, compute_waves, test_utils,
-    };
     use std::collections::{BTreeMap, BTreeSet};
+
+    use hyperscale_test_helpers::{TestCommittee, make_finalized_wave};
+    use hyperscale_types::{
+        BlockHash, BlockHeader, CertificateRoot, FinalizedWave, Hash, LocalReceiptRoot,
+        MerkleInclusionProof, ProposerTimestamp, Provisions, ProvisionsRoot, QuorumCertificate,
+        Round, RoutableTransaction, ShardGroupId, StateRoot, TransactionDecision, TransactionRoot,
+        TxEntries, ValidatorId, ValidatorInfo, ValidatorSet, WeightedTimestamp, compute_waves,
+        test_utils,
+    };
+
+    use super::*;
 
     fn topology() -> TopologySnapshot {
         let committee = TestCommittee::new(4, 42);
@@ -334,7 +337,7 @@ mod tests {
         }
     }
 
-    fn block_with_waves(height: BlockHeight, waves: Vec<hyperscale_types::WaveId>) -> Block {
+    fn block_with_waves(height: BlockHeight, waves: Vec<WaveId>) -> Block {
         let header = BlockHeader {
             shard_group_id: ShardGroupId(0),
             height,
@@ -375,7 +378,7 @@ mod tests {
         let topo = topology();
         let block = block_with_waves(
             BlockHeight(1),
-            vec![hyperscale_types::WaveId::new(
+            vec![WaveId::new(
                 ShardGroupId(99),
                 BlockHeight(1),
                 BTreeSet::new(),
@@ -570,7 +573,7 @@ mod tests {
 
     fn block_with_certificates(
         height: BlockHeight,
-        certificates: Vec<Arc<hyperscale_types::FinalizedWave>>,
+        certificates: Vec<Arc<FinalizedWave>>,
     ) -> Block {
         Block::Live {
             header: header_at_height(height, 100_000),
@@ -580,13 +583,13 @@ mod tests {
         }
     }
 
-    fn finalized_wave_at(height: u64) -> Arc<hyperscale_types::FinalizedWave> {
-        Arc::new(hyperscale_test_helpers::make_finalized_wave(
+    fn finalized_wave_at(height: u64) -> Arc<FinalizedWave> {
+        Arc::new(make_finalized_wave(
             BlockHeight(height),
             TxHash::from_raw(Hash::from_bytes(
                 &[u8::try_from(height).unwrap_or(u8::MAX); 32],
             )),
-            hyperscale_types::TransactionDecision::Accept,
+            TransactionDecision::Accept,
         ))
     }
 
@@ -632,10 +635,7 @@ mod tests {
     // validate_no_duplicate_provisions
     // ═══════════════════════════════════════════════════════════════════════
 
-    fn block_with_provisions(
-        height: BlockHeight,
-        provisions: Vec<Arc<hyperscale_types::Provisions>>,
-    ) -> Block {
+    fn block_with_provisions(height: BlockHeight, provisions: Vec<Arc<Provisions>>) -> Block {
         Block::Live {
             header: header_at_height(height, 100_000),
             transactions: Vec::new(),
@@ -644,8 +644,7 @@ mod tests {
         }
     }
 
-    fn provisions_with_seed(seed: u8) -> Arc<hyperscale_types::Provisions> {
-        use hyperscale_types::{MerkleInclusionProof, Provisions, ShardGroupId, TxEntries};
+    fn provisions_with_seed(seed: u8) -> Arc<Provisions> {
         let tx_hash = TxHash::from_raw(Hash::from_bytes(&[seed; 32]));
         Arc::new(Provisions::new(
             ShardGroupId(0),
@@ -693,7 +692,7 @@ mod tests {
         let block = block_with_provisions(BlockHeight(6), vec![Arc::clone(&p)]);
         let qc_chain = HashSet::new();
         let mut dedup_index = CommitDedupIndex::new();
-        dedup_index.register_committed_provisions(&[p], hyperscale_types::WeightedTimestamp(1_000));
+        dedup_index.register_committed_provisions(&[p], WeightedTimestamp(1_000));
         let err = validate_no_duplicate_provisions(&block, &qc_chain, &dedup_index).unwrap_err();
         assert!(err.contains("already committed"));
     }

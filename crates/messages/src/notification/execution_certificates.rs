@@ -2,7 +2,7 @@
 
 use hyperscale_types::{
     Bls12381G2Signature, ExecutionCertificate, MessageClass, NetworkMessage, ShardGroupId,
-    ValidatorId,
+    ValidatorId, exec_cert_batch_message,
 };
 use sbor::prelude::BasicSbor;
 
@@ -39,7 +39,7 @@ impl ExecutionCertificatesNotification {
     /// Build the canonical signing message for this batch.
     #[must_use]
     pub fn signing_message(&self, shard: ShardGroupId) -> Vec<u8> {
-        hyperscale_types::exec_cert_batch_message(shard, &self.certificates)
+        exec_cert_batch_message(shard, &self.certificates)
     }
 
     /// Get the certificates.

@@ -4,12 +4,13 @@
 //! given the same seed, which is the core property we need for debugging
 //! and replay.
 
-use hyperscale_core::NodeInput;
-use hyperscale_network_memory::NetworkConfig;
-use hyperscale_simulation::SimulationRunner;
-use hyperscale_types::{BlockHeight, Round};
 use std::sync::Arc;
 use std::time::Duration;
+
+use hyperscale_core::{NodeInput, ProtocolEvent};
+use hyperscale_network_memory::NetworkConfig;
+use hyperscale_simulation::SimulationRunner;
+use hyperscale_types::{BlockHeight, LocalTimestamp, Round, TransactionStatus};
 use tracing_test::traced_test;
 
 /// Create a basic network configuration for testing.
@@ -49,7 +50,7 @@ fn test_schedule_initial_events() {
         runner.schedule_initial_event(
             node,
             Duration::from_millis(100),
-            NodeInput::Protocol(Box::new(hyperscale_core::ProtocolEvent::CleanupTimer)),
+            NodeInput::Protocol(Box::new(ProtocolEvent::CleanupTimer)),
         );
     }
 
@@ -76,7 +77,7 @@ fn test_determinism_same_seed() {
         runner1.schedule_initial_event(
             node,
             Duration::from_millis(100),
-            NodeInput::Protocol(Box::new(hyperscale_core::ProtocolEvent::CleanupTimer)),
+            NodeInput::Protocol(Box::new(ProtocolEvent::CleanupTimer)),
         );
     }
     runner1.run_until(Duration::from_secs(1));
@@ -88,7 +89,7 @@ fn test_determinism_same_seed() {
         runner2.schedule_initial_event(
             node,
             Duration::from_millis(100),
-            NodeInput::Protocol(Box::new(hyperscale_core::ProtocolEvent::CleanupTimer)),
+            NodeInput::Protocol(Box::new(ProtocolEvent::CleanupTimer)),
         );
     }
     runner2.run_until(Duration::from_secs(1));
@@ -124,7 +125,7 @@ fn test_different_seeds_diverge() {
         runner1.schedule_initial_event(
             node,
             Duration::from_millis(100),
-            NodeInput::Protocol(Box::new(hyperscale_core::ProtocolEvent::CleanupTimer)),
+            NodeInput::Protocol(Box::new(ProtocolEvent::CleanupTimer)),
         );
     }
     runner1.run_until(Duration::from_secs(1));
@@ -135,7 +136,7 @@ fn test_different_seeds_diverge() {
         runner2.schedule_initial_event(
             node,
             Duration::from_millis(100),
-            NodeInput::Protocol(Box::new(hyperscale_core::ProtocolEvent::CleanupTimer)),
+            NodeInput::Protocol(Box::new(ProtocolEvent::CleanupTimer)),
         );
     }
     runner2.run_until(Duration::from_secs(1));
@@ -172,7 +173,7 @@ fn test_multi_shard_simulation() {
         runner.schedule_initial_event(
             node,
             Duration::from_millis(100),
-            NodeInput::Protocol(Box::new(hyperscale_core::ProtocolEvent::CleanupTimer)),
+            NodeInput::Protocol(Box::new(ProtocolEvent::CleanupTimer)),
         );
     }
 
@@ -199,7 +200,7 @@ fn test_round_advancement_via_view_change_timer() {
         runner.schedule_initial_event(
             node,
             Duration::from_millis(100),
-            NodeInput::Protocol(Box::new(hyperscale_core::ProtocolEvent::CleanupTimer)),
+            NodeInput::Protocol(Box::new(ProtocolEvent::CleanupTimer)),
         );
     }
 
@@ -252,7 +253,7 @@ fn test_extended_simulation_determinism() {
         runner1.schedule_initial_event(
             node,
             Duration::from_millis(100),
-            NodeInput::Protocol(Box::new(hyperscale_core::ProtocolEvent::CleanupTimer)),
+            NodeInput::Protocol(Box::new(ProtocolEvent::CleanupTimer)),
         );
     }
     runner1.run_until(Duration::from_secs(5));
@@ -264,7 +265,7 @@ fn test_extended_simulation_determinism() {
         runner2.schedule_initial_event(
             node,
             Duration::from_millis(100),
-            NodeInput::Protocol(Box::new(hyperscale_core::ProtocolEvent::CleanupTimer)),
+            NodeInput::Protocol(Box::new(ProtocolEvent::CleanupTimer)),
         );
     }
     runner2.run_until(Duration::from_secs(5));
@@ -1215,7 +1216,7 @@ fn test_mempool_to_block_integration() {
     // Transactions submitted at ~50ms with 150ms min dwell time are not yet ready
     let ready_count = node0
         .mempool()
-        .ready_transactions(100, 0, 0, hyperscale_types::LocalTimestamp::ZERO)
+        .ready_transactions(100, 0, 0, LocalTimestamp::ZERO)
         .len();
     assert_eq!(
         ready_count, 0,
@@ -1294,10 +1295,7 @@ fn test_execution_flow() {
     // This is the terminal success state for the full execution flow:
     // Pending → Accepted → Committed → Executing → Finalized → Completed
     assert!(
-        matches!(
-            status,
-            Some(hyperscale_types::TransactionStatus::Completed(_))
-        ),
+        matches!(status, Some(TransactionStatus::Completed(_))),
         "Transaction should be Completed (certificate committed), got {status:?}"
     );
 
@@ -1510,13 +1508,14 @@ fn test_cross_shard_latency() {
 /// Test that Topology correctly identifies cross-shard transactions.
 #[test]
 fn test_cross_shard_transaction_detection() {
+    use std::collections::HashMap;
+
     use hyperscale_topology::TopologyCoordinator;
     use hyperscale_types::test_utils::{test_node, test_transaction_with_nodes};
     use hyperscale_types::{
         Bls12381G1PrivateKey, ShardGroupId, ValidatorId, ValidatorInfo, ValidatorSet,
         generate_bls_keypair,
     };
-    use std::collections::HashMap;
 
     // Create a 2-shard network with 2 validators per shard
     let keys: Vec<Bls12381G1PrivateKey> = (0..4).map(|_| generate_bls_keypair()).collect();

@@ -64,11 +64,14 @@
 //! that execute at different committed heights see different vault balances,
 //! producing different DatabaseUpdates and divergent state roots.
 
-use hyperscale_storage::{
-    DatabaseUpdates, DbPartitionKey, PartitionDatabaseUpdates, SubstateDatabase,
-};
-use hyperscale_types::{BlockHeight, NodeId, ShardGroupId};
 use std::collections::{HashMap, HashSet};
+
+use hyperscale_storage::{
+    DatabaseUpdates, DbPartitionKey, PartitionDatabaseUpdates, SubstateDatabase, SubstateStore,
+};
+use hyperscale_types::{BlockHeight, NodeId, ShardGroupId, WritesRoot, shard_for_node};
+use radix_common::prelude::basic_encode;
+use radix_common::types::NodeId as RadixNodeId;
 
 /// System entity type bytes that should be filtered from `DatabaseUpdates`.
 ///
@@ -114,7 +117,7 @@ fn resolve_owned_nodes<S: SubstateDatabase>(
     let mut ownership: HashMap<NodeId, NodeId> = HashMap::new();
 
     for account in declared_nodes {
-        let radix_node_id = radix_common::types::NodeId(account.0);
+        let radix_node_id = RadixNodeId(account.0);
         let db_node_key = SpreadPrefixKeyMapper::to_db_node_key(&radix_node_id);
 
         // Scan all 256 partitions. Global entities use:
@@ -160,7 +163,7 @@ fn extract_owned_node_ids(value: &[u8], owner: NodeId, ownership: &mut HashMap<N
 /// the expanded node list must match the state at the committed block height,
 /// not the current tip, otherwise the merkle proof will cover keys that don't
 /// exist at the proof's version and verification will fail on the remote shard.
-pub fn expand_nodes_with_owned_at_height<S: hyperscale_storage::SubstateStore>(
+pub fn expand_nodes_with_owned_at_height<S: SubstateStore>(
     storage: &S,
     nodes: &[NodeId],
     block_height: BlockHeight,
@@ -181,7 +184,7 @@ pub fn expand_nodes_with_owned_at_height<S: hyperscale_storage::SubstateStore>(
 ///
 /// Reads substates at `block_height` using `list_substates_for_node_at_height`.
 /// Returns `None` if the version is unavailable (GC'd or not yet committed).
-fn resolve_owned_nodes_at_height<S: hyperscale_storage::SubstateStore>(
+fn resolve_owned_nodes_at_height<S: SubstateStore>(
     storage: &S,
     declared_nodes: &[NodeId],
     block_height: BlockHeight,
@@ -251,7 +254,7 @@ pub fn filter_updates_for_shard<S: SubstateDatabase>(
         };
 
         // Shard assignment based on the owning account.
-        let node_shard = hyperscale_types::shard_for_node(&shard_node_id, num_shards);
+        let node_shard = shard_for_node(&shard_node_id, num_shards);
         if node_shard != local_shard {
             continue;
         }
@@ -329,7 +332,7 @@ pub fn filter_updates_for_global_receipt<S: SubstateDatabase>(
 /// Panics if SBOR encoding of [`DatabaseUpdates`] fails. The Radix SBOR encoder
 /// is infallible for these structures, so this is unreachable in practice.
 #[must_use]
-pub fn compute_writes_root(updates: &DatabaseUpdates) -> hyperscale_types::WritesRoot {
+pub fn compute_writes_root(updates: &DatabaseUpdates) -> WritesRoot {
     use hyperscale_types::{Hash, WritesRoot};
 
     if updates.node_updates.is_empty() {
@@ -338,8 +341,7 @@ pub fn compute_writes_root(updates: &DatabaseUpdates) -> hyperscale_types::Write
 
     let mut canonical = updates.clone();
     sort_database_updates(&mut canonical);
-    let encoded = radix_common::prelude::basic_encode(&canonical)
-        .expect("DatabaseUpdates encoding should not fail");
+    let encoded = basic_encode(&canonical).expect("DatabaseUpdates encoding should not fail");
     WritesRoot::from_raw(Hash::from_bytes(&encoded))
 }
 
@@ -395,13 +397,12 @@ pub fn is_internal_entity(entity_type: u8) -> bool {
 #[must_use]
 pub fn node_entity_key(node_id: &NodeId) -> Vec<u8> {
     use radix_substate_store_interface::db_key_mapper::{DatabaseKeyMapper, SpreadPrefixKeyMapper};
-    let radix_node_id = radix_common::types::NodeId(node_id.0);
+    let radix_node_id = RadixNodeId(node_id.0);
     SpreadPrefixKeyMapper::to_db_node_key(&radix_node_id)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use hyperscale_storage::{
         DatabaseUpdate, DatabaseUpdates, DbPartitionKey, DbSortKey, NodeDatabaseUpdates,
         PartitionDatabaseUpdates, SubstateDatabase, SubstateStore,
@@ -410,6 +411,8 @@ mod tests {
         BlockHeight, MerkleInclusionProof, NodeId, StateRoot, WritesRoot, shard_for_node,
     };
     use radix_substate_store_interface::db_key_mapper::{DatabaseKeyMapper, SpreadPrefixKeyMapper};
+
+    use super::*;
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -460,7 +463,7 @@ mod tests {
         sort: Vec<u8>,
         value: Vec<u8>,
     ) -> DatabaseUpdates {
-        let radix_node_id = radix_common::types::NodeId(node.0);
+        let radix_node_id = RadixNodeId(node.0);
         let db_node_key = SpreadPrefixKeyMapper::to_db_node_key(&radix_node_id);
         let mut updates = DatabaseUpdates::default();
         let nu = updates
@@ -496,7 +499,7 @@ mod tests {
 
     impl MockDb {
         fn insert(&mut self, owner: &NodeId, partition: u8, sort: Vec<u8>, value: Vec<u8>) {
-            let radix_node_id = radix_common::types::NodeId(owner.0);
+            let radix_node_id = RadixNodeId(owner.0);
             let db_node_key = SpreadPrefixKeyMapper::to_db_node_key(&radix_node_id);
             self.partitions
                 .entry((db_node_key, partition))

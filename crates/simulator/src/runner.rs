@@ -3,28 +3,33 @@
 //! Orchestrates workload generation, transaction submission, and metrics collection
 //! using the deterministic simulation framework.
 
-use crate::config::SimulatorConfig;
-use crate::metrics::{MetricsCollector, SimulationReport};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
 use hyperscale_core::NodeInput;
 use hyperscale_mempool::LockContentionStats;
-use hyperscale_network_memory::NodeIndex;
+use hyperscale_network_memory::{BandwidthReport, NodeIndex};
 use hyperscale_simulation::SimulationRunner;
+use hyperscale_spammer::validity::{ValidityClock, range_starting_at};
 use hyperscale_spammer::{
-    AccountPool, AccountPoolError, FundingWorkload, TransferWorkload, WorkloadGenerator,
-    validity::{ValidityClock, range_starting_at},
+    AccountPool, AccountPoolError, AccountUsageStats, FundingWorkload, TransferWorkload,
+    WorkloadGenerator,
 };
 use hyperscale_types::{
-    ShardGroupId, TransactionDecision, TransactionStatus, TxHash, WeightedTimestamp, shard_for_node,
+    RoutableTransaction, ShardGroupId, TransactionDecision, TransactionStatus, TxHash,
+    WeightedTimestamp, shard_for_node,
 };
 use radix_common::math::Decimal;
 use radix_common::network::NetworkDefinition;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 use tracing::{debug, info, warn};
+
+use crate::config::SimulatorConfig;
+use crate::livelock::{LivelockAnalyzer, LivelockReport};
+use crate::metrics::{MetricsCollector, SimulationReport};
 
 /// Main simulator that orchestrates workload generation and metrics collection.
 pub struct Simulator {
@@ -222,7 +227,7 @@ impl Simulator {
     /// Submit funding transactions in batches and wait for completion.
     fn submit_funding_transactions(
         &mut self,
-        txs_by_shard: HashMap<ShardGroupId, Vec<hyperscale_types::RoutableTransaction>>,
+        txs_by_shard: HashMap<ShardGroupId, Vec<RoutableTransaction>>,
     ) {
         let batch_size = 500;
         let mut total_submitted = 0u64;
@@ -335,7 +340,7 @@ impl Simulator {
             for tx in batch {
                 let hash = tx.hash();
                 let target_shard = self.get_target_shard(&tx);
-                let tx = std::sync::Arc::new(tx);
+                let tx = Arc::new(tx);
 
                 // Submit to ALL validators in the shard to ensure the proposer has the tx.
                 // This mirrors real-world behavior where clients submit to multiple validators.
@@ -347,7 +352,7 @@ impl Simulator {
                         node_idx,
                         Duration::ZERO,
                         NodeInput::SubmitTransaction {
-                            tx: std::sync::Arc::clone(&tx),
+                            tx: Arc::clone(&tx),
                         },
                     );
                 }
@@ -448,7 +453,7 @@ impl Simulator {
     }
 
     /// Determine the target shard for a transaction.
-    fn get_target_shard(&self, tx: &hyperscale_types::RoutableTransaction) -> ShardGroupId {
+    fn get_target_shard(&self, tx: &RoutableTransaction) -> ShardGroupId {
         tx.declared_writes
             .first()
             .map_or(ShardGroupId(0), |node_id| {
@@ -537,7 +542,7 @@ impl Simulator {
 
     /// Get account usage statistics.
     #[must_use]
-    pub fn account_usage_stats(&self) -> hyperscale_spammer::AccountUsageStats {
+    pub fn account_usage_stats(&self) -> AccountUsageStats {
         self.accounts.usage_stats()
     }
 
@@ -546,8 +551,8 @@ impl Simulator {
     /// Returns a report of all incomplete transactions, grouped by status
     /// and shard, with potential cycle detection.
     #[must_use]
-    pub fn analyze_livelocks(&self) -> crate::livelock::LivelockReport {
-        let analyzer = crate::livelock::LivelockAnalyzer::from_runner(
+    pub fn analyze_livelocks(&self) -> LivelockReport {
+        let analyzer = LivelockAnalyzer::from_runner(
             &self.runner,
             u64::from(self.config.num_shards),
             self.config.validators_per_shard,
@@ -574,7 +579,7 @@ impl Simulator {
     /// Returns `None` if traffic analysis is not enabled.
     /// Call `enable_traffic_analysis()` before `run_for()` to collect data.
     #[must_use]
-    pub fn traffic_report(&self) -> Option<hyperscale_network_memory::BandwidthReport> {
+    pub fn traffic_report(&self) -> Option<BandwidthReport> {
         self.runner.traffic_report()
     }
 }

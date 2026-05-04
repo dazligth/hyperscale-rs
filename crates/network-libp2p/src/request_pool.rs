@@ -27,20 +27,24 @@
 //! On a response-phase error (read or decompression), the request already
 //! crossed the wire so retry is not safe — the actor tears down and exits.
 
-use crate::adapter::{Libp2pAdapter, NetworkError};
-use crate::peer_backoff::{self, BackoffState};
-use crate::stream_framing::{self, MAX_FRAME_SIZE};
-use dashmap::DashMap;
-use futures::{AsyncRead, AsyncReadExt, AsyncWrite};
-use hyperscale_metrics as metrics;
-use hyperscale_network::compression;
-use libp2p::PeerId;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use dashmap::DashMap;
+use futures::{AsyncRead, AsyncReadExt, AsyncWrite};
+use hyperscale_metrics::record_libp2p_bandwidth;
+use hyperscale_network::compression::decompress;
+use libp2p::PeerId;
+use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot};
+use tokio::time::{sleep, timeout as tokio_timeout};
 use tracing::{debug, warn};
+
+use crate::adapter::{Libp2pAdapter, NetworkError};
+use crate::peer_backoff::{self, BackoffState};
+use crate::stream_framing::{self, MAX_FRAME_SIZE};
 
 /// Channel capacity per peer. Bounds memory and provides caller backpressure.
 const PEER_CHANNEL_CAPACITY: usize = 64;
@@ -109,13 +113,13 @@ pub struct RequestStreamPool {
     adapter: Arc<Libp2pAdapter>,
     peers: Arc<DashMap<PeerId, PeerRequestActor>>,
     backoff: Arc<DashMap<PeerId, BackoffState>>,
-    tokio_handle: tokio::runtime::Handle,
+    tokio_handle: Handle,
 }
 
 impl RequestStreamPool {
     /// Build an empty pool that lazily spawns one per-peer request actor on demand.
     #[must_use]
-    pub fn new(adapter: Arc<Libp2pAdapter>, tokio_handle: tokio::runtime::Handle) -> Self {
+    pub fn new(adapter: Arc<Libp2pAdapter>, tokio_handle: Handle) -> Self {
         Self {
             adapter,
             peers: Arc::new(DashMap::new()),
@@ -237,13 +241,13 @@ impl RequestStreamPool {
                     Some(r) => r,
                     None => break,
                 },
-                () = tokio::time::sleep(CLIENT_IDLE_TIMEOUT) => {
+                () = sleep(CLIENT_IDLE_TIMEOUT) => {
                     debug!(peer = %peer, "Client idle timeout — closing persistent stream");
                     break;
                 }
             };
 
-            let outcome = tokio::time::timeout(
+            let outcome = tokio_timeout(
                 req.timeout,
                 do_request_response(&mut stream, req.type_id, &req.data),
             )
@@ -259,7 +263,7 @@ impl RequestStreamPool {
                     match adapter.open_request_stream(peer).await {
                         Ok(new_stream) => {
                             stream = new_stream;
-                            tokio::time::timeout(
+                            tokio_timeout(
                                 req.timeout,
                                 do_request_response(&mut stream, req.type_id, &req.data),
                             )
@@ -335,7 +339,7 @@ async fn do_request_response<S: AsyncRead + AsyncWrite + Unpin>(
             return IoOutcome::WriteFailed(NetworkError::StreamIo(format!("write failed: {e}")));
         }
     };
-    metrics::record_libp2p_bandwidth(0, wire_bytes as u64);
+    record_libp2p_bandwidth(0, wire_bytes as u64);
 
     let response_len = match stream_framing::read_frame_len(stream, MAX_FRAME_SIZE).await {
         Ok(len) => len,
@@ -351,9 +355,9 @@ async fn do_request_response<S: AsyncRead + AsyncWrite + Unpin>(
         return IoOutcome::ResponseFailed(NetworkError::StreamIo(format!("read body failed: {e}")));
     }
 
-    metrics::record_libp2p_bandwidth((4 + response_len) as u64, 0);
+    record_libp2p_bandwidth((4 + response_len) as u64, 0);
 
-    match compression::decompress(&compressed) {
+    match decompress(&compressed) {
         Ok(bytes) => IoOutcome::Ok(bytes),
         Err(e) => {
             IoOutcome::ResponseFailed(NetworkError::StreamIo(format!("decompression failed: {e}")))
@@ -375,18 +379,22 @@ fn drain_with_error(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::stream_framing::read_typed_frame;
     use std::io;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll};
 
+    use futures::io::Cursor;
+    use hyperscale_network::compression::compress;
+
+    use super::*;
+    use crate::stream_framing::read_typed_frame;
+
     /// In-memory bidirectional stream. Writes accumulate in `written`; reads
     /// drain from `to_read`. Optionally fails every write with a stub error.
     struct MockStream {
         written: Vec<u8>,
-        to_read: futures::io::Cursor<Vec<u8>>,
+        to_read: Cursor<Vec<u8>>,
         write_err: Option<io::ErrorKind>,
     }
 
@@ -394,7 +402,7 @@ mod tests {
         fn new(read_data: Vec<u8>) -> Self {
             Self {
                 written: Vec::new(),
-                to_read: futures::io::Cursor::new(read_data),
+                to_read: Cursor::new(read_data),
                 write_err: None,
             }
         }
@@ -402,7 +410,7 @@ mod tests {
         fn failing_writes(kind: io::ErrorKind) -> Self {
             Self {
                 written: Vec::new(),
-                to_read: futures::io::Cursor::new(Vec::new()),
+                to_read: Cursor::new(Vec::new()),
                 write_err: Some(kind),
             }
         }
@@ -442,7 +450,7 @@ mod tests {
 
     /// Build a wire-format response frame: 4-byte BE length prefix + LZ4-compressed payload.
     fn build_response(payload: &[u8]) -> Vec<u8> {
-        let compressed = compression::compress(payload);
+        let compressed = compress(payload);
         let len = u32::try_from(compressed.len()).unwrap();
         let mut buf = Vec::with_capacity(4 + compressed.len());
         buf.extend_from_slice(&len.to_be_bytes());
@@ -480,7 +488,7 @@ mod tests {
 
         // The request must have hit the wire as a well-formed typed frame
         // matching what an inbound router would parse.
-        let mut written = futures::io::Cursor::new(stream.written);
+        let mut written = Cursor::new(stream.written);
         let (parsed_type_id, parsed_payload, _) = read_typed_frame(&mut written, MAX_FRAME_SIZE)
             .await
             .expect("written request must round-trip through read_typed_frame");

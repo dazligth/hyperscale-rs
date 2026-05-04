@@ -1,22 +1,34 @@
 //! Core `Libp2pAdapter`: construction, public API, and shutdown.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use arc_swap::ArcSwap;
+use dashmap::DashMap;
+use futures::FutureExt;
+use hyperscale_metrics::{record_libp2p_bandwidth, record_network_message_sent};
+use hyperscale_network::{HandlerRegistry, Topic, ValidatorKeyMap};
+use hyperscale_types::{Bls12381G2Signature, MessageClass, ShardGroupId, ValidatorId};
+use libp2p::connection_limits::{Behaviour as ConnectionLimitsBehaviour, ConnectionLimits};
+use libp2p::gossipsub::{
+    Behaviour as GossipsubBehaviour, ConfigBuilder as GossipsubConfigBuilder, MessageAuthenticity,
+    MessageId, ValidationMode,
+};
+use libp2p::identify::{Behaviour as IdentifyBehaviour, Config as IdentifyConfig};
+use libp2p::identity::Keypair;
+use libp2p::kad::store::MemoryStore as KadMemoryStore;
+use libp2p::kad::{Behaviour as KadBehaviour, Mode as KadMode};
+use libp2p::{Multiaddr, PeerId as Libp2pPeerId, Stream};
+use libp2p_stream::{Behaviour as StreamBehaviour, Control as StreamControl};
+use tokio::spawn;
+use tokio::sync::{mpsc, oneshot};
+use tracing::{info, trace};
+
 use super::behaviour::{Behaviour, NOTIFY_PROTOCOL, REQUEST_PROTOCOL};
 use super::command::{ClassCommandChannels, SwarmCommand};
 use super::error::NetworkError;
 use crate::config::Libp2pConfig;
-use arc_swap::ArcSwap;
-use dashmap::DashMap;
-use futures::FutureExt;
-use hyperscale_metrics as metrics;
-use hyperscale_network::HandlerRegistry;
-use hyperscale_network::ValidatorKeyMap;
-use hyperscale_types::{Bls12381G2Signature, MessageClass, ShardGroupId, ValidatorId};
-use libp2p::{Multiaddr, PeerId as Libp2pPeerId, Stream, gossipsub, identify, identity, kad};
-use libp2p_stream as stream;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use tokio::sync::mpsc;
-use tracing::{info, trace};
+use crate::validator_bind::spawn_validator_bind_service;
 
 /// libp2p-based network adapter for production use.
 ///
@@ -49,7 +61,7 @@ pub struct Libp2pAdapter {
 
     /// Stream control handle for opening outbound streams.
     /// Cloneable and thread-safe.
-    stream_control: stream::Control,
+    stream_control: StreamControl,
 
     /// Validator BLS public keys for identity verification.
     /// Shared with the validator-bind service; updated on topology changes.
@@ -83,7 +95,7 @@ impl Libp2pAdapter {
     #[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
     pub fn new(
         config: Libp2pConfig,
-        keypair: identity::Keypair,
+        keypair: Keypair,
         validator_id: ValidatorId,
         shard: ShardGroupId,
         registry: Arc<HandlerRegistry>,
@@ -100,9 +112,9 @@ impl Libp2pAdapter {
         );
 
         // Configure gossipsub
-        let gossipsub_config = gossipsub::ConfigBuilder::default()
+        let gossipsub_config = GossipsubConfigBuilder::default()
             .heartbeat_interval(config.gossipsub_heartbeat)
-            .validation_mode(gossipsub::ValidationMode::None)
+            .validation_mode(ValidationMode::None)
             .validate_messages()
             .message_id_fn(|msg| {
                 // Use message data + topic as ID for deduplication.
@@ -113,30 +125,29 @@ impl Libp2pAdapter {
                 msg.data.hash(&mut hasher);
                 msg.topic.hash(&mut hasher);
                 // more efficient than previous .to_string()
-                gossipsub::MessageId::from(hasher.finish().to_le_bytes().to_vec())
+                MessageId::from(hasher.finish().to_le_bytes().to_vec())
             })
             .max_transmit_size(config.max_message_size)
             .build()
             .map_err(|e| NetworkError::NetworkError(e.to_string()))?;
 
-        let gossipsub =
-            gossipsub::Behaviour::new(gossipsub::MessageAuthenticity::Anonymous, gossipsub_config)
-                .map_err(|e| NetworkError::NetworkError(e.to_string()))?;
+        let gossipsub = GossipsubBehaviour::new(MessageAuthenticity::Anonymous, gossipsub_config)
+            .map_err(|e| NetworkError::NetworkError(e.to_string()))?;
 
         // Set up Kademlia DHT for peer discovery
-        let store = kad::store::MemoryStore::new(local_peer_id);
-        let mut kademlia = kad::Behaviour::new(local_peer_id, store);
+        let store = KadMemoryStore::new(local_peer_id);
+        let mut kademlia = KadBehaviour::new(local_peer_id, store);
         // Set to server mode so we can serve routing information to peers
-        kademlia.set_mode(Some(kad::Mode::Server));
+        kademlia.set_mode(Some(KadMode::Server));
 
         // Set up raw stream behaviour for request/response.
         // This replaces request_response - RequestManager owns all timeout logic.
-        let stream_behaviour = stream::Behaviour::new();
+        let stream_behaviour = StreamBehaviour::new();
         let stream_control = stream_behaviour.new_control();
 
         // Connection limits
-        let limits = libp2p::connection_limits::Behaviour::new(
-            libp2p::connection_limits::ConnectionLimits::default()
+        let limits = ConnectionLimitsBehaviour::new(
+            ConnectionLimits::default()
                 .with_max_pending_incoming(Some(10))
                 .with_max_pending_outgoing(Some(10))
                 .with_max_established_incoming(Some(100))
@@ -150,9 +161,9 @@ impl Libp2pAdapter {
         // handled separately by the validator-bind protocol.
         let version = option_env!("HYPERSCALE_VERSION").unwrap_or("localdev");
         let identify_config =
-            identify::Config::new("/hyperscale/1.0.0".to_string(), keypair.public())
+            IdentifyConfig::new("/hyperscale/1.0.0".to_string(), keypair.public())
                 .with_agent_version(format!("hyperscale/{version}"));
-        let identify = identify::Behaviour::new(identify_config);
+        let identify = IdentifyBehaviour::new(identify_config);
 
         // Create behaviour
         let behaviour = Behaviour {
@@ -222,7 +233,7 @@ impl Libp2pAdapter {
 
         // Spawn the validator-bind service. This handles cryptographic
         // ValidatorId ↔ PeerId binding via BLS signatures.
-        let bind_handle = crate::validator_bind::spawn_validator_bind_service(
+        let bind_handle = spawn_validator_bind_service(
             stream_control.clone(),
             validator_peers.clone(),
             validator_id,
@@ -246,7 +257,7 @@ impl Libp2pAdapter {
         let event_loop_validator_peers = validator_peers;
         let bind_trigger_tx = bind_handle.bind_tx.clone();
         let bootstrap_peers = config.bootstrap_peers.clone();
-        tokio::spawn(async move {
+        spawn(async move {
             // Keep bind_handle alive for the lifetime of the event loop.
             let _bind_handle = bind_handle;
 
@@ -329,7 +340,7 @@ impl Libp2pAdapter {
     /// Returns [`NetworkError::NetworkShutdown`] if the swarm task has stopped.
     pub fn publish(
         &self,
-        topic: &hyperscale_network::Topic,
+        topic: &Topic,
         data: Vec<u8>,
         class: MessageClass,
     ) -> Result<(), NetworkError> {
@@ -343,8 +354,8 @@ impl Libp2pAdapter {
             })
             .map_err(|_| NetworkError::NetworkShutdown)?;
 
-        metrics::record_network_message_sent();
-        metrics::record_libp2p_bandwidth(0, data_len as u64);
+        record_network_message_sent();
+        record_libp2p_bandwidth(0, data_len as u64);
 
         trace!(
             topic = %topic,
@@ -395,7 +406,7 @@ impl Libp2pAdapter {
     /// For hot paths like metrics collection in the consensus loop, prefer
     /// `cached_peer_count()` which returns instantly.
     pub async fn connected_peers(&self) -> Vec<Libp2pPeerId> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (tx, rx) = oneshot::channel();
         let cmd = SwarmCommand::GetConnectedPeers { response_tx: tx };
 
         if self.priority_channels.send(cmd).is_err() {
@@ -407,7 +418,7 @@ impl Libp2pAdapter {
 
     /// Get listen addresses.
     pub async fn listen_addresses(&self) -> Vec<Multiaddr> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (tx, rx) = oneshot::channel();
         let cmd = SwarmCommand::GetListenAddresses { response_tx: tx };
 
         if self.priority_channels.send(cmd).is_err() {
@@ -466,7 +477,7 @@ impl Libp2pAdapter {
     ///
     /// This allows external components (like `InboundRouter`) to accept incoming streams.
     #[must_use]
-    pub fn stream_control(&self) -> stream::Control {
+    pub fn stream_control(&self) -> StreamControl {
         self.stream_control.clone()
     }
 }

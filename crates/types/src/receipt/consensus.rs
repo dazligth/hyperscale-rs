@@ -11,11 +11,14 @@
 //! flag and no zero-padded `database_updates`/`application_events` for
 //! failed transactions.
 
+use std::sync::LazyLock;
+
+use sbor::prelude::{BasicSbor, basic_encode};
+
 use crate::{
     ApplicationEvent, DatabaseUpdates, EventRoot, GlobalReceipt, GlobalReceiptHash, Hash,
     WritesRoot, compute_merkle_root,
 };
-use std::sync::LazyLock;
 
 /// Canonical receipt hash for any failed transaction.
 ///
@@ -38,7 +41,7 @@ pub static FAILED_RECEIPT_HASH: LazyLock<GlobalReceiptHash> = LazyLock::new(|| {
 /// (which depends on a `writes_root` derived from globally-filtered
 /// updates not stored here). `Failed` carries no payload — every
 /// failure is consensus-equivalent.
-#[derive(Debug, Clone, PartialEq, Eq, sbor::prelude::BasicSbor)]
+#[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
 pub enum ConsensusReceipt {
     /// Engine committed the tx; carries the precomputed receipt hash and
     /// the writes/events the local shard needs.
@@ -116,8 +119,7 @@ impl ConsensusReceipt {
             }
             Self::Failed => ([0u8], Hash::ZERO, DatabaseUpdates::default()),
         };
-        let updates_bytes =
-            sbor::prelude::basic_encode(&database_updates).expect("encode should not fail");
+        let updates_bytes = basic_encode(&database_updates).expect("encode should not fail");
         let updates_hash = Hash::from_bytes(&updates_bytes);
         Hash::from_parts(&[
             &outcome_byte,

@@ -1,12 +1,19 @@
 //! [`FinalizedWave`] — wave certificate plus locally-executed receipts, with
 //! reconstruction, validation, and `Vec<Arc<FinalizedWave>>` SBOR helpers.
 
+use std::collections::HashSet;
+use std::sync::Arc;
+
+use sbor::prelude::*;
+use sbor::{
+    Categorize, Decode, DecodeError, Decoder, Describe, Encode, EncodeError, Encoder,
+    NoCustomTypeKind, NoCustomValueKind, RustTypeId, TypeData, TypeKind, ValueKind,
+};
+
 use crate::{
     ConsensusReceipt, ExecutionCertificate, ExecutionOutcome, GlobalReceiptHash, StoredReceipt,
     TransactionDecision, TxHash, WaveCertificate, WaveId,
 };
-use sbor::prelude::*;
-use std::sync::Arc;
 
 /// A finalized wave — all participating shards have reported, `WaveCertificate` created.
 ///
@@ -127,7 +134,7 @@ impl FinalizedWave {
     /// Iterator over each receipt's consensus payload, in canonical
     /// block order. Used by pending-chain insertion and local-receipt
     /// root verification.
-    pub fn consensus_receipts(&self) -> impl Iterator<Item = Arc<crate::ConsensusReceipt>> + '_ {
+    pub fn consensus_receipts(&self) -> impl Iterator<Item = Arc<ConsensusReceipt>> + '_ {
         self.receipts.iter().map(|r| Arc::clone(&r.consensus))
     }
 
@@ -269,8 +276,8 @@ impl FinalizedWave {
     /// Iteration order follows the local EC's canonical (block) order.
     #[must_use]
     pub fn tx_decisions(&self) -> Vec<(TxHash, TransactionDecision)> {
-        let mut aborted: std::collections::HashSet<TxHash> = std::collections::HashSet::new();
-        let mut failure: std::collections::HashSet<TxHash> = std::collections::HashSet::new();
+        let mut aborted: HashSet<TxHash> = HashSet::new();
+        let mut failure: HashSet<TxHash> = HashSet::new();
         for ec in &self.certificate.execution_certificates {
             for outcome in &ec.tx_outcomes {
                 if outcome.is_aborted() {
@@ -299,14 +306,12 @@ impl FinalizedWave {
 // Manual SBOR implementation for FinalizedWave (Arc fields prevent BasicSbor derive).
 // Encodes Arc<T> as T, decodes T and wraps in Arc.
 
-impl<E: sbor::Encoder<sbor::NoCustomValueKind>> sbor::Encode<sbor::NoCustomValueKind, E>
-    for FinalizedWave
-{
-    fn encode_value_kind(&self, encoder: &mut E) -> Result<(), sbor::EncodeError> {
-        encoder.write_value_kind(sbor::ValueKind::Tuple)
+impl<E: Encoder<NoCustomValueKind>> Encode<NoCustomValueKind, E> for FinalizedWave {
+    fn encode_value_kind(&self, encoder: &mut E) -> Result<(), EncodeError> {
+        encoder.write_value_kind(ValueKind::Tuple)
     }
 
-    fn encode_body(&self, encoder: &mut E) -> Result<(), sbor::EncodeError> {
+    fn encode_body(&self, encoder: &mut E) -> Result<(), EncodeError> {
         encoder.write_size(2)?;
         encoder.encode(self.certificate.as_ref())?;
         encoder.encode(&self.receipts)?;
@@ -314,17 +319,15 @@ impl<E: sbor::Encoder<sbor::NoCustomValueKind>> sbor::Encode<sbor::NoCustomValue
     }
 }
 
-impl<D: sbor::Decoder<sbor::NoCustomValueKind>> sbor::Decode<sbor::NoCustomValueKind, D>
-    for FinalizedWave
-{
+impl<D: Decoder<NoCustomValueKind>> Decode<NoCustomValueKind, D> for FinalizedWave {
     fn decode_body_with_value_kind(
         decoder: &mut D,
-        value_kind: sbor::ValueKind<sbor::NoCustomValueKind>,
-    ) -> Result<Self, sbor::DecodeError> {
-        decoder.check_preloaded_value_kind(value_kind, sbor::ValueKind::Tuple)?;
+        value_kind: ValueKind<NoCustomValueKind>,
+    ) -> Result<Self, DecodeError> {
+        decoder.check_preloaded_value_kind(value_kind, ValueKind::Tuple)?;
         let length = decoder.read_size()?;
         if length != 2 {
-            return Err(sbor::DecodeError::UnexpectedSize {
+            return Err(DecodeError::UnexpectedSize {
                 expected: 2,
                 actual: length,
             });
@@ -338,17 +341,17 @@ impl<D: sbor::Decoder<sbor::NoCustomValueKind>> sbor::Decode<sbor::NoCustomValue
     }
 }
 
-impl sbor::Categorize<sbor::NoCustomValueKind> for FinalizedWave {
-    fn value_kind() -> sbor::ValueKind<sbor::NoCustomValueKind> {
-        sbor::ValueKind::Tuple
+impl Categorize<NoCustomValueKind> for FinalizedWave {
+    fn value_kind() -> ValueKind<NoCustomValueKind> {
+        ValueKind::Tuple
     }
 }
 
-impl sbor::Describe<sbor::NoCustomTypeKind> for FinalizedWave {
-    const TYPE_ID: sbor::RustTypeId = sbor::RustTypeId::novel_with_code("FinalizedWave", &[], &[]);
+impl Describe<NoCustomTypeKind> for FinalizedWave {
+    const TYPE_ID: RustTypeId = RustTypeId::novel_with_code("FinalizedWave", &[], &[]);
 
-    fn type_data() -> sbor::TypeData<sbor::NoCustomTypeKind, sbor::RustTypeId> {
-        sbor::TypeData::unnamed(sbor::TypeKind::Any)
+    fn type_data() -> TypeData<NoCustomTypeKind, RustTypeId> {
+        TypeData::unnamed(TypeKind::Any)
     }
 }
 
@@ -356,13 +359,13 @@ impl sbor::Describe<sbor::NoCustomTypeKind> for FinalizedWave {
 ///
 /// # Errors
 ///
-/// Forwards [`sbor::EncodeError`] from the underlying encoder.
-pub fn encode_finalized_wave_vec<E: sbor::Encoder<sbor::NoCustomValueKind>>(
+/// Forwards [`EncodeError`] from the underlying encoder.
+pub fn encode_finalized_wave_vec<E: Encoder<NoCustomValueKind>>(
     encoder: &mut E,
     waves: &[Arc<FinalizedWave>],
-) -> Result<(), sbor::EncodeError> {
-    encoder.write_value_kind(sbor::ValueKind::Array)?;
-    encoder.write_value_kind(sbor::ValueKind::Tuple)?;
+) -> Result<(), EncodeError> {
+    encoder.write_value_kind(ValueKind::Array)?;
+    encoder.write_value_kind(ValueKind::Tuple)?;
     encoder.write_size(waves.len())?;
     for wave in waves {
         encoder.encode_deeper_body(wave.as_ref())?;
@@ -374,26 +377,25 @@ pub fn encode_finalized_wave_vec<E: sbor::Encoder<sbor::NoCustomValueKind>>(
 ///
 /// # Errors
 ///
-/// Returns [`sbor::DecodeError::UnexpectedSize`] if the encoded count
+/// Returns [`DecodeError::UnexpectedSize`] if the encoded count
 /// exceeds `max_size`, or any decoder error from reading individual
 /// finalized waves.
-pub fn decode_finalized_wave_vec<D: sbor::Decoder<sbor::NoCustomValueKind>>(
+pub fn decode_finalized_wave_vec<D: Decoder<NoCustomValueKind>>(
     decoder: &mut D,
     max_size: usize,
-) -> Result<Vec<Arc<FinalizedWave>>, sbor::DecodeError> {
-    decoder.read_and_check_value_kind(sbor::ValueKind::Array)?;
-    decoder.read_and_check_value_kind(sbor::ValueKind::Tuple)?;
+) -> Result<Vec<Arc<FinalizedWave>>, DecodeError> {
+    decoder.read_and_check_value_kind(ValueKind::Array)?;
+    decoder.read_and_check_value_kind(ValueKind::Tuple)?;
     let count = decoder.read_size()?;
     if count > max_size {
-        return Err(sbor::DecodeError::UnexpectedSize {
+        return Err(DecodeError::UnexpectedSize {
             expected: max_size,
             actual: count,
         });
     }
     let mut waves = Vec::with_capacity(count);
     for _ in 0..count {
-        let wave: FinalizedWave =
-            decoder.decode_deeper_body_with_value_kind(sbor::ValueKind::Tuple)?;
+        let wave: FinalizedWave = decoder.decode_deeper_body_with_value_kind(ValueKind::Tuple)?;
         waves.push(Arc::new(wave));
     }
     Ok(waves)

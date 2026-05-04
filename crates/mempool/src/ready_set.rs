@@ -15,11 +15,13 @@
 //! - `txs_deferred_by_node`: node → deferred hashes blocked by it.
 //! - `deferred_by_nodes`: hash → set of nodes blocking it.
 
-use crate::lock_tracker::LockTracker;
-use hyperscale_types::{LocalTimestamp, NodeId, RoutableTransaction, TxHash};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
+
+use hyperscale_types::{LocalTimestamp, NodeId, RoutableTransaction, TxHash};
+
+use crate::lock_tracker::LockTracker;
 
 struct ReadyEntry {
     tx: Arc<RoutableTransaction>,
@@ -200,8 +202,9 @@ impl ReadySet {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use hyperscale_types::test_utils::{test_node, test_transaction_with_nodes};
+
+    use super::*;
 
     fn tx_with(seed: u8, nodes: &[u8]) -> (TxHash, Arc<RoutableTransaction>) {
         let nodes: Vec<_> = nodes.iter().map(|n| test_node(*n)).collect();

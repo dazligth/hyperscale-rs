@@ -17,13 +17,14 @@
 //! we have enough voting power for quorum. This avoids wasting CPU on votes
 //! we'll never use.
 
+use std::collections::{BTreeMap, HashSet};
+
 #[cfg(test)]
 use hyperscale_types::Hash;
 use hyperscale_types::{
     BlockHash, Bls12381G1PublicKey, ExecutionVote, GlobalReceiptRoot, ValidatorId, WaveId,
     WeightedTimestamp,
 };
-use std::collections::{BTreeMap, HashSet};
 
 /// Key for grouping votes: `(global_receipt_root, vote_anchor_ts)`.
 ///
@@ -247,9 +248,11 @@ impl VoteTracker {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use hyperscale_types::{BlockHeight, ShardGroupId, generate_bls_keypair, zero_bls_signature};
     use std::collections::BTreeSet;
+
+    use hyperscale_types::{BlockHeight, ShardGroupId, generate_bls_keypair, zero_bls_signature};
+
+    use super::*;
 
     fn make_test_public_key() -> Bls12381G1PublicKey {
         generate_bls_keypair().public_key()

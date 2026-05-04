@@ -1,8 +1,9 @@
 //! Execution certificate fetch request for fallback recovery.
 
-use crate::response::GetExecutionCertsResponse;
 use hyperscale_types::{MessageClass, NetworkMessage, Request, WaveId};
 use sbor::prelude::BasicSbor;
+
+use crate::response::GetExecutionCertsResponse;
 
 /// Request to fetch missing execution certificates from a source shard.
 ///
@@ -34,9 +35,12 @@ impl Request for GetExecutionCertsRequest {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use hyperscale_types::{BlockHeight, ShardGroupId};
     use std::collections::BTreeSet;
+
+    use hyperscale_types::{BlockHeight, ShardGroupId};
+    use sbor::{basic_decode, basic_encode};
+
+    use super::*;
 
     #[test]
     fn test_sbor_roundtrip() {
@@ -48,8 +52,8 @@ mod tests {
             )],
         };
 
-        let encoded = sbor::basic_encode(&request).unwrap();
-        let decoded: GetExecutionCertsRequest = sbor::basic_decode(&encoded).unwrap();
+        let encoded = basic_encode(&request).unwrap();
+        let decoded: GetExecutionCertsRequest = basic_decode(&encoded).unwrap();
         assert_eq!(request, decoded);
     }
 }

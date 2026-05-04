@@ -10,9 +10,12 @@
 //! ensuring even distribution across `RocksDB`'s key space. The `partition_num` and
 //! `sort_key` are appended directly, preserving lexicographic ordering for prefix scans.
 
-use crate::typed_cf::DbCodec;
-use radix_substate_store_interface::db_key_mapper::DatabaseKeyMapper;
+use hyperscale_types::NodeId;
+use radix_common::types::NodeId as RadixNodeId;
+use radix_substate_store_interface::db_key_mapper::{DatabaseKeyMapper, SpreadPrefixKeyMapper};
 use radix_substate_store_interface::interface::{DbPartitionKey, DbSortKey};
+
+use crate::typed_cf::DbCodec;
 
 /// Codec for composite substate keys: `node_key ++ partition_num ++ sort_key`.
 #[derive(Default)]
@@ -62,15 +65,13 @@ pub fn substate_prefix(partition_key: &DbPartitionKey, sort_key: &DbSortKey) -> 
 ///
 /// This is the hash-spread 50-byte representation of the `NodeId` (same as
 /// `node_entity_key` — the entity prefix IS the node prefix).
-pub fn node_prefix(node_id: &hyperscale_types::NodeId) -> Vec<u8> {
-    let radix_node_id = radix_common::types::NodeId(node_id.0);
-    radix_substate_store_interface::db_key_mapper::SpreadPrefixKeyMapper::to_db_node_key(
-        &radix_node_id,
-    )
+pub fn node_prefix(node_id: &NodeId) -> Vec<u8> {
+    let radix_node_id = RadixNodeId(node_id.0);
+    SpreadPrefixKeyMapper::to_db_node_key(&radix_node_id)
 }
 
 /// Get the entity key (`db_node_key`) for a `NodeId`. Same as `node_prefix`.
-pub fn node_entity_key(node_id: &hyperscale_types::NodeId) -> Vec<u8> {
+pub fn node_entity_key(node_id: &NodeId) -> Vec<u8> {
     node_prefix(node_id)
 }
 

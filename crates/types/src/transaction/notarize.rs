@@ -1,15 +1,16 @@
 //! Helpers for signing and notarizing a Radix `TransactionManifestV1`.
 
-use crate::TransactionError;
-use radix_common::crypto::IsHash;
+use radix_common::crypto::{Ed25519PrivateKey, IsHash, PublicKey};
 use radix_common::network::NetworkDefinition;
 use radix_common::prelude::Epoch;
 use radix_transactions::model::{
     HasSignedTransactionIntentHash, HasTransactionIntentHash, IntentSignatureV1,
-    IntentSignaturesV1, IntentV1, NotarizedTransactionV1, NotarySignatureV1, SignatureV1,
-    SignatureWithPublicKeyV1, SignedIntentV1, TransactionHeaderV1, TransactionPayload,
+    IntentSignaturesV1, IntentV1, MessageV1, NotarizedTransactionV1, NotarySignatureV1,
+    SignatureV1, SignatureWithPublicKeyV1, SignedIntentV1, TransactionHeaderV1, TransactionPayload,
 };
 use radix_transactions::prelude::{PreparationSettings, TransactionManifestV1};
+
+use crate::TransactionError;
 
 /// Sign and notarize a transaction manifest.
 ///
@@ -33,7 +34,7 @@ pub fn sign_and_notarize(
     manifest: TransactionManifestV1,
     network: &NetworkDefinition,
     nonce: u32,
-    signer: &crate::Ed25519PrivateKey,
+    signer: &Ed25519PrivateKey,
 ) -> Result<NotarizedTransactionV1, TransactionError> {
     sign_and_notarize_with_options(
         manifest,
@@ -63,10 +64,10 @@ pub fn sign_and_notarize_with_options(
     tip_percentage: u16,
     start_epoch: Epoch,
     end_epoch: Epoch,
-    signer: &crate::Ed25519PrivateKey,
+    signer: &Ed25519PrivateKey,
 ) -> Result<NotarizedTransactionV1, TransactionError> {
     let (instructions, blobs) = manifest.for_intent();
-    let notary_public_key = radix_common::crypto::PublicKey::Ed25519(signer.public_key());
+    let notary_public_key = PublicKey::Ed25519(signer.public_key());
 
     let intent = IntentV1 {
         header: TransactionHeaderV1 {
@@ -80,7 +81,7 @@ pub fn sign_and_notarize_with_options(
         },
         instructions,
         blobs,
-        message: radix_transactions::prelude::MessageV1::None,
+        message: MessageV1::None,
     };
 
     // Prepare and sign the intent

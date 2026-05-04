@@ -4,17 +4,29 @@
 //! algorithms, separated from dispatch (thread pool vs inline) and result
 //! delivery (channel vs event queue) concerns.
 
-use hyperscale_storage::{ChainWriter, SubstateStore};
+use std::sync::Arc;
+
+use hyperscale_core::{
+    Action, ActionContext, NodeInput, PreparedBlock, ProtocolEvent, VerificationKind,
+};
+use hyperscale_engine::Engine;
+use hyperscale_messages::{
+    BlockHeaderNotification, BlockVoteNotification, CommittedBlockHeaderGossip,
+};
+use hyperscale_metrics::record_signature_verification_latency;
+use hyperscale_network::Network;
+use hyperscale_storage::{ChainWriter, JmtSnapshot, Storage, SubstateStore};
 use hyperscale_types::{
     Block, BlockHash, BlockHeader, BlockHeight, BlockVote, Bls12381G1PublicKey,
-    Bls12381G2Signature, CertificateRoot, FinalizedWave, Hash, LocalReceiptRoot, ProposerTimestamp,
-    ProvisionHash, ProvisionTxRoot, ProvisionsRoot, QuorumCertificate, Round, RoutableTransaction,
-    ShardGroupId, SignerBitfield, StateRoot, StoredReceipt, TopologySnapshot, TransactionRoot,
-    ValidatorId, VotePower, WeightedTimestamp, batch_verify_bls_same_message,
-    compute_certificate_root, compute_local_receipt_root, compute_provision_root,
-    compute_provision_tx_roots, compute_transaction_root, compute_waves, verify_bls12381_v1,
+    Bls12381G2Signature, CertificateRoot, ConsensusReceipt, FinalizedWave, Hash, LocalReceiptRoot,
+    ProposerTimestamp, ProvisionHash, ProvisionTxRoot, Provisions, ProvisionsRoot,
+    QuorumCertificate, Round, RoutableTransaction, ShardGroupId, SignerBitfield, StateRoot,
+    StoredReceipt, TopologySnapshot, TransactionRoot, ValidatorId, VotePower, WeightedTimestamp,
+    batch_verify_bls_same_message, block_header_message, block_vote_message,
+    committed_block_header_message, compute_certificate_root, compute_local_receipt_root,
+    compute_provision_root, compute_provision_tx_roots, compute_transaction_root, compute_waves,
+    verify_bls12381_v1,
 };
-use std::sync::Arc;
 
 /// Result of QC verification and assembly.
 pub struct QcVerificationResult {
@@ -50,8 +62,7 @@ pub fn verify_and_build_qc(
     already_verified: Vec<(usize, BlockVote, u64)>,
     total_voting_power: u64,
 ) -> QcVerificationResult {
-    let signing_message =
-        hyperscale_types::block_vote_message(shard_group_id, height, round, &block_hash);
+    let signing_message = block_vote_message(shard_group_id, height, round, &block_hash);
 
     let all_verified = verify_vote_batch(
         block_hash,
@@ -387,7 +398,7 @@ pub fn verify_state_root<S: ChainWriter + SubstateStore>(
     expected_root: StateRoot,
     finalized_waves: &[Arc<FinalizedWave>],
     block_height: BlockHeight,
-    pending_snapshots: &[Arc<hyperscale_storage::JmtSnapshot>],
+    pending_snapshots: &[Arc<JmtSnapshot>],
 ) -> StateRootResult<S::PreparedCommit> {
     // Use the stable parent_block_height from the verification pipeline, not
     // storage.jmt_height() which is racy — by the time this runs on the
@@ -461,10 +472,10 @@ pub fn build_proposal<S: ChainWriter + SubstateStore>(
     certificates: Vec<Arc<FinalizedWave>>,
     local_shard: ShardGroupId,
     topology: &TopologySnapshot,
-    provisions: Vec<Arc<hyperscale_types::Provisions>>,
+    provisions: Vec<Arc<Provisions>>,
     parent_in_flight: u32,
     finalized_tx_count: u32,
-    pending_snapshots: &[Arc<hyperscale_storage::JmtSnapshot>],
+    pending_snapshots: &[Arc<JmtSnapshot>],
 ) -> ProposalResult<S::PreparedCommit> {
     let (state_root, prepared) = storage.prepare_block_commit(
         parent_state_root,
@@ -533,9 +544,7 @@ pub fn build_proposal<S: ChainWriter + SubstateStore>(
     }
 }
 
-fn collect_finalized_receipts(
-    waves: &[Arc<FinalizedWave>],
-) -> Vec<Arc<hyperscale_types::ConsensusReceipt>> {
+fn collect_finalized_receipts(waves: &[Arc<FinalizedWave>]) -> Vec<Arc<ConsensusReceipt>> {
     waves
         .iter()
         .flat_map(|fw| fw.consensus_receipts())
@@ -549,17 +558,12 @@ fn collect_finalized_receipts(
 /// owned by other coordinator crates hit `unreachable!()` — the caller
 /// (node's dispatcher) routes by variant prefix.
 #[allow(clippy::too_many_lines)] // single dispatch over BFT-owned Action variants
-pub fn handle_action<S, E, N>(
-    action: hyperscale_core::Action,
-    ctx: &hyperscale_core::ActionContext<'_, S, E, N>,
-) where
-    S: hyperscale_storage::Storage,
-    E: hyperscale_engine::Engine,
-    N: hyperscale_network::Network,
+pub fn handle_action<S, E, N>(action: Action, ctx: &ActionContext<'_, S, E, N>)
+where
+    S: Storage,
+    E: Engine,
+    N: Network,
 {
-    use hyperscale_core::{Action, NodeInput, PreparedBlock, ProtocolEvent, VerificationKind};
-    use hyperscale_metrics as metrics;
-
     match action {
         Action::VerifyAndBuildQuorumCertificate {
             block_hash,
@@ -584,7 +588,7 @@ pub fn handle_action<S, E, N>(
                 verified_votes,
                 total_voting_power,
             );
-            metrics::record_signature_verification_latency("vote", start.elapsed().as_secs_f64());
+            record_signature_verification_latency("vote", start.elapsed().as_secs_f64());
             (ctx.notify)(NodeInput::Protocol(Box::new(
                 ProtocolEvent::QuorumCertificateResult {
                     block_hash: result.block_hash,
@@ -601,7 +605,7 @@ pub fn handle_action<S, E, N>(
         } => {
             let start = std::time::Instant::now();
             let valid = verify_qc_signature(&qc, &public_keys);
-            metrics::record_signature_verification_latency("qc", start.elapsed().as_secs_f64());
+            record_signature_verification_latency("qc", start.elapsed().as_secs_f64());
             (ctx.notify)(NodeInput::Protocol(Box::new(
                 ProtocolEvent::QcSignatureVerified { block_hash, valid },
             )));
@@ -629,7 +633,7 @@ pub fn handle_action<S, E, N>(
             } else {
                 false
             };
-            metrics::record_signature_verification_latency(
+            record_signature_verification_latency(
                 "remote_header_qc",
                 start.elapsed().as_secs_f64(),
             );
@@ -651,7 +655,7 @@ pub fn handle_action<S, E, N>(
         } => {
             let start = std::time::Instant::now();
             let valid = verify_transaction_root(expected_root, &transactions, validity_anchor);
-            metrics::record_signature_verification_latency(
+            record_signature_verification_latency(
                 "transaction_root",
                 start.elapsed().as_secs_f64(),
             );
@@ -672,7 +676,7 @@ pub fn handle_action<S, E, N>(
         } => {
             let start = std::time::Instant::now();
             let valid = verify_provision_tx_roots(&expected, &transactions, &topology_snapshot);
-            metrics::record_signature_verification_latency(
+            record_signature_verification_latency(
                 "provision_tx_roots",
                 start.elapsed().as_secs_f64(),
             );
@@ -693,10 +697,7 @@ pub fn handle_action<S, E, N>(
             let start = std::time::Instant::now();
             let raw_batch_hashes: Vec<Hash> = batch_hashes.iter().map(|h| h.into_raw()).collect();
             let valid = verify_provision_root(expected_root, &raw_batch_hashes);
-            metrics::record_signature_verification_latency(
-                "provision_root",
-                start.elapsed().as_secs_f64(),
-            );
+            record_signature_verification_latency("provision_root", start.elapsed().as_secs_f64());
             (ctx.notify)(NodeInput::Protocol(Box::new(
                 ProtocolEvent::BlockRootVerified {
                     kind: VerificationKind::ProvisionRoot,
@@ -713,7 +714,7 @@ pub fn handle_action<S, E, N>(
         } => {
             let start = std::time::Instant::now();
             let valid = verify_certificate_root(expected_root, &certificates);
-            metrics::record_signature_verification_latency(
+            record_signature_verification_latency(
                 "certificate_root",
                 start.elapsed().as_secs_f64(),
             );
@@ -750,7 +751,7 @@ pub fn handle_action<S, E, N>(
             let receipt_start = std::time::Instant::now();
             let receipt_root_valid =
                 verify_local_receipt_root(expected_local_receipt_root, &stored_receipts);
-            metrics::record_signature_verification_latency(
+            record_signature_verification_latency(
                 "local_receipt_root",
                 receipt_start.elapsed().as_secs_f64(),
             );
@@ -785,10 +786,7 @@ pub fn handle_action<S, E, N>(
                 block_height,
                 &pending_snapshots,
             );
-            metrics::record_signature_verification_latency(
-                "state_root",
-                start.elapsed().as_secs_f64(),
-            );
+            record_signature_verification_latency("state_root", start.elapsed().as_secs_f64());
             if let Some(prepared) = result.prepared_commit {
                 (ctx.commit_prepared)(PreparedBlock {
                     block_hash,
@@ -871,14 +869,14 @@ pub fn handle_action<S, E, N>(
         // ── Sign + broadcast actions ──────────────────────────────────────
         Action::BroadcastBlockHeader { header, manifest } => {
             let block_hash = header.hash();
-            let msg = hyperscale_types::block_header_message(
+            let msg = block_header_message(
                 header.shard_group_id,
                 header.height,
                 header.round,
                 &block_hash,
             );
             let sig = ctx.signing_key.sign_v1(&msg);
-            let gossip = hyperscale_messages::BlockHeaderNotification::new(*header, *manifest, sig);
+            let gossip = BlockHeaderNotification::new(*header, *manifest, sig);
             let local_peers: Vec<ValidatorId> = ctx
                 .topology_snapshot
                 .committee_for_shard(ctx.topology_snapshot.local_shard())
@@ -905,7 +903,7 @@ pub fn handle_action<S, E, N>(
                 ctx.signing_key,
                 timestamp,
             );
-            let gossip = hyperscale_messages::BlockVoteNotification { vote: vote.clone() };
+            let gossip = BlockVoteNotification { vote: vote.clone() };
             ctx.network.notify(&next_proposers, &gossip);
             // Feed our own signed vote back for local VoteSet tracking.
             (ctx.notify)(NodeInput::Protocol(Box::new(
@@ -914,13 +912,13 @@ pub fn handle_action<S, E, N>(
         }
 
         Action::BroadcastCommittedBlockHeader { committed_header } => {
-            let msg = hyperscale_types::committed_block_header_message(
+            let msg = committed_block_header_message(
                 committed_header.header.shard_group_id,
                 committed_header.header.height,
                 &committed_header.header.hash(),
             );
             let sig = ctx.signing_key.sign_v1(&msg);
-            let gossip = hyperscale_messages::CommittedBlockHeaderGossip {
+            let gossip = CommittedBlockHeaderGossip {
                 committed_header,
                 sender: ctx.topology_snapshot.local_validator_id(),
                 sender_signature: sig,
@@ -934,12 +932,14 @@ pub fn handle_action<S, E, N>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use hyperscale_types::test_utils::test_notarized_transaction_v1;
     use hyperscale_types::{
-        Bls12381G1PrivateKey, ProposerTimestamp, StoredReceipt, compute_certificate_root,
-        compute_local_receipt_root, compute_provision_root, compute_transaction_root,
-        generate_bls_keypair,
+        Bls12381G1PrivateKey, ProposerTimestamp, StoredReceipt, TimestampRange,
+        compute_certificate_root, compute_local_receipt_root, compute_provision_root,
+        compute_transaction_root, generate_bls_keypair, routable_from_notarized_v1,
     };
+
+    use super::*;
 
     fn shard() -> ShardGroupId {
         ShardGroupId(0)
@@ -986,7 +986,7 @@ mod tests {
         let block_hash = BlockHash::from_raw(Hash::from_bytes(b"b1"));
         let height = BlockHeight(1);
         let round = Round::INITIAL;
-        let msg = hyperscale_types::block_vote_message(shard(), height, round, &block_hash);
+        let msg = block_vote_message(shard(), height, round, &block_hash);
 
         let to_verify: Vec<_> = (0..3)
             .map(|i| {
@@ -1005,7 +1005,7 @@ mod tests {
         let block_hash = BlockHash::from_raw(Hash::from_bytes(b"b1"));
         let height = BlockHeight(1);
         let round = Round::INITIAL;
-        let msg = hyperscale_types::block_vote_message(shard(), height, round, &block_hash);
+        let msg = block_vote_message(shard(), height, round, &block_hash);
 
         // Vote 1's signature is replaced by a signature over a different block.
         let other_hash = BlockHash::from_raw(Hash::from_bytes(b"other"));
@@ -1328,8 +1328,6 @@ mod tests {
 
     #[test]
     fn verify_transaction_root_rejects_expired_tx() {
-        use hyperscale_types::test_utils::test_notarized_transaction_v1;
-        use hyperscale_types::{TimestampRange, routable_from_notarized_v1};
         use std::time::Duration;
 
         let anchor = WeightedTimestamp::from_millis(100_000);
@@ -1362,8 +1360,6 @@ mod tests {
 
     #[test]
     fn verify_transaction_root_rejects_malformed_range() {
-        use hyperscale_types::test_utils::test_notarized_transaction_v1;
-        use hyperscale_types::{TimestampRange, routable_from_notarized_v1};
         use std::time::Duration;
 
         let anchor = WeightedTimestamp::from_millis(1_000);

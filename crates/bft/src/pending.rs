@@ -2,6 +2,10 @@
 //!
 //! Tracks blocks being assembled from headers + gossiped transactions + finalized waves.
 
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
+use std::time::Duration;
+
 use hyperscale_core::{Action, FetchOrigin, FetchPeers, FetchRequest};
 #[cfg(test)]
 use hyperscale_types::Hash;
@@ -9,9 +13,6 @@ use hyperscale_types::{
     Block, BlockHash, BlockHeader, BlockManifest, FinalizedWave, LocalTimestamp, ProvisionHash,
     Provisions, RoutableTransaction, TopologySnapshot, TxHash, WaveId,
 };
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::Arc;
-use std::time::Duration;
 use tracing::debug;
 
 /// Tracks a block being assembled from header + gossiped transactions + finalized waves.
@@ -409,12 +410,16 @@ pub fn check_fetches(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use hyperscale_types::{
-        BlockHeight, CertificateRoot, LocalReceiptRoot, ProvisionsRoot, QuorumCertificate, Round,
-        ShardGroupId, StateRoot, TransactionRoot, ValidatorId,
-    };
     use std::collections::BTreeSet;
+
+    use hyperscale_types::test_utils::test_transaction;
+    use hyperscale_types::{
+        Block, BlockHeight, CertificateRoot, LocalReceiptRoot, ProposerTimestamp, ProvisionsRoot,
+        QuorumCertificate, Round, ShardGroupId, StateRoot, TransactionRoot, ValidatorId,
+        WaveCertificate, WaveId,
+    };
+
+    use super::*;
 
     fn make_header(height: BlockHeight) -> BlockHeader {
         BlockHeader {
@@ -423,7 +428,7 @@ mod tests {
             parent_block_hash: BlockHash::from_raw(Hash::from_bytes(b"parent")),
             parent_qc: QuorumCertificate::genesis(),
             proposer: ValidatorId(0),
-            timestamp: hyperscale_types::ProposerTimestamp(1_234_567_890),
+            timestamp: ProposerTimestamp(1_234_567_890),
             round: Round::INITIAL,
             is_fallback: false,
             state_root: StateRoot::ZERO,
@@ -494,8 +499,6 @@ mod tests {
 
     #[test]
     fn test_add_finalized_wave() {
-        use hyperscale_types::{BlockHeight, WaveCertificate, WaveId};
-
         let wave_id = WaveId::new(ShardGroupId(0), BlockHeight(1), BTreeSet::new());
         let header = make_header(BlockHeight(1));
 
@@ -527,10 +530,6 @@ mod tests {
 
     #[test]
     fn test_block_needs_transactions_and_waves() {
-        use hyperscale_types::{
-            BlockHeight, WaveCertificate, WaveId, test_utils::test_transaction,
-        };
-
         let tx = Arc::new(test_transaction(1));
         let tx_hash = tx.hash();
         let wave_id = WaveId::new(ShardGroupId(0), BlockHeight(1), BTreeSet::new());
@@ -567,8 +566,6 @@ mod tests {
 
     #[test]
     fn test_from_complete_block_is_complete() {
-        use hyperscale_types::{Block, BlockHeight, WaveCertificate, WaveId};
-
         let wave_id = WaveId::new(ShardGroupId(0), BlockHeight(1), BTreeSet::new());
         let cert = Arc::new(WaveCertificate {
             wave_id,

@@ -11,10 +11,11 @@
 //! coordinator's `on_block_committed` and `drop_past_deadline`. Pure
 //! data structures here — no topology, no time source.
 
-use hyperscale_types::{LocalTimestamp, ProvisionHash, Provisions, WeightedTimestamp};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
+
+use hyperscale_types::{LocalTimestamp, ProvisionHash, Provisions, WeightedTimestamp};
 
 /// A queued provisions entry awaiting block inclusion. `added_at` drives
 /// dwell-time filtering; `source_block_ts` anchors deadline-based eviction
@@ -97,10 +98,11 @@ impl QueuedProvisionBuffer {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use hyperscale_types::{
         BlockHeight, Hash, MerkleInclusionProof, ShardGroupId, TxEntries, TxHash,
     };
+
+    use super::*;
 
     fn ts(ms: u64) -> WeightedTimestamp {
         WeightedTimestamp::from_millis(ms)

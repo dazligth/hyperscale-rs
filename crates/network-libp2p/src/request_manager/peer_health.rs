@@ -19,9 +19,11 @@
 //! }
 //! ```
 
+use std::time::{Duration, Instant};
+
 use dashmap::DashMap;
 use libp2p::PeerId;
-use std::time::{Duration, Instant};
+use rand::{RngExt, rng};
 
 /// Health metrics for a single peer.
 #[derive(Debug, Clone)]
@@ -233,7 +235,6 @@ impl PeerHealthTracker {
     /// This ensures requests never fail with "no peers" when peers exist.
     #[must_use]
     pub fn select_peer(&self, candidates: &[PeerId]) -> Option<PeerId> {
-        use rand::RngExt;
         if candidates.is_empty() {
             return None;
         }
@@ -262,7 +263,7 @@ impl PeerHealthTracker {
         }
 
         // Use thread-local RNG for efficiency
-        let mut rng = rand::rng();
+        let mut rng = rng();
         let mut target: f64 = rng.random_range(0.0..total_weight);
 
         for (peer, weight) in weights {

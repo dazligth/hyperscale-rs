@@ -11,12 +11,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hyperscale_core::NodeInput;
+use hyperscale_metrics::{MetricsRecorder, with_scoped_recorder};
 use hyperscale_metrics_memory::MemoryRecorder;
 use hyperscale_network_memory::{NetworkConfig, RuleHandle};
 use hyperscale_simulation::SimulationRunner;
 use hyperscale_types::test_utils::test_validity_range;
 use hyperscale_types::{
-    BlockHeight, Ed25519PrivateKey, NodeId, RoutableTransaction, ShardGroupId,
+    BlockHeight, Ed25519PrivateKey, NodeId, RoutableTransaction, ShardGroupId, TxHash,
     ed25519_keypair_from_seed, routable_from_notarized_v1, shard_for_node, sign_and_notarize,
 };
 use radix_common::constants::XRD;
@@ -33,8 +34,8 @@ use tracing_test::traced_test;
 /// with the default parallelism.
 fn with_test_recorder<R>(f: impl FnOnce(&MemoryRecorder) -> R) -> R {
     let recorder = MemoryRecorder::new();
-    let arc: Arc<dyn hyperscale_metrics::MetricsRecorder> = Arc::new(recorder.clone());
-    hyperscale_metrics::with_scoped_recorder(arc, || f(&recorder))
+    let arc: Arc<dyn MetricsRecorder> = Arc::new(recorder.clone());
+    with_scoped_recorder(arc, || f(&recorder))
 }
 
 fn single_shard_config() -> NetworkConfig {
@@ -124,11 +125,7 @@ fn build_transfer_tx(signer_seed: u8, recipient_seed: u8) -> RoutableTransaction
 /// (executed or tombstoned post-eviction). Does not distinguish between
 /// success and abort — pair with `transactions_aborted` counter when the
 /// distinction matters.
-fn tx_reached_terminal_state(
-    runner: &SimulationRunner,
-    node_idx: u32,
-    tx_hash: &hyperscale_types::TxHash,
-) -> bool {
+fn tx_reached_terminal_state(runner: &SimulationRunner, node_idx: u32, tx_hash: &TxHash) -> bool {
     let node = runner.node(node_idx).expect("node exists");
     node.execution().is_finalized(tx_hash) || node.mempool().is_tombstoned(tx_hash)
 }

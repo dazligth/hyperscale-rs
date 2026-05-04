@@ -16,9 +16,10 @@
 //! Stamps are ms-since-Unix-epoch (`LocalTimestamp`), the same unit the
 //! `io_loop`'s clock origin is minted in. They're never compared across
 //! validators; each node logs its own observed latency only.
-use hyperscale_types::{LocalTimestamp, TransactionStatus, TxHash};
 use std::collections::HashMap;
 use std::fmt;
+
+use hyperscale_types::{LocalTimestamp, TransactionStatus, TxHash};
 
 /// Phase-time stamps for a single transaction's mempool → terminal flow.
 #[derive(Debug, Clone, Copy)]

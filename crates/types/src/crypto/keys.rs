@@ -1,9 +1,10 @@
 //! Key generation, deterministic seeding, and zero-signature placeholders.
 
+use blst::min_pk::SecretKey;
 use radix_common::crypto::{
     Bls12381G1PrivateKey, Bls12381G2Signature, Ed25519PrivateKey, Ed25519Signature,
 };
-use rand::Rng;
+use rand::{Rng, rng};
 
 /// Generate a new random Ed25519 keypair.
 ///
@@ -13,7 +14,7 @@ use rand::Rng;
 #[must_use]
 pub fn generate_ed25519_keypair() -> Ed25519PrivateKey {
     let mut secret = [0u8; 32];
-    rand::rng().fill_bytes(&mut secret);
+    rng().fill_bytes(&mut secret);
     Ed25519PrivateKey::from_bytes(&secret).expect("valid key bytes")
 }
 
@@ -23,7 +24,7 @@ pub fn generate_ed25519_keypair() -> Ed25519PrivateKey {
 #[must_use]
 pub fn generate_bls_keypair() -> Bls12381G1PrivateKey {
     let mut ikm = [0u8; 32];
-    rand::rng().fill_bytes(&mut ikm);
+    rng().fill_bytes(&mut ikm);
     bls_keypair_from_seed(&ikm)
 }
 
@@ -48,7 +49,7 @@ pub fn ed25519_keypair_from_seed(seed: &[u8; 32]) -> Ed25519PrivateKey {
 #[must_use]
 pub fn bls_keypair_from_seed(seed: &[u8; 32]) -> Bls12381G1PrivateKey {
     // Use blst's key_gen which properly hashes the seed to derive a valid scalar
-    let blst_sk = blst::min_pk::SecretKey::key_gen(seed, &[]).expect("key_gen should not fail");
+    let blst_sk = SecretKey::key_gen(seed, &[]).expect("key_gen should not fail");
 
     // Convert to radix-common type
     // blst secret key is a 32-byte scalar in big-endian format

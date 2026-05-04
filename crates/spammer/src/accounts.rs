@@ -16,11 +16,14 @@ use hyperscale_types::{
 /// shard's accounts at genesis, this is the per-shard limit. Accounts beyond
 /// this limit must be funded via runtime transactions after genesis.
 pub const MAX_GENESIS_ACCOUNTS_PER_SHARD: usize = 16_000;
-use radix_common::math::Decimal;
-use radix_common::types::ComponentAddress;
-use rand::RngExt;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use hex::encode as hex_encode;
+use radix_common::math::Decimal;
+use radix_common::types::ComponentAddress;
+use rand::{Rng, RngExt};
+use serde_json::{from_str as json_from_str, to_string_pretty as json_to_string_pretty};
 use tracing::info;
 
 /// A funded account that can sign transactions.
@@ -158,7 +161,7 @@ pub struct AccountPool {
     round_robin_counters: HashMap<ShardGroupId, std::sync::atomic::AtomicUsize>,
 
     /// Usage tracking: total selections per account index per shard.
-    usage_counts: HashMap<ShardGroupId, Vec<std::sync::atomic::AtomicU64>>,
+    usage_counts: HashMap<ShardGroupId, Vec<AtomicU64>>,
 }
 
 /// A partition of accounts for a single worker thread.
@@ -256,7 +259,7 @@ impl AccountPool {
         // Initialize usage counts for each shard
         for shard in 0..num_shards {
             let shard_id = ShardGroupId(shard);
-            let count = pool.by_shard.get(&shard_id).map_or(0, std::vec::Vec::len);
+            let count = pool.by_shard.get(&shard_id).map_or(0, Vec::len);
             let counters: Vec<AtomicU64> = (0..count).map(|_| AtomicU64::new(0)).collect();
             pool.usage_counts.insert(shard_id, counters);
         }
@@ -382,7 +385,7 @@ impl AccountPool {
     /// Get a pair of accounts on the same shard.
     pub fn same_shard_pair(
         &self,
-        rng: &mut impl rand::Rng,
+        rng: &mut impl Rng,
         mode: SelectionMode,
     ) -> Option<(&FundedAccount, &FundedAccount)> {
         let shard = ShardGroupId(rng.random_range(0..self.num_shards));
@@ -401,7 +404,7 @@ impl AccountPool {
     /// Get a pair of accounts on different shards (for cross-shard transactions).
     pub fn cross_shard_pair(
         &self,
-        rng: &mut (impl rand::Rng + ?Sized),
+        rng: &mut (impl Rng + ?Sized),
         mode: SelectionMode,
     ) -> Option<(&FundedAccount, &FundedAccount)> {
         if self.num_shards < 2 {
@@ -433,7 +436,7 @@ impl AccountPool {
         &self,
         from_shard: ShardGroupId,
         to_shard: ShardGroupId,
-        rng: &mut (impl rand::Rng + ?Sized),
+        rng: &mut (impl Rng + ?Sized),
         mode: SelectionMode,
     ) -> Option<(&FundedAccount, &FundedAccount)> {
         use std::sync::atomic::Ordering;
@@ -477,7 +480,7 @@ impl AccountPool {
     pub fn pair_for_shard(
         &self,
         shard: ShardGroupId,
-        rng: &mut (impl rand::Rng + ?Sized),
+        rng: &mut (impl Rng + ?Sized),
         mode: SelectionMode,
     ) -> Option<(&FundedAccount, &FundedAccount)> {
         let num_accounts = self.by_shard.get(&shard)?.len();
@@ -497,7 +500,7 @@ impl AccountPool {
         &self,
         shard: ShardGroupId,
         num_accounts: usize,
-        rng: &mut (impl rand::Rng + ?Sized),
+        rng: &mut (impl Rng + ?Sized),
         mode: SelectionMode,
     ) -> (usize, usize) {
         use std::sync::atomic::Ordering;
@@ -551,7 +554,7 @@ impl AccountPool {
         &self,
         shard: ShardGroupId,
         num_accounts: usize,
-        rng: &mut (impl rand::Rng + ?Sized),
+        rng: &mut (impl Rng + ?Sized),
         mode: SelectionMode,
     ) -> usize {
         use std::sync::atomic::Ordering;
@@ -594,7 +597,7 @@ impl AccountPool {
         clippy::cast_sign_loss
     )]
     // Skewed sampling for benchmarks; precision/sign correctness aren't material.
-    fn zipf_index(n: usize, exponent: f64, rng: &mut (impl rand::Rng + ?Sized)) -> usize {
+    fn zipf_index(n: usize, exponent: f64, rng: &mut (impl Rng + ?Sized)) -> usize {
         let exp = exponent.max(1.0);
         let u: f64 = rng.random();
         let idx = ((n as f64).powf(1.0 - u)).powf(1.0 / exp) as usize;
@@ -604,13 +607,13 @@ impl AccountPool {
     /// Total number of accounts across all shards.
     #[must_use]
     pub fn total_accounts(&self) -> usize {
-        self.by_shard.values().map(std::vec::Vec::len).sum()
+        self.by_shard.values().map(Vec::len).sum()
     }
 
     /// Number of accounts on a specific shard.
     #[must_use]
     pub fn accounts_on_shard(&self, shard: ShardGroupId) -> usize {
-        self.by_shard.get(&shard).map_or(0, std::vec::Vec::len)
+        self.by_shard.get(&shard).map_or(0, Vec::len)
     }
 
     /// Get all shards with accounts.
@@ -627,7 +630,7 @@ impl AccountPool {
     /// Get accounts for a specific shard.
     #[must_use]
     pub fn accounts_for_shard(&self, shard: ShardGroupId) -> Option<&[FundedAccount]> {
-        self.by_shard.get(&shard).map(std::vec::Vec::as_slice)
+        self.by_shard.get(&shard).map(Vec::as_slice)
     }
 
     /// Partition the account pool into multiple disjoint partitions.
@@ -794,13 +797,13 @@ impl AccountPool {
             Err(e) => return Err(AccountPoolError::NonceLoadError(e.to_string())),
         };
 
-        let nonces: HashMap<String, u64> = serde_json::from_str(&contents)
+        let nonces: HashMap<String, u64> = json_from_str(&contents)
             .map_err(|e| AccountPoolError::NonceLoadError(e.to_string()))?;
 
         let mut loaded = 0;
         for accounts in self.by_shard.values() {
             for account in accounts {
-                let addr_hex = hex::encode(account.address.as_bytes());
+                let addr_hex = hex_encode(account.address.as_bytes());
                 if let Some(&nonce) = nonces.get(&addr_hex) {
                     account.nonce.store(nonce, Ordering::SeqCst);
                     loaded += 1;
@@ -828,13 +831,13 @@ impl AccountPool {
             for account in accounts {
                 let nonce = account.nonce.load(Ordering::SeqCst);
                 if nonce > 0 {
-                    let addr_hex = hex::encode(account.address.as_bytes());
+                    let addr_hex = hex_encode(account.address.as_bytes());
                     nonces.insert(addr_hex, nonce);
                 }
             }
         }
 
-        let contents = serde_json::to_string_pretty(&nonces)
+        let contents = json_to_string_pretty(&nonces)
             .map_err(|e| AccountPoolError::NonceSaveError(e.to_string()))?;
 
         std::fs::write(path, contents)
@@ -887,19 +890,19 @@ impl AccountPartition {
     /// Get total number of accounts in this partition.
     #[must_use]
     pub fn total_accounts(&self) -> usize {
-        self.by_shard.values().map(std::vec::Vec::len).sum()
+        self.by_shard.values().map(Vec::len).sum()
     }
 
     /// Get number of accounts on a specific shard.
     #[must_use]
     pub fn accounts_on_shard(&self, shard: ShardGroupId) -> usize {
-        self.by_shard.get(&shard).map_or(0, std::vec::Vec::len)
+        self.by_shard.get(&shard).map_or(0, Vec::len)
     }
 
     /// Get accounts for a specific shard.
     #[must_use]
     pub fn accounts_for_shard(&self, shard: ShardGroupId) -> Option<&[FundedAccount]> {
-        self.by_shard.get(&shard).map(std::vec::Vec::as_slice)
+        self.by_shard.get(&shard).map(Vec::as_slice)
     }
 
     /// Get a pair of accounts on the same shard (mutable for counter updates).
@@ -913,7 +916,7 @@ impl AccountPartition {
     pub fn pair_for_shard(
         &mut self,
         shard: ShardGroupId,
-        rng: &mut impl rand::Rng,
+        rng: &mut impl Rng,
         mode: SelectionMode,
     ) -> Option<(&FundedAccount, &FundedAccount)> {
         let accounts = self.by_shard.get(&shard)?;
@@ -956,7 +959,7 @@ impl AccountPartition {
     /// Get a cross-shard pair of accounts.
     pub fn cross_shard_pair(
         &mut self,
-        rng: &mut impl rand::Rng,
+        rng: &mut impl Rng,
         mode: SelectionMode,
     ) -> Option<(&FundedAccount, &FundedAccount)> {
         if self.num_shards < 2 {
@@ -982,7 +985,7 @@ impl AccountPartition {
         &mut self,
         from_shard: ShardGroupId,
         to_shard: ShardGroupId,
-        rng: &mut impl rand::Rng,
+        rng: &mut impl Rng,
         mode: SelectionMode,
     ) -> Option<(&FundedAccount, &FundedAccount)> {
         let accounts1 = self.by_shard.get(&from_shard)?;
@@ -1031,7 +1034,7 @@ impl AccountPartition {
         clippy::cast_sign_loss
     )]
     // Skewed sampling for benchmarks; precision/sign correctness aren't material.
-    fn zipf_index(n: usize, exponent: f64, rng: &mut impl rand::Rng) -> usize {
+    fn zipf_index(n: usize, exponent: f64, rng: &mut impl Rng) -> usize {
         let exp = exponent.max(1.0);
         let u: f64 = rng.random();
         let idx = ((n as f64).powf(1.0 - u)).powf(1.0 / exp) as usize;
@@ -1046,9 +1049,10 @@ impl AccountPartition {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
+
+    use super::*;
 
     #[test]
     fn test_account_generation() {
@@ -1263,7 +1267,7 @@ mod tests {
         // Total accounts across all partitions should equal original
         let total: usize = partitions
             .iter()
-            .map(super::AccountPartition::total_accounts)
+            .map(AccountPartition::total_accounts)
             .sum();
         assert_eq!(total, pool.total_accounts());
     }

@@ -7,14 +7,22 @@
 //! summary, log messages, error string). Shard-filtering of writes
 //! happens here too, via [`crate::sharding`].
 
-use crate::output::ExecutedTx;
 use hyperscale_types::{
     ApplicationEvent, ConsensusReceipt, EventRoot, ExecutionMetadata, FeeSummary, GlobalReceipt,
-    LogLevel, NodeId, RoutableTransaction, ShardGroupId, compute_merkle_root,
+    Hash, LogLevel, NodeId, RoutableTransaction, ShardGroupId, compute_merkle_root,
 };
-use radix_engine::transaction::{TransactionReceipt, TransactionResult};
+use radix_common::data::scrypto::scrypto_encode;
+use radix_engine::transaction::{
+    CommitResult, TransactionOutcome, TransactionReceipt, TransactionResult,
+};
+use radix_engine_interface::types::Level;
 use radix_substate_store_interface::interface::{
     CreateDatabaseUpdates, DatabaseUpdates, SubstateDatabase,
+};
+
+use crate::output::ExecutedTx;
+use crate::sharding::{
+    compute_writes_root, filter_updates_for_global_receipt, filter_updates_for_shard,
 };
 
 /// Extract `DatabaseUpdates` from a transaction receipt.
@@ -53,10 +61,7 @@ pub fn build_executed_tx<S: SubstateDatabase>(
         return ExecutedTx::failure_with_log(tx.hash(), &error);
     };
 
-    let success = matches!(
-        commit.outcome,
-        radix_engine::transaction::TransactionOutcome::Success(_)
-    );
+    let success = matches!(commit.outcome, TransactionOutcome::Success(_));
 
     let declared_nodes: Vec<NodeId> = tx
         .declared_reads
@@ -77,18 +82,17 @@ pub fn build_executed_tx<S: SubstateDatabase>(
     // declared-only/system-filtered for the global `writes_root` the
     // EC commits to.
     let raw_updates = extract_database_updates(receipt);
-    let database_updates = crate::sharding::filter_updates_for_shard(
+    let database_updates = filter_updates_for_shard(
         &raw_updates,
         local_shard,
         num_shards,
         storage,
         &declared_nodes,
     );
-    let global_updates =
-        crate::sharding::filter_updates_for_global_receipt(&raw_updates, storage, &declared_nodes);
-    let writes_root = crate::sharding::compute_writes_root(&global_updates);
+    let global_updates = filter_updates_for_global_receipt(&raw_updates, storage, &declared_nodes);
+    let writes_root = compute_writes_root(&global_updates);
 
-    let event_hashes: Vec<hyperscale_types::Hash> = application_events
+    let event_hashes: Vec<Hash> = application_events
         .iter()
         .map(ApplicationEvent::hash)
         .collect();
@@ -120,10 +124,8 @@ pub fn build_execution_metadata(receipt: &TransactionReceipt) -> ExecutionMetada
                 .map(|(level, msg)| (convert_log_level(*level), msg.clone()))
                 .collect();
             let error = match &commit.outcome {
-                radix_engine::transaction::TransactionOutcome::Failure(err) => {
-                    Some(format!("{err:?}"))
-                }
-                radix_engine::transaction::TransactionOutcome::Success(_) => None,
+                TransactionOutcome::Failure(err) => Some(format!("{err:?}")),
+                TransactionOutcome::Success(_) => None,
             };
             (logs, error)
         }
@@ -139,16 +141,14 @@ pub fn build_execution_metadata(receipt: &TransactionReceipt) -> ExecutionMetada
 }
 
 /// Extract application events from a committed receipt.
-fn extract_application_events(
-    commit: &radix_engine::transaction::CommitResult,
-) -> Vec<ApplicationEvent> {
+fn extract_application_events(commit: &CommitResult) -> Vec<ApplicationEvent> {
     commit
         .application_events
         .iter()
         .map(|(type_id, data)| {
             // SBOR-encode the EventTypeIdentifier for type_id bytes.
-            let type_id_bytes = radix_common::data::scrypto::scrypto_encode(type_id)
-                .unwrap_or_else(|_| format!("{type_id:?}").into_bytes());
+            let type_id_bytes =
+                scrypto_encode(type_id).unwrap_or_else(|_| format!("{type_id:?}").into_bytes());
             ApplicationEvent {
                 type_id: type_id_bytes,
                 data: data.clone(),
@@ -164,48 +164,35 @@ fn extract_application_events(
 fn build_fee_summary(receipt: &TransactionReceipt) -> FeeSummary {
     let fees = &receipt.fee_summary;
     FeeSummary {
-        total_execution_cost: radix_common::data::scrypto::scrypto_encode(
-            &fees.total_execution_cost_in_xrd,
-        )
-        .unwrap_or_default(),
-        total_royalty_cost: radix_common::data::scrypto::scrypto_encode(
-            &fees.total_royalty_cost_in_xrd,
-        )
-        .unwrap_or_default(),
-        total_storage_cost: radix_common::data::scrypto::scrypto_encode(
-            &fees.total_storage_cost_in_xrd,
-        )
-        .unwrap_or_default(),
-        total_tipping_cost: radix_common::data::scrypto::scrypto_encode(
-            &fees.total_tipping_cost_in_xrd,
-        )
-        .unwrap_or_default(),
+        total_execution_cost: scrypto_encode(&fees.total_execution_cost_in_xrd).unwrap_or_default(),
+        total_royalty_cost: scrypto_encode(&fees.total_royalty_cost_in_xrd).unwrap_or_default(),
+        total_storage_cost: scrypto_encode(&fees.total_storage_cost_in_xrd).unwrap_or_default(),
+        total_tipping_cost: scrypto_encode(&fees.total_tipping_cost_in_xrd).unwrap_or_default(),
     }
 }
 
 /// Convert Radix Engine log level to our `LogLevel`.
-const fn convert_log_level(level: radix_engine_interface::types::Level) -> LogLevel {
+const fn convert_log_level(level: Level) -> LogLevel {
     match level {
-        radix_engine_interface::types::Level::Error => LogLevel::Error,
-        radix_engine_interface::types::Level::Warn => LogLevel::Warn,
-        radix_engine_interface::types::Level::Info => LogLevel::Info,
-        radix_engine_interface::types::Level::Debug => LogLevel::Debug,
-        radix_engine_interface::types::Level::Trace => LogLevel::Trace,
+        Level::Error => LogLevel::Error,
+        Level::Warn => LogLevel::Warn,
+        Level::Info => LogLevel::Info,
+        Level::Debug => LogLevel::Debug,
+        Level::Trace => LogLevel::Trace,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use hyperscale_types::LogLevel;
+    use radix_engine::errors::RejectionReason;
     use radix_engine::transaction::{
-        AbortResult, CommitResult, RejectResult, TransactionOutcome as RadixTransactionOutcome,
-        TransactionReceipt, TransactionResult,
+        AbortReason, AbortResult, RejectResult, TransactionOutcome as RadixTransactionOutcome,
     };
 
-    fn make_success_receipt_with_logs(
-        logs: Vec<(radix_engine_interface::types::Level, String)>,
-    ) -> TransactionReceipt {
+    use super::*;
+
+    fn make_success_receipt_with_logs(logs: Vec<(Level, String)>) -> TransactionReceipt {
         let mut commit = CommitResult::empty_with_outcome(RadixTransactionOutcome::Success(vec![]));
         commit.application_logs = logs;
         TransactionReceipt::empty_with_commit(commit)
@@ -214,7 +201,7 @@ mod tests {
     fn make_reject_receipt() -> TransactionReceipt {
         TransactionReceipt {
             result: TransactionResult::Reject(RejectResult {
-                reason: radix_engine::errors::RejectionReason::SuccessButFeeLoanNotRepaid,
+                reason: RejectionReason::SuccessButFeeLoanNotRepaid,
             }),
             ..TransactionReceipt::empty_commit_success()
         }
@@ -223,7 +210,7 @@ mod tests {
     fn make_abort_receipt() -> TransactionReceipt {
         TransactionReceipt {
             result: TransactionResult::Abort(AbortResult {
-                reason: radix_engine::transaction::AbortReason::ConfiguredAbortTriggeredOnFeeLoanRepayment,
+                reason: AbortReason::ConfiguredAbortTriggeredOnFeeLoanRepayment,
             }),
             ..TransactionReceipt::empty_commit_success()
         }
@@ -240,7 +227,6 @@ mod tests {
 
     #[test]
     fn test_build_execution_metadata_with_logs() {
-        use radix_engine_interface::types::Level;
         let receipt = make_success_receipt_with_logs(vec![
             (Level::Info, "hello world".to_string()),
             (Level::Error, "something broke".to_string()),

@@ -22,14 +22,15 @@
 //! registration (via [`register_tx`](ProvisioningTracker::register_tx))
 //! flow through the tracker.
 
+use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
+
 #[cfg(test)]
 use hyperscale_types::Hash;
 use hyperscale_types::{
     NodeId, Provisions, RETENTION_HORIZON, ShardGroupId, StateProvision, TopologySnapshot, TxHash,
     WeightedTimestamp,
 };
-use std::collections::{BTreeSet, HashMap};
-use std::sync::Arc;
 
 use crate::conflict::{ConflictDetector, DetectedConflict};
 
@@ -257,8 +258,9 @@ impl ProvisioningTracker {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use hyperscale_types::{BlockHeight, MerkleInclusionProof, TxEntries};
+
+    use super::*;
 
     fn shard(n: u64) -> ShardGroupId {
         ShardGroupId(n)

@@ -13,8 +13,6 @@
 //!    directly as `ProtocolEvent::RemoteHeaderReceived` for the state
 //!    machine to dispatch QC verification.
 
-use crate::io_loop::IoLoop;
-use crate::io_loop::verify::verify_bls_with_metrics;
 use hyperscale_core::{NodeInput, ProtocolEvent, StateMachine};
 use hyperscale_dispatch::{Dispatch, DispatchPool};
 use hyperscale_engine::Engine;
@@ -22,7 +20,11 @@ use hyperscale_network::Network;
 use hyperscale_storage::Storage;
 use hyperscale_types::{
     Bls12381G1PublicKey, Bls12381G2Signature, CommittedBlockHeader, ValidatorId,
+    committed_block_header_message,
 };
+
+use crate::io_loop::IoLoop;
+use crate::io_loop::verify::verify_bls_with_metrics;
 
 /// A committed header pending sender-signature verification.
 pub(in crate::io_loop) type CommittedHeaderVerificationItem = (
@@ -73,7 +75,7 @@ where
         let event_tx = self.event_sender.clone();
         self.dispatch.spawn(DispatchPool::Crypto, move || {
             for (committed_header, sender, public_key, sender_signature) in items {
-                let msg = hyperscale_types::committed_block_header_message(
+                let msg = committed_block_header_message(
                     committed_header.header.shard_group_id,
                     committed_header.header.height,
                     &committed_header.header.hash(),

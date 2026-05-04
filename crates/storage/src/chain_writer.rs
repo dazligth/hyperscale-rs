@@ -4,9 +4,11 @@
 //! `prepare_block_commit` returns an opaque `PreparedCommit` handle that
 //! carries precomputed work; `commit_prepared_block` applies it efficiently.
 
-use crate::{BaseReadCache, JmtSnapshot};
-use hyperscale_types::{Block, BlockHeight, FinalizedWave, QuorumCertificate, StateRoot};
 use std::sync::Arc;
+
+use hyperscale_types::{Block, BlockHeight, FinalizedWave, QuorumCertificate, StateRoot};
+
+use crate::{BaseReadCache, JmtSnapshot};
 
 /// Abstracts state commitment for both simulation and production storage.
 ///

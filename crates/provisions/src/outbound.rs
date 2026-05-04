@@ -17,13 +17,15 @@
 //! to terminate, so any provisions unacked past `MAX_VALIDITY_RANGE +
 //! WAVE_TIMEOUT` reference a tx no shard could still be processing.
 
-use crate::store::ProvisionStore;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
 use hyperscale_types::{
     BlockHeight, ProvisionHash, Provisions, ShardGroupId, TxHash, TxOutcome, WeightedTimestamp,
 };
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use tracing::{debug, warn};
+
+use crate::store::ProvisionStore;
 
 /// Snapshot of how much state the outbound tracker is holding onto.
 #[allow(missing_docs)] // flat counters; field names are the documentation
@@ -224,12 +226,14 @@ impl OutboundProvisionTracker {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::time::Duration;
+
     use hyperscale_types::{
         ExecutionOutcome, GlobalReceiptHash, Hash, MerkleInclusionProof, RETENTION_HORIZON,
         TxEntries,
     };
-    use std::time::Duration;
+
+    use super::*;
 
     fn ts(ms: u64) -> WeightedTimestamp {
         WeightedTimestamp::from_millis(ms)

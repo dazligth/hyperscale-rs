@@ -22,13 +22,14 @@
 //! the base entry and any earlier-only provision entry. See
 //! [`MergedPartitionIterator`].
 
+use std::collections::BTreeMap;
+
 use hyperscale_storage::keys;
 use hyperscale_types::StateEntry;
 use radix_engine::transaction::{ExecutionConfig, TransactionReceipt, execute_transaction};
 use radix_engine::vm::DefaultVmModules;
 use radix_substate_store_interface::interface::{DbPartitionKey, DbSortKey, SubstateDatabase};
 use radix_transactions::prelude::ExecutableTransaction;
-use std::collections::BTreeMap;
 
 /// A snapshot with provisions overlaid using pre-computed storage keys.
 ///
@@ -209,8 +210,9 @@ impl Iterator for MergedPartitionIterator<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::collections::BTreeMap;
+
+    use super::*;
 
     /// In-memory `SubstateDatabase` keyed by full storage key.
     /// Mirrors the layout `ProvisionedSnapshot` overlays on top of.

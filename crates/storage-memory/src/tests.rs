@@ -1,70 +1,151 @@
-use crate::core::SimStorage;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 
 use hyperscale_storage::test_helpers::{
     make_database_update, make_mapped_database_update, make_test_block, make_test_qc,
 };
+use hyperscale_storage::tree::{jmt_parent_height, put_at_version};
 use hyperscale_storage::{
     ChainReader, ChainWriter, CommittableSubstateDatabase, DatabaseUpdate, DatabaseUpdates,
     DbPartitionKey, DbSortKey, NodeDatabaseUpdates, PartitionDatabaseUpdates, SubstateDatabase,
-    SubstateStore,
+    SubstateStore, VersionedStore, keys, merge_database_updates, merge_into, test_helpers,
 };
-use hyperscale_types::{BlockHeight, Hash, NodeId, StateRoot, TxHash};
-use std::sync::Arc;
+use hyperscale_types::test_utils::test_transaction;
+use hyperscale_types::{
+    Block, BlockHeight, ConsensusReceipt, FinalizedWave, GlobalReceiptHash, Hash, NodeId,
+    ProposerTimestamp, QuorumCertificate, ShardGroupId, StateRoot, StoredReceipt, TxHash,
+    WaveCertificate, WaveId,
+};
+use indexmap::IndexMap;
+
+use crate::core::SimStorage;
+use crate::state::apply_updates;
+
+impl SimStorage {
+    /// Atomically commit a certificate and its state writes.
+    ///
+    /// Applies database updates and stores certificate metadata.
+    /// JMT is deferred to block commit — this mirrors the production
+    /// `RocksDbStorage::commit_certificate_with_writes()` to ensure DST
+    /// catches timing bugs where code incorrectly assumes state is available
+    /// before certificate persistence.
+    ///
+    /// # Panics
+    ///
+    /// Panics if either internal `RwLock` is poisoned.
+    #[allow(clippy::significant_drop_tightening)] // both reads need the lock
+    pub fn commit_certificate_with_writes(
+        &self,
+        certificate: &WaveCertificate,
+        updates: &DatabaseUpdates,
+    ) {
+        {
+            let mut s = self.state.write().unwrap();
+            let ver = s.current_block_height.0;
+            apply_updates(&mut s, updates, ver, /* write_history */ true);
+        }
+        self.consensus
+            .write()
+            .unwrap()
+            .certificates
+            .insert(certificate.wave_id.clone(), certificate.clone());
+    }
+
+    /// Test helper: commits database updates with auto-incrementing JMT version.
+    /// Not used in production (use `commit_block` instead).
+    ///
+    /// Computes JMT updates and applies them to the tree store, resolving
+    /// leaf-substate associations for historical reads.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned.
+    pub fn commit_shared(&self, updates: &DatabaseUpdates) {
+        let mut s = self.state.write().unwrap();
+
+        let new_version = s.current_block_height.0 + 1;
+
+        // Apply substate updates first (visible for association resolution below).
+        apply_updates(&mut s, updates, new_version, /* write_history */ true);
+
+        let parent_version =
+            jmt_parent_height(s.current_block_height, s.current_root_hash).map(|h| h.0);
+        let (new_root, collected) = put_at_version(
+            &s.tree_store,
+            parent_version,
+            new_version,
+            &[updates],
+            &HashMap::new(),
+        );
+
+        for (key, node) in &collected.nodes {
+            s.tree_store.insert(key.clone(), Arc::clone(node));
+        }
+        for stale_key in &collected.stale_node_keys {
+            s.tree_store.remove(stale_key);
+        }
+
+        s.current_block_height = BlockHeight(new_version);
+        s.current_root_hash = new_root;
+    }
+}
+
+impl CommittableSubstateDatabase for SimStorage {
+    fn commit(&mut self, updates: &DatabaseUpdates) {
+        self.commit_shared(updates);
+    }
+}
 
 /// Helper: commit a block with given updates by injecting them via a single-tx
 /// `FinalizedWave` inside `block.certificates`.
 fn commit_with(
     storage: &SimStorage,
     updates: &DatabaseUpdates,
-    block: &hyperscale_types::Block,
-    qc: &hyperscale_types::QuorumCertificate,
+    block: &Block,
+    qc: &QuorumCertificate,
 ) -> StateRoot {
     let block = block.clone();
     let block = if updates.node_updates.is_empty() {
         block
     } else {
-        let receipt = hyperscale_types::StoredReceipt {
+        let receipt = StoredReceipt {
             tx_hash: TxHash::ZERO,
-            consensus: Arc::new(hyperscale_types::ConsensusReceipt::Succeeded {
-                receipt_hash: hyperscale_types::GlobalReceiptHash::ZERO,
+            consensus: Arc::new(ConsensusReceipt::Succeeded {
+                receipt_hash: GlobalReceiptHash::ZERO,
                 database_updates: updates.clone(),
                 application_events: vec![],
             }),
             metadata: None,
         };
-        let new_fw = Arc::new(hyperscale_types::FinalizedWave {
-            certificate: Arc::new(hyperscale_types::WaveCertificate {
-                wave_id: hyperscale_types::WaveId::new(
-                    hyperscale_types::ShardGroupId(0),
-                    block.height(),
-                    std::collections::BTreeSet::new(),
-                ),
+        let new_fw = Arc::new(FinalizedWave {
+            certificate: Arc::new(WaveCertificate {
+                wave_id: WaveId::new(ShardGroupId(0), block.height(), BTreeSet::new()),
                 execution_certificates: vec![],
             }),
             receipts: vec![receipt],
         });
         match block {
-            hyperscale_types::Block::Live {
+            Block::Live {
                 header,
                 transactions,
                 mut certificates,
                 provisions,
             } => {
                 certificates.push(new_fw);
-                hyperscale_types::Block::Live {
+                Block::Live {
                     header,
                     transactions,
                     certificates,
                     provisions,
                 }
             }
-            hyperscale_types::Block::Sealed {
+            Block::Sealed {
                 header,
                 transactions,
                 mut certificates,
             } => {
                 certificates.push(new_fw);
-                hyperscale_types::Block::Sealed {
+                Block::Sealed {
                     header,
                     transactions,
                     certificates,
@@ -76,11 +157,7 @@ fn commit_with(
 }
 
 /// Helper: commit a block with empty updates and no ECs/receipts.
-fn commit_empty(
-    storage: &SimStorage,
-    block: &hyperscale_types::Block,
-    qc: &hyperscale_types::QuorumCertificate,
-) -> StateRoot {
+fn commit_empty(storage: &SimStorage, block: &Block, qc: &QuorumCertificate) -> StateRoot {
     commit_with(storage, &DatabaseUpdates::default(), block, qc)
 }
 
@@ -259,10 +336,7 @@ fn test_block_storage_and_retrieval() {
 
     let stored = storage.get_block(BlockHeight(1)).unwrap();
     assert_eq!(stored.block.height(), BlockHeight(1));
-    assert_eq!(
-        stored.block.header().timestamp,
-        hyperscale_types::ProposerTimestamp(1_000)
-    );
+    assert_eq!(stored.block.header().timestamp, ProposerTimestamp(1_000));
     assert_eq!(stored.qc.block_hash, block.hash());
 }
 
@@ -306,25 +380,25 @@ fn test_transactions_batch_with_indexed_block() {
     let storage = SimStorage::new();
     let block = make_test_block(BlockHeight(1));
 
-    let tx = Arc::new(hyperscale_types::test_utils::test_transaction(42));
+    let tx = Arc::new(test_transaction(42));
     let tx_hash = tx.hash();
     let block = match block {
-        hyperscale_types::Block::Live {
+        Block::Live {
             header,
             certificates,
             provisions,
             ..
-        } => hyperscale_types::Block::Live {
+        } => Block::Live {
             header,
             transactions: vec![tx],
             certificates,
             provisions,
         },
-        hyperscale_types::Block::Sealed {
+        Block::Sealed {
             header,
             certificates,
             ..
-        } => hyperscale_types::Block::Sealed {
+        } => Block::Sealed {
             header,
             transactions: vec![tx],
             certificates,
@@ -439,7 +513,7 @@ fn test_commit_block_multiple_updates() {
     let storage = SimStorage::new();
     let updates1 = make_mapped_database_update(1, 0, vec![10], vec![1]);
     let updates2 = make_mapped_database_update(2, 0, vec![20], vec![2]);
-    let merged = hyperscale_storage::merge_database_updates(&[updates1, updates2]);
+    let merged = merge_database_updates(&[updates1, updates2]);
     let block = make_test_block(BlockHeight(1));
     let qc = make_test_qc(&block);
 
@@ -601,13 +675,13 @@ fn test_list_substates_for_node_at_height_returns_historical_data() {
 #[test]
 fn test_ec_storage_roundtrip() {
     let storage = SimStorage::new();
-    hyperscale_storage::test_helpers::test_ec_storage_roundtrip(&storage);
+    test_helpers::test_ec_storage_roundtrip(&storage);
 }
 
 #[test]
 fn test_ec_storage_batch() {
     let storage = SimStorage::new();
-    hyperscale_storage::test_helpers::test_ec_storage_batch(&storage);
+    test_helpers::test_ec_storage_batch(&storage);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -621,8 +695,6 @@ fn test_ec_storage_batch() {
 /// leaked post-anchor writes on the faster-persisting validator.
 #[test]
 fn test_snapshot_at_version_is_deterministic_across_persistence_lag() {
-    use hyperscale_storage::VersionedStore;
-
     let nid = NodeId([1u8; 30]);
     let partition_num = 0;
     let sort_key = vec![1u8];
@@ -654,7 +726,7 @@ fn test_snapshot_at_version_is_deterministic_across_persistence_lag() {
     let snap_a = a.snapshot_at(BlockHeight(3));
     let snap_b = b.snapshot_at(BlockHeight(3));
     let pk = DbPartitionKey {
-        node_key: hyperscale_storage::keys::node_entity_key(&nid),
+        node_key: keys::node_entity_key(&nid),
         partition_num,
     };
     let sk = DbSortKey(sort_key.clone());
@@ -677,8 +749,6 @@ fn test_snapshot_at_version_is_deterministic_across_persistence_lag() {
 /// is visible as lower CPU on hot keys in production.
 #[test]
 fn test_snapshot_resolves_floor_among_many_versions() {
-    use hyperscale_storage::VersionedStore;
-
     let node_seed = 5u8;
     let nid = NodeId([node_seed; 30]);
     let partition_num = 0;
@@ -698,7 +768,7 @@ fn test_snapshot_resolves_floor_among_many_versions() {
     }
 
     let pk = DbPartitionKey {
-        node_key: hyperscale_storage::keys::node_entity_key(&nid),
+        node_key: keys::node_entity_key(&nid),
         partition_num,
     };
     let sk = DbSortKey(sort_key);
@@ -724,13 +794,11 @@ fn test_snapshot_resolves_floor_among_many_versions() {
 /// construct full blocks/QCs around every write.
 #[test]
 fn test_state_history_create_delete_create() {
-    use hyperscale_storage::VersionedStore;
-
     let nid = NodeId([7u8; 30]);
     let partition_num = 0;
     let sort_key = vec![42u8];
     let pk = DbPartitionKey {
-        node_key: hyperscale_storage::keys::node_entity_key(&nid),
+        node_key: keys::node_entity_key(&nid),
         partition_num,
     };
     let sk = DbSortKey(sort_key.clone());
@@ -745,7 +813,7 @@ fn test_state_history_create_delete_create() {
 
     // V1: create with value A (=0xAA). Also set the anchor key.
     let mut v1 = make_mapped_database_update(7, partition_num, sort_key.clone(), vec![0xAA]);
-    hyperscale_storage::merge_into(&mut v1, &anchor);
+    merge_into(&mut v1, &anchor);
     storage.commit_shared(&v1);
 
     // V2: delete K.
@@ -811,8 +879,7 @@ fn test_snapshot_at_below_retention_panics() {
         commit_with(&storage, &DatabaseUpdates::default(), &block, &qc);
     }
     // current=10, floor=8. Asking for V=1 is well below floor.
-    let _snap =
-        <SimStorage as hyperscale_storage::VersionedStore>::snapshot_at(&storage, BlockHeight(1));
+    let _snap = <SimStorage as VersionedStore>::snapshot_at(&storage, BlockHeight(1));
 }
 
 /// `list_substates_for_node_at_height` is an external-facing API —
@@ -820,8 +887,6 @@ fn test_snapshot_at_below_retention_panics() {
 /// panicking (the panic path is reserved for `snapshot_at` callers).
 #[test]
 fn test_list_substates_at_height_respects_retention() {
-    use hyperscale_storage::keys;
-
     let nid = NodeId([9u8; 30]);
     let partition_num = 0;
     let sort_key = vec![1u8];
@@ -858,8 +923,6 @@ fn test_list_substates_at_height_respects_retention() {
 /// removed so historical reads see the pre-reset contents.
 #[test]
 fn test_reset_partition_captures_history_for_all_removed_keys() {
-    use hyperscale_storage::VersionedStore;
-
     let node_key = vec![3u8; 50];
     let partition_num = 0;
     let pk = DbPartitionKey {
@@ -900,7 +963,7 @@ fn test_reset_partition_captures_history_for_all_removed_keys() {
         let block = make_test_block(BlockHeight(2));
         let qc = make_test_qc(&block);
         let mut updates = DatabaseUpdates::default();
-        let mut new_values = indexmap::IndexMap::new();
+        let mut new_values = IndexMap::new();
         new_values.insert(DbSortKey(vec![0xD1]), vec![0xDD]);
         new_values.insert(DbSortKey(vec![0xE1]), vec![0xEE]);
         updates.node_updates.insert(

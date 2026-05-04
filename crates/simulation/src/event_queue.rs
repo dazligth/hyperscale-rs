@@ -1,9 +1,10 @@
 //! Event queue with deterministic ordering.
 
-use hyperscale_core::{EventPriority, NodeInput};
-use hyperscale_network_memory::NodeIndex;
 use std::cmp::Ordering;
 use std::time::Duration;
+
+use hyperscale_core::{EventPriority, NodeInput};
+use hyperscale_network_memory::NodeIndex;
 
 /// Key for ordering events in the queue.
 ///

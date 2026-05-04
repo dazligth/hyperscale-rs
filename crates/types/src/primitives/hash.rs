@@ -1,7 +1,11 @@
 //! Cryptographic hash type using Blake3.
 
+use core::hash::Hash as StdHash;
+use std::fmt::{self, Debug, Display, Formatter};
+
+use blake3::{Hasher, hash as blake3_hash};
+use hex::{decode_to_slice as hex_decode_to_slice, encode as hex_encode};
 use sbor::prelude::*;
-use std::fmt;
 
 /// A 32-byte cryptographic hash using Blake3.
 ///
@@ -24,7 +28,7 @@ impl Hash {
     /// Create hash from bytes using Blake3.
     #[must_use]
     pub fn from_bytes(bytes: &[u8]) -> Self {
-        let hash = blake3::hash(bytes);
+        let hash = blake3_hash(bytes);
         Self(*hash.as_bytes())
     }
 
@@ -44,7 +48,7 @@ impl Hash {
     /// Create hash from multiple byte slices.
     #[must_use]
     pub fn from_parts(parts: &[&[u8]]) -> Self {
-        let mut hasher = blake3::Hasher::new();
+        let mut hasher = Hasher::new();
         for part in parts {
             hasher.update(part);
         }
@@ -66,7 +70,7 @@ impl Hash {
         }
 
         let mut bytes = [0u8; 32];
-        hex::decode_to_slice(hex, &mut bytes).map_err(|_| HexError::InvalidHex)?;
+        hex_decode_to_slice(hex, &mut bytes).map_err(|_| HexError::InvalidHex)?;
 
         Ok(Self(bytes))
     }
@@ -74,7 +78,7 @@ impl Hash {
     /// Convert hash to hex string.
     #[must_use]
     pub fn to_hex(&self) -> String {
-        hex::encode(self.0)
+        hex_encode(self.0)
     }
 
     /// Get bytes as slice reference.
@@ -131,15 +135,15 @@ impl Hash {
     }
 }
 
-impl fmt::Debug for Hash {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Debug for Hash {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let hex = self.to_hex();
         write!(f, "Hash({}..{})", &hex[..8], &hex[56..])
     }
 }
 
-impl fmt::Display for Hash {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for Hash {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.to_hex())
     }
 }
@@ -154,9 +158,7 @@ impl fmt::Display for Hash {
 /// [`TypedHash::into_raw`] or `Into<Hash>`. Conversion is deliberately explicit —
 /// there is no `Deref<Target = Hash>`, since that would silently re-admit the
 /// cross-kind confusion this trait exists to prevent.
-pub trait TypedHash:
-    Copy + Eq + Ord + core::hash::Hash + fmt::Debug + fmt::Display + Into<Hash>
-{
+pub trait TypedHash: Copy + Eq + Ord + StdHash + Debug + Display + Into<Hash> {
     /// Human-readable name for this hash kind (used in `Debug` output).
     const KIND: &'static str;
 

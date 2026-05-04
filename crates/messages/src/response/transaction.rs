@@ -1,7 +1,12 @@
 //! Transaction fetch response.
 
-use hyperscale_types::{MessageClass, NetworkMessage, RoutableTransaction};
 use std::sync::Arc;
+
+use hyperscale_types::{MessageClass, NetworkMessage, RoutableTransaction};
+use sbor::{
+    Categorize, Decode, DecodeError, Decoder, Describe, Encode, EncodeError, Encoder,
+    NoCustomTypeKind, NoCustomValueKind, RustTypeId, TypeData, TypeKind, ValueKind,
+};
 
 /// Response to a transaction fetch request.
 ///
@@ -67,19 +72,17 @@ impl Eq for GetTransactionsResponse {}
 // Manual SBOR implementation (since Arc doesn't derive BasicSbor)
 // ============================================================================
 
-impl<E: sbor::Encoder<sbor::NoCustomValueKind>> sbor::Encode<sbor::NoCustomValueKind, E>
-    for GetTransactionsResponse
-{
-    fn encode_value_kind(&self, encoder: &mut E) -> Result<(), sbor::EncodeError> {
-        encoder.write_value_kind(sbor::ValueKind::Tuple)
+impl<E: Encoder<NoCustomValueKind>> Encode<NoCustomValueKind, E> for GetTransactionsResponse {
+    fn encode_value_kind(&self, encoder: &mut E) -> Result<(), EncodeError> {
+        encoder.write_value_kind(ValueKind::Tuple)
     }
 
-    fn encode_body(&self, encoder: &mut E) -> Result<(), sbor::EncodeError> {
+    fn encode_body(&self, encoder: &mut E) -> Result<(), EncodeError> {
         encoder.write_size(1)?; // 1 field
 
         // Encode transactions array (unwrap Arc for each)
-        encoder.write_value_kind(sbor::ValueKind::Array)?;
-        encoder.write_value_kind(sbor::ValueKind::Tuple)?;
+        encoder.write_value_kind(ValueKind::Array)?;
+        encoder.write_value_kind(ValueKind::Tuple)?;
         encoder.write_size(self.transactions.len())?;
         for tx in &self.transactions {
             encoder.encode_deeper_body(tx.as_ref())?;
@@ -89,29 +92,27 @@ impl<E: sbor::Encoder<sbor::NoCustomValueKind>> sbor::Encode<sbor::NoCustomValue
     }
 }
 
-impl<D: sbor::Decoder<sbor::NoCustomValueKind>> sbor::Decode<sbor::NoCustomValueKind, D>
-    for GetTransactionsResponse
-{
+impl<D: Decoder<NoCustomValueKind>> Decode<NoCustomValueKind, D> for GetTransactionsResponse {
     fn decode_body_with_value_kind(
         decoder: &mut D,
-        value_kind: sbor::ValueKind<sbor::NoCustomValueKind>,
-    ) -> Result<Self, sbor::DecodeError> {
-        decoder.check_preloaded_value_kind(value_kind, sbor::ValueKind::Tuple)?;
+        value_kind: ValueKind<NoCustomValueKind>,
+    ) -> Result<Self, DecodeError> {
+        decoder.check_preloaded_value_kind(value_kind, ValueKind::Tuple)?;
         let length = decoder.read_size()?;
 
         if length != 1 {
-            return Err(sbor::DecodeError::UnexpectedSize {
+            return Err(DecodeError::UnexpectedSize {
                 expected: 1,
                 actual: length,
             });
         }
 
         // Decode transactions array (wrap each in Arc)
-        decoder.read_and_check_value_kind(sbor::ValueKind::Array)?;
-        decoder.read_and_check_value_kind(sbor::ValueKind::Tuple)?;
+        decoder.read_and_check_value_kind(ValueKind::Array)?;
+        decoder.read_and_check_value_kind(ValueKind::Tuple)?;
         let tx_count = decoder.read_size()?;
         if tx_count > 1_000 {
-            return Err(sbor::DecodeError::UnexpectedSize {
+            return Err(DecodeError::UnexpectedSize {
                 expected: 1_000,
                 actual: tx_count,
             });
@@ -119,7 +120,7 @@ impl<D: sbor::Decoder<sbor::NoCustomValueKind>> sbor::Decode<sbor::NoCustomValue
         let mut transactions = Vec::with_capacity(tx_count);
         for _ in 0..tx_count {
             let tx: RoutableTransaction =
-                decoder.decode_deeper_body_with_value_kind(sbor::ValueKind::Tuple)?;
+                decoder.decode_deeper_body_with_value_kind(ValueKind::Tuple)?;
             transactions.push(Arc::new(tx));
         }
 
@@ -127,18 +128,17 @@ impl<D: sbor::Decoder<sbor::NoCustomValueKind>> sbor::Decode<sbor::NoCustomValue
     }
 }
 
-impl sbor::Categorize<sbor::NoCustomValueKind> for GetTransactionsResponse {
-    fn value_kind() -> sbor::ValueKind<sbor::NoCustomValueKind> {
-        sbor::ValueKind::Tuple
+impl Categorize<NoCustomValueKind> for GetTransactionsResponse {
+    fn value_kind() -> ValueKind<NoCustomValueKind> {
+        ValueKind::Tuple
     }
 }
 
-impl sbor::Describe<sbor::NoCustomTypeKind> for GetTransactionsResponse {
-    const TYPE_ID: sbor::RustTypeId =
-        sbor::RustTypeId::novel_with_code("GetTransactionsResponse", &[], &[]);
+impl Describe<NoCustomTypeKind> for GetTransactionsResponse {
+    const TYPE_ID: RustTypeId = RustTypeId::novel_with_code("GetTransactionsResponse", &[], &[]);
 
-    fn type_data() -> sbor::TypeData<sbor::NoCustomTypeKind, sbor::RustTypeId> {
-        sbor::TypeData::unnamed(sbor::TypeKind::Any)
+    fn type_data() -> TypeData<NoCustomTypeKind, RustTypeId> {
+        TypeData::unnamed(TypeKind::Any)
     }
 }
 
@@ -155,9 +155,10 @@ impl NetworkMessage for GetTransactionsResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use hyperscale_types::test_utils::test_transaction;
     use sbor::prelude::{basic_decode, basic_encode};
+
+    use super::*;
 
     #[test]
     fn test_get_transactions_response() {

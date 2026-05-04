@@ -35,7 +35,8 @@ pub(crate) mod versioned_key;
 #[cfg(test)]
 mod tests;
 
-pub use config::{CompressionType, RocksDbConfig};
 pub use core::{RocksDbStorage, StorageError};
+
+pub use config::{CompressionType, RocksDbConfig};
 pub use shared::SharedStorage;
 pub use snapshot::RocksDbSnapshot;

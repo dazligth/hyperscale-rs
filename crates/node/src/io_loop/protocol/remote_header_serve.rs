@@ -8,6 +8,7 @@
 
 use hyperscale_messages::request::{GetRemoteHeadersRequest, MAX_REMOTE_HEADERS_PER_REQUEST};
 use hyperscale_messages::response::GetRemoteHeadersResponse;
+use hyperscale_metrics::record_fetch_response_sent;
 use hyperscale_storage::ChainReader;
 use hyperscale_types::BlockHeight;
 
@@ -34,7 +35,7 @@ pub fn serve_remote_headers_request(
     }
 
     if !headers.is_empty() {
-        hyperscale_metrics::record_fetch_response_sent("remote_header", headers.len());
+        record_fetch_response_sent("remote_header", headers.len());
     }
 
     GetRemoteHeadersResponse { headers }

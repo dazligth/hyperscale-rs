@@ -25,9 +25,10 @@
 //! the network worker thread are wait-free in the common case and never
 //! contend with the single state-machine writer.
 
+use std::sync::Arc;
+
 use hyperscale_types::{BloomFilter, DEFAULT_FPR, RoutableTransaction, TxHash};
 use papaya::HashMap;
-use std::sync::Arc;
 
 /// Shared content-addressed store of [`RoutableTransaction`] bodies.
 ///
@@ -128,8 +129,9 @@ impl Default for TxStore {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use hyperscale_types::test_utils::test_transaction;
+
+    use super::*;
 
     fn tx(seed: u8) -> Arc<RoutableTransaction> {
         Arc::new(test_transaction(seed))

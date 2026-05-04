@@ -16,9 +16,10 @@
 //! Time is BFT-anchored (`WeightedTimestamp`), consistent with every other
 //! retention/deadline knob in the mempool.
 
-use hyperscale_types::{ShardGroupId, TxHash, WeightedTimestamp};
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
+
+use hyperscale_types::{ShardGroupId, TxHash, WeightedTimestamp};
 
 /// Grace before mempool emits a fetch for an expected tx.
 ///

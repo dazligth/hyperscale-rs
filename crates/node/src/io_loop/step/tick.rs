@@ -7,16 +7,17 @@
 //! explicit `Action::AbandonFetch` actions emitted from the originating
 //! coordinator at every expected-set drop site.
 
+use hyperscale_dispatch::Dispatch;
+use hyperscale_engine::Engine;
+use hyperscale_network::Network;
+use hyperscale_storage::Storage;
+
 use crate::io_loop::IoLoop;
 use crate::io_loop::protocol::binding::{
     ExecCertBinding, FinalizedWaveBinding, LocalProvisionBinding, ProvisionBinding,
     TransactionBinding,
 };
 use crate::io_loop::protocol::fetch::FetchInput;
-use hyperscale_dispatch::Dispatch;
-use hyperscale_engine::Engine;
-use hyperscale_network::Network;
-use hyperscale_storage::Storage;
 
 impl<S, N, D, E> IoLoop<S, N, D, E>
 where

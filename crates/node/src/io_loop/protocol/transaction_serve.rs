@@ -1,11 +1,12 @@
 //! Inbound transaction-fetch request handling.
 
+use std::sync::Arc;
+
 use hyperscale_mempool::TxStore;
 use hyperscale_messages::request::GetTransactionsRequest;
 use hyperscale_messages::response::GetTransactionsResponse;
-use hyperscale_metrics as metrics;
+use hyperscale_metrics::record_fetch_response_sent;
 use hyperscale_storage::ChainReader;
-use std::sync::Arc;
 use tracing::{debug, trace};
 
 /// Maximum items returned in a single transaction fetch response.
@@ -67,6 +68,6 @@ pub fn serve_transaction_request(
         found = found_count,
         "Responding to transaction fetch request"
     );
-    metrics::record_fetch_response_sent("transaction", found_count);
+    record_fetch_response_sent("transaction", found_count);
     GetTransactionsResponse::new(found)
 }

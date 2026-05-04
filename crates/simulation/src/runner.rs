@@ -3,32 +3,42 @@
 //! Uses [`IoLoop`] to process all actions per-node, with the simulation harness
 //! controlling event scheduling, network delivery, and time.
 
-use crate::event_queue::EventKey;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
+use std::time::Duration;
+
+use arc_swap::ArcSwap;
+use crossbeam::channel::{Receiver, unbounded};
 use hyperscale_bft::{BftConfig, RecoveredState};
 use hyperscale_core::{NodeInput, ProtocolEvent, TimerId};
 use hyperscale_dispatch_sync::SyncDispatch;
-use hyperscale_engine::{RadixExecutor, SimExecutionCache, SimulationEngine};
+use hyperscale_engine::{
+    GenesisConfig, RadixExecutor, SimExecutionCache, SimulationEngine, TransactionValidation,
+};
 use hyperscale_mempool::MempoolConfig;
 use hyperscale_network_memory::{
-    NetworkConfig, NetworkTrafficAnalyzer, NodeIndex, SimNetworkAdapter, SimulatedNetwork,
+    BandwidthReport, NetworkConfig, NetworkTrafficAnalyzer, NodeIndex, SimNetworkAdapter,
+    SimulatedNetwork,
 };
 use hyperscale_node::io_loop::{IoLoop, StepOutput};
 use hyperscale_node::{NodeConfig, NodeStateMachine, TimerOp};
+use hyperscale_provisions::{ProvisionConfig, ProvisionStore};
 use hyperscale_storage::ChainReader;
 use hyperscale_storage_memory::SimStorage;
 use hyperscale_topology::TopologyCoordinator;
 use hyperscale_types::{
-    BlockHeight, Bls12381G1PrivateKey, Bls12381G1PublicKey, CertifiedBlock, NodeId, ShardGroupId,
-    TransactionStatus, TxHash, ValidatorId, ValidatorInfo, ValidatorSet, bls_keypair_from_seed,
-    shard_for_node,
+    BlockHeight, Bls12381G1PrivateKey, Bls12381G1PublicKey, CertifiedBlock, LocalTimestamp, NodeId,
+    QuorumCertificate, ShardGroupId, TransactionStatus, TxHash, ValidatorId, ValidatorInfo,
+    ValidatorSet, bls_keypair_from_seed, shard_for_node,
 };
+use radix_common::math::Decimal;
 use radix_common::network::NetworkDefinition;
+use radix_common::types::ComponentAddress;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
-use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
-use std::time::Duration;
 use tracing::{debug, info, trace};
+
+use crate::event_queue::EventKey;
 
 /// Type alias for the simulation's concrete `IoLoop`.
 type SimIoLoop = IoLoop<SimStorage, SimNetworkAdapter, SyncDispatch, SimulationEngine>;
@@ -46,7 +56,7 @@ pub struct SimulationRunner {
     io_loops: Vec<SimIoLoop>,
 
     /// Per-node event receivers (from crossbeam channels passed to `IoLoop`).
-    event_rxs: Vec<crossbeam::channel::Receiver<NodeInput>>,
+    event_rxs: Vec<Receiver<NodeInput>>,
 
     /// Global event queue, ordered deterministically.
     event_queue: BTreeMap<EventKey, NodeInput>,
@@ -209,9 +219,7 @@ impl SimulationRunner {
                     Bls12381G1PrivateKey::from_bytes(&key_bytes).expect("valid key bytes");
 
                 // ArcSwap so the io_loop sees `Action::TopologyChanged` snapshot updates.
-                let topology_arc = Arc::new(arc_swap::ArcSwap::from(Arc::clone(
-                    topology_state.snapshot(),
-                )));
+                let topology_arc = Arc::new(ArcSwap::from(Arc::clone(topology_state.snapshot())));
 
                 let state = NodeStateMachine::new(
                     node_index as NodeIndex,
@@ -219,16 +227,14 @@ impl SimulationRunner {
                     &BftConfig::default(),
                     RecoveredState::default(),
                     MempoolConfig::default(),
-                    hyperscale_provisions::ProvisionConfig::default(),
-                    Arc::new(hyperscale_provisions::ProvisionStore::new()),
+                    ProvisionConfig::default(),
+                    Arc::new(ProvisionStore::new()),
                 );
 
-                let (event_tx, event_rx) = crossbeam::channel::unbounded();
+                let (event_tx, event_rx) = unbounded();
 
                 let network_def = NetworkDefinition::simulator();
-                let tx_validator = Arc::new(hyperscale_engine::TransactionValidation::permissive(
-                    network_def.clone(),
-                ));
+                let tx_validator = Arc::new(TransactionValidation::permissive(network_def.clone()));
 
                 let sim_engine =
                     SimulationEngine::new(RadixExecutor::new(network_def), shard_cache.clone());
@@ -302,7 +308,7 @@ impl SimulationRunner {
 
     /// Get a bandwidth report from the traffic analyzer.
     #[must_use]
-    pub fn traffic_report(&self) -> Option<hyperscale_network_memory::BandwidthReport> {
+    pub fn traffic_report(&self) -> Option<BandwidthReport> {
         self.traffic_analyzer
             .as_ref()
             .map(|analyzer| analyzer.generate_report(self.now, self.network.total_nodes()))
@@ -389,7 +395,7 @@ impl SimulationRunner {
 
     /// Initialize all nodes with genesis blocks and start consensus.
     pub fn initialize_genesis(&mut self) {
-        self.install_engine_genesis(&hyperscale_engine::GenesisConfig::test_default(), |_| true);
+        self.install_engine_genesis(&GenesisConfig::test_default(), |_| true);
         info!(
             num_nodes = self.io_loops.len(),
             "Radix Engine genesis complete on all nodes"
@@ -407,13 +413,7 @@ impl SimulationRunner {
     ///
     /// Panics if a Radix `ComponentAddress` payload is shorter than 30 bytes
     /// (unreachable: `ComponentAddress` is always 30 bytes).
-    pub fn initialize_genesis_with_balances(
-        &mut self,
-        balances: &[(
-            radix_common::types::ComponentAddress,
-            radix_common::math::Decimal,
-        )],
-    ) {
+    pub fn initialize_genesis_with_balances(&mut self, balances: &[(ComponentAddress, Decimal)]) {
         let num_shards = u64::from(self.network.config().num_shards);
         let validators_per_shard = self.network.config().validators_per_shard;
 
@@ -432,18 +432,17 @@ impl SimulationRunner {
         // Each node receives only its own shard's balances. Build one
         // GenesisConfig per shard up-front; the engine cache then memoizes
         // the merged DatabaseUpdates per unique config across the process.
-        let configs_by_shard: HashMap<ShardGroupId, hyperscale_engine::GenesisConfig> =
-            balances_by_shard
-                .into_iter()
-                .map(|(shard_id, shard_balances)| {
-                    let config = hyperscale_engine::GenesisConfig {
-                        xrd_balances: shard_balances,
-                        ..hyperscale_engine::GenesisConfig::test_default()
-                    };
-                    (shard_id, config)
-                })
-                .collect();
-        let empty_config = hyperscale_engine::GenesisConfig::test_default();
+        let configs_by_shard: HashMap<ShardGroupId, GenesisConfig> = balances_by_shard
+            .into_iter()
+            .map(|(shard_id, shard_balances)| {
+                let config = GenesisConfig {
+                    xrd_balances: shard_balances,
+                    ..GenesisConfig::test_default()
+                };
+                (shard_id, config)
+            })
+            .collect();
+        let empty_config = GenesisConfig::test_default();
 
         for shard_idx in 0..self.network.config().num_shards {
             let shard_id = ShardGroupId(u64::from(shard_idx));
@@ -467,7 +466,7 @@ impl SimulationRunner {
     /// [`Self::finalize_genesis`].
     fn install_engine_genesis(
         &mut self,
-        config: &hyperscale_engine::GenesisConfig,
+        config: &GenesisConfig,
         mut select: impl FnMut(usize) -> bool,
     ) {
         for node_idx in 0..self.io_loops.len() {
@@ -501,7 +500,7 @@ impl SimulationRunner {
 
             let proposer = ValidatorId(u64::from(shard_id * validators_per_shard));
             let genesis_block = Block::genesis(
-                hyperscale_types::ShardGroupId(u64::from(shard_id)),
+                ShardGroupId(u64::from(shard_id)),
                 proposer,
                 genesis_jmt_root,
             );
@@ -523,9 +522,9 @@ impl SimulationRunner {
                 // Sync state machine with actual JMT state after genesis bootstrap.
                 // Pair the genesis block with a zeroed QC whose `block_hash` matches
                 // so the CertifiedBlock pairing invariant holds.
-                let genesis_qc = hyperscale_types::QuorumCertificate {
+                let genesis_qc = QuorumCertificate {
                     block_hash: genesis_block.hash(),
-                    ..hyperscale_types::QuorumCertificate::genesis()
+                    ..QuorumCertificate::genesis()
                 };
                 let genesis_certified =
                     CertifiedBlock::new_unchecked(genesis_block.clone(), genesis_qc);
@@ -631,11 +630,9 @@ impl SimulationRunner {
                 self.stats.events_processed += 1;
                 self.stats.events_by_priority[event.priority() as usize] += 1;
 
-                self.io_loops[node_index as usize].set_time(
-                    hyperscale_types::LocalTimestamp::from_millis(
-                        u64::try_from(self.now.as_millis()).unwrap_or(u64::MAX),
-                    ),
-                );
+                self.io_loops[node_index as usize].set_time(LocalTimestamp::from_millis(
+                    u64::try_from(self.now.as_millis()).unwrap_or(u64::MAX),
+                ));
                 let output = self.io_loops[node_index as usize].step(event);
                 self.io_loops[node_index as usize].flush_all_batches();
 

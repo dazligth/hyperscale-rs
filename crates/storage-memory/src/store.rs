@@ -1,10 +1,14 @@
 //! `SubstateStore` implementation for `SimStorage`.
 
+use std::sync::Arc;
+
+use hyperscale_jmt::{Node as JmtNode, NodeKey as JmtNodeKey, TreeReader};
+use hyperscale_storage::tree::proofs::generate_proof;
+use hyperscale_storage::{DbSortKey, SubstateStore, VersionedStore};
+use hyperscale_types::{BlockHeight, MerkleInclusionProof, NodeId, StateRoot};
+
 use crate::core::SimStorage;
 use crate::snapshot::SimSnapshot;
-
-use hyperscale_storage::{DbSortKey, SubstateStore, VersionedStore};
-use hyperscale_types::{BlockHeight, NodeId, StateRoot};
 
 impl SubstateStore for SimStorage {
     type Snapshot<'a> = SimSnapshot;
@@ -50,9 +54,9 @@ impl SubstateStore for SimStorage {
         &self,
         storage_keys: &[Vec<u8>],
         block_height: BlockHeight,
-    ) -> Option<hyperscale_types::MerkleInclusionProof> {
+    ) -> Option<MerkleInclusionProof> {
         let s = self.state.read().unwrap();
-        hyperscale_storage::tree::proofs::generate_proof(&s.tree_store, storage_keys, block_height)
+        generate_proof(&s.tree_store, storage_keys, block_height)
     }
 }
 
@@ -83,15 +87,12 @@ impl VersionedStore for SimStorage {
     }
 }
 
-impl hyperscale_jmt::TreeReader for SimStorage {
-    fn get_node(
-        &self,
-        key: &hyperscale_jmt::NodeKey,
-    ) -> Option<std::sync::Arc<hyperscale_jmt::Node>> {
+impl TreeReader for SimStorage {
+    fn get_node(&self, key: &JmtNodeKey) -> Option<Arc<JmtNode>> {
         self.state.read().unwrap().tree_store.get_node(key)
     }
 
-    fn get_root_key(&self, version: u64) -> Option<hyperscale_jmt::NodeKey> {
+    fn get_root_key(&self, version: u64) -> Option<JmtNodeKey> {
         self.state.read().unwrap().tree_store.get_root_key(version)
     }
 }

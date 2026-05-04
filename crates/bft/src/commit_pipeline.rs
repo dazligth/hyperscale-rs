@@ -12,9 +12,10 @@
 //!    it is parked in [`CommitPipeline::out_of_order`] keyed by height, to
 //!    be drained in sequence once the predecessor commits.
 
+use std::collections::{BTreeMap, HashMap};
+
 use hyperscale_core::CommitSource;
 use hyperscale_types::{Block, BlockHash, BlockHeight, QuorumCertificate};
-use std::collections::{BTreeMap, HashMap};
 
 pub struct CommitPipeline {
     /// Blocks that have been certified (have QC) but not yet committed.
@@ -88,8 +89,9 @@ impl CommitPipeline {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use hyperscale_types::{Hash, QuorumCertificate};
+
+    use super::*;
 
     fn make_qc(height: u64) -> QuorumCertificate {
         let mut qc = QuorumCertificate::genesis();
@@ -163,9 +165,10 @@ mod tests {
 
 #[cfg(test)]
 mod properties {
-    use super::*;
     use hyperscale_types::Hash;
     use proptest::prelude::*;
+
+    use super::*;
 
     fn make_qc(height: u64) -> QuorumCertificate {
         let mut qc = QuorumCertificate::genesis();

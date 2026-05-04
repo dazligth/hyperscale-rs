@@ -1,21 +1,30 @@
 //! Swarm construction with QUIC/TCP transport configuration.
 
-use super::behaviour::Behaviour;
-use super::error::NetworkError;
-use crate::config::Libp2pConfig;
+use std::time::Duration;
+
 use futures::future::Either;
 use libp2p::core::muxing::StreamMuxerBox;
 use libp2p::core::transport::{OrTransport, Transport};
 use libp2p::core::upgrade::Version;
-use libp2p::{Swarm, SwarmBuilder, identity};
-use std::time::Duration;
+use libp2p::identity::Keypair;
+use libp2p::noise::Config as NoiseConfig;
+use libp2p::quic::Config as QuicConfig;
+use libp2p::quic::tokio::Transport as QuicTokioTransport;
+use libp2p::tcp::Config as TcpConfig;
+use libp2p::tcp::tokio::Transport as TcpTokioTransport;
+use libp2p::yamux::Config as YamuxConfig;
+use libp2p::{Swarm, SwarmBuilder};
 use tracing::info;
+
+use super::behaviour::Behaviour;
+use super::error::NetworkError;
+use crate::config::Libp2pConfig;
 
 /// Apply consensus-optimized QUIC settings to a config.
 ///
 /// Used by both the TCP fallback path (which creates `Config::new`) and
 /// the QUIC-only path (which receives a mutable Config from `SwarmBuilder`).
-fn apply_quic_tuning(quic_config: &mut libp2p::quic::Config, app_config: &Libp2pConfig) {
+fn apply_quic_tuning(quic_config: &mut QuicConfig, app_config: &Libp2pConfig) {
     // QUIC configuration optimized for BFT consensus workloads:
     // - High stream concurrency for parallel sync and cross-shard coordination
     // - Large flow control windows for block transfers
@@ -41,38 +50,37 @@ fn apply_quic_tuning(quic_config: &mut libp2p::quic::Config, app_config: &Libp2p
 /// Build a configured libp2p Swarm with QUIC transport and optional TCP fallback.
 pub(super) fn build_swarm(
     config: &Libp2pConfig,
-    keypair: identity::Keypair,
+    keypair: Keypair,
     behaviour: Behaviour,
 ) -> Result<Swarm<Behaviour>, NetworkError> {
     if config.tcp_fallback_enabled {
         info!("Building swarm with QUIC (primary) + TCP (fallback)");
 
-        let mut quic_config = libp2p::quic::Config::new(&keypair);
+        let mut quic_config = QuicConfig::new(&keypair);
         apply_quic_tuning(&mut quic_config, config);
 
-        let quic_transport = libp2p::quic::tokio::Transport::new(quic_config)
-            .map(|(p, c), _| (p, StreamMuxerBox::new(c)));
+        let quic_transport =
+            QuicTokioTransport::new(quic_config).map(|(p, c), _| (p, StreamMuxerBox::new(c)));
 
         // TCP configuration with Noise + Yamux
-        let tcp_transport =
-            libp2p::tcp::tokio::Transport::new(libp2p::tcp::Config::default().nodelay(true))
-                .upgrade(Version::V1)
-                .authenticate(
-                    libp2p::noise::Config::new(&keypair)
-                        .map_err(|e| NetworkError::NetworkError(e.to_string()))?,
-                )
-                .multiplex({
-                    let mut config = libp2p::yamux::Config::default();
-                    config.set_max_num_streams(4096);
-                    // allowing deprecated because replacement (connection-level limits) is not available libp2p 0.56
-                    #[allow(deprecated)]
-                    {
-                        config.set_max_buffer_size(16 * 1024 * 1024);
-                        config.set_receive_window_size(16 * 1024 * 1024);
-                    }
-                    config
-                })
-                .map(|(p, c), _| (p, StreamMuxerBox::new(c)));
+        let tcp_transport = TcpTokioTransport::new(TcpConfig::default().nodelay(true))
+            .upgrade(Version::V1)
+            .authenticate(
+                NoiseConfig::new(&keypair)
+                    .map_err(|e| NetworkError::NetworkError(e.to_string()))?,
+            )
+            .multiplex({
+                let mut config = YamuxConfig::default();
+                config.set_max_num_streams(4096);
+                // allowing deprecated because replacement (connection-level limits) is not available libp2p 0.56
+                #[allow(deprecated)]
+                {
+                    config.set_max_buffer_size(16 * 1024 * 1024);
+                    config.set_receive_window_size(16 * 1024 * 1024);
+                }
+                config
+            })
+            .map(|(p, c), _| (p, StreamMuxerBox::new(c)));
 
         // Prioritize QUIC by putting it first (Left side of OrTransport)
         let transport =

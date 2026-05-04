@@ -79,9 +79,10 @@ pub fn committee_public_keys(topology: &TopologySnapshot) -> Option<Vec<Bls12381
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use hyperscale_test_helpers::TestCommittee;
     use hyperscale_types::{ValidatorInfo, ValidatorSet};
+
+    use super::*;
 
     fn topology_for(local_idx: usize, committee: &TestCommittee) -> TopologySnapshot {
         let validators: Vec<ValidatorInfo> = (0..committee.size())

@@ -7,11 +7,11 @@ mod funding;
 mod transfer;
 
 pub use funding::FundingWorkload;
+use hyperscale_types::RoutableTransaction;
+use rand::Rng;
 pub use transfer::TransferWorkload;
 
 use crate::accounts::AccountPool;
-use hyperscale_types::RoutableTransaction;
-use rand::Rng;
 
 /// Trait for generating transaction workloads.
 ///

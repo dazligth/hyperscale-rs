@@ -1,10 +1,11 @@
 //! Block fetch request.
 
-use crate::response::GetBlockResponse;
 use hyperscale_types::{
     BlockHeight, BloomFilter, MessageClass, NetworkMessage, ProvisionHash, Request, TxHash, WaveId,
 };
 use sbor::prelude::BasicSbor;
+
+use crate::response::GetBlockResponse;
 
 /// Inventory of locally-known item hashes, grouped by category.
 ///
@@ -119,9 +120,10 @@ impl Request for GetBlockRequest {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use hyperscale_types::{BloomFilter, Hash, TxHash};
     use sbor::{basic_decode, basic_encode};
+
+    use super::*;
 
     #[test]
     fn test_get_block_request() {

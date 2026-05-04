@@ -50,6 +50,7 @@ impl NetworkMessage for CommittedBlockHeaderGossip {
 #[cfg(test)]
 mod tests {
     use hyperscale_types::{BlockHash, ProposerTimestamp};
+    use sbor::{basic_decode, basic_encode};
 
     use super::*;
 
@@ -63,12 +64,13 @@ mod tests {
 
     #[test]
     fn test_sbor_roundtrip() {
+        use std::collections::BTreeMap;
+
         use hyperscale_types::{
             BlockHeader, BlockHeight, CertificateRoot, Hash, LocalReceiptRoot, ProvisionsRoot,
             QuorumCertificate, Round, ShardGroupId, StateRoot, TransactionRoot, ValidatorId,
             zero_bls_signature,
         };
-        use std::collections::BTreeMap;
 
         let header = BlockHeader {
             shard_group_id: ShardGroupId(1),
@@ -96,8 +98,8 @@ mod tests {
             sender_signature: zero_bls_signature(),
         };
 
-        let encoded = sbor::basic_encode(&gossip).unwrap();
-        let decoded: CommittedBlockHeaderGossip = sbor::basic_decode(&encoded).unwrap();
+        let encoded = basic_encode(&gossip).unwrap();
+        let decoded: CommittedBlockHeaderGossip = basic_decode(&encoded).unwrap();
         assert_eq!(gossip, decoded);
     }
 }

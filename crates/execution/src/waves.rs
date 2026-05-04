@@ -32,15 +32,14 @@
 //!   `EarlyArrivalBuffer::buffer_ec` / `clear_routed` and walks the affected
 //!   waves.
 
-#[cfg(test)]
-use hyperscale_types::Hash;
-use hyperscale_types::{
-    Attempt, BlockHash, ExecutionCertificate, GlobalReceiptRoot, TxHash, TxOutcome, WaveId,
-    WeightedTimestamp,
-};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
+
+use hyperscale_types::{
+    Attempt, BlockHash, BlockHeight, ExecutionCertificate, GlobalReceiptRoot, TxHash, TxOutcome,
+    WaveId, WeightedTimestamp,
+};
 
 use crate::vote_tracker::VoteTracker;
 use crate::wave_state::WaveState;
@@ -65,7 +64,7 @@ pub struct PendingVoteRetry {
     pub sent_at: WeightedTimestamp,
     pub attempt: Attempt,
     pub block_hash: BlockHash,
-    pub block_height: hyperscale_types::BlockHeight,
+    pub block_height: BlockHeight,
     pub vote_anchor_ts: WeightedTimestamp,
     pub global_receipt_root: GlobalReceiptRoot,
     pub tx_outcomes: Arc<Vec<TxOutcome>>,
@@ -79,7 +78,7 @@ pub struct RetryEffect {
     pub wave_id: WaveId,
     pub attempt: Attempt,
     pub block_hash: BlockHash,
-    pub block_height: hyperscale_types::BlockHeight,
+    pub block_height: BlockHeight,
     pub vote_anchor_ts: WeightedTimestamp,
     pub global_receipt_root: GlobalReceiptRoot,
     pub tx_outcomes: Arc<Vec<TxOutcome>>,
@@ -395,11 +394,14 @@ impl WaveRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use hyperscale_types::test_utils::test_transaction;
     use hyperscale_types::{
-        BlockHash, BlockHeight, ExecutionOutcome, GlobalReceiptHash, ShardGroupId, SignerBitfield,
-        test_utils::test_transaction,
+        BlockHash, BlockHeight, ExecutionOutcome, GlobalReceiptHash, Hash, ShardGroupId,
+        SignerBitfield, zero_bls_signature,
     };
+    use proptest::collection::vec as prop_vec;
+
+    use super::*;
 
     fn shard() -> ShardGroupId {
         ShardGroupId(0)
@@ -443,7 +445,7 @@ mod tests {
             WeightedTimestamp::ZERO,
             GlobalReceiptRoot::ZERO,
             tx_hashes.iter().map(|h| make_outcome(*h)).collect(),
-            hyperscale_types::zero_bls_signature(),
+            zero_bls_signature(),
             SignerBitfield::new(4),
         )
     }
@@ -647,8 +649,8 @@ mod tests {
     proptest! {
         #[test]
         fn prune_resolved_leaves_registry_consistent(
-            wave_heights in proptest::collection::vec(0u64..10, 1..10),
-            assignment_indices in proptest::collection::vec(0usize..20, 0..20),
+            wave_heights in prop_vec(0u64..10, 1..10),
+            assignment_indices in prop_vec(0usize..20, 0..20),
         ) {
             let mut r = WaveRegistry::new();
             let wave_ids: Vec<WaveId> = wave_heights.iter().map(|h| wave(*h)).collect();

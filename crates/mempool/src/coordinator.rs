@@ -1,21 +1,24 @@
 //! Mempool state.
 
-use crate::expected_txs::{EXPECTED_TX_GRACE, ExpectedTxs};
-use crate::lock_tracker::LockTracker;
-use crate::ready_set::ReadySet;
-use crate::tombstones::TombstoneStore;
-use crate::tx_store::TxStore;
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::Duration;
+
 use hyperscale_core::{Action, FetchAbandon, FetchOrigin, FetchPeers, FetchRequest, ProtocolEvent};
+use hyperscale_metrics::{record_expected_tx_dropped, record_transaction_aborted};
 use hyperscale_types::{
     BlockHeight, CertifiedBlock, LocalTimestamp, NodeId, RETENTION_HORIZON, RoutableTransaction,
     ShardGroupId, TopologySnapshot, TransactionDecision, TransactionStatus, TxHash,
     WeightedTimestamp,
 };
 use serde::Deserialize;
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::time::Duration;
 use tracing::instrument;
+
+use crate::expected_txs::{EXPECTED_TX_GRACE, ExpectedTxs};
+use crate::lock_tracker::LockTracker;
+use crate::ready_set::ReadySet;
+use crate::tombstones::TombstoneStore;
+use crate::tx_store::TxStore;
 
 /// Default minimum dwell time for transactions before they become eligible for block inclusion.
 ///
@@ -650,7 +653,7 @@ impl MempoolCoordinator {
                     height = height.0,
                     "Expected cross-shard tx dropped past RETENTION_HORIZON without DA"
                 );
-                hyperscale_metrics::record_expected_tx_dropped();
+                record_expected_tx_dropped();
                 abandoned.push(tx_hash);
             }
             actions.push(Action::AbandonFetch(FetchAbandon::Transactions {
@@ -664,7 +667,7 @@ impl MempoolCoordinator {
         for fw in block.certificates() {
             for (tx_hash, decision) in fw.tx_decisions() {
                 if matches!(decision, TransactionDecision::Aborted) {
-                    hyperscale_metrics::record_transaction_aborted();
+                    record_transaction_aborted();
                 }
                 actions.extend(self.process_certificate_committed(topology, tx_hash, decision));
             }
@@ -1050,12 +1053,16 @@ impl MempoolCoordinator {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use hyperscale_test_helpers::{TestCommittee, make_finalized_wave};
+    use hyperscale_metrics::{MetricsRecorder, with_scoped_recorder};
+    use hyperscale_metrics_memory::MemoryRecorder;
+    use hyperscale_test_helpers::{TestCommittee, certify, make_finalized_wave, make_live_block};
+    use hyperscale_types::test_utils::{test_transaction, test_transaction_with_nodes};
     use hyperscale_types::{
         Block, FinalizedWave, MerkleInclusionProof, Provisions, ShardGroupId, TxEntries,
-        ValidatorId, test_utils::test_transaction,
+        ValidatorId,
     };
+
+    use super::*;
 
     fn make_test_topology() -> TopologySnapshot {
         TestCommittee::new(4, 42).topology_snapshot(0, 1)
@@ -1073,7 +1080,7 @@ mod tests {
         tx: RoutableTransaction,
         fw: FinalizedWave,
     ) -> CertifiedBlock {
-        let block = hyperscale_test_helpers::make_live_block(
+        let block = make_live_block(
             ShardGroupId(0),
             height,
             1_234_567_890,
@@ -1081,7 +1088,7 @@ mod tests {
             vec![Arc::new(tx)],
             vec![Arc::new(fw)],
         );
-        hyperscale_test_helpers::certify(block, height.0 * TEST_BLOCK_INTERVAL_MS)
+        certify(block, height.0 * TEST_BLOCK_INTERVAL_MS)
     }
 
     /// Build a `CertifiedBlock` whose body carries one `Provisions` bundle
@@ -1107,7 +1114,7 @@ mod tests {
             MerkleInclusionProof::dummy(),
             transactions,
         );
-        let block = match hyperscale_test_helpers::make_live_block(
+        let block = match make_live_block(
             ShardGroupId(0),
             height,
             1_234_567_890,
@@ -1128,7 +1135,7 @@ mod tests {
             },
             sealed @ Block::Sealed { .. } => sealed,
         };
-        hyperscale_test_helpers::certify(block, height.0 * TEST_BLOCK_INTERVAL_MS)
+        certify(block, height.0 * TEST_BLOCK_INTERVAL_MS)
     }
 
     #[test]
@@ -1368,10 +1375,9 @@ mod tests {
 
         let unseen_hash = test_transaction(1).hash();
 
-        let recorder = hyperscale_metrics_memory::MemoryRecorder::new();
-        let arc: std::sync::Arc<dyn hyperscale_metrics::MetricsRecorder> =
-            std::sync::Arc::new(recorder.clone());
-        hyperscale_metrics::with_scoped_recorder(arc, || {
+        let recorder = MemoryRecorder::new();
+        let arc: Arc<dyn MetricsRecorder> = Arc::new(recorder.clone());
+        with_scoped_recorder(arc, || {
             mempool.on_block_committed(
                 &topology,
                 &certified_block_with_provisions(BlockHeight(1), ShardGroupId(0), &[unseen_hash]),
@@ -1706,7 +1712,7 @@ mod tests {
         for tx in &txs {
             mempool.on_submit_transaction(topology, Arc::clone(tx), LocalTimestamp::ZERO);
         }
-        let block = hyperscale_test_helpers::make_live_block(
+        let block = make_live_block(
             ShardGroupId(0),
             BlockHeight(1),
             1_234_567_890,
@@ -1714,10 +1720,7 @@ mod tests {
             txs,
             vec![],
         );
-        mempool.on_block_committed(
-            topology,
-            &hyperscale_test_helpers::certify(block, TEST_BLOCK_INTERVAL_MS),
-        );
+        mempool.on_block_committed(topology, &certify(block, TEST_BLOCK_INTERVAL_MS));
 
         assert!(
             mempool.at_in_flight_limit(),
@@ -1756,7 +1759,7 @@ mod tests {
         }
 
         // Create cross-shard transaction
-        hyperscale_types::test_utils::test_transaction_with_nodes(
+        test_transaction_with_nodes(
             &[seed, seed + 1, seed + 2],
             vec![test_node(seed)],                        // read from one shard
             vec![test_node(seed), test_node(node2_seed)], // write to both shards
@@ -1846,7 +1849,7 @@ mod tests {
         assert_eq!(mempool.in_flight(), 0, "Pending TXs do not count");
 
         // Block 1 commits both txs — both transition Pending → Committed.
-        let block1 = hyperscale_test_helpers::make_live_block(
+        let block1 = make_live_block(
             ShardGroupId(0),
             BlockHeight(1),
             1_000,
@@ -1854,11 +1857,11 @@ mod tests {
             vec![Arc::new(single_tx), Arc::new(cross_tx)],
             vec![],
         );
-        mempool.on_block_committed(&topology, &hyperscale_test_helpers::certify(block1, 1_000));
+        mempool.on_block_committed(&topology, &certify(block1, 1_000));
         assert_eq!(mempool.in_flight(), 2, "Committed TXs hold state locks");
 
         // Block 2 carries the wave cert for the cross-shard tx — completes it.
-        let block2 = hyperscale_test_helpers::make_live_block(
+        let block2 = make_live_block(
             ShardGroupId(0),
             BlockHeight(2),
             2_000,
@@ -1870,10 +1873,10 @@ mod tests {
                 TransactionDecision::Accept,
             ))],
         );
-        mempool.on_block_committed(&topology, &hyperscale_test_helpers::certify(block2, 2_000));
+        mempool.on_block_committed(&topology, &certify(block2, 2_000));
         assert_eq!(mempool.in_flight(), 1, "Completed TX releases its lock");
 
-        let block3 = hyperscale_test_helpers::make_live_block(
+        let block3 = make_live_block(
             ShardGroupId(0),
             BlockHeight(3),
             3_000,
@@ -1885,7 +1888,7 @@ mod tests {
                 TransactionDecision::Accept,
             ))],
         );
-        mempool.on_block_committed(&topology, &hyperscale_test_helpers::certify(block3, 3_000));
+        mempool.on_block_committed(&topology, &certify(block3, 3_000));
         assert_eq!(mempool.in_flight(), 0, "All completed");
     }
 

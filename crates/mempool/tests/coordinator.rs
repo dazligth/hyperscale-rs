@@ -5,14 +5,16 @@
 //! API is caught here rather than by inline tests that can reach into
 //! private fields.
 
-use hyperscale_mempool::{MempoolConfig, MempoolCoordinator, MempoolMemoryStats};
-use hyperscale_test_helpers::{TestCommittee, certify, make_finalized_wave, make_live_block};
-use hyperscale_types::{
-    BlockHeight, Hash, LocalTimestamp, ShardGroupId, TopologySnapshot, TransactionDecision,
-    TransactionStatus, TxHash, ValidatorId, test_utils::test_transaction,
-};
 use std::sync::Arc;
 use std::time::Duration;
+
+use hyperscale_mempool::{MempoolConfig, MempoolCoordinator, MempoolMemoryStats};
+use hyperscale_test_helpers::{TestCommittee, certify, make_finalized_wave, make_live_block};
+use hyperscale_types::test_utils::test_transaction;
+use hyperscale_types::{
+    BlockHeight, Hash, LocalTimestamp, ShardGroupId, TopologySnapshot, TransactionDecision,
+    TransactionStatus, TxHash, ValidatorId,
+};
 
 fn test_topology() -> TopologySnapshot {
     TestCommittee::new(4, 42).topology_snapshot(0, 1)

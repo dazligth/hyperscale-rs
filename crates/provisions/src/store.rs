@@ -27,12 +27,13 @@
 //! block, attested in the source block header). Repeated inserts for
 //! the same key are idempotent.
 
+use std::collections::HashSet;
+use std::sync::Arc;
+
 use hyperscale_types::{
     BlockHeight, BloomFilter, DEFAULT_FPR, ProvisionHash, Provisions, ShardGroupId,
 };
 use papaya::HashMap;
-use std::collections::HashSet;
-use std::sync::Arc;
 
 /// Shared content-addressed store of `Provisions` bodies.
 pub struct ProvisionStore {
@@ -149,8 +150,9 @@ impl Default for ProvisionStore {
 
 #[cfg(test)]
 mod tests {
+    use hyperscale_types::{Hash, MerkleInclusionProof, TxEntries, TxHash};
+
     use super::*;
-    use hyperscale_types::{MerkleInclusionProof, TxEntries, TxHash};
 
     fn make_provisions(tx_seed: u8, height: u64) -> Arc<Provisions> {
         Arc::new(Provisions::new(
@@ -159,7 +161,7 @@ mod tests {
             BlockHeight(height),
             MerkleInclusionProof::dummy(),
             vec![TxEntries {
-                tx_hash: TxHash::from_raw(hyperscale_types::Hash::from_bytes(&[tx_seed])),
+                tx_hash: TxHash::from_raw(Hash::from_bytes(&[tx_seed])),
                 entries: vec![],
                 target_nodes: vec![],
             }],

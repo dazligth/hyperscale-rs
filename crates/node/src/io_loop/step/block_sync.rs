@@ -16,18 +16,25 @@
 //! tracks heights and emits `Fetch { from, count }` for the binding to
 //! turn into a network round-trip.
 
-use crate::io_loop::IoLoop;
-use crate::io_loop::protocol::block_sync::{BlockSyncInput, BlockSyncOutput};
-use crate::io_loop::protocol::sync::SyncOutput;
 use hyperscale_core::{NodeInput, ProtocolEvent};
 use hyperscale_dispatch::{Dispatch, DispatchPool};
 use hyperscale_engine::Engine;
 use hyperscale_messages::request::Inventory;
 use hyperscale_messages::response::{ElidedCertifiedBlock, GetBlockResponse, RehydrateError};
-use hyperscale_metrics as metrics;
+use hyperscale_metrics::{
+    record_sync_block_filtered, record_sync_response_error, record_sync_round_completed,
+    record_sync_round_retried, record_sync_round_started,
+};
 use hyperscale_network::{Network, ResponseVerdict};
 use hyperscale_storage::Storage;
-use hyperscale_types::{BlockHeight, CertifiedBlock};
+use hyperscale_types::{
+    BlockHeight, CertifiedBlock, Hash, StoredReceipt, compute_certificate_root,
+    compute_local_receipt_root, compute_provision_root, compute_transaction_root,
+};
+
+use crate::io_loop::IoLoop;
+use crate::io_loop::protocol::block_sync::{BlockSyncInput, BlockSyncOutput};
+use crate::io_loop::protocol::sync::SyncOutput;
 
 impl<S, N, D, E> IoLoop<S, N, D, E>
 where
@@ -75,7 +82,7 @@ where
                     RehydrateError::Missing(_) => "rehydration_miss",
                     RehydrateError::QcMismatch { .. } => "qc_hash_mismatch",
                 };
-                metrics::record_sync_response_error("block", reason);
+                record_sync_response_error("block", reason);
                 self.protocols.block_sync.mark_force_full_refetch(height);
                 self.feed_block_sync_fetch_failed(height);
                 return;
@@ -101,7 +108,7 @@ where
 
     /// Handle a sync block fetch failure (network error / not-found).
     pub(in crate::io_loop) fn handle_block_sync_fetch_failed(&mut self, height: BlockHeight) {
-        metrics::record_sync_response_error("block", "fetch_failed");
+        record_sync_response_error("block", "fetch_failed");
         self.feed_block_sync_fetch_failed(height);
     }
 
@@ -123,7 +130,7 @@ where
         reason: &'static str,
     ) {
         tracing::warn!(height = height.0, reason, "Sync: rejecting response");
-        metrics::record_sync_block_filtered("block", reason);
+        record_sync_block_filtered("block", reason);
         self.feed_block_sync_fetch_failed(height);
     }
 
@@ -175,7 +182,7 @@ where
         };
         let es = self.event_sender.clone();
         let peers = self.local_peers();
-        metrics::record_sync_round_started("block");
+        record_sync_round_started("block");
         self.network.request(
             &peers,
             None,
@@ -228,7 +235,7 @@ where
     /// Structural validation runs off-thread; this is the
     /// post-verdict pinned-thread continuation.
     fn deliver_validated_sync_block(&mut self, height: BlockHeight, certified: CertifiedBlock) {
-        metrics::record_sync_round_completed("block");
+        record_sync_round_completed("block");
 
         // Hand the block off to BFT; tell the FSM the height was delivered.
         self.feed_event(ProtocolEvent::BlockSyncReadyToApply { certified });
@@ -248,7 +255,7 @@ where
 
     /// Common back-edge: re-queue a height via `FetchFailed`.
     fn feed_block_sync_fetch_failed(&mut self, height: BlockHeight) {
-        metrics::record_sync_round_retried("block");
+        record_sync_round_retried("block");
         let outputs = self
             .protocols
             .block_sync
@@ -292,16 +299,13 @@ fn validate_synced_block(
     let header = certified.block.header();
 
     if !certified.block.transactions().is_empty()
-        && hyperscale_types::compute_transaction_root(certified.block.transactions())
-            != header.transaction_root
+        && compute_transaction_root(certified.block.transactions()) != header.transaction_root
     {
         return Err("transaction_root_mismatch");
     }
 
     if !certified.block.certificates().is_empty() {
-        if hyperscale_types::compute_certificate_root(certified.block.certificates())
-            != header.certificate_root
-        {
+        if compute_certificate_root(certified.block.certificates()) != header.certificate_root {
             return Err("certificate_root_mismatch");
         }
 
@@ -315,25 +319,25 @@ fn validate_synced_block(
             }
         }
 
-        let receipts: Vec<hyperscale_types::StoredReceipt> = certified
+        let receipts: Vec<StoredReceipt> = certified
             .block
             .certificates()
             .iter()
             .flat_map(|fw| fw.receipts.iter().cloned())
             .collect();
-        if hyperscale_types::compute_local_receipt_root(&receipts) != header.local_receipt_root {
+        if compute_local_receipt_root(&receipts) != header.local_receipt_root {
             return Err("local_receipt_root_mismatch");
         }
     }
 
     if !certified.block.provisions().is_empty() {
-        let provision_hashes: Vec<hyperscale_types::Hash> = certified
+        let provision_hashes: Vec<Hash> = certified
             .block
             .provisions()
             .iter()
             .map(|p| p.hash().into_raw())
             .collect();
-        if hyperscale_types::compute_provision_root(&provision_hashes) != header.provision_root {
+        if compute_provision_root(&provision_hashes) != header.provision_root {
             return Err("provision_root_mismatch");
         }
     }
@@ -343,18 +347,19 @@ fn validate_synced_block(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use hyperscale_types::{
-        Block, BlockHash, BlockHeader, Bls12381G2Signature, CertificateRoot, ExecutionCertificate,
-        ExecutionOutcome, FinalizedWave, GlobalReceiptHash, GlobalReceiptRoot, Hash,
-        LocalReceiptRoot, ProposerTimestamp, ProvisionsRoot, QuorumCertificate, Round,
-        ShardGroupId, SignerBitfield, StateRoot, StoredReceipt, TransactionRoot, TxHash, TxOutcome,
-        ValidatorId, WaveCertificate, WaveId, WeightedTimestamp, compute_certificate_root,
-        compute_local_receipt_root, compute_transaction_root, test_utils::test_transaction,
-        zero_bls_signature,
-    };
     use std::collections::BTreeMap;
     use std::sync::Arc;
+
+    use hyperscale_types::test_utils::test_transaction;
+    use hyperscale_types::{
+        Block, BlockHash, BlockHeader, Bls12381G2Signature, CertificateRoot, ConsensusReceipt,
+        ExecutionCertificate, ExecutionOutcome, FinalizedWave, GlobalReceiptHash,
+        GlobalReceiptRoot, LocalReceiptRoot, ProposerTimestamp, ProvisionsRoot, QuorumCertificate,
+        Round, ShardGroupId, SignerBitfield, StateRoot, TransactionRoot, TxHash, TxOutcome,
+        ValidatorId, WaveCertificate, WaveId, WeightedTimestamp, zero_bls_signature,
+    };
+
+    use super::*;
 
     const HEIGHT: BlockHeight = BlockHeight(1);
 
@@ -420,14 +425,14 @@ mod tests {
         let receipt = StoredReceipt {
             tx_hash,
             consensus: Arc::new(if success {
-                hyperscale_types::ConsensusReceipt::Succeeded {
-                    receipt_hash: hyperscale_types::GlobalReceiptHash::ZERO,
+                ConsensusReceipt::Succeeded {
+                    receipt_hash: GlobalReceiptHash::ZERO,
                     #[allow(clippy::default_trait_access)]
                     database_updates: Default::default(),
                     application_events: vec![],
                 }
             } else {
-                hyperscale_types::ConsensusReceipt::Failed
+                ConsensusReceipt::Failed
             }),
             metadata: None,
         };
@@ -582,7 +587,7 @@ mod tests {
         let receipt = StoredReceipt {
             tx_hash,
             // ConsensusReceipt::Failed but EC said Succeeded — mismatch test.
-            consensus: std::sync::Arc::new(hyperscale_types::ConsensusReceipt::Failed),
+            consensus: Arc::new(ConsensusReceipt::Failed),
             metadata: None,
         };
         let fw = Arc::new(FinalizedWave {

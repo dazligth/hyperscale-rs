@@ -24,15 +24,16 @@
 //!    `add_execution_certificate`. When every tx is covered (or aborted, which
 //!    is terminal-covered), the wave is complete and ready for finalization.
 
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
+use std::time::Duration;
+
 use hyperscale_types::{
     BlockHash, BlockHeight, ExecutionCertificate, ExecutionCertificateHash, ExecutionOutcome,
     GlobalReceiptRoot, RoutableTransaction, ShardGroupId, StoredReceipt, TransactionDecision,
     TxHash, TxOutcome, WAVE_TIMEOUT, WaveCertificate, WaveId, WeightedTimestamp,
     compute_global_receipt_root,
 };
-use std::collections::{BTreeSet, HashMap, HashSet};
-use std::sync::Arc;
-use std::time::Duration;
 
 /// Age at which a still-alive wave emits a single diagnostic warning.
 ///
@@ -768,11 +769,12 @@ impl WaveState {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use hyperscale_types::test_utils::{test_node, test_transaction_with_nodes};
     use hyperscale_types::{
-        Bls12381G2Signature, GlobalReceiptHash, Hash, SignerBitfield,
-        test_utils::{test_node, test_transaction_with_nodes},
+        Bls12381G2Signature, ConsensusReceipt, GlobalReceiptHash, Hash, SignerBitfield,
     };
+
+    use super::*;
 
     const WAVE_START: BlockHeight = BlockHeight(10);
 
@@ -847,14 +849,14 @@ mod tests {
         w.record_receipt(StoredReceipt {
             tx_hash,
             consensus: Arc::new(if success {
-                hyperscale_types::ConsensusReceipt::Succeeded {
-                    receipt_hash: hyperscale_types::GlobalReceiptHash::ZERO,
+                ConsensusReceipt::Succeeded {
+                    receipt_hash: GlobalReceiptHash::ZERO,
                     #[allow(clippy::default_trait_access)]
                     database_updates: Default::default(),
                     application_events: vec![],
                 }
             } else {
-                hyperscale_types::ConsensusReceipt::Failed
+                ConsensusReceipt::Failed
             }),
             metadata: None,
         });

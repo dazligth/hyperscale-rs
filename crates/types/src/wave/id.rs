@@ -1,9 +1,12 @@
 //! [`WaveId`] — self-contained globally unique wave identifier.
 
+use std::collections::BTreeSet;
+use std::fmt::{self, Display};
+
+use sbor::prelude::*;
+
 use crate::primitives::bloom::BloomKey;
 use crate::{BlockHeight, Hash, ShardGroupId};
-use sbor::prelude::*;
-use std::collections::BTreeSet;
 
 /// Self-contained wave identifier.
 ///
@@ -65,8 +68,8 @@ impl BloomKey for WaveId {
     }
 }
 
-impl std::fmt::Display for WaveId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for WaveId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.is_zero() {
             write!(
                 f,

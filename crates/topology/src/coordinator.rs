@@ -4,9 +4,10 @@
 //! `Arc<TopologySnapshot>` snapshots that are passed by reference to
 //! subsystems and shared with the `io_loop`.
 
-use hyperscale_types::{ShardGroupId, TopologySnapshot, ValidatorId, ValidatorSet};
 use std::collections::HashMap;
 use std::sync::Arc;
+
+use hyperscale_types::{ShardGroupId, TopologySnapshot, ValidatorId, ValidatorSet};
 
 /// Mutable topology state machine.
 ///
@@ -99,8 +100,9 @@ impl TopologyCoordinator {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use hyperscale_types::{ValidatorInfo, ValidatorSet, generate_bls_keypair};
+
+    use super::*;
 
     fn make_test_validator(id: u64, power: u64) -> ValidatorInfo {
         ValidatorInfo {

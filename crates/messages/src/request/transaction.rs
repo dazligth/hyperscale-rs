@@ -1,8 +1,9 @@
 //! Transaction fetch request.
 
-use crate::response::GetTransactionsResponse;
 use hyperscale_types::{MessageClass, NetworkMessage, Request, TxHash};
 use sbor::prelude::BasicSbor;
+
+use crate::response::GetTransactionsResponse;
 
 /// Request to fetch transactions by hash.
 ///
@@ -47,9 +48,10 @@ impl Request for GetTransactionsRequest {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use hyperscale_types::Hash;
-    use sbor::prelude::basic_encode;
+    use sbor::prelude::{basic_decode, basic_encode};
+
+    use super::*;
 
     #[test]
     fn test_get_transactions_request() {
@@ -68,7 +70,7 @@ mod tests {
     fn test_sbor_roundtrip() {
         let request = GetTransactionsRequest::new(vec![TxHash::from_raw(Hash::from_bytes(b"tx1"))]);
         let bytes = basic_encode(&request).unwrap();
-        let decoded: GetTransactionsRequest = sbor::prelude::basic_decode(&bytes).unwrap();
+        let decoded: GetTransactionsRequest = basic_decode(&bytes).unwrap();
         assert_eq!(request, decoded);
     }
 }

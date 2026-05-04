@@ -18,6 +18,8 @@
 //! assert_eq!(shard.to_string(), "hyperscale/transaction.gossip/shard-5/1.0.0");
 //! ```
 
+use std::fmt::{self, Display, Formatter};
+
 use hyperscale_types::ShardGroupId;
 
 /// Protocol version for topic generation.
@@ -145,8 +147,8 @@ impl Topic {
     }
 }
 
-impl std::fmt::Display for Topic {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for Topic {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.to_topic_string())
     }
 }

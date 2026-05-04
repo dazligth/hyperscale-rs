@@ -28,11 +28,14 @@
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use thiserror::Error;
-use tracing::instrument;
 
+use core_affinity::{get_core_ids, set_for_current};
 use hyperscale_dispatch::{Dispatch, DispatchPool};
-use hyperscale_metrics as metrics;
+use hyperscale_metrics::record_pool_task_completed;
+use rayon::{ThreadPool, ThreadPoolBuilder};
+use thiserror::Error;
+use tokio::runtime::Handle;
+use tracing::instrument;
 
 /// Errors from thread pool configuration.
 #[derive(Debug, Error)]
@@ -323,14 +326,14 @@ impl Default for ThreadPoolConfigBuilder {
 #[derive(Clone)]
 pub struct PooledDispatch {
     config: ThreadPoolConfig,
-    consensus_crypto_pool: Arc<rayon::ThreadPool>,
-    crypto_pool: Arc<rayon::ThreadPool>,
-    tx_validation_pool: Arc<rayon::ThreadPool>,
-    execution_pool: Arc<rayon::ThreadPool>,
+    consensus_crypto_pool: Arc<ThreadPool>,
+    crypto_pool: Arc<ThreadPool>,
+    tx_validation_pool: Arc<ThreadPool>,
+    execution_pool: Arc<ThreadPool>,
     /// Tokio handle for [`DispatchPool::Io`] tasks. Captured at construction
     /// time, so [`PooledDispatch::new`] must be called from inside a tokio
     /// runtime context.
-    tokio_handle: tokio::runtime::Handle,
+    tokio_handle: Handle,
     consensus_crypto_pending: Arc<AtomicUsize>,
     crypto_pending: Arc<AtomicUsize>,
     tx_validation_pending: Arc<AtomicUsize>,
@@ -342,17 +345,14 @@ impl PooledDispatch {
     /// Create a new pooled dispatch with the given configuration.
     ///
     /// `tokio_handle` is used to route [`DispatchPool::Io`] tasks. Pass
-    /// [`tokio::runtime::Handle::current`] from inside a runtime, or a handle
+    /// [`Handle::current`] from inside a runtime, or a handle
     /// from a runtime constructed by the caller.
     ///
     /// # Errors
     ///
     /// Returns a [`ThreadPoolError`] when validation fails or when any of the
     /// underlying rayon thread pools cannot be built.
-    pub fn new(
-        config: ThreadPoolConfig,
-        tokio_handle: tokio::runtime::Handle,
-    ) -> Result<Self, ThreadPoolError> {
+    pub fn new(config: ThreadPoolConfig, tokio_handle: Handle) -> Result<Self, ThreadPoolError> {
         config.validate()?;
 
         let consensus_crypto_pool = Arc::new(Self::build_consensus_crypto_pool(&config)?);
@@ -392,8 +392,8 @@ impl PooledDispatch {
 
     fn build_consensus_crypto_pool(
         config: &ThreadPoolConfig,
-    ) -> Result<rayon::ThreadPool, ThreadPoolError> {
-        let mut builder = rayon::ThreadPoolBuilder::new()
+    ) -> Result<ThreadPool, ThreadPoolError> {
+        let mut builder = ThreadPoolBuilder::new()
             .num_threads(config.consensus_crypto_threads)
             .stack_size(config.crypto_stack_size)
             .thread_name(|i| format!("consensus-crypto-{i}"));
@@ -415,8 +415,8 @@ impl PooledDispatch {
             .map_err(|e| ThreadPoolError::RayonBuildError(e.to_string()))
     }
 
-    fn build_crypto_pool(config: &ThreadPoolConfig) -> Result<rayon::ThreadPool, ThreadPoolError> {
-        let mut builder = rayon::ThreadPoolBuilder::new()
+    fn build_crypto_pool(config: &ThreadPoolConfig) -> Result<ThreadPool, ThreadPoolError> {
+        let mut builder = ThreadPoolBuilder::new()
             .num_threads(config.crypto_threads)
             .stack_size(config.crypto_stack_size)
             .thread_name(|i| format!("crypto-{i}"));
@@ -440,10 +440,8 @@ impl PooledDispatch {
             .map_err(|e| ThreadPoolError::RayonBuildError(e.to_string()))
     }
 
-    fn build_tx_validation_pool(
-        config: &ThreadPoolConfig,
-    ) -> Result<rayon::ThreadPool, ThreadPoolError> {
-        rayon::ThreadPoolBuilder::new()
+    fn build_tx_validation_pool(config: &ThreadPoolConfig) -> Result<ThreadPool, ThreadPoolError> {
+        ThreadPoolBuilder::new()
             .num_threads(config.tx_validation_threads)
             .stack_size(config.crypto_stack_size)
             .thread_name(|i| format!("tx-val-{i}"))
@@ -451,10 +449,8 @@ impl PooledDispatch {
             .map_err(|e| ThreadPoolError::RayonBuildError(e.to_string()))
     }
 
-    fn build_execution_pool(
-        config: &ThreadPoolConfig,
-    ) -> Result<rayon::ThreadPool, ThreadPoolError> {
-        let mut builder = rayon::ThreadPoolBuilder::new()
+    fn build_execution_pool(config: &ThreadPoolConfig) -> Result<ThreadPool, ThreadPoolError> {
+        let mut builder = ThreadPoolBuilder::new()
             .num_threads(config.execution_threads)
             .stack_size(config.execution_stack_size)
             .thread_name(|i| format!("exec-{i}"));
@@ -485,7 +481,7 @@ impl PooledDispatch {
     const fn rayon_pool_state(
         &self,
         pool: DispatchPool,
-    ) -> Option<(&Arc<rayon::ThreadPool>, &Arc<AtomicUsize>, &'static str)> {
+    ) -> Option<(&Arc<ThreadPool>, &Arc<AtomicUsize>, &'static str)> {
         match pool {
             DispatchPool::ConsensusCrypto => Some((
                 &self.consensus_crypto_pool,
@@ -527,7 +523,7 @@ impl Dispatch for PooledDispatch {
                 let start = std::time::Instant::now();
                 rayon_pool_owned.install(f);
                 pending.fetch_sub(1, Ordering::Relaxed);
-                metrics::record_pool_task_completed(label, start.elapsed().as_secs_f64());
+                record_pool_task_completed(label, start.elapsed().as_secs_f64());
             });
         } else {
             // DispatchPool::Io — route to tokio's blocking pool. Sized for
@@ -540,7 +536,7 @@ impl Dispatch for PooledDispatch {
                 let start = std::time::Instant::now();
                 f();
                 pending.fetch_sub(1, Ordering::Relaxed);
-                metrics::record_pool_task_completed("io", start.elapsed().as_secs_f64());
+                record_pool_task_completed("io", start.elapsed().as_secs_f64());
             });
         }
     }
@@ -555,7 +551,7 @@ impl Dispatch for PooledDispatch {
 /// Uses `core_affinity` which validates the core ID against the set of
 /// available cores, avoiding out-of-bounds issues with raw libc calls.
 fn pin_thread_to_core(core_id: usize) -> Result<(), ThreadPoolError> {
-    let core_ids = core_affinity::get_core_ids().ok_or_else(|| {
+    let core_ids = get_core_ids().ok_or_else(|| {
         ThreadPoolError::CorePinningError("failed to enumerate CPU cores".to_string())
     })?;
 
@@ -566,7 +562,7 @@ fn pin_thread_to_core(core_id: usize) -> Result<(), ThreadPoolError> {
             ThreadPoolError::CorePinningError(format!("core {core_id} not in available core set"))
         })?;
 
-    if core_affinity::set_for_current(target) {
+    if set_for_current(target) {
         Ok(())
     } else {
         Err(ThreadPoolError::CorePinningError(format!(
@@ -577,6 +573,8 @@ fn pin_thread_to_core(core_id: usize) -> Result<(), ThreadPoolError> {
 
 #[cfg(test)]
 mod tests {
+    use tokio::runtime::{Builder, Runtime};
+
     use super::*;
 
     #[test]
@@ -628,10 +626,8 @@ mod tests {
         assert!(result.is_err());
     }
 
-    fn test_runtime() -> tokio::runtime::Runtime {
-        tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap()
+    fn test_runtime() -> Runtime {
+        Builder::new_current_thread().build().unwrap()
     }
 
     #[test]

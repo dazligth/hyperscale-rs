@@ -1,10 +1,11 @@
 //! Per-validator [`ExecutionVote`] over an entire wave's transactions.
 
+use sbor::prelude::*;
+
 use crate::{
     BlockHash, BlockHeight, Bls12381G2Signature, GlobalReceiptRoot, ShardGroupId, TxOutcome,
     ValidatorId, WaveId, WeightedTimestamp,
 };
-use sbor::prelude::*;
 
 /// A validator's vote on all transactions in an execution wave.
 ///

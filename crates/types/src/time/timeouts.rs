@@ -6,8 +6,9 @@
 //! derive their invariants from `WAVE_TIMEOUT`, which defines the cross-shard
 //! execution window.
 
-use crate::MAX_VALIDITY_RANGE;
 use std::time::Duration;
+
+use crate::MAX_VALIDITY_RANGE;
 
 /// How long after wave start before a not-fully-provisioned wave is aborted
 /// in its entirety.

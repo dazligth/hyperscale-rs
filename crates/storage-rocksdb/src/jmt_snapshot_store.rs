@@ -2,14 +2,15 @@
 
 use std::sync::Arc;
 
-use crate::column_families::{CfHandles, JmtNodesCf, StateCf};
-use crate::jmt_stored::StoredNodeKey;
-use crate::typed_cf::{self, TypedCf};
-
-use hyperscale_jmt as jmt;
+use hyperscale_jmt::{Node as JmtNode, NodeKey as JmtNodeKey, TreeReader};
 use hyperscale_storage::{DbPartitionKey, DbSortKey, SubstateLookup};
 use hyperscale_types::StateRoot;
 use rocksdb::{DB, Snapshot};
+
+use crate::column_families::{CfHandles, JmtNodesCf, StateCf};
+use crate::jmt_stored::StoredNodeKey;
+use crate::metadata::read_jmt_metadata;
+use crate::typed_cf::{self, TypedCf};
 
 /// A tree store that reads JMT nodes from a `RocksDB` snapshot.
 ///
@@ -56,20 +57,20 @@ impl<'a> SnapshotTreeStore<'a> {
     ///
     /// Returns `(version, root_hash)`. For an empty tree, returns `(0, [0; 32])`.
     pub fn read_jmt_metadata(&self) -> (u64, StateRoot) {
-        crate::metadata::read_jmt_metadata(&self.snapshot)
+        read_jmt_metadata(&self.snapshot)
     }
 }
 
-impl jmt::TreeReader for SnapshotTreeStore<'_> {
-    fn get_node(&self, key: &jmt::NodeKey) -> Option<Arc<jmt::Node>> {
+impl TreeReader for SnapshotTreeStore<'_> {
+    fn get_node(&self, key: &JmtNodeKey) -> Option<Arc<JmtNode>> {
         let stored_key = StoredNodeKey::from_jmt(key);
         let cf = CfHandles::resolve(self.db);
         typed_cf::get::<JmtNodesCf>(&self.snapshot, JmtNodesCf::handle(&cf), &stored_key)
             .map(|v| Arc::new(v.into_latest().to_jmt()))
     }
 
-    fn get_root_key(&self, version: u64) -> Option<jmt::NodeKey> {
-        let root = jmt::NodeKey::root(version);
+    fn get_root_key(&self, version: u64) -> Option<JmtNodeKey> {
+        let root = JmtNodeKey::root(version);
         let stored_key = StoredNodeKey::from_jmt(&root);
         let cf = CfHandles::resolve(self.db);
         if typed_cf::get::<JmtNodesCf>(&self.snapshot, JmtNodesCf::handle(&cf), &stored_key)

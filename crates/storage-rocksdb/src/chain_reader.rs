@@ -1,17 +1,19 @@
 //! `ChainReader` implementation for `RocksDbStorage`.
 
-use crate::core::RocksDbStorage;
-use crate::typed_cf::TypedCf;
-
-use hyperscale_storage::BlockForSync;
-use hyperscale_types::{
-    BlockHash, BlockHeight, CertifiedBlock, CommittedBlockHeader, ExecutionCertificate,
-    ExecutionCertificateHash, QuorumCertificate, RoutableTransaction, ShardGroupId, TxHash,
-    WaveCertificate, WaveId,
-};
 use std::sync::Arc;
 
-impl hyperscale_storage::ChainReader for RocksDbStorage {
+use hyperscale_storage::{BlockForSync, ChainReader};
+use hyperscale_types::{
+    BlockHash, BlockHeight, CertifiedBlock, CommittedBlockHeader, ConsensusReceipt,
+    ExecutionCertificate, ExecutionCertificateHash, QuorumCertificate, RoutableTransaction,
+    ShardGroupId, TxHash, WaveCertificate, WaveId,
+};
+
+use crate::column_families::{ExecutionCertsByHeightCf, ExecutionCertsCf};
+use crate::core::RocksDbStorage;
+use crate::typed_cf::{TypedCf, prefix_iter};
+
+impl ChainReader for RocksDbStorage {
     fn get_block(&self, height: BlockHeight) -> Option<CertifiedBlock> {
         self.get_block_denormalized(height)
     }
@@ -49,10 +51,7 @@ impl hyperscale_storage::ChainReader for RocksDbStorage {
         Self::get_certificates_batch(self, ids)
     }
 
-    fn get_consensus_receipt(
-        &self,
-        tx_hash: &TxHash,
-    ) -> Option<Arc<hyperscale_types::ConsensusReceipt>> {
+    fn get_consensus_receipt(&self, tx_hash: &TxHash) -> Option<Arc<ConsensusReceipt>> {
         Self::get_consensus_receipt(self, tx_hash)
     }
 
@@ -60,15 +59,13 @@ impl hyperscale_storage::ChainReader for RocksDbStorage {
         &self,
         block_height: BlockHeight,
     ) -> Vec<ExecutionCertificate> {
-        let cf = crate::column_families::ExecutionCertsByHeightCf::handle(&self.cf());
+        let cf = ExecutionCertsByHeightCf::handle(&self.cf());
         let prefix = block_height.0.to_be_bytes();
-        crate::typed_cf::prefix_iter::<crate::column_families::ExecutionCertsByHeightCf>(
-            &self.db, cf, &prefix,
-        )
-        .filter_map(|((_height, canonical_hash), ())| {
-            self.cf_get::<crate::column_families::ExecutionCertsCf>(&canonical_hash)
-        })
-        .collect()
+        prefix_iter::<ExecutionCertsByHeightCf>(&self.db, cf, &prefix)
+            .filter_map(|((_height, canonical_hash), ())| {
+                self.cf_get::<ExecutionCertsCf>(&canonical_hash)
+            })
+            .collect()
     }
 
     fn get_wave_certificate_for_tx(&self, _tx_hash: &TxHash) -> Option<WaveCertificate> {

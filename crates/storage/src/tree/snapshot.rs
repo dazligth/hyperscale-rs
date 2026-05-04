@@ -2,9 +2,10 @@
 
 use std::sync::Arc;
 
-use super::CollectedWrites;
-use hyperscale_jmt as jmt;
+use hyperscale_jmt::{Node, NodeKey};
 use hyperscale_types::{BlockHeight, StateRoot};
+
+use super::CollectedWrites;
 
 /// Associates a JMT leaf node with the substate value it represents.
 ///
@@ -13,7 +14,7 @@ use hyperscale_types::{BlockHeight, StateRoot};
 #[derive(Debug, Clone)]
 pub struct LeafSubstateKeyAssociation {
     /// The JMT leaf node key.
-    pub tree_node_key: jmt::NodeKey,
+    pub tree_node_key: NodeKey,
     /// The substate value associated with this leaf.
     pub substate_value: Vec<u8>,
 }
@@ -37,9 +38,9 @@ pub struct JmtSnapshot {
     /// The block height after applying this snapshot.
     pub new_height: BlockHeight,
     /// New tree nodes.
-    pub nodes: Vec<(jmt::NodeKey, Arc<jmt::Node>)>,
+    pub nodes: Vec<(NodeKey, Arc<Node>)>,
     /// Keys of nodes that became stale.
-    pub stale_node_keys: Vec<jmt::NodeKey>,
+    pub stale_node_keys: Vec<NodeKey>,
     /// Leaf-to-substate associations for historical queries.
     pub leaf_substate_associations: Vec<LeafSubstateKeyAssociation>,
 }

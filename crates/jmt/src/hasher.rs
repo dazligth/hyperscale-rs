@@ -14,6 +14,8 @@
 //! prevent second-preimage attacks (a leaf hash must never collide with
 //! an internal hash at the same depth).
 
+use blake3::{Hasher as Blake3Backend, hash as blake3_hash};
+
 /// 32-byte digest. All hashers in this crate produce 32-byte output.
 pub type Hash = [u8; 32];
 
@@ -47,11 +49,11 @@ const DOMAIN_INTERNAL: &[u8] = b"JMT:INTERNAL:v1";
 
 impl Hasher for Blake3Hasher {
     fn hash(input: &[u8]) -> Hash {
-        *blake3::hash(input).as_bytes()
+        *blake3_hash(input).as_bytes()
     }
 
     fn hash_leaf(key: &[u8; 32], value_hash: &Hash) -> Hash {
-        let mut hasher = blake3::Hasher::new();
+        let mut hasher = Blake3Backend::new();
         hasher.update(DOMAIN_LEAF);
         hasher.update(key);
         hasher.update(value_hash);
@@ -59,7 +61,7 @@ impl Hasher for Blake3Hasher {
     }
 
     fn hash_internal(children: &[Hash]) -> Hash {
-        let mut hasher = blake3::Hasher::new();
+        let mut hasher = Blake3Backend::new();
         hasher.update(DOMAIN_INTERNAL);
         for child in children {
             hasher.update(child);

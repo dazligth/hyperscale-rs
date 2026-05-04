@@ -1,12 +1,14 @@
 //! Block header containing consensus metadata.
 
+use std::collections::{BTreeMap, BTreeSet};
+
+use sbor::prelude::*;
+
 use crate::{
     BlockHash, BlockHeight, CertificateRoot, Hash, LocalReceiptRoot, ProposerTimestamp,
     ProvisionTxRoot, ProvisionsRoot, QuorumCertificate, Round, ShardGroupId, StateRoot,
     TransactionRoot, ValidatorId, WaveId,
 };
-use sbor::prelude::*;
-use std::collections::BTreeMap;
 
 /// Block header containing consensus metadata.
 ///
@@ -160,7 +162,7 @@ impl BlockHeader {
     /// Returns the sorted set of all remote shards that need provisions from this block.
     #[must_use]
     pub fn provision_targets(&self) -> Vec<ShardGroupId> {
-        let mut set = std::collections::BTreeSet::new();
+        let mut set = BTreeSet::new();
         for wave in &self.waves {
             set.extend(wave.remote_shards.iter().copied());
         }

@@ -48,8 +48,7 @@ pub use executor::{RadixExecutor, fetch_state_entries};
 pub use genesis::GenesisConfig;
 pub use genesis_cache::prepared_genesis;
 pub use output::{ExecutedTx, ExecutionOutput};
-pub use simulation::{SimExecutionCache, SimulationEngine};
-pub use validation::TransactionValidation;
-
 // Re-export Radix types needed by engine callers (not storage-related).
 pub use radix_common::network::NetworkDefinition;
+pub use simulation::{SimExecutionCache, SimulationEngine};
+pub use validation::TransactionValidation;

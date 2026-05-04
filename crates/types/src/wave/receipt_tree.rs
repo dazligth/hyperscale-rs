@@ -1,6 +1,9 @@
 //! Receipt tree leaves and `global_receipt_root` computation/proof helpers.
 
-use crate::{ExecutionOutcome, GlobalReceiptRoot, Hash, TxOutcome, compute_padded_merkle_root};
+use crate::{
+    ExecutionOutcome, GlobalReceiptRoot, Hash, TxOutcome, compute_merkle_root_with_proof,
+    compute_padded_merkle_root,
+};
 
 /// Compute the leaf hash for a transaction outcome in the receipt tree.
 ///
@@ -45,6 +48,6 @@ pub fn compute_global_receipt_root_with_proof(
     let leaves: Vec<Hash> = outcomes.iter().map(tx_outcome_leaf).collect();
 
     let leaf_hash = leaves[tx_index];
-    let (root, siblings, leaf_index) = crate::compute_merkle_root_with_proof(&leaves, tx_index);
+    let (root, siblings, leaf_index) = compute_merkle_root_with_proof(&leaves, tx_index);
     (root, siblings, leaf_index, leaf_hash)
 }

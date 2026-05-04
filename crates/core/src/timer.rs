@@ -5,9 +5,10 @@
 //! - Production: `TimerManager` spawns tokio tasks
 //! - Simulation: inserts into a deterministic event queue
 
+use std::time::Duration;
+
 use crate::input::NodeInput;
 use crate::protocol_event::ProtocolEvent;
-use std::time::Duration;
 
 /// Timer identification for scheduled events.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

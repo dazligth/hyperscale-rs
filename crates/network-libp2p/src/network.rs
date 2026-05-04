@@ -3,19 +3,27 @@
 //! [`Libp2pNetwork`] wraps [`Libp2pAdapter`] and [`RequestManager`] to provide
 //! the [`Network`] interface used by `IoLoop` in the production runner.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use hyperscale_metrics::record_request_retry;
+use hyperscale_network::compression::compress;
+use hyperscale_network::{
+    GossipHandler, HandlerRegistry, Network, NotificationHandler, RequestError, RequestHandler,
+    ResponseVerdict, Topic, TopicScope, ValidatorKeyMap,
+};
+use hyperscale_types::{
+    MessageClass, NetworkMessage, Request, ShardGroupId, ShardMessage, ValidatorId,
+};
+use libp2p::PeerId;
+use sbor::{basic_decode, basic_encode};
+use tokio::runtime::Handle;
+use tracing::{info, warn};
+
 use crate::adapter::Libp2pAdapter;
 use crate::inbound_router::{InboundRouterHandle, spawn_inbound_router};
 use crate::notify_pool::NotifyStreamPool;
 use crate::request_manager::RequestManager;
-use hyperscale_network::{
-    GossipHandler, HandlerRegistry, Network, NotificationHandler, RequestError, RequestHandler,
-    ResponseVerdict, Topic, TopicScope, ValidatorKeyMap, compression,
-};
-use hyperscale_types::{NetworkMessage, Request, ShardGroupId, ShardMessage, ValidatorId};
-use libp2p::PeerId;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use tracing::{info, warn};
 
 // ═══════════════════════════════════════════════════════════════════════
 // Libp2pNetwork
@@ -34,7 +42,7 @@ use tracing::{info, warn};
 pub struct Libp2pNetwork {
     adapter: Arc<Libp2pAdapter>,
     request_manager: Arc<RequestManager>,
-    tokio_handle: tokio::runtime::Handle,
+    tokio_handle: Handle,
     /// Shared handler registry for per-type gossip and request dispatch.
     registry: Arc<HandlerRegistry>,
     /// Local shard for deriving topic subscriptions.
@@ -56,7 +64,7 @@ impl Libp2pNetwork {
     pub fn new(
         adapter: Arc<Libp2pAdapter>,
         request_manager: Arc<RequestManager>,
-        tokio_handle: tokio::runtime::Handle,
+        tokio_handle: Handle,
         registry: Arc<HandlerRegistry>,
         local_shard: ShardGroupId,
     ) -> Self {
@@ -91,7 +99,7 @@ impl Network for Libp2pNetwork {
 
     fn broadcast_to_shard<M: ShardMessage>(&self, shard: ShardGroupId, message: &M) {
         let topic = Topic::shard(M::message_type_id(), shard);
-        let data = compression::compress(&sbor::basic_encode(message).expect("SBOR encode failed"));
+        let data = compress(&basic_encode(message).expect("SBOR encode failed"));
         if let Err(e) = self.adapter.publish(&topic, data, M::class()) {
             warn!(error = ?e, "Libp2pNetwork: broadcast_to_shard failed");
         }
@@ -99,7 +107,7 @@ impl Network for Libp2pNetwork {
 
     fn broadcast_global<M: NetworkMessage>(&self, message: &M) {
         let topic = Topic::global(M::message_type_id());
-        let data = compression::compress(&sbor::basic_encode(message).expect("SBOR encode failed"));
+        let data = compress(&basic_encode(message).expect("SBOR encode failed"));
         if let Err(e) = self.adapter.publish(&topic, data, M::class()) {
             warn!(error = ?e, "Libp2pNetwork: broadcast_global failed");
         }
@@ -130,8 +138,8 @@ impl Network for Libp2pNetwork {
     }
 
     fn notify<M: NetworkMessage>(&self, recipients: &[ValidatorId], message: &M) {
-        let sbor = sbor::basic_encode(message).expect("SBOR encode failed");
-        let compressed = compression::compress(&sbor);
+        let sbor = basic_encode(message).expect("SBOR encode failed");
+        let compressed = compress(&sbor);
         let type_id = M::message_type_id();
         for &validator in recipients {
             let Some(peer_id) = self.validator_peer_id(validator) else {
@@ -162,7 +170,7 @@ impl Network for Libp2pNetwork {
         peers: &[ValidatorId],
         preferred_peer: Option<ValidatorId>,
         request: R,
-        class_override: Option<hyperscale_types::MessageClass>,
+        class_override: Option<MessageClass>,
         on_response: Box<dyn FnOnce(Result<R::Response, RequestError>) -> ResponseVerdict + Send>,
     ) {
         // Resolve ValidatorIds → PeerIds via the adapter's global registry
@@ -199,7 +207,7 @@ impl Network for Libp2pNetwork {
         let class = class_override.unwrap_or_else(R::class);
 
         // SBOR-encode the request
-        let request_bytes = match sbor::basic_encode(&request) {
+        let request_bytes = match basic_encode(&request) {
             Ok(bytes) => bytes,
             Err(e) => {
                 warn!(error = ?e, "Libp2pNetwork: failed to encode request");
@@ -229,7 +237,7 @@ impl Network for Libp2pNetwork {
                     // RequestManager returns decompressed SBOR response bytes.
                     // The serving peer is captured so we can deprioritize it
                     // in the health tracker if the app rejects the response.
-                    let verdict = match sbor::basic_decode::<R::Response>(&bytes) {
+                    let verdict = match basic_decode::<R::Response>(&bytes) {
                         Ok(response) => on_response(Ok(response)),
                         Err(e) => {
                             warn!(error = ?e, "Failed to decode response");
@@ -240,7 +248,7 @@ impl Network for Libp2pNetwork {
                     };
                     if matches!(verdict, ResponseVerdict::Reject) {
                         rm.health_tracker().record_failure(&peer, false);
-                        hyperscale_metrics::record_request_retry("app_rejected");
+                        record_request_retry("app_rejected");
                     }
                 }
                 Err(e) => {

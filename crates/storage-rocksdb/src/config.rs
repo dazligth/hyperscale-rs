@@ -3,6 +3,8 @@
 //! Pure tuning knobs and options. Column family definitions live in
 //! [`column_families`](crate::column_families).
 
+use rocksdb::DBCompressionType;
+
 use crate::column_families::ALL_COLUMN_FAMILIES;
 
 /// Compression type for `RocksDB`. Each variant maps 1:1 to the
@@ -25,14 +27,14 @@ pub enum CompressionType {
 }
 
 impl CompressionType {
-    pub(crate) const fn to_rocksdb(self) -> rocksdb::DBCompressionType {
+    pub(crate) const fn to_rocksdb(self) -> DBCompressionType {
         match self {
-            Self::None => rocksdb::DBCompressionType::None,
-            Self::Snappy => rocksdb::DBCompressionType::Snappy,
-            Self::Zlib => rocksdb::DBCompressionType::Zlib,
-            Self::Lz4 => rocksdb::DBCompressionType::Lz4,
-            Self::Lz4hc => rocksdb::DBCompressionType::Lz4hc,
-            Self::Zstd => rocksdb::DBCompressionType::Zstd,
+            Self::None => DBCompressionType::None,
+            Self::Snappy => DBCompressionType::Snappy,
+            Self::Zlib => DBCompressionType::Zlib,
+            Self::Lz4 => DBCompressionType::Lz4,
+            Self::Lz4hc => DBCompressionType::Lz4hc,
+            Self::Zstd => DBCompressionType::Zstd,
         }
     }
 }
@@ -82,7 +84,7 @@ impl Default for RocksDbConfig {
             keep_log_file_num: 10,
             column_families: ALL_COLUMN_FAMILIES
                 .iter()
-                .map(std::string::ToString::to_string)
+                .map(ToString::to_string)
                 .collect(),
             jmt_history_length: 256,
         }

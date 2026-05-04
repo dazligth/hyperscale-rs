@@ -4,11 +4,12 @@
 //! default. These helpers replace earlier `TryFrom` impls so the missing
 //! argument is a compile-time error rather than a silent default.
 
-use crate::{RoutableTransaction, TimestampRange, TransactionError};
-use radix_transactions::model::{NotarizedTransactionV1, NotarizedTransactionV2, UserTransaction};
 use std::collections::HashSet;
 
+use radix_transactions::model::{NotarizedTransactionV1, NotarizedTransactionV2, UserTransaction};
+
 use super::manifest_analysis::{analyze_instructions_v1, analyze_instructions_v2};
+use crate::{RoutableTransaction, TimestampRange, TransactionError};
 
 /// Convert a `NotarizedTransactionV1` into a `RoutableTransaction`.
 ///

@@ -7,12 +7,13 @@
 //! such entry exists, `current_state[K]` was stable since V and is the
 //! answer.
 
+use std::collections::{BTreeMap, HashMap};
+use std::ops::Bound;
+
 use hyperscale_storage::{
     DbPartitionKey, DbSortKey, DbSubstateValue, PartitionEntry, SubstateDatabase, keys,
 };
 use hyperscale_types::NodeId;
-use std::collections::{BTreeMap, HashMap};
-use std::ops::Bound;
 
 /// Point-in-time snapshot of in-memory storage scoped to a specific
 /// version within the retention window. Retention enforcement happens

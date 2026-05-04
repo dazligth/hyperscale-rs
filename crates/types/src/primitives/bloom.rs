@@ -27,7 +27,14 @@
 //! assert!(bf.contains(&h_known));
 //! ```
 
+use std::f64::consts::LN_2;
+use std::fmt;
 use std::marker::PhantomData;
+
+use sbor::{
+    Categorize, Decode, DecodeError, Decoder, Describe, Encode, EncodeError, Encoder,
+    NoCustomTypeKind, NoCustomValueKind, RustTypeId, TypeData, TypeKind, ValueKind,
+};
 
 use crate::TypedHash;
 
@@ -167,14 +174,13 @@ fn size_for(n: usize, fpr: f64) -> Option<(usize, u8)> {
         return Some((64, 1));
     }
     let fpr = fpr.clamp(1e-9, 0.5);
-    let ln2 = std::f64::consts::LN_2;
-    let m_raw = -(n as f64) * fpr.ln() / (ln2 * ln2);
+    let m_raw = -(n as f64) * fpr.ln() / (LN_2 * LN_2);
     let m_words = (m_raw.ceil() as usize).div_ceil(64).max(1);
     let m_bits = m_words * 64;
     if m_bits > MAX_BITS {
         return None;
     }
-    let k_raw = (m_bits as f64 / n as f64) * ln2;
+    let k_raw = (m_bits as f64 / n as f64) * LN_2;
     let k = (k_raw.ceil() as u32).clamp(1, u32::from(MAX_K)) as u8;
     Some((m_bits, k))
 }
@@ -213,8 +219,8 @@ impl<T> PartialEq for BloomFilter<T> {
 
 impl<T> Eq for BloomFilter<T> {}
 
-impl<T> std::fmt::Debug for BloomFilter<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<T> fmt::Debug for BloomFilter<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BloomFilter")
             .field("bits", &format_args!("<{} bits>", self.bit_len()))
             .field("k", &self.k)
@@ -224,14 +230,12 @@ impl<T> std::fmt::Debug for BloomFilter<T> {
 
 // ── SBOR: encode as `(Vec<u64>, u8)`; phantom is not serialized. ─────────────
 
-impl<T, E: sbor::Encoder<sbor::NoCustomValueKind>> sbor::Encode<sbor::NoCustomValueKind, E>
-    for BloomFilter<T>
-{
-    fn encode_value_kind(&self, encoder: &mut E) -> Result<(), sbor::EncodeError> {
-        encoder.write_value_kind(sbor::ValueKind::Tuple)
+impl<T, E: Encoder<NoCustomValueKind>> Encode<NoCustomValueKind, E> for BloomFilter<T> {
+    fn encode_value_kind(&self, encoder: &mut E) -> Result<(), EncodeError> {
+        encoder.write_value_kind(ValueKind::Tuple)
     }
 
-    fn encode_body(&self, encoder: &mut E) -> Result<(), sbor::EncodeError> {
+    fn encode_body(&self, encoder: &mut E) -> Result<(), EncodeError> {
         encoder.write_size(2)?;
         encoder.encode(&self.bits)?;
         encoder.encode(&self.k)?;
@@ -239,17 +243,15 @@ impl<T, E: sbor::Encoder<sbor::NoCustomValueKind>> sbor::Encode<sbor::NoCustomVa
     }
 }
 
-impl<T, D: sbor::Decoder<sbor::NoCustomValueKind>> sbor::Decode<sbor::NoCustomValueKind, D>
-    for BloomFilter<T>
-{
+impl<T, D: Decoder<NoCustomValueKind>> Decode<NoCustomValueKind, D> for BloomFilter<T> {
     fn decode_body_with_value_kind(
         decoder: &mut D,
-        value_kind: sbor::ValueKind<sbor::NoCustomValueKind>,
-    ) -> Result<Self, sbor::DecodeError> {
-        decoder.check_preloaded_value_kind(value_kind, sbor::ValueKind::Tuple)?;
+        value_kind: ValueKind<NoCustomValueKind>,
+    ) -> Result<Self, DecodeError> {
+        decoder.check_preloaded_value_kind(value_kind, ValueKind::Tuple)?;
         let length = decoder.read_size()?;
         if length != 2 {
-            return Err(sbor::DecodeError::UnexpectedSize {
+            return Err(DecodeError::UnexpectedSize {
                 expected: 2,
                 actual: length,
             });
@@ -264,25 +266,26 @@ impl<T, D: sbor::Decoder<sbor::NoCustomValueKind>> sbor::Decode<sbor::NoCustomVa
     }
 }
 
-impl<T> sbor::Categorize<sbor::NoCustomValueKind> for BloomFilter<T> {
-    fn value_kind() -> sbor::ValueKind<sbor::NoCustomValueKind> {
-        sbor::ValueKind::Tuple
+impl<T> Categorize<NoCustomValueKind> for BloomFilter<T> {
+    fn value_kind() -> ValueKind<NoCustomValueKind> {
+        ValueKind::Tuple
     }
 }
 
-impl<T> sbor::Describe<sbor::NoCustomTypeKind> for BloomFilter<T> {
-    const TYPE_ID: sbor::RustTypeId = sbor::RustTypeId::novel_with_code("BloomFilter", &[], &[]);
+impl<T> Describe<NoCustomTypeKind> for BloomFilter<T> {
+    const TYPE_ID: RustTypeId = RustTypeId::novel_with_code("BloomFilter", &[], &[]);
 
-    fn type_data() -> sbor::TypeData<sbor::NoCustomTypeKind, sbor::RustTypeId> {
-        sbor::TypeData::unnamed(sbor::TypeKind::Any)
+    fn type_data() -> TypeData<NoCustomTypeKind, RustTypeId> {
+        TypeData::unnamed(TypeKind::Any)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use sbor::{basic_decode, basic_encode};
+
     use super::*;
     use crate::{Hash, ProvisionHash, TxHash};
-    use sbor::{basic_decode, basic_encode};
 
     fn tx(n: u64) -> TxHash {
         TxHash::from_raw(Hash::from_bytes(&n.to_le_bytes()))

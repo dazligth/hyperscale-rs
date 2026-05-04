@@ -2,13 +2,18 @@
 //!
 //! Provides deterministic test setup including key generation and topology construction.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use hyperscale_network::ValidatorKeyMap;
 use hyperscale_topology::TopologyCoordinator;
 use hyperscale_types::{
-    Bls12381G1PrivateKey, Bls12381G1PublicKey, ShardGroupId, ValidatorId, ValidatorInfo,
-    ValidatorSet, bls_keypair_from_seed,
+    Bls12381G1PrivateKey, Bls12381G1PublicKey, Bls12381G2Signature, ShardGroupId, ValidatorId,
+    ValidatorInfo, ValidatorSet, bls_keypair_from_seed, validator_bind_message,
 };
-use libp2p::{Multiaddr, identity};
-use std::collections::HashMap;
+use libp2p::identity::Keypair;
+use libp2p::identity::ed25519::{Keypair as Ed25519Keypair, SecretKey};
+use libp2p::{Multiaddr, PeerId};
 
 /// Test fixtures for deterministic test setup.
 ///
@@ -19,7 +24,7 @@ pub struct TestFixtures {
     pub bls_keys: Vec<Bls12381G1PrivateKey>,
 
     /// Ed25519 keypairs for libp2p (one per validator).
-    pub ed25519_keys: Vec<identity::Keypair>,
+    pub ed25519_keys: Vec<Keypair>,
 
     /// Per-validator topologies.
     topologies: Vec<TopologyCoordinator>,
@@ -63,7 +68,7 @@ impl TestFixtures {
 
         // Generate Ed25519 keys deterministically using a different derivation path
         // for independence from the BLS keys above.
-        let ed25519_keys: Vec<identity::Keypair> = (0..num_validators)
+        let ed25519_keys: Vec<Keypair> = (0..num_validators)
             .map(|i| {
                 let mut seed_bytes = [0u8; 32];
                 let key_seed = seed
@@ -74,9 +79,8 @@ impl TestFixtures {
                 seed_bytes[16..24].copy_from_slice(b"ed25519k"); // Domain separation
 
                 // libp2p's ed25519 key from seed
-                let secret = identity::ed25519::SecretKey::try_from_bytes(seed_bytes)
-                    .expect("valid ed25519 seed");
-                identity::Keypair::from(identity::ed25519::Keypair::from(secret))
+                let secret = SecretKey::try_from_bytes(seed_bytes).expect("valid ed25519 seed");
+                Keypair::from(Ed25519Keypair::from(secret))
             })
             .collect();
 
@@ -141,12 +145,9 @@ impl TestFixtures {
     }
 
     /// Extract a validator key map for network adapter construction.
-    pub fn validator_key_map(
-        &self,
-        index: u32,
-    ) -> std::sync::Arc<hyperscale_network::ValidatorKeyMap> {
+    pub fn validator_key_map(&self, index: u32) -> Arc<ValidatorKeyMap> {
         let snapshot = self.topologies[index as usize].snapshot();
-        std::sync::Arc::new(
+        Arc::new(
             snapshot
                 .global_validator_set()
                 .validators
@@ -163,13 +164,13 @@ impl TestFixtures {
     }
 
     /// Get the Ed25519 keypair for a validator.
-    pub fn ed25519_keypair(&self, index: u32) -> identity::Keypair {
+    pub fn ed25519_keypair(&self, index: u32) -> Keypair {
         self.ed25519_keys[index as usize].clone()
     }
 
     /// Get the libp2p peer ID for a validator.
-    pub fn peer_id(&self, index: u32) -> libp2p::PeerId {
-        libp2p::PeerId::from(self.ed25519_keys[index as usize].public())
+    pub fn peer_id(&self, index: u32) -> PeerId {
+        PeerId::from(self.ed25519_keys[index as usize].public())
     }
 
     /// Get validators in a shard.
@@ -183,13 +184,9 @@ impl TestFixtures {
     /// Compute the BLS bind signature for a validator's `PeerId`.
     ///
     /// Used by the validator-bind protocol to prove identity.
-    pub fn bind_signature(
-        &self,
-        index: u32,
-        keypair: &identity::Keypair,
-    ) -> hyperscale_types::Bls12381G2Signature {
-        let peer_id = libp2p::PeerId::from(keypair.public());
-        let msg = hyperscale_types::validator_bind_message(&peer_id.to_bytes());
+    pub fn bind_signature(&self, index: u32, keypair: &Keypair) -> Bls12381G2Signature {
+        let peer_id = PeerId::from(keypair.public());
+        let msg = validator_bind_message(&peer_id.to_bytes());
         let signing_key = self.signing_key(index);
         signing_key.sign_v1(&msg)
     }

@@ -1,18 +1,33 @@
 //! Denormalized block storage, transaction/certificate CRUD, and chain metadata.
 
-use crate::column_families::{BlocksCf, CertificatesCf, TransactionsCf};
-use crate::core::RocksDbStorage;
+use std::sync::Arc;
+use std::time::Instant;
 
-use hyperscale_metrics as metrics;
+#[cfg(test)]
+use hyperscale_metrics::{
+    record_certificate_persisted, record_storage_batch_size, record_storage_write,
+};
+use hyperscale_metrics::{record_storage_operation, record_storage_read};
+#[cfg(test)]
+use hyperscale_storage::DatabaseUpdates;
 use hyperscale_types::{
     Block, BlockHeight, BlockMetadata, CertifiedBlock, FinalizedWave, Hash, ProvisionHash,
     QuorumCertificate, RoutableTransaction, TxHash, WaveCertificate, WaveId,
 };
 use rocksdb::{WriteBatch, WriteOptions};
-use std::sync::Arc;
-use std::time::Instant;
+#[cfg(test)]
+use tracing::Span;
+#[cfg(test)]
+use tracing::field::Empty;
 #[cfg(test)]
 use tracing::{Level, instrument};
+
+use crate::column_families::{BlocksCf, CertificatesCf, TransactionsCf};
+use crate::core::RocksDbStorage;
+use crate::metadata::{
+    read_committed_hash, read_committed_height, read_committed_qc, write_committed_hash,
+    write_committed_height, write_committed_qc,
+};
 
 impl RocksDbStorage {
     /// Get a range of committed blocks [from, to).
@@ -48,7 +63,7 @@ impl RocksDbStorage {
     pub fn get_transaction(&self, hash: &TxHash) -> Option<RoutableTransaction> {
         let start = Instant::now();
         let result = self.cf_get::<TransactionsCf>(hash.as_raw());
-        metrics::record_storage_read(start.elapsed().as_secs_f64());
+        record_storage_read(start.elapsed().as_secs_f64());
         result
     }
 
@@ -68,8 +83,8 @@ impl RocksDbStorage {
         let txs: Vec<_> = results.into_iter().flatten().collect();
 
         let elapsed = start.elapsed().as_secs_f64();
-        metrics::record_storage_read(elapsed);
-        metrics::record_storage_operation("get_transactions_batch", elapsed);
+        record_storage_read(elapsed);
+        record_storage_operation("get_transactions_batch", elapsed);
 
         txs
     }
@@ -95,7 +110,7 @@ impl RocksDbStorage {
     /// Append block data to an existing `WriteBatch` (for atomic commit).
     pub(crate) fn append_block_to_batch(
         &self,
-        batch: &mut rocksdb::WriteBatch,
+        batch: &mut WriteBatch,
         block: &Block,
         qc: &QuorumCertificate,
     ) {
@@ -183,8 +198,8 @@ impl RocksDbStorage {
         };
 
         let elapsed = start.elapsed().as_secs_f64();
-        metrics::record_storage_read(elapsed);
-        metrics::record_storage_operation("get_block_denormalized", elapsed);
+        record_storage_read(elapsed);
+        record_storage_operation("get_block_denormalized", elapsed);
 
         match CertifiedBlock::new_checked(block, metadata.qc) {
             Ok(certified) => Some(certified),
@@ -212,8 +227,8 @@ impl RocksDbStorage {
         let start = Instant::now();
         let metadata = self.cf_get::<BlocksCf>(&height.0)?;
         let elapsed = start.elapsed().as_secs_f64();
-        metrics::record_storage_read(elapsed);
-        metrics::record_storage_operation("get_block_metadata", elapsed);
+        record_storage_read(elapsed);
+        record_storage_operation("get_block_metadata", elapsed);
         Some(metadata)
     }
 
@@ -249,7 +264,7 @@ impl RocksDbStorage {
                 "Block has missing transactions - cannot serve sync request"
             );
             let elapsed = start.elapsed().as_secs_f64();
-            metrics::record_storage_operation("get_block_for_sync_incomplete", elapsed);
+            record_storage_operation("get_block_for_sync_incomplete", elapsed);
             return None;
         }
 
@@ -265,7 +280,7 @@ impl RocksDbStorage {
                 "Block has missing certificates - cannot serve sync request"
             );
             let elapsed = start.elapsed().as_secs_f64();
-            metrics::record_storage_operation("get_block_for_sync_incomplete", elapsed);
+            record_storage_operation("get_block_for_sync_incomplete", elapsed);
             return None;
         }
 
@@ -284,7 +299,7 @@ impl RocksDbStorage {
                 "Block has missing receipts - cannot reconstruct FinalizedWave for sync"
             );
             let elapsed = start.elapsed().as_secs_f64();
-            metrics::record_storage_operation("get_block_for_sync_incomplete", elapsed);
+            record_storage_operation("get_block_for_sync_incomplete", elapsed);
             return None;
         };
 
@@ -300,8 +315,8 @@ impl RocksDbStorage {
         let provision_hashes = metadata.manifest.provision_hashes;
 
         let elapsed = start.elapsed().as_secs_f64();
-        metrics::record_storage_read(elapsed);
-        metrics::record_storage_operation("get_block_for_sync_complete", elapsed);
+        record_storage_read(elapsed);
+        record_storage_operation("get_block_for_sync_complete", elapsed);
 
         Some((block, metadata.qc, provision_hashes))
     }
@@ -376,12 +391,12 @@ impl RocksDbStorage {
         qc: Option<&QuorumCertificate>,
     ) {
         let mut batch = WriteBatch::default();
-        crate::metadata::write_committed_height(&mut batch, height);
+        write_committed_height(&mut batch, height);
         if let Some(h) = hash {
-            crate::metadata::write_committed_hash(&mut batch, &h);
+            write_committed_hash(&mut batch, &h);
         }
         if let Some(qc) = qc {
-            crate::metadata::write_committed_qc(&mut batch, qc);
+            write_committed_qc(&mut batch, qc);
         }
         let mut opts = WriteOptions::default();
         opts.set_sync(true);
@@ -403,25 +418,25 @@ impl RocksDbStorage {
         let qc = self.read_latest_qc();
 
         let elapsed = start.elapsed().as_secs_f64();
-        metrics::record_storage_read(elapsed);
-        metrics::record_storage_operation("get_chain_metadata", elapsed);
+        record_storage_read(elapsed);
+        record_storage_operation("get_chain_metadata", elapsed);
 
         (height, hash, qc)
     }
 
     /// Read only the committed height from `RocksDB`.
     pub(crate) fn read_committed_height(&self) -> BlockHeight {
-        crate::metadata::read_committed_height(&*self.db)
+        read_committed_height(&*self.db)
     }
 
     /// Read only the committed hash from `RocksDB`.
     pub(crate) fn read_committed_hash(&self) -> Option<Hash> {
-        crate::metadata::read_committed_hash(&*self.db)
+        read_committed_hash(&*self.db)
     }
 
     /// Read only the latest QC from `RocksDB`.
     pub(crate) fn read_latest_qc(&self) -> Option<QuorumCertificate> {
-        crate::metadata::read_committed_qc(&*self.db)
+        read_committed_qc(&*self.db)
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -452,8 +467,8 @@ impl RocksDbStorage {
         let certs: Vec<_> = results.into_iter().flatten().collect();
 
         let elapsed = start.elapsed().as_secs_f64();
-        metrics::record_storage_read(elapsed);
-        metrics::record_storage_operation("get_certificates_batch", elapsed);
+        record_storage_read(elapsed);
+        record_storage_operation("get_certificates_batch", elapsed);
 
         certs
     }
@@ -473,16 +488,18 @@ impl RocksDbStorage {
     #[cfg(test)]
     #[instrument(level = Level::DEBUG, skip_all, fields(
         wave_id = ?certificate.wave_id,
-        latency_us = tracing::field::Empty,
+        latency_us = Empty,
         otel.kind = "INTERNAL",
     ))]
     pub fn commit_certificate_with_writes(
         &self,
         certificate: &WaveCertificate,
-        updates: &hyperscale_storage::DatabaseUpdates,
+        updates: &DatabaseUpdates,
     ) {
+        use hyperscale_storage::PartitionDatabaseUpdates;
+
         let start = Instant::now();
-        let mut batch = rocksdb::WriteBatch::default();
+        let mut batch = WriteBatch::default();
         let mut write_count = 0usize;
 
         // 1. Serialize and add certificate to batch
@@ -500,16 +517,14 @@ impl RocksDbStorage {
         );
         for (_db_node_key, node_updates) in &updates.node_updates {
             for (_partition_num, partition_updates) in &node_updates.partition_updates {
-                if let hyperscale_storage::PartitionDatabaseUpdates::Delta { substate_updates } =
-                    partition_updates
-                {
+                if let PartitionDatabaseUpdates::Delta { substate_updates } = partition_updates {
                     write_count += substate_updates.len();
                 }
             }
         }
 
         // 3. Write batch atomically with sync for durability (JMT deferred to block commit)
-        let mut write_opts = rocksdb::WriteOptions::default();
+        let mut write_opts = WriteOptions::default();
         write_opts.set_sync(true);
 
         self.db.write_opt(batch, &write_opts).expect(
@@ -523,13 +538,13 @@ impl RocksDbStorage {
         );
 
         let elapsed = start.elapsed();
-        metrics::record_storage_write(elapsed.as_secs_f64());
-        metrics::record_storage_operation("commit_cert_writes", elapsed.as_secs_f64());
-        metrics::record_storage_batch_size(write_count);
-        metrics::record_certificate_persisted();
+        record_storage_write(elapsed.as_secs_f64());
+        record_storage_operation("commit_cert_writes", elapsed.as_secs_f64());
+        record_storage_batch_size(write_count);
+        record_certificate_persisted();
 
         // Record span fields
-        tracing::Span::current().record(
+        Span::current().record(
             "latency_us",
             u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX),
         );

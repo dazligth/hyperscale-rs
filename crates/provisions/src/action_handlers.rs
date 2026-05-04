@@ -5,16 +5,24 @@
 //! grouping them by target shard with merkle inclusion proofs. They are kept
 //! free of node/runner concerns so the dispatcher only handles event plumbing.
 
-use hyperscale_core::ProvisionsRequest;
-use hyperscale_engine::{Engine, fetch_state_entries, sharding::expand_nodes_with_owned_at_height};
-use hyperscale_jmt::TreeReader as JmtTreeReader;
-use hyperscale_storage::{SubstateStore, SubstateView, VersionedStore};
-use hyperscale_types::{
-    BlockHeight, NodeId, Provisions, ShardGroupId, StateEntry, TxEntries, TxHash, ValidatorId,
-};
 use std::collections::HashMap;
 use std::hash::BuildHasher;
 use std::sync::Arc;
+use std::time::Instant;
+
+use hyperscale_core::{Action, ActionContext, NodeInput, ProtocolEvent, ProvisionsRequest};
+use hyperscale_engine::sharding::expand_nodes_with_owned_at_height;
+use hyperscale_engine::{Engine, fetch_state_entries};
+use hyperscale_jmt::TreeReader as JmtTreeReader;
+use hyperscale_messages::ProvisionsNotification;
+use hyperscale_metrics::record_signature_verification_latency;
+use hyperscale_network::Network;
+use hyperscale_storage::tree::proofs::verify_proof;
+use hyperscale_storage::{Storage, SubstateStore, SubstateView, VersionedStore};
+use hyperscale_types::{
+    BlockHeight, NodeId, Provisions, ShardGroupId, StateEntry, TxEntries, TxHash, ValidatorId,
+    state_provisions_message,
+};
 use tracing::warn;
 
 /// Per-tx fetched entries: (`tx_hash`, `target_shards_with_nodes`, `state_entries`).
@@ -155,33 +163,28 @@ where
     batches
 }
 
-/// Handle the provisions-owned delegated [`hyperscale_core::Action`] variants.
+/// Handle the provisions-owned delegated [`Action`] variants.
 ///
 /// Outcomes flow through `ctx.notify`. Variants owned by other coordinator
 /// crates hit `unreachable!()` — node's dispatcher routes by variant prefix.
-pub fn handle_action<S, E, N>(
-    action: hyperscale_core::Action,
-    ctx: &hyperscale_core::ActionContext<'_, S, E, N>,
-) where
-    S: hyperscale_storage::Storage,
+pub fn handle_action<S, E, N>(action: Action, ctx: &ActionContext<'_, S, E, N>)
+where
+    S: Storage,
     E: Engine,
-    N: hyperscale_network::Network,
+    N: Network,
 {
-    use hyperscale_core::{Action, NodeInput, ProtocolEvent};
-    use hyperscale_metrics as metrics;
-
     match action {
         Action::VerifyProvisions {
             provisions,
             committed_header,
         } => {
-            let merkle_start = std::time::Instant::now();
+            let merkle_start = Instant::now();
             let all_valid = {
                 let all_entries = provisions.all_entries_deduped();
                 if all_entries.is_empty() {
                     true
                 } else {
-                    let valid = hyperscale_storage::tree::proofs::verify_proof(
+                    let valid = verify_proof(
                         &provisions.proof,
                         &all_entries,
                         committed_header.header.state_root,
@@ -201,7 +204,7 @@ pub fn handle_action<S, E, N>(
                     valid
                 }
             };
-            metrics::record_signature_verification_latency(
+            record_signature_verification_latency(
                 "inclusion_proof",
                 merkle_start.elapsed().as_secs_f64(),
             );
@@ -248,13 +251,10 @@ pub fn handle_action<S, E, N>(
                     },
                 )));
 
-                let msg = hyperscale_types::state_provisions_message(&provisions_arc);
+                let msg = state_provisions_message(&provisions_arc);
                 let sig = ctx.signing_key.sign_v1(&msg);
-                let notification = hyperscale_messages::ProvisionsNotification::new(
-                    (*provisions_arc).clone(),
-                    validator_id,
-                    sig,
-                );
+                let notification =
+                    ProvisionsNotification::new((*provisions_arc).clone(), validator_id, sig);
                 ctx.network.notify(&recipients, &notification);
             }
         }

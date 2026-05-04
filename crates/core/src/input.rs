@@ -1,11 +1,14 @@
 //! Event types for the deterministic state machine.
 
-use crate::ProtocolEvent;
+use std::sync::Arc;
+
+use hyperscale_messages::response::ElidedCertifiedBlock;
 use hyperscale_types::{
     BlockHeight, Bls12381G1PublicKey, Bls12381G2Signature, CertifiedBlock, CommittedBlockHeader,
     ProvisionHash, RoutableTransaction, ShardGroupId, TxHash, ValidatorId, WaveId,
 };
-use std::sync::Arc;
+
+use crate::ProtocolEvent;
 
 /// Priority levels for event ordering within the same timestamp.
 ///
@@ -68,7 +71,7 @@ pub enum NodeInput {
         /// Height of the block being synced.
         height: BlockHeight,
         /// Elided block payload, or `None` if the peer couldn't serve this height.
-        block: Option<Box<hyperscale_messages::response::ElidedCertifiedBlock>>,
+        block: Option<Box<ElidedCertifiedBlock>>,
     },
 
     /// Sync block fetch failed from network callback.
@@ -101,19 +104,19 @@ pub enum NodeInput {
     /// heights (responder short-capped) get re-deferred by the FSM.
     RemoteHeadersResponseReceived {
         /// Source shard the fetch targeted.
-        source_shard: hyperscale_types::ShardGroupId,
+        source_shard: ShardGroupId,
         /// First height of the requested range.
         from_height: BlockHeight,
         /// Number of heights the request covered.
         count: u64,
         /// Headers the responder returned.
-        headers: Vec<hyperscale_types::CommittedBlockHeader>,
+        headers: Vec<CommittedBlockHeader>,
     },
 
     /// Remote-header range fetch failed (transport error / no peer).
     RemoteHeadersFetchFailed {
         /// Source shard the fetch targeted.
-        source_shard: hyperscale_types::ShardGroupId,
+        source_shard: ShardGroupId,
         /// First height of the requested range.
         from_height: BlockHeight,
         /// Number of heights the request covered.

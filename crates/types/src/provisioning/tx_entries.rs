@@ -1,8 +1,10 @@
 //! Per-transaction state entries within a provision.
 
-use crate::{NodeId, StateEntry, TxHash};
-use sbor::prelude::*;
 use std::collections::HashSet;
+
+use sbor::prelude::*;
+
+use crate::{NodeId, StateEntry, TxHash};
 
 /// Per-transaction state entries within a provision.
 ///

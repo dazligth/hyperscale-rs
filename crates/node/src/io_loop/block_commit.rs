@@ -15,17 +15,18 @@
 //! drives that based on the [`AccumulateDecision`] returned from
 //! [`BlockCommitCoordinator::accumulate`].
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
 use crossbeam::channel::Sender;
 use hyperscale_core::{CommitSource, NodeInput, ProtocolEvent};
 use hyperscale_dispatch::{Dispatch, DispatchPool};
-use hyperscale_metrics as metrics;
+use hyperscale_metrics::{record_block_committed, set_block_height};
 use hyperscale_storage::ChainWriter;
 use hyperscale_types::{
     Block, BlockHash, BlockHeight, CertifiedBlock, LocalTimestamp, QuorumCertificate,
 };
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 
 /// Block + QC pair handed back to the `io_loop` to build a [`CertifiedBlock`]
 /// for immediate `BlockCommitted` delivery. Cloned `Arc` handles to the
@@ -199,8 +200,8 @@ where
         #[allow(clippy::cast_precision_loss)] // latency readout for metrics; ms→f64 lossy is fine
         let commit_latency_secs =
             (now_ms.saturating_sub(commit.block.header().timestamp.as_millis())) as f64 / 1000.0;
-        metrics::record_block_committed(height.0, commit_latency_secs, commit.source.as_str());
-        metrics::set_block_height(height.0);
+        record_block_committed(height.0, commit_latency_secs, commit.source.as_str());
+        set_block_height(height.0);
 
         // Fire BlockCommitted immediately unless persistence is falling
         // too far behind (backpressure). When deferred, flush sends
@@ -389,7 +390,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::atomic::AtomicU64;
+
     use crossbeam::channel::{Receiver, unbounded};
     use hyperscale_dispatch_sync::SyncDispatch;
     use hyperscale_storage::tree::CollectedWrites;
@@ -398,7 +400,8 @@ mod tests {
     use hyperscale_types::{
         BlockHeight, FinalizedWave, QuorumCertificate as Qc, ShardGroupId, StateRoot, ValidatorId,
     };
-    use std::sync::atomic::AtomicU64;
+
+    use super::*;
 
     /// Mock prepared-commit handle. Carries an empty `JmtSnapshot` (the
     /// coordinator only inspects it via `jmt_snapshot()` from action

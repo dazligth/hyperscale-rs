@@ -33,13 +33,14 @@
 //! has been admitted when the consumer feeds back
 //! [`SyncInput::Admitted`].
 
-use hyperscale_types::BlockHeight;
-use serde::Serialize;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::time::{Duration, Instant};
+
+use hyperscale_types::BlockHeight;
+use serde::Serialize;
 use tracing::{info, trace};
 
 /// Initial backoff for a deferred height after its first fetch failure.
@@ -1223,7 +1224,7 @@ mod tests {
             from: BlockHeight(1),
             count: 1,
             delivered_heights: vec![BlockHeight(1)],
-            now: std::time::Instant::now(),
+            now: Instant::now(),
         });
     }
 }

@@ -5,6 +5,8 @@
 //! API is caught here rather than by inline tests that can reach into
 //! private fields.
 
+use std::sync::Arc;
+
 use hyperscale_provisions::{ProvisionConfig, ProvisionCoordinator, ProvisionMemoryStats};
 use hyperscale_test_helpers::TestCommittee;
 use hyperscale_types::{
@@ -13,7 +15,6 @@ use hyperscale_types::{
     ProvisionsRoot, QuorumCertificate, Round, ShardGroupId, StateRoot, TopologySnapshot,
     TransactionRoot, ValidatorId, WaveId, WeightedTimestamp,
 };
-use std::sync::Arc;
 
 const TEST_BLOCK_INTERVAL_MS: u64 = 500;
 

@@ -1,18 +1,22 @@
 //! RPC server implementation.
 
-use super::routes::create_router;
-use super::state::{MempoolSnapshot, NodeStatusState, RpcState, TxSubmissionSender};
-use crate::status::SyncStatus;
-use arc_swap::ArcSwap;
-use hyperscale_types::{TransactionStatus, TxHash};
-use quick_cache::sync::Cache as QuickCache;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
+
+use arc_swap::ArcSwap;
+use axum::serve;
+use hyperscale_types::{TransactionStatus, TxHash};
+use quick_cache::sync::Cache as QuickCache;
 use thiserror::Error;
-use tokio::task::JoinHandle;
+use tokio::net::TcpListener;
+use tokio::task::{JoinError, JoinHandle, spawn};
 use tracing::{error, info};
+
+use super::routes::create_router;
+use super::state::{MempoolSnapshot, NodeStatusState, RpcState, TxSubmissionSender};
+use crate::status::SyncStatus;
 
 /// Errors from the RPC server.
 #[derive(Debug, Error)]
@@ -106,7 +110,7 @@ impl RpcServerHandle {
     /// # Errors
     ///
     /// Returns the underlying `JoinError` if the server task panicked or was cancelled.
-    pub async fn join(self) -> Result<(), tokio::task::JoinError> {
+    pub async fn join(self) -> Result<(), JoinError> {
         self.task.await
     }
 }
@@ -191,11 +195,11 @@ impl RpcServer {
 
         let router = create_router(self.state);
 
-        let listener = tokio::net::TcpListener::bind(addr).await?;
+        let listener = TcpListener::bind(addr).await?;
         info!(addr = %addr, "RPC server listening");
 
-        let task = tokio::spawn(async move {
-            if let Err(e) = axum::serve(listener, router).await {
+        let task = spawn(async move {
+            if let Err(e) = serve(listener, router).await {
                 error!(error = ?e, "RPC server error");
             }
         });
@@ -225,6 +229,8 @@ impl RpcServer {
 
 #[cfg(test)]
 mod tests {
+    use crossbeam::channel::unbounded;
+
     use super::*;
 
     #[test]
@@ -237,7 +243,7 @@ mod tests {
     #[tokio::test]
     async fn test_server_creation() {
         let config = RpcServerConfig::default();
-        let (tx_submission_tx, _rx) = crossbeam::channel::unbounded();
+        let (tx_submission_tx, _rx) = unbounded();
         let tx_status_cache = Arc::new(QuickCache::new(1000));
         let server = RpcServer::new(config, tx_submission_tx, tx_status_cache);
 

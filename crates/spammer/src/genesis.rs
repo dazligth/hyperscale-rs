@@ -2,13 +2,15 @@
 //!
 //! Generates TOML configuration for funding spammer accounts at genesis.
 
-use crate::accounts::AccountPool;
+use std::fmt::Write;
+
 use hyperscale_types::ShardGroupId;
 use radix_common::math::Decimal;
 use radix_common::network::NetworkDefinition;
 use radix_common::prelude::AddressBech32Encoder;
 use radix_common::types::ComponentAddress;
-use std::fmt::Write;
+
+use crate::accounts::{AccountPool, AccountPoolError};
 
 /// Generate TOML-formatted genesis balances for all accounts in the pool.
 ///
@@ -102,7 +104,7 @@ pub fn format_balances_toml(
 pub enum GenesisError {
     /// The underlying account pool could not be generated.
     #[error("Account generation failed: {0}")]
-    AccountGeneration(#[from] crate::accounts::AccountPoolError),
+    AccountGeneration(#[from] AccountPoolError),
 }
 
 #[cfg(test)]

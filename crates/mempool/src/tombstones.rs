@@ -19,10 +19,11 @@
 //! block, so behavior is deterministic across validators regardless of block
 //! cadence.
 
+use std::collections::HashMap;
+
 #[cfg(test)]
 use hyperscale_types::Hash;
 use hyperscale_types::{TxHash, WeightedTimestamp};
-use std::collections::HashMap;
 
 pub struct TombstoneStore {
     /// `tx_hash → end_timestamp_exclusive`. Pruned when

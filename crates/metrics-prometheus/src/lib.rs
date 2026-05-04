@@ -12,9 +12,9 @@
 // Metrics values are display readouts; precision loss on usize/u64 → f64 is irrelevant.
 #![allow(clippy::cast_precision_loss)]
 
-use hyperscale_metrics::{ChannelDepths, MemoryMetrics, MetricsRecorder};
+use hyperscale_metrics::{ChannelDepths, MemoryMetrics, MetricsRecorder, set_global_recorder};
 use prometheus::{
-    Counter, CounterVec, Gauge, GaugeVec, Histogram, HistogramVec, register_counter,
+    Counter, CounterVec, Gauge, GaugeVec, Histogram, HistogramVec, gather, register_counter,
     register_counter_vec, register_gauge, register_gauge_vec, register_histogram,
     register_histogram_vec,
 };
@@ -1462,7 +1462,7 @@ pub fn install() {
     use std::sync::Once;
     static INIT: Once = Once::new();
     INIT.call_once(|| {
-        hyperscale_metrics::set_global_recorder(Box::new(PrometheusRecorder::new()));
+        set_global_recorder(Box::new(PrometheusRecorder::new()));
     });
 }
 
@@ -1477,7 +1477,7 @@ pub fn install() {
 pub fn encode_metrics() -> Result<(String, Vec<u8>), String> {
     use prometheus::{Encoder, TextEncoder};
     let encoder = TextEncoder::new();
-    let metric_families = prometheus::gather();
+    let metric_families = gather();
     let content_type = encoder.format_type().to_string();
     let mut buffer = Vec::new();
     encoder

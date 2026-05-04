@@ -1,8 +1,9 @@
 //! Finalized wave fetch request (intra-shard DA).
 
-use crate::response::GetFinalizedWavesResponse;
 use hyperscale_types::{MessageClass, NetworkMessage, Request, WaveId};
 use sbor::prelude::BasicSbor;
+
+use crate::response::GetFinalizedWavesResponse;
 
 /// Request to fetch finalized waves by id.
 ///
@@ -40,9 +41,12 @@ impl Request for GetFinalizedWavesRequest {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use hyperscale_types::{BlockHeight, ShardGroupId};
     use std::collections::BTreeSet;
+
+    use hyperscale_types::{BlockHeight, ShardGroupId};
+    use sbor::{basic_decode, basic_encode};
+
+    use super::*;
 
     #[test]
     fn test_sbor_roundtrip() {
@@ -52,8 +56,8 @@ mod tests {
                 WaveId::new(ShardGroupId(0), BlockHeight(2), BTreeSet::new()),
             ],
         };
-        let encoded = sbor::basic_encode(&request).unwrap();
-        let decoded: GetFinalizedWavesRequest = sbor::basic_decode(&encoded).unwrap();
+        let encoded = basic_encode(&request).unwrap();
+        let decoded: GetFinalizedWavesRequest = basic_decode(&encoded).unwrap();
         assert_eq!(request, decoded);
     }
 }

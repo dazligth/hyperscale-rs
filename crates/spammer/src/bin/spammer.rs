@@ -2,18 +2,26 @@
 //!
 //! A command-line tool for generating and submitting transactions to a Hyperscale network.
 
+use std::time::{Duration, Instant};
+
 use clap::{Parser, Subcommand};
+use humantime::Duration as HumantimeDuration;
 use hyperscale_spammer::accounts::{AccountPool, SelectionMode};
 use hyperscale_spammer::client::RpcClient;
 use hyperscale_spammer::config::SpammerConfig;
 use hyperscale_spammer::genesis::{generate_genesis_toml, generate_genesis_toml_for_shard};
 use hyperscale_spammer::runner::Spammer;
 use hyperscale_spammer::workloads::TransferWorkload;
+use hyperscale_types::ShardGroupId;
 use radix_common::math::Decimal;
 use radix_common::network::NetworkDefinition;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
-use std::time::{Duration, Instant};
+use tokio::signal::ctrl_c;
+use tokio::spawn;
+use tokio::time::sleep;
+use tokio_util::sync::CancellationToken;
+use tracing_subscriber::fmt;
 
 #[derive(Parser)]
 #[command(name = "hyperscale-spammer")]
@@ -70,7 +78,7 @@ enum Commands {
 
         /// Duration to run (e.g., "30s", "5m", "1h")
         #[arg(short, long, default_value = "60s")]
-        duration: humantime::Duration,
+        duration: HumantimeDuration,
 
         /// Cross-shard transaction ratio (0.0 to 1.0)
         #[arg(long, default_value = "0.3")]
@@ -111,7 +119,7 @@ enum Commands {
         /// How frequently to poll for transaction completion.
         /// Only used if --measure-latency is set.
         #[arg(long, default_value = "100ms")]
-        latency_poll_interval: humantime::Duration,
+        latency_poll_interval: HumantimeDuration,
 
         /// Timeout for waiting for in-flight transactions after spammer stops (e.g., "30s")
         ///
@@ -119,7 +127,7 @@ enum Commands {
         /// transactions to complete before marking them as timed out.
         /// Only used if --measure-latency is set.
         #[arg(long, default_value = "30s")]
-        latency_timeout: humantime::Duration,
+        latency_timeout: HumantimeDuration,
 
         /// Number of worker threads for parallel transaction submission.
         ///
@@ -153,11 +161,11 @@ enum Commands {
 
         /// Maximum time to wait for transaction completion
         #[arg(long, default_value = "60s")]
-        timeout: humantime::Duration,
+        timeout: HumantimeDuration,
 
         /// Poll interval for checking transaction status
         #[arg(long, default_value = "100ms")]
-        poll_interval: humantime::Duration,
+        poll_interval: HumantimeDuration,
 
         /// Wait for nodes to be ready before starting
         #[arg(long)]
@@ -225,7 +233,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             workers,
         } => {
             // Initialize tracing for the run command
-            tracing_subscriber::fmt::init();
+            fmt::init();
 
             let selection_mode = parse_selection_mode(&selection)?;
 
@@ -274,13 +282,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             // Set up graceful shutdown on Ctrl+C
-            let cancel = tokio_util::sync::CancellationToken::new();
+            let cancel = CancellationToken::new();
             let cancel_for_signal = cancel.clone();
             let cancel_for_timeout = cancel.clone();
 
             // Spawn task to cancel on Ctrl+C
-            tokio::spawn(async move {
-                if tokio::signal::ctrl_c().await.is_ok() {
+            spawn(async move {
+                if ctrl_c().await.is_ok() {
                     println!("\nReceived Ctrl+C, shutting down gracefully...");
                     cancel_for_signal.cancel();
                 }
@@ -288,8 +296,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Spawn task to cancel after duration
             let duration_val = *duration;
-            tokio::spawn(async move {
-                tokio::time::sleep(duration_val).await;
+            spawn(async move {
+                sleep(duration_val).await;
                 cancel_for_timeout.cancel();
             });
 
@@ -308,7 +316,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             wait_ready,
         } => {
             // Initialize tracing for smoke test
-            tracing_subscriber::fmt::init();
+            fmt::init();
 
             println!("=== Smoke Test ===");
             println!("Endpoints: {endpoints:?}");
@@ -350,7 +358,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         break;
                     }
 
-                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    sleep(Duration::from_millis(500)).await;
                 }
             }
 
@@ -383,11 +391,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Generate a transaction specifically for shard 0
             let target_shard: usize = 0;
             let tx = workload
-                .generate_for_shard(
-                    &accounts,
-                    hyperscale_types::ShardGroupId(target_shard as u64),
-                    &mut rng,
-                )
+                .generate_for_shard(&accounts, ShardGroupId(target_shard as u64), &mut rng)
                 .expect("Failed to generate transaction for shard 0");
 
             // Calculate client index: endpoints are organized as shard0_v0, shard0_v1, ..., shard1_v0, ...
@@ -477,7 +481,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
-                tokio::time::sleep(poll_duration).await;
+                sleep(poll_duration).await;
             }
         }
     }

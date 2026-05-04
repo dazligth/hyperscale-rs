@@ -5,7 +5,7 @@
 //! (not an actual value change), the actual substate value must be looked
 //! up from the database.
 
-use crate::{DbPartitionKey, DbSortKey};
+use crate::{DbPartitionKey, DbSortKey, SubstateDatabase};
 
 /// Trait for looking up substate values during JMT snapshot construction.
 ///
@@ -25,7 +25,7 @@ pub trait SubstateLookup {
 ///
 /// This is needed because Rust can't coerce `dyn SubstateDatabase` to
 /// `dyn SubstateLookup` even with a blanket impl.
-pub struct SubstateDbLookup<'a>(pub &'a (dyn crate::SubstateDatabase + Sync));
+pub struct SubstateDbLookup<'a>(pub &'a (dyn SubstateDatabase + Sync));
 
 impl SubstateLookup for SubstateDbLookup<'_> {
     fn lookup_substate(

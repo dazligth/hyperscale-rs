@@ -60,10 +60,12 @@
 //! proposer needs to re-evaluate. The post-dispatch drain in `mod.rs::handle`
 //! invokes `try_event_driven_proposal` once.
 
-use super::NodeStateMachine;
+use std::sync::Arc;
+
 use hyperscale_core::{Action, ProtocolEvent, TimerId};
 use hyperscale_types::{BlockHash, BlockHeader, BlockManifest, CertifiedBlock, QuorumCertificate};
-use std::sync::Arc;
+
+use super::NodeStateMachine;
 
 impl NodeStateMachine {
     /// Dispatch a BFT-category `ProtocolEvent`.
@@ -328,17 +330,20 @@ impl NodeStateMachine {
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::TestNode;
-    use hyperscale_core::{Action, ProtocolEvent, StateMachine};
-    use hyperscale_mempool::MempoolConfig;
-    use hyperscale_test_helpers::{certify, make_live_block};
-    use hyperscale_types::{
-        BlockHeight, BlockManifest, CommittedBlockHeader, Hash, LocalTimestamp,
-        MerkleInclusionProof, Provisions, QuorumCertificate, RETENTION_HORIZON, ShardGroupId,
-        TransactionStatus, TxEntries, TxHash, ValidatorId, WaveId, test_utils::test_transaction,
-    };
     use std::collections::BTreeSet;
     use std::sync::Arc;
+
+    use hyperscale_core::{Action, ProtocolEvent, StateMachine, TimerId};
+    use hyperscale_mempool::MempoolConfig;
+    use hyperscale_test_helpers::{certify, make_live_block};
+    use hyperscale_types::test_utils::test_transaction;
+    use hyperscale_types::{
+        Block, BlockHeight, BlockManifest, CommittedBlockHeader, Hash, LocalTimestamp,
+        MerkleInclusionProof, Provisions, QuorumCertificate, RETENTION_HORIZON, Round,
+        ShardGroupId, TransactionStatus, TxEntries, TxHash, ValidatorId, WaveId,
+    };
+
+    use super::super::test_support::TestNode;
 
     /// `RemoteHeaderAdmitted` must fan out to **both** execution and
     /// provisions: execution registers expected ECs from the header's
@@ -363,7 +368,7 @@ mod tests {
             vec![],
             vec![],
         );
-        if let hyperscale_types::Block::Live { ref mut header, .. } = block {
+        if let Block::Live { ref mut header, .. } = block {
             header.waves = vec![wave];
         }
         let committed_header = Arc::new(CommittedBlockHeader::new(
@@ -403,7 +408,7 @@ mod tests {
         let TestNode { mut node, .. } = TestNode::builder().local_idx(1).build();
         assert!(
             node.topology()
-                .should_propose(BlockHeight(1), hyperscale_types::Round::INITIAL),
+                .should_propose(BlockHeight(1), Round::INITIAL),
             "local must be the round-0 height-1 proposer for this test",
         );
 
@@ -430,7 +435,7 @@ mod tests {
         assert!(
             !node
                 .topology()
-                .should_propose(BlockHeight(1), hyperscale_types::Round::INITIAL),
+                .should_propose(BlockHeight(1), Round::INITIAL),
             "local must NOT be the round-0 height-1 proposer for this test",
         );
 
@@ -461,7 +466,7 @@ mod tests {
             matches!(
                 a,
                 Action::SetTimer {
-                    id: hyperscale_core::TimerId::Cleanup,
+                    id: TimerId::Cleanup,
                     ..
                 }
             )

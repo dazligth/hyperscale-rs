@@ -5,12 +5,15 @@
 //! All query methods are `&self`; mutations happen in `TopologyCoordinator`
 //! (in the `hyperscale-topology` crate) which builds new snapshots.
 
+use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
+
+use blake3::hash as blake3_hash;
+
 use crate::{
     BlockHeight, Bls12381G1PublicKey, NodeId, Round, RoutableTransaction, ShardGroupId,
     ValidatorId, ValidatorSet, VotePower,
 };
-use std::collections::{BTreeSet, HashMap};
-use std::sync::Arc;
 
 /// Per-shard committee membership.
 #[derive(Debug, Clone)]
@@ -22,7 +25,7 @@ struct ShardCommittee {
 /// Hash a `NodeId` to a u64 using blake3 (first 8 bytes, little-endian).
 #[must_use]
 pub fn node_id_hash_u64(node_id: &NodeId) -> u64 {
-    let hash = blake3::hash(&node_id.0);
+    let hash = blake3_hash(&node_id.0);
     let bytes = hash.as_bytes();
     u64::from_le_bytes([
         bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
@@ -350,7 +353,7 @@ impl TopologySnapshot {
     /// Determine which shard a `NodeId` belongs to (hash-modulo).
     #[must_use]
     pub fn shard_for_node_id(&self, node_id: &NodeId) -> ShardGroupId {
-        crate::shard_for_node(node_id, self.num_shards)
+        shard_for_node(node_id, self.num_shards)
     }
 
     /// Every shard a transaction touches via either `declared_reads` or

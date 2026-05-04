@@ -1,17 +1,18 @@
 //! Crash recovery for `RocksDB` storage.
 
-use crate::core::RocksDbStorage;
-
-use hyperscale_metrics as metrics;
+use hyperscale_bft::RecoveredState;
+use hyperscale_metrics::record_storage_operation;
 use hyperscale_storage::SubstateStore;
 use hyperscale_types::{BlockHash, BlockHeight};
+
+use crate::core::RocksDbStorage;
 
 impl RocksDbStorage {
     /// Load recovered state from storage for crash recovery.
     ///
     /// This should be called on startup before creating the state machine.
     /// Returns `RecoveredState::default()` for a fresh database.
-    pub fn load_recovered_state(&self) -> hyperscale_bft::RecoveredState {
+    pub fn load_recovered_state(&self) -> RecoveredState {
         let start = std::time::Instant::now();
         let (committed_height, committed_hash, latest_qc) = self.get_chain_metadata();
 
@@ -40,7 +41,7 @@ impl RocksDbStorage {
         }
 
         let elapsed = start.elapsed().as_secs_f64();
-        metrics::record_storage_operation("load_recovered_state", elapsed);
+        record_storage_operation("load_recovered_state", elapsed);
 
         tracing::info!(
             committed_height = committed_height.0,
@@ -52,7 +53,7 @@ impl RocksDbStorage {
             "Loaded recovered state from storage"
         );
 
-        hyperscale_bft::RecoveredState {
+        RecoveredState {
             committed_height,
             committed_hash: committed_hash.map(BlockHash::from_raw),
             latest_qc,

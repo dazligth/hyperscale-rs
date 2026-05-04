@@ -1,8 +1,9 @@
 //! Common BLS signature verification helpers.
 
-use hyperscale_metrics as metrics;
+use hyperscale_metrics::record_signature_verification_latency;
 use hyperscale_types::{
     Bls12381G1PublicKey, Bls12381G2Signature, ShardGroupId, TopologySnapshot, ValidatorId,
+    verify_bls12381_v1,
 };
 use tracing::warn;
 
@@ -14,8 +15,8 @@ pub(super) fn verify_bls_with_metrics(
     label: &str,
 ) -> bool {
     let start = std::time::Instant::now();
-    let valid = hyperscale_types::verify_bls12381_v1(msg, public_key, signature);
-    metrics::record_signature_verification_latency(label, start.elapsed().as_secs_f64());
+    let valid = verify_bls12381_v1(msg, public_key, signature);
+    record_signature_verification_latency(label, start.elapsed().as_secs_f64());
     valid
 }
 

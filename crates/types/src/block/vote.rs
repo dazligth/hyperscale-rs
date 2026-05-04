@@ -1,10 +1,11 @@
 //! BFT block vote.
 
+use sbor::prelude::*;
+
 use crate::{
     BlockHash, BlockHeight, Bls12381G1PrivateKey, Bls12381G2Signature, ProposerTimestamp, Round,
     ShardGroupId, ValidatorId, block_vote_message,
 };
-use sbor::prelude::*;
 
 /// Block vote for BFT consensus.
 #[derive(Debug, Clone, PartialEq, Eq, sbor::prelude::BasicSbor)]

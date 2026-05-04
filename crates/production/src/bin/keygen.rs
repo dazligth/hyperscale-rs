@@ -4,8 +4,10 @@
 //!   `keygen <seed_hex>`      - Print BLS public key for given 32-byte seed (hex)
 //!   `keygen --generate`      - Generate new random BLS keypair and print
 
-use hyperscale_types::{bls_keypair_from_seed, generate_bls_keypair};
 use std::env;
+
+use hex::{decode, encode};
+use hyperscale_types::{bls_keypair_from_seed, generate_bls_keypair};
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -20,11 +22,11 @@ fn main() {
         let keypair = generate_bls_keypair();
         let public_key = keypair.public_key();
         let bytes = public_key.to_vec();
-        println!("{}", hex::encode(&bytes));
+        println!("{}", encode(&bytes));
     } else {
         // Derive BLS keypair from seed
         let seed_hex = &args[1];
-        let seed_bytes = hex::decode(seed_hex).expect("Invalid hex seed");
+        let seed_bytes = decode(seed_hex).expect("Invalid hex seed");
 
         if seed_bytes.len() != 32 {
             eprintln!("Seed must be 32 bytes (64 hex chars)");
@@ -37,6 +39,6 @@ fn main() {
 
         // Print BLS public key hex
         let bytes = public_key.to_vec();
-        println!("{}", hex::encode(&bytes));
+        println!("{}", encode(&bytes));
     }
 }

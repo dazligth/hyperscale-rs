@@ -2,11 +2,13 @@
 
 mod types;
 
-pub use types::*;
-
-use hyperscale_types::RoutableTransaction;
-use reqwest::Client;
 use std::time::Duration;
+
+use hex::encode as hex_encode;
+use hyperscale_types::RoutableTransaction;
+use reqwest::{Client, Error as ReqwestError};
+use sbor::prelude::basic_encode;
+pub use types::*;
 
 /// Client for submitting transactions via RPC.
 pub struct RpcClient {
@@ -44,11 +46,10 @@ impl RpcClient {
         tx: &RoutableTransaction,
     ) -> Result<SubmissionResult, RpcError> {
         // Encode transaction as SBOR
-        let tx_bytes = sbor::prelude::basic_encode(tx)
-            .map_err(|e| RpcError::EncodingFailed(format!("{e:?}")))?;
+        let tx_bytes = basic_encode(tx).map_err(|e| RpcError::EncodingFailed(format!("{e:?}")))?;
 
         // Convert to hex
-        let tx_hex = hex::encode(tx_bytes);
+        let tx_hex = hex_encode(tx_bytes);
 
         // Build request
         let request = SubmitTransactionRequest {
@@ -154,7 +155,7 @@ impl RpcClient {
 pub enum RpcError {
     /// Underlying `reqwest` HTTP failure.
     #[error("HTTP error: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(#[from] ReqwestError),
 
     /// SBOR encoding of the outgoing transaction failed.
     #[error("Failed to encode transaction: {0}")]

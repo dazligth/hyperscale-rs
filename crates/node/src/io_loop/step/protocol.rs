@@ -7,13 +7,14 @@
 //! pipeline state (`block_commit`, `pending_chain`) that needs updating
 //! before the state machine sees the event.
 
-use crate::io_loop::IoLoop;
 use hyperscale_core::ProtocolEvent;
 use hyperscale_dispatch::Dispatch;
 use hyperscale_engine::Engine;
 use hyperscale_network::Network;
 use hyperscale_storage::Storage;
 use hyperscale_types::BlockHeight;
+
+use crate::io_loop::IoLoop;
 
 impl<S, N, D, E> IoLoop<S, N, D, E>
 where

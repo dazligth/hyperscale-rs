@@ -14,8 +14,9 @@
 //! payload means writing one impl block here — not editing three parallel
 //! files.
 
-use super::fetch::{Fetch, FetchInput};
-use super::host::ProtocolHost;
+use std::hash::Hash;
+use std::sync::Arc;
+
 use crossbeam::channel::Sender;
 use hyperscale_core::{FetchOrigin, FetchPeers, NodeInput, ProtocolEvent};
 use hyperscale_messages::request::{
@@ -24,8 +25,9 @@ use hyperscale_messages::request::{
 };
 use hyperscale_network::{Network, ResponseVerdict};
 use hyperscale_types::{BlockHeight, ProvisionHash, ShardGroupId, TxHash, WaveId};
-use std::hash::Hash;
-use std::sync::Arc;
+
+use super::fetch::{Fetch, FetchInput};
+use super::host::ProtocolHost;
 
 // ─── Type aliases used across the module tree ──────────────────────────
 

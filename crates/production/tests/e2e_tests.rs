@@ -9,19 +9,26 @@
 
 mod fixtures;
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use fixtures::TestFixtures;
 use hyperscale_bft::BftConfig;
+use hyperscale_network::{HandlerRegistry, ValidatorKeyMap};
 use hyperscale_network_libp2p::{Libp2pAdapter, Libp2pConfig};
 use hyperscale_production::ProductionRunner;
 use hyperscale_storage_rocksdb::RocksDbStorage;
-use hyperscale_types::{ShardGroupId, ValidatorId, generate_bls_keypair, validator_bind_message};
-use libp2p::identity;
+use hyperscale_types::{
+    Bls12381G2Signature, ShardGroupId, ValidatorId, generate_bls_keypair, validator_bind_message,
+};
+use libp2p::PeerId;
+use libp2p::identity::Keypair;
 use serial_test::serial;
-use std::sync::Arc;
-use std::time::Duration;
 use tempfile::TempDir;
-use tokio::time::timeout;
+use tokio::task::spawn;
+use tokio::time::{sleep, timeout};
 use tracing::info;
+use tracing_subscriber::fmt;
 
 /// Test timeout values (from design spec).
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -38,17 +45,14 @@ const OVERALL_TEST_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// Create a dummy bind signature + validator key map for tests that create adapters directly.
 fn test_bind_args(
-    keypair: &libp2p::identity::Keypair,
+    keypair: &Keypair,
     validator_id: ValidatorId,
-) -> (
-    hyperscale_types::Bls12381G2Signature,
-    Arc<hyperscale_network::ValidatorKeyMap>,
-) {
+) -> (Bls12381G2Signature, Arc<ValidatorKeyMap>) {
     let bls_key = generate_bls_keypair();
     let pubkey = bls_key.public_key();
-    let peer_id = libp2p::PeerId::from(keypair.public());
+    let peer_id = PeerId::from(keypair.public());
     let sig = bls_key.sign_v1(&validator_bind_message(&peer_id.to_bytes()));
-    let mut keys = hyperscale_network::ValidatorKeyMap::new();
+    let mut keys = ValidatorKeyMap::new();
     keys.insert(validator_id, pubkey);
     (sig, Arc::new(keys))
 }
@@ -56,9 +60,9 @@ fn test_bind_args(
 #[tokio::test]
 #[serial]
 async fn test_network_adapter_starts() {
-    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let _ = fmt().with_test_writer().try_init();
 
-    let keypair = identity::Keypair::generate_ed25519();
+    let keypair = Keypair::generate_ed25519();
     let validator_id = ValidatorId(0);
     let shard = ShardGroupId(0);
 
@@ -75,7 +79,7 @@ async fn test_network_adapter_starts() {
         keypair,
         validator_id,
         shard,
-        Arc::new(hyperscale_network::HandlerRegistry::new()),
+        Arc::new(HandlerRegistry::new()),
         bind_sig,
         topo,
     )
@@ -85,7 +89,7 @@ async fn test_network_adapter_starts() {
     assert_eq!(adapter.local_validator_id(), validator_id);
 
     // Get listen addresses (should have at least one after initialization)
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    sleep(Duration::from_millis(100)).await;
     let addrs = adapter.listen_addresses().await;
     info!(addresses = ?addrs, "Adapter listening on");
 
@@ -95,10 +99,10 @@ async fn test_network_adapter_starts() {
 #[tokio::test]
 #[serial]
 async fn test_two_node_connection() {
-    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let _ = fmt().with_test_writer().try_init();
 
     // Node 1
-    let keypair1 = identity::Keypair::generate_ed25519();
+    let keypair1 = Keypair::generate_ed25519();
     let (bind_sig1, topo1) = test_bind_args(&keypair1, ValidatorId(0));
     let config1 = Libp2pConfig {
         listen_addresses: vec!["/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()],
@@ -110,21 +114,21 @@ async fn test_two_node_connection() {
         keypair1,
         ValidatorId(0),
         ShardGroupId(0),
-        Arc::new(hyperscale_network::HandlerRegistry::new()),
+        Arc::new(HandlerRegistry::new()),
         bind_sig1,
         topo1,
     )
     .unwrap();
 
     // Wait for node 1 to be ready and get its address
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    sleep(Duration::from_millis(200)).await;
     let addrs1 = adapter1.listen_addresses().await;
     assert!(!addrs1.is_empty(), "Node 1 should have listen addresses");
     let node1_addr = addrs1[0].clone();
     info!(addr = %node1_addr, "Node 1 listening");
 
     // Node 2 - bootstrap to node 1
-    let keypair2 = identity::Keypair::generate_ed25519();
+    let keypair2 = Keypair::generate_ed25519();
     let (bind_sig2, topo2) = test_bind_args(&keypair2, ValidatorId(1));
     let config2 = Libp2pConfig {
         listen_addresses: vec!["/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()],
@@ -136,7 +140,7 @@ async fn test_two_node_connection() {
         keypair2,
         ValidatorId(1),
         ShardGroupId(0),
-        Arc::new(hyperscale_network::HandlerRegistry::new()),
+        Arc::new(HandlerRegistry::new()),
         bind_sig2,
         topo2,
     )
@@ -152,7 +156,7 @@ async fn test_two_node_connection() {
                 return (peers1, peers2);
             }
 
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            sleep(Duration::from_millis(100)).await;
         }
     })
     .await;
@@ -173,9 +177,9 @@ async fn test_two_node_connection() {
 #[tokio::test]
 #[serial]
 async fn test_topic_subscription() {
-    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let _ = fmt().with_test_writer().try_init();
 
-    let keypair = identity::Keypair::generate_ed25519();
+    let keypair = Keypair::generate_ed25519();
     let (bind_sig, topo) = test_bind_args(&keypair, ValidatorId(0));
     let config = Libp2pConfig {
         listen_addresses: vec!["/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()],
@@ -187,7 +191,7 @@ async fn test_topic_subscription() {
         keypair,
         ValidatorId(0),
         ShardGroupId(0),
-        Arc::new(hyperscale_network::HandlerRegistry::new()),
+        Arc::new(HandlerRegistry::new()),
         bind_sig,
         topo,
     )
@@ -207,7 +211,7 @@ async fn test_topic_subscription() {
 #[tokio::test]
 #[serial]
 async fn test_validator_bind_success() {
-    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let _ = fmt().with_test_writer().try_init();
 
     // Shared topology — both validators known to both nodes.
     let fixtures = TestFixtures::new(42, 2);
@@ -225,13 +229,13 @@ async fn test_validator_bind_success() {
         keypair0,
         ValidatorId(0),
         ShardGroupId(0),
-        Arc::new(hyperscale_network::HandlerRegistry::new()),
+        Arc::new(HandlerRegistry::new()),
         bind_sig0,
         fixtures.validator_key_map(0),
     )
     .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    sleep(Duration::from_millis(200)).await;
     let addrs0 = adapter0.listen_addresses().await;
     assert!(!addrs0.is_empty(), "Node 0 should have listen addresses");
     let node0_addr = addrs0[0].clone();
@@ -249,7 +253,7 @@ async fn test_validator_bind_success() {
         keypair1,
         ValidatorId(1),
         ShardGroupId(0),
-        Arc::new(hyperscale_network::HandlerRegistry::new()),
+        Arc::new(HandlerRegistry::new()),
         bind_sig1,
         fixtures.validator_key_map(1),
     )
@@ -264,7 +268,7 @@ async fn test_validator_bind_success() {
             ) {
                 return (p1, p0);
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            sleep(Duration::from_millis(50)).await;
         }
     })
     .await;
@@ -285,7 +289,7 @@ async fn test_validator_bind_success() {
 #[tokio::test]
 #[serial]
 async fn test_validator_bind_rejects_wrong_key() {
-    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let _ = fmt().with_test_writer().try_init();
 
     let fixtures = TestFixtures::new(42, 2);
 
@@ -302,13 +306,13 @@ async fn test_validator_bind_rejects_wrong_key() {
         keypair0,
         ValidatorId(0),
         ShardGroupId(0),
-        Arc::new(hyperscale_network::HandlerRegistry::new()),
+        Arc::new(HandlerRegistry::new()),
         bind_sig0,
         fixtures.validator_key_map(0),
     )
     .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    sleep(Duration::from_millis(200)).await;
     let addrs0 = adapter0.listen_addresses().await;
     assert!(!addrs0.is_empty(), "Node 0 should have listen addresses");
     let node0_addr = addrs0[0].clone();
@@ -316,7 +320,7 @@ async fn test_validator_bind_rejects_wrong_key() {
     // Node 1 — impersonator: signs with a BLS key that doesn't match the topology.
     let keypair1 = fixtures.ed25519_keypair(1);
     let wrong_bls_key = generate_bls_keypair();
-    let peer1_id = libp2p::PeerId::from(keypair1.public());
+    let peer1_id = PeerId::from(keypair1.public());
     let wrong_sig = wrong_bls_key.sign_v1(&validator_bind_message(&peer1_id.to_bytes()));
     let config1 = Libp2pConfig {
         listen_addresses: vec!["/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()],
@@ -328,7 +332,7 @@ async fn test_validator_bind_rejects_wrong_key() {
         keypair1,
         ValidatorId(1),
         ShardGroupId(0),
-        Arc::new(hyperscale_network::HandlerRegistry::new()),
+        Arc::new(HandlerRegistry::new()),
         wrong_sig,
         fixtures.validator_key_map(1),
     )
@@ -340,14 +344,14 @@ async fn test_validator_bind_rejects_wrong_key() {
             if !adapter0.connected_peers().await.is_empty() {
                 return;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            sleep(Duration::from_millis(50)).await;
         }
     })
     .await;
     assert!(connected.is_ok(), "Transport connection should establish");
 
     // Give the bind protocol time to attempt and fail.
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    sleep(Duration::from_secs(1)).await;
 
     // Node 0 must NOT trust the impersonator.
     assert!(
@@ -364,7 +368,7 @@ async fn test_validator_bind_rejects_wrong_key() {
 #[tokio::test]
 #[serial]
 async fn test_validator_bind_evicted_on_disconnect() {
-    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let _ = fmt().with_test_writer().try_init();
 
     let fixtures = TestFixtures::new(42, 2);
 
@@ -381,13 +385,13 @@ async fn test_validator_bind_evicted_on_disconnect() {
         keypair0,
         ValidatorId(0),
         ShardGroupId(0),
-        Arc::new(hyperscale_network::HandlerRegistry::new()),
+        Arc::new(HandlerRegistry::new()),
         bind_sig0,
         fixtures.validator_key_map(0),
     )
     .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    sleep(Duration::from_millis(200)).await;
     let addrs0 = adapter0.listen_addresses().await;
     assert!(!addrs0.is_empty(), "Node 0 should have listen addresses");
     let node0_addr = addrs0[0].clone();
@@ -405,7 +409,7 @@ async fn test_validator_bind_evicted_on_disconnect() {
         keypair1,
         ValidatorId(1),
         ShardGroupId(0),
-        Arc::new(hyperscale_network::HandlerRegistry::new()),
+        Arc::new(HandlerRegistry::new()),
         bind_sig1,
         fixtures.validator_key_map(1),
     )
@@ -417,7 +421,7 @@ async fn test_validator_bind_evicted_on_disconnect() {
             if adapter0.peer_for_validator(ValidatorId(1)).is_some() {
                 return;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            sleep(Duration::from_millis(50)).await;
         }
     })
     .await;
@@ -435,7 +439,7 @@ async fn test_validator_bind_evicted_on_disconnect() {
             if adapter0.peer_for_validator(ValidatorId(1)).is_none() {
                 return;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            sleep(Duration::from_millis(50)).await;
         }
     })
     .await;
@@ -454,7 +458,7 @@ async fn test_validator_bind_evicted_on_disconnect() {
 #[tokio::test]
 #[serial]
 async fn test_production_runner_with_network() {
-    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let _ = fmt().with_test_writer().try_init();
 
     let fixtures = TestFixtures::new(42, 1);
 
@@ -487,7 +491,7 @@ async fn test_production_runner_with_network() {
     info!(peer_id = %network.local_peer_id(), "Runner has network");
 
     // Get listen addresses
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    sleep(Duration::from_millis(100)).await;
     let addrs = network.listen_addresses().await;
     info!(addresses = ?addrs, "Runner listening on");
 
@@ -495,9 +499,9 @@ async fn test_production_runner_with_network() {
     let shutdown = runner
         .shutdown_handle()
         .expect("Should have shutdown handle");
-    let handle = tokio::spawn(runner.run());
+    let handle = spawn(runner.run());
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    sleep(Duration::from_millis(500)).await;
     drop(shutdown);
 
     let result = timeout(Duration::from_secs(5), handle).await;
@@ -513,7 +517,7 @@ async fn test_production_runner_with_network() {
 #[tokio::test]
 #[serial]
 async fn test_graceful_shutdown() {
-    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let _ = fmt().with_test_writer().try_init();
 
     let fixtures = TestFixtures::new(42, 1);
 
@@ -541,10 +545,10 @@ async fn test_graceful_shutdown() {
     let shutdown = runner
         .shutdown_handle()
         .expect("Should have shutdown handle");
-    let handle = tokio::spawn(runner.run());
+    let handle = spawn(runner.run());
 
     // Let it run briefly
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    sleep(Duration::from_millis(200)).await;
 
     // Shutdown via handle
     drop(shutdown);

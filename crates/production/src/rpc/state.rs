@@ -1,19 +1,23 @@
 //! Shared state types for RPC handlers.
 
-use crate::status::SyncStatus;
-use arc_swap::ArcSwap;
-use hyperscale_core::NodeInput;
-use hyperscale_types::{TransactionStatus, TxHash};
-use quick_cache::sync::Cache as QuickCache;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
+
+use arc_swap::ArcSwap;
+use crossbeam::channel::Sender;
+use hyperscale_core::NodeInput;
+use hyperscale_types::{ShardGroupId, TransactionStatus, TxHash};
+use quick_cache::sync::Cache as QuickCache;
+
+use crate::status::SyncStatus;
 
 /// Type alias for the transaction submission channel.
 ///
 /// RPC handlers send `Event::SubmitTransaction` directly to the `IoLoop`'s
 /// crossbeam event channel, bypassing tokio mpsc bridges entirely.
-pub type TxSubmissionSender = crossbeam::channel::Sender<NodeInput>;
+pub type TxSubmissionSender = Sender<NodeInput>;
 
 /// Shared state for RPC handlers.
 #[derive(Clone)]
@@ -79,7 +83,7 @@ pub struct MempoolSnapshot {
     pub at_pending_limit: bool,
     /// Per-remote-shard in-flight counts from latest verified block headers.
     /// Used for cross-shard backpressure: reject transactions targeting congested shards.
-    pub remote_shard_in_flight: std::collections::HashMap<hyperscale_types::ShardGroupId, u32>,
+    pub remote_shard_in_flight: HashMap<ShardGroupId, u32>,
     /// Threshold for rejecting transactions due to remote shard congestion (80% of `max_in_flight`).
     pub remote_congestion_threshold: u32,
 }
@@ -93,7 +97,7 @@ impl Default for MempoolSnapshot {
             updated_at: None,
             accepting_rpc_transactions: true, // Default to accepting until we know otherwise
             at_pending_limit: false,          // Default to not at limit until we know otherwise
-            remote_shard_in_flight: std::collections::HashMap::new(),
+            remote_shard_in_flight: HashMap::new(),
             remote_congestion_threshold: 0,
         }
     }
@@ -115,8 +119,9 @@ pub struct NodeStatusState {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use hyperscale_types::{BlockHeight, Hash, TransactionDecision};
+
+    use super::*;
 
     fn new_cache() -> QuickCache<TxHash, TransactionStatus> {
         QuickCache::new(100)

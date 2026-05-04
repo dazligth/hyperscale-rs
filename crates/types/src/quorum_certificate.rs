@@ -1,10 +1,11 @@
 //! Quorum certificate for BFT consensus.
 
+use sbor::prelude::*;
+
 use crate::{
     BlockHash, BlockHeight, Bls12381G2Signature, Round, ShardGroupId, SignerBitfield,
     WeightedTimestamp, block_vote_message, zero_bls_signature,
 };
-use sbor::prelude::*;
 
 /// A quorum certificate proving 2f+1 validators voted for a block.
 ///
@@ -118,7 +119,6 @@ impl QuorumCertificate {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     use crate::Hash;
 
     #[test]

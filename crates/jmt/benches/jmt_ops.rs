@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 use std::hint::black_box;
 
+use blake3::hash as blake3_hash;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use hyperscale_jmt::{Blake3Hasher, Key, MemoryStore, MultiProof, Tree, ValueHash};
 
@@ -13,7 +14,7 @@ fn make_key(i: u32) -> Key {
     let mut k = [0u8; 32];
     k[0..4].copy_from_slice(&i.to_be_bytes());
     // Spread entropy across the path so buckets actually branch.
-    let h = blake3::hash(&k);
+    let h = blake3_hash(&k);
     k.copy_from_slice(h.as_bytes());
     k
 }

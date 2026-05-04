@@ -1,12 +1,13 @@
 //! Receipt storage for `RocksDB`.
 
+use std::sync::Arc;
+
+use hyperscale_types::{ConsensusReceipt, ExecutionMetadata, StoredReceipt, TxHash};
+use rocksdb::WriteBatch;
+
 use crate::column_families::{ConsensusReceiptsCf, ExecutionMetadataCf};
 use crate::core::RocksDbStorage;
-use crate::typed_cf::{self, TypedCf};
-
-use hyperscale_types::TxHash;
-use rocksdb::WriteBatch;
-use std::sync::Arc;
+use crate::typed_cf::{TypedCf, batch_put};
 
 impl RocksDbStorage {
     /// One-shot variant of [`Self::store_receipts`] for a single receipt.
@@ -14,7 +15,7 @@ impl RocksDbStorage {
     /// # Panics
     ///
     /// Panics if the underlying `RocksDB` write fails.
-    pub fn store_receipt(&self, receipt: &hyperscale_types::StoredReceipt) {
+    pub fn store_receipt(&self, receipt: &StoredReceipt) {
         let mut batch = WriteBatch::default();
         self.add_receipt_to_batch(&mut batch, receipt);
         self.db.write(batch).expect("failed to persist receipt");
@@ -27,7 +28,7 @@ impl RocksDbStorage {
     /// # Panics
     ///
     /// Panics if the underlying `RocksDB` write fails.
-    pub fn store_receipts(&self, receipts: &[hyperscale_types::StoredReceipt]) {
+    pub fn store_receipts(&self, receipts: &[StoredReceipt]) {
         if receipts.is_empty() {
             return;
         }
@@ -46,14 +47,10 @@ impl RocksDbStorage {
     /// Append the receipt's writes to a caller-owned `WriteBatch` so it
     /// can land atomically with the rest of the block commit (header,
     /// substate, JMT). Used by `commit_block` / `prepare_block_commit`.
-    pub(crate) fn add_receipt_to_batch(
-        &self,
-        batch: &mut WriteBatch,
-        receipt: &hyperscale_types::StoredReceipt,
-    ) {
+    pub(crate) fn add_receipt_to_batch(&self, batch: &mut WriteBatch, receipt: &StoredReceipt) {
         let cf = self.cf();
 
-        typed_cf::batch_put::<ConsensusReceiptsCf>(
+        batch_put::<ConsensusReceiptsCf>(
             batch,
             ConsensusReceiptsCf::handle(&cf),
             receipt.tx_hash.as_raw(),
@@ -61,7 +58,7 @@ impl RocksDbStorage {
         );
 
         if let Some(ref metadata) = receipt.metadata {
-            typed_cf::batch_put::<ExecutionMetadataCf>(
+            batch_put::<ExecutionMetadataCf>(
                 batch,
                 ExecutionMetadataCf::handle(&cf),
                 receipt.tx_hash.as_raw(),
@@ -72,10 +69,7 @@ impl RocksDbStorage {
 
     /// Read the consensus portion. Present for any tx that committed
     /// (success or failure); absent for aborted txs and unknown hashes.
-    pub fn get_consensus_receipt(
-        &self,
-        tx_hash: &TxHash,
-    ) -> Option<Arc<hyperscale_types::ConsensusReceipt>> {
+    pub fn get_consensus_receipt(&self, tx_hash: &TxHash) -> Option<Arc<ConsensusReceipt>> {
         self.cf_get::<ConsensusReceiptsCf>(tx_hash.as_raw())
             .map(Arc::new)
     }
@@ -83,10 +77,7 @@ impl RocksDbStorage {
     /// Read the local-only metadata. `None` when the tx was synced from
     /// a peer (peers don't ship their metadata) or pruned earlier than
     /// the consensus portion.
-    pub fn get_execution_metadata(
-        &self,
-        tx_hash: &TxHash,
-    ) -> Option<hyperscale_types::ExecutionMetadata> {
+    pub fn get_execution_metadata(&self, tx_hash: &TxHash) -> Option<ExecutionMetadata> {
         self.cf_get::<ExecutionMetadataCf>(tx_hash.as_raw())
     }
 }

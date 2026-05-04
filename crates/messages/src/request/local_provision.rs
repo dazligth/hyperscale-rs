@@ -1,10 +1,9 @@
 //! Local provisions fetch request (intra-shard DA).
 
-use crate::response::GetLocalProvisionsResponse;
-#[cfg(test)]
-use hyperscale_types::Hash;
 use hyperscale_types::{MessageClass, NetworkMessage, ProvisionHash, Request};
 use sbor::prelude::BasicSbor;
+
+use crate::response::GetLocalProvisionsResponse;
 
 /// Request to fetch provision batches by hash.
 ///
@@ -41,6 +40,9 @@ impl Request for GetLocalProvisionsRequest {
 
 #[cfg(test)]
 mod tests {
+    use hyperscale_types::Hash;
+    use sbor::{basic_decode, basic_encode};
+
     use super::*;
 
     #[test]
@@ -51,8 +53,8 @@ mod tests {
                 ProvisionHash::from_raw(Hash::from_bytes(b"batch2")),
             ],
         };
-        let encoded = sbor::basic_encode(&request).unwrap();
-        let decoded: GetLocalProvisionsRequest = sbor::basic_decode(&encoded).unwrap();
+        let encoded = basic_encode(&request).unwrap();
+        let decoded: GetLocalProvisionsRequest = basic_decode(&encoded).unwrap();
         assert_eq!(request, decoded);
     }
 }

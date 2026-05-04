@@ -6,18 +6,21 @@
 //! response decoding, and feeding delivered headers into per-header QC
 //! verification.
 
-use crate::io_loop::IoLoop;
-use crate::io_loop::protocol::remote_header_sync::{RemoteHeaderSyncInput, RemoteHeaderSyncOutput};
-use crate::io_loop::protocol::sync::SyncOutput;
 use hyperscale_core::{NodeInput, ProtocolEvent};
 use hyperscale_dispatch::Dispatch;
 use hyperscale_engine::Engine;
 use hyperscale_messages::request::GetRemoteHeadersRequest;
 use hyperscale_messages::response::GetRemoteHeadersResponse;
-use hyperscale_metrics as metrics;
+use hyperscale_metrics::{
+    record_sync_round_completed, record_sync_round_retried, record_sync_round_started,
+};
 use hyperscale_network::{Network, ResponseVerdict};
 use hyperscale_storage::Storage;
 use hyperscale_types::{BlockHeight, CommittedBlockHeader, ShardGroupId, ValidatorId};
+
+use crate::io_loop::IoLoop;
+use crate::io_loop::protocol::remote_header_sync::{RemoteHeaderSyncInput, RemoteHeaderSyncOutput};
+use crate::io_loop::protocol::sync::SyncOutput;
 
 impl<S, N, D, E> IoLoop<S, N, D, E>
 where
@@ -144,7 +147,7 @@ where
                         from_height,
                         count,
                     };
-                    metrics::record_sync_round_started("remote_header");
+                    record_sync_round_started("remote_header");
                     self.network.request(
                         &peers,
                         None,
@@ -152,7 +155,7 @@ where
                         None,
                         Box::new(move |result: Result<GetRemoteHeadersResponse, _>| {
                             if let Ok(resp) = result {
-                                metrics::record_sync_round_completed("remote_header");
+                                record_sync_round_completed("remote_header");
                                 let _ = es.send(NodeInput::RemoteHeadersResponseReceived {
                                     source_shard,
                                     from_height,
@@ -160,7 +163,7 @@ where
                                     headers: resp.headers,
                                 });
                             } else {
-                                metrics::record_sync_round_retried("remote_header");
+                                record_sync_round_retried("remote_header");
                                 let _ = es.send(NodeInput::RemoteHeadersFetchFailed {
                                     source_shard,
                                     from_height,

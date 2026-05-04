@@ -1,12 +1,18 @@
 //! [`Block`] enum (Live/Sealed) plus its manual SBOR encoding.
 
+use std::sync::Arc;
+
+use sbor::prelude::*;
+use sbor::{
+    Categorize, Decode, DecodeError, Decoder, Describe, Encode, EncodeError, Encoder,
+    NoCustomTypeKind, NoCustomValueKind, RustTypeId, TypeData, TypeKind, ValueKind,
+};
+
 use crate::{
     BlockHash, BlockHeader, BlockHeight, FinalizedWave, Provisions, RoutableTransaction,
     ShardGroupId, StateRoot, TxHash, ValidatorId, decode_finalized_wave_vec,
     encode_finalized_wave_vec,
 };
-use sbor::prelude::*;
-use std::sync::Arc;
 
 /// Complete block with header and transaction data.
 ///
@@ -77,12 +83,12 @@ impl Eq for Block {}
 // ============================================================================
 
 /// Helper to encode a Vec<Arc<RoutableTransaction>> as an SBOR array.
-fn encode_tx_vec<E: sbor::Encoder<sbor::NoCustomValueKind>>(
+fn encode_tx_vec<E: Encoder<NoCustomValueKind>>(
     encoder: &mut E,
     txs: &[Arc<RoutableTransaction>],
-) -> Result<(), sbor::EncodeError> {
-    encoder.write_value_kind(sbor::ValueKind::Array)?;
-    encoder.write_value_kind(sbor::ValueKind::Tuple)?;
+) -> Result<(), EncodeError> {
+    encoder.write_value_kind(ValueKind::Array)?;
+    encoder.write_value_kind(ValueKind::Tuple)?;
     encoder.write_size(txs.len())?;
     for tx in txs {
         encoder.encode_deeper_body(tx.as_ref())?;
@@ -92,12 +98,12 @@ fn encode_tx_vec<E: sbor::Encoder<sbor::NoCustomValueKind>>(
 
 /// Helper to encode a Vec<Arc<Provision>> as an SBOR array. Mirrors the
 /// transaction / finalized-wave helpers.
-fn encode_provision_vec<E: sbor::Encoder<sbor::NoCustomValueKind>>(
+fn encode_provision_vec<E: Encoder<NoCustomValueKind>>(
     encoder: &mut E,
     provisions: &[Arc<Provisions>],
-) -> Result<(), sbor::EncodeError> {
-    encoder.write_value_kind(sbor::ValueKind::Array)?;
-    encoder.write_value_kind(sbor::ValueKind::Tuple)?;
+) -> Result<(), EncodeError> {
+    encoder.write_value_kind(ValueKind::Array)?;
+    encoder.write_value_kind(ValueKind::Tuple)?;
     encoder.write_size(provisions.len())?;
     for p in provisions {
         encoder.encode_deeper_body(p.as_ref())?;
@@ -110,12 +116,12 @@ fn encode_provision_vec<E: sbor::Encoder<sbor::NoCustomValueKind>>(
 const BLOCK_VARIANT_LIVE: u8 = 0;
 const BLOCK_VARIANT_SEALED: u8 = 1;
 
-impl<E: sbor::Encoder<sbor::NoCustomValueKind>> sbor::Encode<sbor::NoCustomValueKind, E> for Block {
-    fn encode_value_kind(&self, encoder: &mut E) -> Result<(), sbor::EncodeError> {
-        encoder.write_value_kind(sbor::ValueKind::Enum)
+impl<E: Encoder<NoCustomValueKind>> Encode<NoCustomValueKind, E> for Block {
+    fn encode_value_kind(&self, encoder: &mut E) -> Result<(), EncodeError> {
+        encoder.write_value_kind(ValueKind::Enum)
     }
 
-    fn encode_body(&self, encoder: &mut E) -> Result<(), sbor::EncodeError> {
+    fn encode_body(&self, encoder: &mut E) -> Result<(), EncodeError> {
         match self {
             Self::Live {
                 header,
@@ -156,14 +162,14 @@ impl<E: sbor::Encoder<sbor::NoCustomValueKind>> sbor::Encode<sbor::NoCustomValue
 const MAX_SBOR_COLLECTION_SIZE: usize = 10_000;
 
 /// Helper to decode a Vec<Arc<RoutableTransaction>> from an SBOR array.
-fn decode_tx_vec<D: sbor::Decoder<sbor::NoCustomValueKind>>(
+fn decode_tx_vec<D: Decoder<NoCustomValueKind>>(
     decoder: &mut D,
-) -> Result<Vec<Arc<RoutableTransaction>>, sbor::DecodeError> {
-    decoder.read_and_check_value_kind(sbor::ValueKind::Array)?;
-    decoder.read_and_check_value_kind(sbor::ValueKind::Tuple)?;
+) -> Result<Vec<Arc<RoutableTransaction>>, DecodeError> {
+    decoder.read_and_check_value_kind(ValueKind::Array)?;
+    decoder.read_and_check_value_kind(ValueKind::Tuple)?;
     let count = decoder.read_size()?;
     if count > MAX_SBOR_COLLECTION_SIZE {
-        return Err(sbor::DecodeError::UnexpectedSize {
+        return Err(DecodeError::UnexpectedSize {
             expected: MAX_SBOR_COLLECTION_SIZE,
             actual: count,
         });
@@ -171,46 +177,46 @@ fn decode_tx_vec<D: sbor::Decoder<sbor::NoCustomValueKind>>(
     let mut txs = Vec::with_capacity(count);
     for _ in 0..count {
         let tx: RoutableTransaction =
-            decoder.decode_deeper_body_with_value_kind(sbor::ValueKind::Tuple)?;
+            decoder.decode_deeper_body_with_value_kind(ValueKind::Tuple)?;
         txs.push(Arc::new(tx));
     }
     Ok(txs)
 }
 
 /// Helper to decode a Vec<Arc<Provision>> from an SBOR array.
-fn decode_provision_vec<D: sbor::Decoder<sbor::NoCustomValueKind>>(
+fn decode_provision_vec<D: Decoder<NoCustomValueKind>>(
     decoder: &mut D,
-) -> Result<Vec<Arc<Provisions>>, sbor::DecodeError> {
-    decoder.read_and_check_value_kind(sbor::ValueKind::Array)?;
-    decoder.read_and_check_value_kind(sbor::ValueKind::Tuple)?;
+) -> Result<Vec<Arc<Provisions>>, DecodeError> {
+    decoder.read_and_check_value_kind(ValueKind::Array)?;
+    decoder.read_and_check_value_kind(ValueKind::Tuple)?;
     let count = decoder.read_size()?;
     if count > MAX_SBOR_COLLECTION_SIZE {
-        return Err(sbor::DecodeError::UnexpectedSize {
+        return Err(DecodeError::UnexpectedSize {
             expected: MAX_SBOR_COLLECTION_SIZE,
             actual: count,
         });
     }
     let mut out = Vec::with_capacity(count);
     for _ in 0..count {
-        let p: Provisions = decoder.decode_deeper_body_with_value_kind(sbor::ValueKind::Tuple)?;
+        let p: Provisions = decoder.decode_deeper_body_with_value_kind(ValueKind::Tuple)?;
         out.push(Arc::new(p));
     }
     Ok(out)
 }
 
-impl<D: sbor::Decoder<sbor::NoCustomValueKind>> sbor::Decode<sbor::NoCustomValueKind, D> for Block {
+impl<D: Decoder<NoCustomValueKind>> Decode<NoCustomValueKind, D> for Block {
     fn decode_body_with_value_kind(
         decoder: &mut D,
-        value_kind: sbor::ValueKind<sbor::NoCustomValueKind>,
-    ) -> Result<Self, sbor::DecodeError> {
-        decoder.check_preloaded_value_kind(value_kind, sbor::ValueKind::Enum)?;
+        value_kind: ValueKind<NoCustomValueKind>,
+    ) -> Result<Self, DecodeError> {
+        decoder.check_preloaded_value_kind(value_kind, ValueKind::Enum)?;
         let discriminator = decoder.read_discriminator()?;
         let length = decoder.read_size()?;
 
         match discriminator {
             BLOCK_VARIANT_LIVE => {
                 if length != 4 {
-                    return Err(sbor::DecodeError::UnexpectedSize {
+                    return Err(DecodeError::UnexpectedSize {
                         expected: 4,
                         actual: length,
                     });
@@ -228,7 +234,7 @@ impl<D: sbor::Decoder<sbor::NoCustomValueKind>> sbor::Decode<sbor::NoCustomValue
             }
             BLOCK_VARIANT_SEALED => {
                 if length != 3 {
-                    return Err(sbor::DecodeError::UnexpectedSize {
+                    return Err(DecodeError::UnexpectedSize {
                         expected: 3,
                         actual: length,
                     });
@@ -242,22 +248,22 @@ impl<D: sbor::Decoder<sbor::NoCustomValueKind>> sbor::Decode<sbor::NoCustomValue
                     certificates,
                 })
             }
-            other => Err(sbor::DecodeError::UnknownDiscriminator(other)),
+            other => Err(DecodeError::UnknownDiscriminator(other)),
         }
     }
 }
 
-impl sbor::Categorize<sbor::NoCustomValueKind> for Block {
-    fn value_kind() -> sbor::ValueKind<sbor::NoCustomValueKind> {
-        sbor::ValueKind::Enum
+impl Categorize<NoCustomValueKind> for Block {
+    fn value_kind() -> ValueKind<NoCustomValueKind> {
+        ValueKind::Enum
     }
 }
 
-impl sbor::Describe<sbor::NoCustomTypeKind> for Block {
-    const TYPE_ID: sbor::RustTypeId = sbor::RustTypeId::novel_with_code("Block", &[], &[]);
+impl Describe<NoCustomTypeKind> for Block {
+    const TYPE_ID: RustTypeId = RustTypeId::novel_with_code("Block", &[], &[]);
 
-    fn type_data() -> sbor::TypeData<sbor::NoCustomTypeKind, sbor::RustTypeId> {
-        sbor::TypeData::unnamed(sbor::TypeKind::Any)
+    fn type_data() -> TypeData<NoCustomTypeKind, RustTypeId> {
+        TypeData::unnamed(TypeKind::Any)
     }
 }
 

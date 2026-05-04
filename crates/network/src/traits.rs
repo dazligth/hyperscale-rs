@@ -7,12 +7,13 @@
 //! `GossipHandler<M>` and `register_request_handler<R>` accepts a `RequestHandler<R>`.
 //! The `HandlerRegistry` owns SBOR serialization — `Network` impls just forward.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use hyperscale_types::{
     Bls12381G1PublicKey, MessageClass, NetworkMessage, Request, ShardGroupId, ShardMessage,
     ValidatorId,
 };
-use std::collections::HashMap;
-use std::sync::Arc;
 
 /// Maps `ValidatorId` to BLS public key for identity verification (e.g. validator-bind).
 ///
@@ -245,10 +246,11 @@ mod tests {
     // Verify that closures satisfy GossipHandler<M> via blanket impl.
     #[test]
     fn test_closure_gossip_handler() {
-        use hyperscale_types::NetworkMessage;
-        use sbor::{Decode, Encode};
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use hyperscale_types::NetworkMessage;
+        use sbor::{Decode, Encode};
 
         #[derive(Debug, Encode, Decode)]
         struct TestMsg(u32);

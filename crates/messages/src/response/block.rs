@@ -1,13 +1,16 @@
 //! Block fetch response.
 
-use crate::request::Inventory;
-use hyperscale_types::{
-    Block, BlockHash, BlockHeader, CertifiedBlock, FinalizedWave, MessageClass, NetworkMessage,
-    ProvisionHash, Provisions, QuorumCertificate, RoutableTransaction, TxHash, WaveId,
-};
-use sbor::prelude::BasicSbor;
 use std::fmt;
 use std::sync::Arc;
+
+use hyperscale_types::{
+    Block, BlockHash, BlockHeader, BloomFilter, BloomKey, CertifiedBlock, FinalizedWave,
+    MessageClass, NetworkMessage, ProvisionHash, Provisions, QuorumCertificate,
+    RoutableTransaction, TxHash, WaveId,
+};
+use sbor::prelude::BasicSbor;
+
+use crate::request::Inventory;
 
 /// A block in elided wire form.
 ///
@@ -277,9 +280,9 @@ impl fmt::Display for RehydrateError {
 
 impl std::error::Error for RehydrateError {}
 
-fn matches_filter<T>(filter: Option<&hyperscale_types::BloomFilter<T>>, item: &T) -> bool
+fn matches_filter<T>(filter: Option<&BloomFilter<T>>, item: &T) -> bool
 where
-    T: hyperscale_types::BloomKey,
+    T: BloomKey,
 {
     filter.is_some_and(|bf| bf.contains(item))
 }
@@ -337,13 +340,16 @@ impl NetworkMessage for GetBlockResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use hyperscale_types::{
-        BlockHash, BlockHeight, CertificateRoot, Hash, LocalReceiptRoot, ProposerTimestamp,
-        ProvisionsRoot, Round, ShardGroupId, SignerBitfield, StateRoot, TransactionRoot,
-        ValidatorId, WeightedTimestamp, test_utils::test_transaction, zero_bls_signature,
-    };
     use std::collections::BTreeMap;
+
+    use hyperscale_types::test_utils::test_transaction;
+    use hyperscale_types::{
+        BlockHash, BlockHeight, BloomFilter, CertificateRoot, Hash, LocalReceiptRoot,
+        ProposerTimestamp, ProvisionsRoot, Round, ShardGroupId, SignerBitfield, StateRoot,
+        TransactionRoot, ValidatorId, WeightedTimestamp, zero_bls_signature,
+    };
+
+    use super::*;
 
     fn create_test_block() -> Block {
         let tx = test_transaction(1);
@@ -403,8 +409,7 @@ mod tests {
         let block = create_test_block();
         let qc = create_test_qc(&block);
         let tx_hash = block.transactions()[0].hash();
-        let mut bf: hyperscale_types::BloomFilter<TxHash> =
-            hyperscale_types::BloomFilter::with_capacity(16, 0.01).unwrap();
+        let mut bf: BloomFilter<TxHash> = BloomFilter::with_capacity(16, 0.01).unwrap();
         bf.insert(&tx_hash);
         let inv = Inventory {
             tx_have: Some(bf),
@@ -423,8 +428,7 @@ mod tests {
         let qc = create_test_qc(&block);
         let tx_arc = Arc::clone(&block.transactions()[0]);
         let tx_hash = tx_arc.hash();
-        let mut bf: hyperscale_types::BloomFilter<TxHash> =
-            hyperscale_types::BloomFilter::with_capacity(16, 0.01).unwrap();
+        let mut bf: BloomFilter<TxHash> = BloomFilter::with_capacity(16, 0.01).unwrap();
         bf.insert(&tx_hash);
         let inv = Inventory {
             tx_have: Some(bf),
@@ -454,8 +458,7 @@ mod tests {
         let block = create_test_block();
         let qc = create_test_qc(&block);
         let tx_hash = block.transactions()[0].hash();
-        let mut bf: hyperscale_types::BloomFilter<TxHash> =
-            hyperscale_types::BloomFilter::with_capacity(16, 0.01).unwrap();
+        let mut bf: BloomFilter<TxHash> = BloomFilter::with_capacity(16, 0.01).unwrap();
         bf.insert(&tx_hash);
         let inv = Inventory {
             tx_have: Some(bf),
@@ -481,8 +484,7 @@ mod tests {
         let qc = create_test_qc(&block);
         let tx_arc = Arc::clone(&block.transactions()[0]);
         let tx_hash = tx_arc.hash();
-        let mut bf: hyperscale_types::BloomFilter<TxHash> =
-            hyperscale_types::BloomFilter::with_capacity(16, 0.01).unwrap();
+        let mut bf: BloomFilter<TxHash> = BloomFilter::with_capacity(16, 0.01).unwrap();
         bf.insert(&tx_hash);
         let inv = Inventory {
             tx_have: Some(bf),

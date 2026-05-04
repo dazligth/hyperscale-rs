@@ -1,9 +1,10 @@
 //! Command types and class-based command channels.
 
-use hyperscale_metrics as metrics;
+use hyperscale_metrics::record_backpressure_event;
 use hyperscale_types::MessageClass;
 use libp2p::{Multiaddr, PeerId as Libp2pPeerId};
 use tokio::sync::mpsc;
+use tokio::sync::oneshot::Sender as OneshotSender;
 use tracing::warn;
 
 /// Maximum number of commands to drain per event loop iteration.
@@ -51,12 +52,12 @@ pub(super) enum SwarmCommand {
 
     /// Query listen addresses.
     GetListenAddresses {
-        response_tx: tokio::sync::oneshot::Sender<Vec<Multiaddr>>,
+        response_tx: OneshotSender<Vec<Multiaddr>>,
     },
 
     /// Query connected peers.
     GetConnectedPeers {
-        response_tx: tokio::sync::oneshot::Sender<Vec<Libp2pPeerId>>,
+        response_tx: OneshotSender<Vec<Libp2pPeerId>>,
     },
 }
 
@@ -179,7 +180,7 @@ fn try_send_or_drop(
     match sender.try_send(cmd) {
         Ok(()) => Ok(()),
         Err(mpsc::error::TrySendError::Full(dropped)) => {
-            metrics::record_backpressure_event(source);
+            record_backpressure_event(source);
             warn!(source, "Sheddable class channel full; dropping command");
             // Drop is intentional. Return Ok so callers don't treat
             // backpressure as a hard error.

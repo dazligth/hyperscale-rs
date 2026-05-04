@@ -21,9 +21,10 @@
 //! `#[sbor(transparent)]` (they ride on QCs and headers); `LocalTimestamp`
 //! is local-only and deliberately not wired.
 
-use sbor::prelude::*;
-use std::fmt;
+use std::fmt::{self, Display, Formatter};
 use std::time::Duration;
+
+use sbor::prelude::*;
 
 /// BFT-authenticated, stake-weighted block timestamp in milliseconds.
 ///
@@ -82,8 +83,8 @@ impl WeightedTimestamp {
     }
 }
 
-impl fmt::Display for WeightedTimestamp {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for WeightedTimestamp {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{}ms", self.0)
     }
 }
@@ -138,8 +139,8 @@ impl ProposerTimestamp {
     }
 }
 
-impl fmt::Display for ProposerTimestamp {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for ProposerTimestamp {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{}ms", self.0)
     }
 }
@@ -219,8 +220,8 @@ impl LocalTimestamp {
     }
 }
 
-impl fmt::Display for LocalTimestamp {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for LocalTimestamp {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{}ms", self.0)
     }
 }

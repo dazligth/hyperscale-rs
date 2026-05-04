@@ -3,23 +3,32 @@
 //! Infrastructure events (connections, identify, kademlia) are handled directly
 //! in `event_loop.rs`. This module only processes gossipsub application messages.
 
-use super::behaviour::BehaviourEvent;
-use hyperscale_metrics as metrics;
-use hyperscale_network::HandlerRegistry;
-use hyperscale_types::ShardGroupId;
-use libp2p::{PeerId as Libp2pPeerId, gossipsub, swarm::SwarmEvent};
 use std::sync::Arc;
+
+use hyperscale_metrics::{
+    record_gossipsub_validation, record_invalid_message, record_libp2p_bandwidth,
+    record_network_message_received,
+};
+use hyperscale_network::compression::decompress;
+use hyperscale_network::{GossipVerdict, HandlerRegistry, parse_topic};
+use hyperscale_types::ShardGroupId;
+use libp2p::PeerId as Libp2pPeerId;
+use libp2p::gossipsub::{Event as GossipsubEvent, MessageAcceptance, MessageId};
+use libp2p::swarm::SwarmEvent;
+use tokio::spawn;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
+
+use super::behaviour::BehaviourEvent;
 
 /// Validation result sent from the gossipsub handler back to the event loop.
 ///
 /// The event loop drains these and calls `report_message_validation_result`
 /// on the gossipsub behaviour, which controls message forwarding and peer scoring.
 pub(super) struct ValidationReport {
-    pub message_id: gossipsub::MessageId,
+    pub message_id: MessageId,
     pub propagation_source: Libp2pPeerId,
-    pub acceptance: gossipsub::MessageAcceptance,
+    pub acceptance: MessageAcceptance,
 }
 
 /// Guards a single message's verdict so gossipsub never leaks peer-scoring
@@ -34,13 +43,13 @@ pub(super) struct ValidationReport {
 /// return). `Ignore` is the right fallback — it does not penalise the
 /// sender or propagate the message.
 struct VerdictGuard {
-    pending: Option<(gossipsub::MessageId, Libp2pPeerId)>,
+    pending: Option<(MessageId, Libp2pPeerId)>,
     tx: mpsc::UnboundedSender<ValidationReport>,
 }
 
 impl VerdictGuard {
     const fn new(
-        message_id: gossipsub::MessageId,
+        message_id: MessageId,
         propagation_source: Libp2pPeerId,
         tx: mpsc::UnboundedSender<ValidationReport>,
     ) -> Self {
@@ -50,9 +59,9 @@ impl VerdictGuard {
         }
     }
 
-    fn report(&mut self, acceptance: gossipsub::MessageAcceptance) {
+    fn report(&mut self, acceptance: MessageAcceptance) {
         if let Some((message_id, propagation_source)) = self.pending.take() {
-            metrics::record_gossipsub_validation(acceptance_label(&acceptance));
+            record_gossipsub_validation(acceptance_label(&acceptance));
             let _ = self.tx.send(ValidationReport {
                 message_id,
                 propagation_source,
@@ -69,24 +78,22 @@ impl Drop for VerdictGuard {
                 peer = %propagation_source,
                 "Gossip handler task ended without reporting a verdict; sending Ignore"
             );
-            metrics::record_gossipsub_validation(acceptance_label(
-                &gossipsub::MessageAcceptance::Ignore,
-            ));
+            record_gossipsub_validation(acceptance_label(&MessageAcceptance::Ignore));
             let _ = self.tx.send(ValidationReport {
                 message_id,
                 propagation_source,
-                acceptance: gossipsub::MessageAcceptance::Ignore,
+                acceptance: MessageAcceptance::Ignore,
             });
         }
     }
 }
 
 /// Stable string label for the gossipsub validation outcome metric.
-const fn acceptance_label(acceptance: &gossipsub::MessageAcceptance) -> &'static str {
+const fn acceptance_label(acceptance: &MessageAcceptance) -> &'static str {
     match acceptance {
-        gossipsub::MessageAcceptance::Accept => "accept",
-        gossipsub::MessageAcceptance::Reject => "reject",
-        gossipsub::MessageAcceptance::Ignore => "ignore",
+        MessageAcceptance::Accept => "accept",
+        MessageAcceptance::Reject => "reject",
+        MessageAcceptance::Ignore => "ignore",
     }
 }
 
@@ -105,27 +112,25 @@ pub(super) fn handle_gossipsub_event(
 ) {
     match event {
         // Handle gossipsub messages
-        SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(gossipsub::Event::Message {
+        SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(GossipsubEvent::Message {
             propagation_source,
             message_id,
             message,
         })) => {
             // Parse topic immediately to determine message type and shard
             let topic_str = message.topic.as_str();
-            let Some(parsed) = hyperscale_network::parse_topic(topic_str) else {
+            let Some(parsed) = parse_topic(topic_str) else {
                 warn!(
                     topic = %topic_str,
                     peer = %propagation_source,
                     "Received message with invalid topic format"
                 );
-                metrics::record_invalid_message();
-                metrics::record_gossipsub_validation(acceptance_label(
-                    &gossipsub::MessageAcceptance::Reject,
-                ));
+                record_invalid_message();
+                record_gossipsub_validation(acceptance_label(&MessageAcceptance::Reject));
                 let _ = validation_tx.send(ValidationReport {
                     message_id,
                     propagation_source,
-                    acceptance: gossipsub::MessageAcceptance::Reject,
+                    acceptance: MessageAcceptance::Reject,
                 });
                 return;
             };
@@ -133,7 +138,7 @@ pub(super) fn handle_gossipsub_event(
             let data_len = message.data.len();
 
             // Record inbound bandwidth
-            metrics::record_libp2p_bandwidth(data_len as u64, 0);
+            record_libp2p_bandwidth(data_len as u64, 0);
 
             // Shard-local messages must come from the local shard's topic.
             let msg_type = parsed.message_type;
@@ -151,14 +156,12 @@ pub(super) fn handle_gossipsub_event(
                     msg_type = msg_type,
                     "Dropping shard-local message from wrong shard (cross-shard contamination attempt)"
                 );
-                metrics::record_invalid_message();
-                metrics::record_gossipsub_validation(acceptance_label(
-                    &gossipsub::MessageAcceptance::Reject,
-                ));
+                record_invalid_message();
+                record_gossipsub_validation(acceptance_label(&MessageAcceptance::Reject));
                 let _ = validation_tx.send(ValidationReport {
                     message_id,
                     propagation_source,
-                    acceptance: gossipsub::MessageAcceptance::Reject,
+                    acceptance: MessageAcceptance::Reject,
                 });
                 return;
             }
@@ -170,13 +173,11 @@ pub(super) fn handle_gossipsub_event(
                     "No gossip handler registered for message type, dropping"
                 );
                 // No handler is not the sender's fault — ignore rather than reject.
-                metrics::record_gossipsub_validation(acceptance_label(
-                    &gossipsub::MessageAcceptance::Ignore,
-                ));
+                record_gossipsub_validation(acceptance_label(&MessageAcceptance::Ignore));
                 let _ = validation_tx.send(ValidationReport {
                     message_id,
                     propagation_source,
-                    acceptance: gossipsub::MessageAcceptance::Ignore,
+                    acceptance: MessageAcceptance::Ignore,
                 });
                 return;
             };
@@ -187,19 +188,19 @@ pub(super) fn handle_gossipsub_event(
             // `VerdictGuard` ensures gossipsub gets exactly one verdict per
             // message even if `handler` panics or the task is cancelled.
             let vtx = validation_tx.clone();
-            tokio::spawn(async move {
+            spawn(async move {
                 let mut guard = VerdictGuard::new(message_id, propagation_source, vtx);
-                match hyperscale_network::compression::decompress(&message.data) {
+                match decompress(&message.data) {
                     Ok(payload) => {
                         let verdict = handler(payload);
                         let acceptance = match verdict {
-                            hyperscale_network::GossipVerdict::Accept => {
-                                metrics::record_network_message_received();
-                                gossipsub::MessageAcceptance::Accept
+                            GossipVerdict::Accept => {
+                                record_network_message_received();
+                                MessageAcceptance::Accept
                             }
-                            hyperscale_network::GossipVerdict::Reject => {
-                                metrics::record_invalid_message();
-                                gossipsub::MessageAcceptance::Reject
+                            GossipVerdict::Reject => {
+                                record_invalid_message();
+                                MessageAcceptance::Reject
                             }
                         };
                         guard.report(acceptance);
@@ -210,15 +211,15 @@ pub(super) fn handle_gossipsub_event(
                             peer = %propagation_source,
                             "Failed to decompress gossip message"
                         );
-                        metrics::record_invalid_message();
-                        guard.report(gossipsub::MessageAcceptance::Reject);
+                        record_invalid_message();
+                        guard.report(MessageAcceptance::Reject);
                     }
                 }
             });
         }
 
         // Handle subscription events
-        SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(gossipsub::Event::Subscribed {
+        SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(GossipsubEvent::Subscribed {
             peer_id,
             topic,
         })) => {

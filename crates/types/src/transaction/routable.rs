@@ -1,11 +1,19 @@
 //! `RoutableTransaction` — wraps a Radix `UserTransaction` with shard-routing metadata.
 
-use crate::{Hash, NodeId, TimestampRange, TxHash};
+use std::fmt::{self, Debug, Formatter};
+use std::sync::OnceLock;
+
+use blake3::Hasher;
 use radix_common::data::manifest::{manifest_decode, manifest_encode};
 use radix_transactions::model::{UserTransaction, ValidatedUserTransaction};
 use radix_transactions::validation::TransactionValidator;
 use sbor::prelude::*;
-use std::sync::OnceLock;
+use sbor::{
+    Categorize, Decode, DecodeError, Decoder, Describe, Encode, EncodeError, Encoder,
+    NoCustomTypeKind, NoCustomValueKind, RustTypeId, TypeData, TypeKind, ValueKind,
+};
+
+use crate::{Hash, NodeId, TimestampRange, TxHash, shard_for_node};
 
 /// A transaction with routing information.
 ///
@@ -76,8 +84,8 @@ impl Clone for RoutableTransaction {
 }
 
 // Manual Debug - skip the validated field
-impl std::fmt::Debug for RoutableTransaction {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Debug for RoutableTransaction {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("RoutableTransaction")
             .field("hash", &self.hash)
             .field("declared_reads", &self.declared_reads)
@@ -111,7 +119,7 @@ impl RoutableTransaction {
         let payload = manifest_encode(&transaction).expect("transaction should be encodable");
 
         // Hash the transaction payload directly
-        let mut hasher = blake3::Hasher::new();
+        let mut hasher = Hasher::new();
         hasher.update(&payload);
         let hash = Hash::from_hash_bytes(hasher.finalize().as_bytes());
 
@@ -194,7 +202,7 @@ impl RoutableTransaction {
     }
 
     fn populate_cached_sbor(&mut self) {
-        self.cached_sbor = Some(sbor::basic_encode(self).expect("RoutableTransaction SBOR encode"));
+        self.cached_sbor = Some(basic_encode(self).expect("RoutableTransaction SBOR encode"));
     }
 
     /// Check if this transaction is cross-shard for the given number of shards.
@@ -203,11 +211,11 @@ impl RoutableTransaction {
             return false;
         }
 
-        let first_shard = crate::shard_for_node(&self.declared_writes[0], num_shards);
+        let first_shard = shard_for_node(&self.declared_writes[0], num_shards);
         self.declared_writes
             .iter()
             .skip(1)
-            .any(|node| crate::shard_for_node(node, num_shards) != first_shard)
+            .any(|node| shard_for_node(node, num_shards) != first_shard)
     }
 
     /// All `NodeIds` this transaction declares access to.
@@ -222,14 +230,12 @@ impl RoutableTransaction {
 // Manual SBOR implementation since UserTransaction uses ManifestSbor
 // ============================================================================
 
-impl<E: sbor::Encoder<sbor::NoCustomValueKind>> sbor::Encode<sbor::NoCustomValueKind, E>
-    for RoutableTransaction
-{
-    fn encode_value_kind(&self, encoder: &mut E) -> Result<(), sbor::EncodeError> {
-        encoder.write_value_kind(sbor::ValueKind::Tuple)
+impl<E: Encoder<NoCustomValueKind>> Encode<NoCustomValueKind, E> for RoutableTransaction {
+    fn encode_value_kind(&self, encoder: &mut E) -> Result<(), EncodeError> {
+        encoder.write_value_kind(ValueKind::Tuple)
     }
 
-    fn encode_body(&self, encoder: &mut E) -> Result<(), sbor::EncodeError> {
+    fn encode_body(&self, encoder: &mut E) -> Result<(), EncodeError> {
         encoder.write_size(5)?; // 5 fields
 
         // Encode hash as [u8; 32]
@@ -252,18 +258,16 @@ impl<E: sbor::Encoder<sbor::NoCustomValueKind>> sbor::Encode<sbor::NoCustomValue
     }
 }
 
-impl<D: sbor::Decoder<sbor::NoCustomValueKind>> sbor::Decode<sbor::NoCustomValueKind, D>
-    for RoutableTransaction
-{
+impl<D: Decoder<NoCustomValueKind>> Decode<NoCustomValueKind, D> for RoutableTransaction {
     fn decode_body_with_value_kind(
         decoder: &mut D,
-        value_kind: sbor::ValueKind<sbor::NoCustomValueKind>,
-    ) -> Result<Self, sbor::DecodeError> {
-        decoder.check_preloaded_value_kind(value_kind, sbor::ValueKind::Tuple)?;
+        value_kind: ValueKind<NoCustomValueKind>,
+    ) -> Result<Self, DecodeError> {
+        decoder.check_preloaded_value_kind(value_kind, ValueKind::Tuple)?;
         let length = decoder.read_size()?;
 
         if length != 5 {
-            return Err(sbor::DecodeError::UnexpectedSize {
+            return Err(DecodeError::UnexpectedSize {
                 expected: 5,
                 actual: length,
             });
@@ -276,7 +280,7 @@ impl<D: sbor::Decoder<sbor::NoCustomValueKind>> sbor::Decode<sbor::NoCustomValue
         // Decode transaction bytes and convert to UserTransaction
         let tx_bytes: Vec<u8> = decoder.decode()?;
         let transaction: UserTransaction =
-            manifest_decode(&tx_bytes).map_err(|_| sbor::DecodeError::InvalidCustomValue)?;
+            manifest_decode(&tx_bytes).map_err(|_| DecodeError::InvalidCustomValue)?;
 
         // Decode declared_reads
         let declared_reads: Vec<NodeId> = decoder.decode()?;
@@ -302,17 +306,16 @@ impl<D: sbor::Decoder<sbor::NoCustomValueKind>> sbor::Decode<sbor::NoCustomValue
     }
 }
 
-impl sbor::Categorize<sbor::NoCustomValueKind> for RoutableTransaction {
-    fn value_kind() -> sbor::ValueKind<sbor::NoCustomValueKind> {
-        sbor::ValueKind::Tuple
+impl Categorize<NoCustomValueKind> for RoutableTransaction {
+    fn value_kind() -> ValueKind<NoCustomValueKind> {
+        ValueKind::Tuple
     }
 }
 
-impl sbor::Describe<sbor::NoCustomTypeKind> for RoutableTransaction {
-    const TYPE_ID: sbor::RustTypeId =
-        sbor::RustTypeId::novel_with_code("RoutableTransaction", &[], &[]);
+impl Describe<NoCustomTypeKind> for RoutableTransaction {
+    const TYPE_ID: RustTypeId = RustTypeId::novel_with_code("RoutableTransaction", &[], &[]);
 
-    fn type_data() -> sbor::TypeData<sbor::NoCustomTypeKind, sbor::RustTypeId> {
-        sbor::TypeData::unnamed(sbor::TypeKind::Any)
+    fn type_data() -> TypeData<NoCustomTypeKind, RustTypeId> {
+        TypeData::unnamed(TypeKind::Any)
     }
 }

@@ -40,42 +40,52 @@
 //! ProdTimerManager ──crossbeam──→ pinned thread (timer events)
 //! ```
 
-use crate::rpc::{MempoolSnapshot, NodeStatusState};
-use crate::status::SyncStatus;
-use arc_swap::ArcSwap;
-use crossbeam::channel::Receiver;
 use std::collections::HashMap;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
-use tokio::task::JoinHandle;
-use tracing::debug;
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use arc_swap::ArcSwap;
+use core_affinity::{get_core_ids, set_for_current};
+use crossbeam::channel::{Receiver, Sender, unbounded};
+use hex::encode as hex_encode;
 use hyperscale_bft::BftConfig;
-use hyperscale_core::TimerId;
+use hyperscale_core::{NodeInput, ProtocolEvent, TimerId};
 use hyperscale_dispatch::{Dispatch, DispatchPool};
-use hyperscale_dispatch_pooled::PooledDispatch;
-use hyperscale_engine::{NetworkDefinition, RadixExecutor};
+use hyperscale_dispatch_pooled::{PooledDispatch, ThreadPoolConfig};
+use hyperscale_engine::{GenesisConfig, NetworkDefinition, RadixExecutor, TransactionValidation};
 use hyperscale_mempool::MempoolConfig;
-use hyperscale_metrics as metrics;
-use hyperscale_network_libp2p::Libp2pNetwork;
-use hyperscale_network_libp2p::{
-    Libp2pAdapter, Libp2pConfig, NetworkError, generate_random_keypair,
+use hyperscale_metrics::{
+    ChannelDepths, set_channel_depths, set_libp2p_peers, set_pool_queue_depths,
 };
-use hyperscale_node::io_loop::NodeStatusSnapshot;
+use hyperscale_metrics_prometheus::install;
+use hyperscale_network::{HandlerRegistry, ValidatorKeyMap};
+use hyperscale_network_libp2p::{
+    Libp2pAdapter, Libp2pConfig, Libp2pNetwork, NetworkError, RequestManager, RequestManagerConfig,
+    RequestStreamPool, generate_random_keypair,
+};
+use hyperscale_node::io_loop::{IoLoop, NodeStatusSnapshot, TimerOp, record_metrics};
+use hyperscale_node::{NodeConfig, NodeStateMachine, SharedTopologySnapshot};
+use hyperscale_provisions::{ProvisionConfig, ProvisionStore};
 use hyperscale_storage::ChainReader;
 use hyperscale_storage_rocksdb::{RocksDbStorage, SharedStorage};
-use quick_cache::sync::Cache as QuickCache;
-
-use hyperscale_core::NodeInput;
-use hyperscale_node::SharedTopologySnapshot;
-use hyperscale_node::io_loop::{IoLoop, TimerOp};
-use hyperscale_node::{NodeConfig, NodeStateMachine};
 use hyperscale_topology::TopologyCoordinator;
-use hyperscale_types::{Block, Bls12381G1PrivateKey, ShardGroupId, TxHash, ValidatorId};
-use std::sync::Arc;
-use std::time::Duration;
+use hyperscale_types::{
+    Block, Bls12381G1PrivateKey, Bls12381G2Signature, CertifiedBlock, LocalTimestamp,
+    QuorumCertificate, ShardGroupId, TransactionStatus, TxHash, ValidatorId,
+    validator_bind_message,
+};
+use libp2p::PeerId;
+use libp2p::identity::Keypair;
+use quick_cache::sync::Cache as QuickCache;
 use thiserror::Error;
+use tokio::runtime::Handle as TokioHandle;
 use tokio::sync::oneshot;
-use tracing::{info, warn};
+use tokio::task::JoinHandle;
+use tokio::time::{MissedTickBehavior, interval, sleep};
+use tracing::{debug, info, warn};
+
+use crate::rpc::{MempoolSnapshot, NodeStatusState};
+use crate::status::SyncStatus;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // RunnerError
@@ -153,16 +163,16 @@ pub struct ProductionRunnerBuilder {
     channel_capacity: usize,
     rpc_status: Option<Arc<ArcSwap<NodeStatusState>>>,
     mempool_snapshot: Option<Arc<ArcSwap<MempoolSnapshot>>>,
-    sync_status: Option<Arc<ArcSwap<crate::status::SyncStatus>>>,
+    sync_status: Option<Arc<ArcSwap<SyncStatus>>>,
     /// Optional genesis configuration for initial state.
-    genesis_config: Option<hyperscale_engine::GenesisConfig>,
+    genesis_config: Option<GenesisConfig>,
     /// Radix network definition for transaction validation.
     /// Defaults to simulator network if not set.
     network_definition: Option<NetworkDefinition>,
     /// Mempool configuration.
     mempool_config: MempoolConfig,
     /// Provision coordinator configuration.
-    provision_config: hyperscale_provisions::ProvisionConfig,
+    provision_config: ProvisionConfig,
 }
 
 impl Default for ProductionRunnerBuilder {
@@ -189,7 +199,7 @@ impl ProductionRunnerBuilder {
             genesis_config: None,
             network_definition: None,
             mempool_config: MempoolConfig::default(),
-            provision_config: hyperscale_provisions::ProvisionConfig::default(),
+            provision_config: ProvisionConfig::default(),
         }
     }
 
@@ -258,10 +268,7 @@ impl ProductionRunnerBuilder {
 
     /// Set the provision coordinator configuration.
     #[must_use]
-    pub const fn provision_config(
-        mut self,
-        config: hyperscale_provisions::ProvisionConfig,
-    ) -> Self {
+    pub const fn provision_config(mut self, config: ProvisionConfig) -> Self {
         self.provision_config = config;
         self
     }
@@ -282,14 +289,14 @@ impl ProductionRunnerBuilder {
 
     /// Wire in the shared sync status so the runner publishes sync progress.
     #[must_use]
-    pub fn sync_status(mut self, status: Arc<ArcSwap<crate::status::SyncStatus>>) -> Self {
+    pub fn sync_status(mut self, status: Arc<ArcSwap<SyncStatus>>) -> Self {
         self.sync_status = Some(status);
         self
     }
 
     /// Set the genesis configuration for initial state.
     #[must_use]
-    pub fn genesis_config(mut self, config: hyperscale_engine::GenesisConfig) -> Self {
+    pub fn genesis_config(mut self, config: GenesisConfig) -> Self {
         self.genesis_config = Some(config);
         self
     }
@@ -310,7 +317,7 @@ impl ProductionRunnerBuilder {
     #[allow(clippy::too_many_lines)] // straight-line construction; further splits add no clarity
     pub fn build(self) -> Result<ProductionRunner, RunnerError> {
         // Install the Prometheus metrics backend before anything records metrics.
-        hyperscale_metrics_prometheus::install();
+        install();
 
         let RequiredFields {
             topology_state,
@@ -334,12 +341,11 @@ impl ProductionRunnerBuilder {
         let local_shard = topology_state.snapshot().local_shard();
 
         // ArcSwap so `Action::TopologyChanged` can atomically swap in a new snapshot.
-        let topology: SharedTopologySnapshot = Arc::new(arc_swap::ArcSwap::from(Arc::clone(
-            topology_state.snapshot(),
-        )));
+        let topology: SharedTopologySnapshot =
+            Arc::new(ArcSwap::from(Arc::clone(topology_state.snapshot())));
 
         // Extract initial validator keys for network-layer bind verification.
-        let initial_validator_keys: Arc<hyperscale_network::ValidatorKeyMap> = Arc::new(
+        let initial_validator_keys: Arc<ValidatorKeyMap> = Arc::new(
             topology_state
                 .snapshot()
                 .global_validator_set()
@@ -357,21 +363,20 @@ impl ProductionRunnerBuilder {
 
         // BLS signature binding our `ValidatorId` to our libp2p `PeerId`,
         // consumed by the validator-bind protocol.
-        let local_peer_id = libp2p::PeerId::from(ed25519_keypair.public());
+        let local_peer_id = PeerId::from(ed25519_keypair.public());
         let bind_signing_key =
             Bls12381G1PrivateKey::from_bytes(&key_bytes).expect("valid key bytes");
-        let local_bind_signature = bind_signing_key.sign_v1(
-            &hyperscale_types::validator_bind_message(&local_peer_id.to_bytes()),
-        );
+        let local_bind_signature =
+            bind_signing_key.sign_v1(&validator_bind_message(&local_peer_id.to_bytes()));
 
-        let (xb_timer_tx, xb_timer_rx) = crossbeam::channel::unbounded();
-        let (xb_callback_tx, xb_callback_rx) = crossbeam::channel::unbounded();
-        let (xb_consensus_tx, xb_consensus_rx) = crossbeam::channel::unbounded();
-        let (xb_shutdown_tx, xb_shutdown_rx) = crossbeam::channel::unbounded();
+        let (xb_timer_tx, xb_timer_rx) = unbounded();
+        let (xb_callback_tx, xb_callback_rx) = unbounded();
+        let (xb_consensus_tx, xb_consensus_rx) = unbounded();
+        let (xb_shutdown_tx, xb_shutdown_rx) = unbounded();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
         let recovered = storage.load_recovered_state();
-        let provision_store = Arc::new(hyperscale_provisions::ProvisionStore::new());
+        let provision_store = Arc::new(ProvisionStore::new());
         let state = NodeStateMachine::new(
             0, // node_index is not meaningful in production
             topology_state,
@@ -386,9 +391,7 @@ impl ProductionRunnerBuilder {
         let network_definition = self
             .network_definition
             .unwrap_or_else(NetworkDefinition::simulator);
-        let tx_validator = Arc::new(hyperscale_engine::TransactionValidation::new(
-            network_definition.clone(),
-        ));
+        let tx_validator = Arc::new(TransactionValidation::new(network_definition.clone()));
 
         let NetworkStack {
             adapter,
@@ -462,23 +465,23 @@ pub struct ProductionRunner {
 
     /// Timer events to pinned thread (for external timer injection if needed).
     #[allow(dead_code)]
-    xb_timer_tx: crossbeam::channel::Sender<NodeInput>,
+    xb_timer_tx: Sender<NodeInput>,
     /// Consensus events to pinned thread (from libp2p adapter routing).
-    xb_consensus_tx: crossbeam::channel::Sender<NodeInput>,
+    xb_consensus_tx: Sender<NodeInput>,
     /// Kept alive solely to prevent the crossbeam callback channel from closing.
     #[allow(dead_code)]
-    xb_callback_tx: crossbeam::channel::Sender<NodeInput>,
+    xb_callback_tx: Sender<NodeInput>,
     /// Shutdown signal to pinned thread.
-    xb_shutdown_tx: crossbeam::channel::Sender<()>,
+    xb_shutdown_tx: Sender<()>,
 
     /// Timer receiver (moved to `PinnedLoopConfig`).
-    xb_timer_rx: Option<crossbeam::channel::Receiver<NodeInput>>,
+    xb_timer_rx: Option<Receiver<NodeInput>>,
     /// Callback receiver (moved to `PinnedLoopConfig`).
-    xb_callback_rx: Option<crossbeam::channel::Receiver<NodeInput>>,
+    xb_callback_rx: Option<Receiver<NodeInput>>,
     /// Consensus receiver (moved to `PinnedLoopConfig`).
-    xb_consensus_rx: Option<crossbeam::channel::Receiver<NodeInput>>,
+    xb_consensus_rx: Option<Receiver<NodeInput>>,
     /// Shutdown receiver (moved to `PinnedLoopConfig`).
-    xb_shutdown_rx: Option<crossbeam::channel::Receiver<()>>,
+    xb_shutdown_rx: Option<Receiver<()>>,
 
     /// Libp2p network adapter (shared with `InboundRouter`, `RequestManager`).
     network: Arc<Libp2pAdapter>,
@@ -497,13 +500,13 @@ pub struct ProductionRunner {
     /// Shared mempool snapshot updated by the metrics tick.
     mempool_snapshot: Option<Arc<ArcSwap<MempoolSnapshot>>>,
     /// Shared sync status updated by the metrics tick.
-    sync_status: Option<Arc<ArcSwap<crate::status::SyncStatus>>>,
+    sync_status: Option<Arc<ArcSwap<SyncStatus>>>,
 
     /// Optional genesis configuration for initial state.
-    genesis_config: Option<hyperscale_engine::GenesisConfig>,
+    genesis_config: Option<GenesisConfig>,
 
     /// Transaction status cache, shared from `IoLoop` for lock-free RPC queries.
-    tx_status_cache: Arc<QuickCache<TxHash, hyperscale_types::TransactionStatus>>,
+    tx_status_cache: Arc<QuickCache<TxHash, TransactionStatus>>,
 
     /// Shutdown signal receiver (external shutdown request).
     shutdown_rx: Option<oneshot::Receiver<()>>,
@@ -542,7 +545,7 @@ impl ProductionRunner {
     /// pinned thread. It can be passed directly to the RPC server for
     /// lock-free status queries.
     #[must_use]
-    pub fn tx_status_cache(&self) -> Arc<QuickCache<TxHash, hyperscale_types::TransactionStatus>> {
+    pub fn tx_status_cache(&self) -> Arc<QuickCache<TxHash, TransactionStatus>> {
         Arc::clone(&self.tx_status_cache)
     }
 
@@ -551,7 +554,7 @@ impl ProductionRunner {
     /// Events sent through this sender are forwarded to the pinned `IoLoop`
     /// thread via the crossbeam consensus channel.
     #[must_use]
-    pub fn event_sender(&self) -> crossbeam::channel::Sender<NodeInput> {
+    pub fn event_sender(&self) -> Sender<NodeInput> {
         self.xb_consensus_tx.clone()
     }
 
@@ -561,7 +564,7 @@ impl ProductionRunner {
     /// RPC handlers wrap transactions in `Event::SubmitTransaction` before sending.
     /// `IoLoop` handles gossip, validation, and mempool dispatch.
     #[must_use]
-    pub fn tx_submission_sender(&self) -> crossbeam::channel::Sender<NodeInput> {
+    pub fn tx_submission_sender(&self) -> Sender<NodeInput> {
         self.xb_consensus_tx.clone()
     }
 
@@ -611,7 +614,7 @@ impl ProductionRunner {
         let genesis_config = self
             .genesis_config
             .take()
-            .unwrap_or_else(hyperscale_engine::GenesisConfig::production);
+            .unwrap_or_else(GenesisConfig::production);
         info!(
             xrd_balances = genesis_config.xrd_balances.len(),
             "Running genesis"
@@ -657,14 +660,13 @@ impl ProductionRunner {
         // The state machine was created BEFORE genesis bootstrap ran, so it has
         // stale/zero state. We need to sync it with the actual JMT state from
         // genesis so future blocks compute state_root from the correct base.
-        let genesis_qc = hyperscale_types::QuorumCertificate {
+        let genesis_qc = QuorumCertificate {
             block_hash: genesis_block.hash(),
-            ..hyperscale_types::QuorumCertificate::genesis()
+            ..QuorumCertificate::genesis()
         };
-        let genesis_certified =
-            hyperscale_types::CertifiedBlock::new_unchecked(genesis_block, genesis_qc);
+        let genesis_certified = CertifiedBlock::new_unchecked(genesis_block, genesis_qc);
         let genesis_commit_output = io_loop.step(NodeInput::Protocol(Box::new(
-            hyperscale_core::ProtocolEvent::BlockCommitted {
+            ProtocolEvent::BlockCommitted {
                 certified: genesis_certified,
             },
         )));
@@ -742,7 +744,7 @@ impl ProductionRunner {
                 .xb_shutdown_rx
                 .take()
                 .expect("shutdown_rx already taken"),
-            tokio_handle: tokio::runtime::Handle::current(),
+            tokio_handle: TokioHandle::current(),
             initial_timer_ops,
             rpc_status: self.rpc_status.clone(),
             sync_status: self.sync_status.clone(),
@@ -753,8 +755,8 @@ impl ProductionRunner {
         let loop_handle = spawn_pinned_loop(io_loop, pinned_config);
 
         // ── 4. Metrics + shutdown loop ───────────────────────────────────
-        let mut metrics_tick = tokio::time::interval(Duration::from_secs(1));
-        metrics_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut metrics_tick = interval(Duration::from_secs(1));
+        metrics_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut shutdown_rx = self.shutdown_rx.take().expect("shutdown_rx already taken");
 
         loop {
@@ -793,7 +795,7 @@ impl ProductionRunner {
     /// peer count, and cleans up stale RPC tracking entries.
     fn collect_metrics(&self) {
         // ── Thread pool queue depths ─────────────────────────────────────
-        metrics::set_pool_queue_depths(
+        set_pool_queue_depths(
             self.dispatch.queue_depth(DispatchPool::ConsensusCrypto),
             self.dispatch.queue_depth(DispatchPool::Crypto),
             self.dispatch.queue_depth(DispatchPool::TxValidation),
@@ -802,7 +804,7 @@ impl ProductionRunner {
 
         // ── Peer count ───────────────────────────────────────────────────
         let peer_count = self.network.cached_peer_count();
-        metrics::set_libp2p_peers(peer_count);
+        set_libp2p_peers(peer_count);
 
         // ── Update RPC status with peer count ────────────────────────────
         if let Some(ref rpc_status) = self.rpc_status {
@@ -850,11 +852,8 @@ fn take_required_fields(
     let dispatch = match dispatch {
         Some(pools) => pools,
         None => Arc::new(
-            PooledDispatch::new(
-                hyperscale_dispatch_pooled::ThreadPoolConfig::minimal(),
-                tokio::runtime::Handle::current(),
-            )
-            .map_err(|e| RunnerError::SendError(e.to_string()))?,
+            PooledDispatch::new(ThreadPoolConfig::minimal(), TokioHandle::current())
+                .map_err(|e| RunnerError::SendError(e.to_string()))?,
         ),
     };
     Ok(RequiredFields {
@@ -877,11 +876,11 @@ fn take_required_fields(
 
 struct NetworkBuildArgs {
     network_config: Libp2pConfig,
-    ed25519_keypair: libp2p::identity::Keypair,
+    ed25519_keypair: Keypair,
     validator_id: ValidatorId,
     local_shard: ShardGroupId,
-    local_bind_signature: hyperscale_types::Bls12381G2Signature,
-    initial_validator_keys: Arc<hyperscale_network::ValidatorKeyMap>,
+    local_bind_signature: Bls12381G2Signature,
+    initial_validator_keys: Arc<ValidatorKeyMap>,
 }
 
 struct NetworkStack {
@@ -890,7 +889,7 @@ struct NetworkStack {
 }
 
 fn build_network_stack(args: NetworkBuildArgs) -> Result<NetworkStack, RunnerError> {
-    let registry = Arc::new(hyperscale_network::HandlerRegistry::new());
+    let registry = Arc::new(HandlerRegistry::new());
 
     let adapter = Libp2pAdapter::new(
         args.network_config,
@@ -902,19 +901,19 @@ fn build_network_stack(args: NetworkBuildArgs) -> Result<NetworkStack, RunnerErr
         args.initial_validator_keys,
     )?;
 
-    let request_pool = Arc::new(hyperscale_network_libp2p::RequestStreamPool::new(
+    let request_pool = Arc::new(RequestStreamPool::new(
         adapter.clone(),
-        tokio::runtime::Handle::current(),
+        TokioHandle::current(),
     ));
-    let request_manager = Arc::new(hyperscale_network_libp2p::RequestManager::new(
+    let request_manager = Arc::new(RequestManager::new(
         request_pool,
-        hyperscale_network_libp2p::RequestManagerConfig::default(),
+        RequestManagerConfig::default(),
     ));
 
     let libp2p_network = Libp2pNetwork::new(
         adapter.clone(),
         request_manager,
-        tokio::runtime::Handle::current(),
+        TokioHandle::current(),
         registry,
         args.local_shard,
     );
@@ -946,12 +945,12 @@ type ProdIoLoop = IoLoop<SharedStorage, Libp2pNetwork, PooledDispatch>;
 
 /// Configuration for the pinned event loop.
 struct PinnedLoopConfig {
-    timer_tx: crossbeam::channel::Sender<NodeInput>,
+    timer_tx: Sender<NodeInput>,
     timer_rx: Receiver<NodeInput>,
     callback_rx: Receiver<NodeInput>,
     consensus_rx: Receiver<NodeInput>,
     shutdown_rx: Receiver<()>,
-    tokio_handle: tokio::runtime::Handle,
+    tokio_handle: TokioHandle,
     initial_timer_ops: Vec<TimerOp>,
     rpc_status: Option<Arc<ArcSwap<NodeStatusState>>>,
     sync_status: Option<Arc<ArcSwap<SyncStatus>>>,
@@ -963,16 +962,13 @@ struct PinnedLoopConfig {
 /// Spawns async sleep tasks via the tokio handle that fire timer events
 /// into the crossbeam timer channel.
 struct ProdTimerManager {
-    tokio_handle: tokio::runtime::Handle,
-    timer_tx: crossbeam::channel::Sender<NodeInput>,
+    tokio_handle: TokioHandle,
+    timer_tx: Sender<NodeInput>,
     active: HashMap<TimerId, JoinHandle<()>>,
 }
 
 impl ProdTimerManager {
-    fn new(
-        tokio_handle: tokio::runtime::Handle,
-        timer_tx: crossbeam::channel::Sender<NodeInput>,
-    ) -> Self {
+    fn new(tokio_handle: TokioHandle, timer_tx: Sender<NodeInput>) -> Self {
         Self {
             tokio_handle,
             timer_tx,
@@ -989,7 +985,7 @@ impl ProdTimerManager {
                 let timer_tx = self.timer_tx.clone();
                 let timer_id = id.clone();
                 let handle = self.tokio_handle.spawn(async move {
-                    tokio::time::sleep(duration).await;
+                    sleep(duration).await;
                     let _ = timer_tx.send(timer_id.into_event());
                 });
                 self.active.insert(id, handle);
@@ -1020,7 +1016,7 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(1);
 /// Same epoch as `WeightedTimestamp` so the proposer-skew comparison works
 /// without unit conversion. NTP back-steps are absorbed by saturating
 /// arithmetic on `LocalTimestamp`.
-fn wall_clock_local() -> hyperscale_types::LocalTimestamp {
+fn wall_clock_local() -> LocalTimestamp {
     let ms = u64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1028,7 +1024,7 @@ fn wall_clock_local() -> hyperscale_types::LocalTimestamp {
             .as_millis(),
     )
     .unwrap_or(u64::MAX);
-    hyperscale_types::LocalTimestamp::from_millis(ms)
+    LocalTimestamp::from_millis(ms)
 }
 
 /// Push a [`NodeStatusSnapshot`] into the shared RPC state objects.
@@ -1038,7 +1034,7 @@ fn update_rpc_state(config: &PinnedLoopConfig, snapshot: &NodeStatusSnapshot) {
         rpc_status.store(Arc::new(NodeStatusState {
             block_height: snapshot.committed_height.0,
             view: snapshot.view,
-            state_root_hash: hex::encode(snapshot.state_root.as_bytes()),
+            state_root_hash: hex_encode(snapshot.state_root.as_bytes()),
             // Preserve fields set by other writers (runner sets connected_peers)
             validator_id: current.validator_id,
             shard: current.shard,
@@ -1152,7 +1148,7 @@ fn run_pinned_loop(mut io_loop: ProdIoLoop, mut config: PinnedLoopConfig) {
             // Capture cheap snapshot on pinned thread, dispatch expensive
             // recording (RocksDB queries + prometheus calls) off-thread.
             let snapshot = io_loop.metrics_snapshot();
-            let channel_depths = hyperscale_metrics::ChannelDepths {
+            let channel_depths = ChannelDepths {
                 callback: config.callback_rx.len(),
                 consensus: config.consensus_rx.len(),
                 validated_tx: 0,
@@ -1164,8 +1160,8 @@ fn run_pinned_loop(mut io_loop: ProdIoLoop, mut config: PinnedLoopConfig) {
             };
             let storage = io_loop.storage().clone();
             config.tokio_handle.spawn_blocking(move || {
-                hyperscale_node::io_loop::record_metrics(snapshot, &*storage);
-                metrics::set_channel_depths(&channel_depths);
+                record_metrics(snapshot, &*storage);
+                set_channel_depths(&channel_depths);
             });
 
             // Push status snapshot to shared RPC state.
@@ -1203,10 +1199,10 @@ fn spawn_pinned_loop(io_loop: ProdIoLoop, config: PinnedLoopConfig) -> std::thre
         .name("io-loop".to_string())
         .spawn(move || {
             // Try to pin to core 0
-            if let Some(core_ids) = core_affinity::get_core_ids()
+            if let Some(core_ids) = get_core_ids()
                 && let Some(&core_id) = core_ids.first()
             {
-                if core_affinity::set_for_current(core_id) {
+                if set_for_current(core_id) {
                     info!(?core_id, "Pinned io-loop thread to core");
                 } else {
                     warn!("Failed to pin io-loop thread to core 0");

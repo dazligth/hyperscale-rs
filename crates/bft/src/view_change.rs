@@ -15,9 +15,11 @@
 //!   `(height, round)` so a Byzantine leader can't spam different headers to
 //!   delay view changes indefinitely.
 
-use crate::config::BftConfig;
-use hyperscale_types::{BlockHeight, LocalTimestamp, Round};
 use std::time::Duration;
+
+use hyperscale_types::{BlockHeight, LocalTimestamp, Round};
+
+use crate::config::BftConfig;
 
 pub struct ViewChangeController {
     /// Current round.

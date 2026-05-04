@@ -14,12 +14,11 @@
 //! commit height. All validators derive the same conflicts from the same
 //! committed chain state.
 
-#[cfg(test)]
-use hyperscale_types::Hash;
+use std::collections::{HashMap, HashSet};
+
 use hyperscale_types::{
     NodeId, Provisions, ShardGroupId, TopologySnapshot, TxHash, WeightedTimestamp,
 };
-use std::collections::{HashMap, HashSet};
 
 /// A detected conflict: the loser tx should be aborted at the given commit.
 #[derive(Debug, Clone)]
@@ -287,11 +286,13 @@ impl ConflictDetector {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use hyperscale_types::{
-        BlockHeight, MerkleInclusionProof, NodeId, ShardGroupId, StateEntry, TopologySnapshot,
-        TxEntries, ValidatorId, ValidatorInfo, ValidatorSet, bls_keypair_from_seed,
+        BlockHeight, Hash, MerkleInclusionProof, NodeId, ShardGroupId, StateEntry,
+        TopologySnapshot, TxEntries, ValidatorId, ValidatorInfo, ValidatorSet,
+        bls_keypair_from_seed, shard_for_node,
     };
+
+    use super::*;
 
     /// Create a `NodeId` that routes to `target_shard` under modulo-hash routing.
     fn node_on_shard(target_shard: ShardGroupId, num_shards: u64) -> NodeId {
@@ -299,7 +300,7 @@ mod tests {
             let mut bytes = [0u8; 30];
             bytes[..8].copy_from_slice(&i.to_le_bytes());
             let node = NodeId(bytes);
-            if hyperscale_types::shard_for_node(&node, num_shards) == target_shard {
+            if shard_for_node(&node, num_shards) == target_shard {
                 return node;
             }
         }
@@ -313,7 +314,7 @@ mod tests {
             let mut bytes = [0u8; 30];
             bytes[..8].copy_from_slice(&i.to_le_bytes());
             let node = NodeId(bytes);
-            if hyperscale_types::shard_for_node(&node, num_shards) == target_shard {
+            if shard_for_node(&node, num_shards) == target_shard {
                 found.push(node);
                 if found.len() == 2 {
                     return (found[0], found[1]);

@@ -8,8 +8,9 @@
 //! outbound batches we sent — the admission arm captures that ACK and emits
 //! a follow-up `OutboundEcObserved` to feed the outbound provision tracker.
 
-use super::NodeStateMachine;
 use hyperscale_core::{Action, ProtocolEvent};
+
+use super::NodeStateMachine;
 
 impl NodeStateMachine {
     /// Dispatch an execution-category `ProtocolEvent`.
@@ -92,16 +93,18 @@ impl NodeStateMachine {
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::TestNode;
-    use crate::{assert_no_emit, extract_one};
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+
     use hyperscale_core::{Action, ProtocolEvent, StateMachine};
     use hyperscale_types::{
         BlockHeight, Bls12381G2Signature, ExecutionCertificate, ExecutionOutcome,
         GlobalReceiptRoot, ShardGroupId, SignerBitfield, TxHash, TxOutcome, WaveId,
         WeightedTimestamp,
     };
-    use std::collections::BTreeSet;
-    use std::sync::Arc;
+
+    use super::super::test_support::TestNode;
+    use crate::{assert_no_emit, extract_one};
 
     fn make_ec(
         shard: ShardGroupId,

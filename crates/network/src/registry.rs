@@ -13,10 +13,13 @@
 //! All registrations happen at init (before any messages arrive), so
 //! the read-heavy `RwLock` pattern is ideal.
 
-use crate::traits::{GossipHandler, GossipVerdict, NotificationHandler, RequestHandler};
-use hyperscale_types::{NetworkMessage, Request};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, PoisonError, RwLock};
+
+use hyperscale_types::{NetworkMessage, Request};
+use sbor::{basic_decode, basic_encode};
+
+use crate::traits::{GossipHandler, GossipVerdict, NotificationHandler, RequestHandler};
 
 /// Type-erased gossip handler: receives decompressed SBOR bytes, returns verdict.
 pub type RawGossipHandler = dyn Fn(Vec<u8>) -> GossipVerdict + Send + Sync;
@@ -63,8 +66,8 @@ impl HandlerRegistry {
     ///
     /// Panics if the registry's internal `RwLock` is poisoned.
     pub fn register_gossip<M: NetworkMessage>(&self, handler: impl GossipHandler<M>) {
-        let raw: Arc<RawGossipHandler> = Arc::new(
-            move |payload: Vec<u8>| match sbor::basic_decode::<M>(&payload) {
+        let raw: Arc<RawGossipHandler> =
+            Arc::new(move |payload: Vec<u8>| match basic_decode::<M>(&payload) {
                 Ok(msg) => handler.on_message(msg),
                 Err(e) => {
                     tracing::warn!(
@@ -74,8 +77,7 @@ impl HandlerRegistry {
                     );
                     GossipVerdict::Reject
                 }
-            },
-        );
+            });
         self.gossip
             .write()
             .unwrap()
@@ -92,7 +94,7 @@ impl HandlerRegistry {
     /// Panics if the registry's internal `RwLock` is poisoned.
     pub fn register_request<R: Request>(&self, handler: impl RequestHandler<R>) {
         let raw: Arc<RawRequestHandler> = Arc::new(move |payload: &[u8]| -> Vec<u8> {
-            let req = match sbor::basic_decode::<R>(payload) {
+            let req = match basic_decode::<R>(payload) {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::warn!(
@@ -104,7 +106,7 @@ impl HandlerRegistry {
                 }
             };
             let response = handler.handle_request(req);
-            match sbor::basic_encode(&response) {
+            match basic_encode(&response) {
                 Ok(bytes) => bytes,
                 Err(e) => {
                     tracing::warn!(
@@ -133,18 +135,16 @@ impl HandlerRegistry {
     /// Panics if the registry's internal `RwLock` is poisoned.
     pub fn register_notification<M: NetworkMessage>(&self, handler: impl NotificationHandler<M>) {
         let raw: Arc<RawNotificationHandler> =
-            Arc::new(
-                move |payload: Vec<u8>| match sbor::basic_decode::<M>(&payload) {
-                    Ok(msg) => handler.on_notification(msg),
-                    Err(e) => {
-                        tracing::warn!(
-                            message_type = M::message_type_id(),
-                            error = ?e,
-                            "Failed to SBOR-decode notification message — dropping"
-                        );
-                    }
-                },
-            );
+            Arc::new(move |payload: Vec<u8>| match basic_decode::<M>(&payload) {
+                Ok(msg) => handler.on_notification(msg),
+                Err(e) => {
+                    tracing::warn!(
+                        message_type = M::message_type_id(),
+                        error = ?e,
+                        "Failed to SBOR-decode notification message — dropping"
+                    );
+                }
+            });
         self.notification
             .write()
             .unwrap()
@@ -200,7 +200,7 @@ impl HandlerRegistry {
     pub fn get_gossip(&self, message_type_id: &str) -> Option<Arc<RawGossipHandler>> {
         self.gossip
             .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(PoisonError::into_inner)
             .get(message_type_id)
             .cloned()
     }
@@ -210,7 +210,7 @@ impl HandlerRegistry {
     pub fn get_request(&self, message_type_id: &str) -> Option<Arc<RawRequestHandler>> {
         self.request
             .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(PoisonError::into_inner)
             .get(message_type_id)
             .cloned()
     }
@@ -220,7 +220,7 @@ impl HandlerRegistry {
     pub fn get_notification(&self, message_type_id: &str) -> Option<Arc<RawNotificationHandler>> {
         self.notification
             .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(PoisonError::into_inner)
             .get(message_type_id)
             .cloned()
     }
@@ -234,13 +234,14 @@ impl Default for HandlerRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
 
     #[test]
     fn test_register_and_lookup_gossip() {
         use hyperscale_types::NetworkMessage;
-        use sbor::{Decode, Encode};
+        use sbor::{Decode, Encode, basic_encode};
 
         #[derive(Debug, Encode, Decode)]
         struct TestMsg(u32);
@@ -260,7 +261,7 @@ mod tests {
         });
 
         let handler = registry.get_gossip("test.gossip").unwrap();
-        let encoded = sbor::basic_encode(&TestMsg(42)).unwrap();
+        let encoded = basic_encode(&TestMsg(42)).unwrap();
         let verdict = handler(encoded);
         assert_eq!(counter.load(Ordering::SeqCst), 1);
         assert_eq!(verdict, GossipVerdict::Accept);
@@ -276,7 +277,7 @@ mod tests {
     #[test]
     fn test_register_and_lookup_request() {
         use hyperscale_types::{NetworkMessage, Request};
-        use sbor::{Decode, Encode};
+        use sbor::{Decode, Encode, basic_decode, basic_encode};
 
         #[derive(Debug, Encode, Decode)]
         struct TestReq(u32);
@@ -303,9 +304,9 @@ mod tests {
         registry.register_request(|req: TestReq| TestResp(req.0 * 2));
 
         let handler = registry.get_request("test.request").unwrap();
-        let req_bytes = sbor::basic_encode(&TestReq(21)).unwrap();
+        let req_bytes = basic_encode(&TestReq(21)).unwrap();
         let response_bytes = handler(&req_bytes);
-        let response: TestResp = sbor::basic_decode(&response_bytes).unwrap();
+        let response: TestResp = basic_decode(&response_bytes).unwrap();
         assert_eq!(response, TestResp(42));
 
         assert!(registry.get_request("unknown.request").is_none());
@@ -314,7 +315,7 @@ mod tests {
     #[test]
     fn test_overwrite_handler() {
         use hyperscale_types::NetworkMessage;
-        use sbor::{Decode, Encode};
+        use sbor::{Decode, Encode, basic_encode};
 
         #[derive(Debug, Encode, Decode)]
         struct TestMsg(u32);
@@ -340,7 +341,7 @@ mod tests {
         });
 
         let handler = registry.get_gossip("test").unwrap();
-        let encoded = sbor::basic_encode(&TestMsg(1)).unwrap();
+        let encoded = basic_encode(&TestMsg(1)).unwrap();
         handler(encoded);
 
         // Second handler should have won

@@ -1,11 +1,13 @@
 //! Utilities for merging, filtering, and reconstructing `DatabaseUpdates`.
 
+use std::sync::Arc;
+
 use hyperscale_types::StoredReceipt;
+use indexmap::map::Entry;
 use radix_common::prelude::DatabaseUpdate;
 use radix_substate_store_interface::interface::{
     DatabaseUpdates, NodeDatabaseUpdates, PartitionDatabaseUpdates,
 };
-use std::sync::Arc;
 
 /// Extract and merge `DatabaseUpdates` from stored receipts.
 ///
@@ -75,10 +77,10 @@ pub fn merge_into(target: &mut DatabaseUpdates, source: &DatabaseUpdates) {
 fn merge_node_updates(target: &mut NodeDatabaseUpdates, source: &NodeDatabaseUpdates) {
     for (partition, part_updates) in &source.partition_updates {
         match target.partition_updates.entry(*partition) {
-            indexmap::map::Entry::Vacant(e) => {
+            Entry::Vacant(e) => {
                 e.insert(part_updates.clone());
             }
-            indexmap::map::Entry::Occupied(mut e) => {
+            Entry::Occupied(mut e) => {
                 merge_partition_updates(e.get_mut(), part_updates);
             }
         }
@@ -129,9 +131,11 @@ fn merge_partition_updates(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use indexmap::IndexMap;
     use radix_common::prelude::DatabaseUpdate;
     use radix_substate_store_interface::interface::DbSortKey;
+
+    use super::*;
 
     // Helper to create a Delta DatabaseUpdates with a single node/partition/substate.
     fn make_delta_updates(
@@ -146,7 +150,7 @@ mod tests {
             .partition_updates
             .entry(partition)
             .or_insert_with(|| PartitionDatabaseUpdates::Delta {
-                substate_updates: indexmap::IndexMap::new(),
+                substate_updates: IndexMap::new(),
             });
         if let PartitionDatabaseUpdates::Delta { substate_updates } = partition_updates {
             substate_updates.insert(DbSortKey(sort_key), update);
@@ -159,7 +163,7 @@ mod tests {
         partition: u8,
         values: Vec<(Vec<u8>, Vec<u8>)>,
     ) -> DatabaseUpdates {
-        let mut new_substate_values = indexmap::IndexMap::new();
+        let mut new_substate_values = IndexMap::new();
         for (k, v) in values {
             new_substate_values.insert(DbSortKey(k), v);
         }
@@ -198,7 +202,7 @@ mod tests {
         updates: &DatabaseUpdates,
         node_key: &[u8],
         partition: u8,
-    ) -> Option<indexmap::IndexMap<DbSortKey, Vec<u8>>> {
+    ) -> Option<IndexMap<DbSortKey, Vec<u8>>> {
         let nk: Vec<u8> = node_key.to_vec();
         let pk: u8 = partition;
         updates.node_updates.get(&nk).and_then(|n| {

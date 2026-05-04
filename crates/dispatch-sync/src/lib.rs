@@ -32,9 +32,10 @@ impl Dispatch for SyncDispatch {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
 
     #[test]
     fn test_sync_dispatch_runs_inline() {

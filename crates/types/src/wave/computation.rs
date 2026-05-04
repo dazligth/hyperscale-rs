@@ -1,13 +1,15 @@
 //! Block-derived helpers: wave assignment, per-target provision merkle roots,
 //! and wave-leader selection.
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+
+use sbor::prelude::*;
+
 use crate::{
     Attempt, BlockHeight, Hash, ProvisionTxRoot, RoutableTransaction, ShardGroupId,
     TopologySnapshot, ValidatorId, WaveId, compute_padded_merkle_root,
 };
-use sbor::prelude::*;
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 
 /// Compute the set of cross-shard waves for a block's transactions.
 ///

@@ -5,9 +5,10 @@
 //! Proposal-retry-on-new-content uses the post-dispatch latch on BFT, not
 //! a timer.
 
-use super::NodeStateMachine;
 use hyperscale_core::{Action, TimerId};
 use tracing::instrument;
+
+use super::NodeStateMachine;
 
 impl NodeStateMachine {
     #[instrument(skip(self))]
@@ -58,9 +59,10 @@ impl NodeStateMachine {
 
 #[cfg(test)]
 mod tests {
+    use hyperscale_core::{Action, ProtocolEvent, StateMachine, TimerId};
+
     use super::super::test_support::TestNode;
     use crate::assert_emits;
-    use hyperscale_core::{Action, ProtocolEvent, StateMachine, TimerId};
 
     /// `CleanupTimer` is the only thing keeping its own loop alive — it
     /// must reschedule itself before doing anything else, so a missed

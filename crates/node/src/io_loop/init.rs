@@ -12,13 +12,14 @@
 //!   before the I/O loop starts processing events; reached by both
 //!   genesis and resume paths.
 
-use crate::io_loop::IoLoop;
 use hyperscale_core::Action;
 use hyperscale_dispatch::Dispatch;
-use hyperscale_engine::{Engine, GenesisConfig};
+use hyperscale_engine::{Engine, GenesisConfig, prepared_genesis};
 use hyperscale_network::Network;
-use hyperscale_storage::Storage;
+use hyperscale_storage::{GenesisCommit, Storage};
 use hyperscale_types::StateRoot;
+
+use crate::io_loop::IoLoop;
 
 impl<S, N, D, E> IoLoop<S, N, D, E>
 where
@@ -49,9 +50,9 @@ where
     /// decision is settled.
     pub fn install_engine_genesis(&mut self, config: &GenesisConfig) -> StateRoot
     where
-        S: hyperscale_storage::GenesisCommit,
+        S: GenesisCommit,
     {
-        let merged = hyperscale_engine::prepared_genesis(self.executor.network(), config);
+        let merged = prepared_genesis(self.executor.network(), config);
         self.storage.install_genesis(&merged)
     }
 

@@ -4,12 +4,13 @@
 //! - Primary: `EXECUTION_CERTS_CF` (key: `canonical_hash`, value: EC)
 //! - Index: `EXECUTION_CERTS_BY_HEIGHT_CF` (key: `height_BE` ++ `canonical_hash`, value: ())
 
-use crate::column_families::{ExecutionCertsByHeightCf, ExecutionCertsCf};
-use crate::core::RocksDbStorage;
+use std::sync::Arc;
 
 use hyperscale_types::{Block, ExecutionCertificate};
 use rocksdb::WriteBatch;
-use std::sync::Arc;
+
+use crate::column_families::{ExecutionCertsByHeightCf, ExecutionCertsCf};
+use crate::core::RocksDbStorage;
 
 /// Append execution certificate writes for a block to an existing `WriteBatch`.
 ///

@@ -1,10 +1,14 @@
 //! Batch verification helpers for Ed25519 and BLS12-381 signatures.
 
+use blst::min_pk::{PublicKey as BlstPublicKey, Signature as BlstSignature};
+use blst::{BLST_ERROR, blst_scalar, blst_scalar_from_bendian};
+use ed25519_dalek::{Signature as DalekSignature, VerifyingKey as DalekVerifyingKey, verify_batch};
 use radix_common::crypto::{
     BLS12381_CIPHERSITE_V1, Bls12381G1PublicKey, Bls12381G2Signature, Ed25519PublicKey,
     Ed25519Signature, verify_bls12381_v1,
 };
-use rand::{Rng, SeedableRng};
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng, rng};
 
 /// Batch verify multiple Ed25519 signatures.
 ///
@@ -31,16 +35,16 @@ pub fn batch_verify_ed25519(
     let mut dalek_pks = Vec::with_capacity(pubkeys.len());
 
     for (sig, pk) in signatures.iter().zip(pubkeys.iter()) {
-        dalek_sigs.push(ed25519_dalek::Signature::from_bytes(&sig.0));
+        dalek_sigs.push(DalekSignature::from_bytes(&sig.0));
 
-        match ed25519_dalek::VerifyingKey::from_bytes(&pk.0) {
+        match DalekVerifyingKey::from_bytes(&pk.0) {
             Ok(vk) => dalek_pks.push(vk),
             Err(_) => return false,
         }
     }
 
     // Use batch verification
-    ed25519_dalek::verify_batch(messages, &dalek_sigs, &dalek_pks).is_ok()
+    verify_batch(messages, &dalek_sigs, &dalek_pks).is_ok()
 }
 
 /// Batch verify multiple BLS signatures over the SAME message.
@@ -102,10 +106,10 @@ pub fn batch_verify_bls_different_messages_all_or_nothing(
     let mut bls_pks = Vec::with_capacity(pubkeys.len());
 
     for (sig, pk) in signatures.iter().zip(pubkeys.iter()) {
-        let Ok(sig) = blst::min_pk::Signature::from_bytes(&sig.0) else {
+        let Ok(sig) = BlstSignature::from_bytes(&sig.0) else {
             return false;
         };
-        let Ok(pk) = blst::min_pk::PublicKey::from_bytes(&pk.0) else {
+        let Ok(pk) = BlstPublicKey::from_bytes(&pk.0) else {
             return false;
         };
         bls_sigs.push(sig);
@@ -114,29 +118,29 @@ pub fn batch_verify_bls_different_messages_all_or_nothing(
 
     // Generate random scalars for the linear combination
     let mut seed = [0u8; 32];
-    rand::rng().fill_bytes(&mut seed);
-    let mut rng = rand::rngs::StdRng::from_seed(seed);
+    rng().fill_bytes(&mut seed);
+    let mut rng = StdRng::from_seed(seed);
 
     let mut rands = Vec::with_capacity(signatures.len());
     for _ in 0..signatures.len() {
         let mut rand_bytes = [0u8; 32];
         rng.fill_bytes(&mut rand_bytes);
-        let mut scalar = blst::blst_scalar::default();
+        let mut scalar = blst_scalar::default();
         // SAFETY: `scalar` is a valid `blst_scalar` (zero-initialised above) and
         // `rand_bytes` is a 32-byte array whose pointer is valid for 32 bytes.
         // `blst_scalar_from_bendian` reads exactly 32 bytes from the pointer.
         unsafe {
-            blst::blst_scalar_from_bendian(&raw mut scalar, rand_bytes.as_ptr());
+            blst_scalar_from_bendian(&raw mut scalar, rand_bytes.as_ptr());
         }
         rands.push(scalar);
     }
 
     // Build reference slices for the blst API
-    let sig_refs: Vec<&blst::min_pk::Signature> = bls_sigs.iter().collect();
-    let pk_refs: Vec<&blst::min_pk::PublicKey> = bls_pks.iter().collect();
+    let sig_refs: Vec<&BlstSignature> = bls_sigs.iter().collect();
+    let pk_refs: Vec<&BlstPublicKey> = bls_pks.iter().collect();
 
     // Use blst's batch verification with random linear combination
-    let result = blst::min_pk::Signature::verify_multiple_aggregate_signatures(
+    let result = BlstSignature::verify_multiple_aggregate_signatures(
         messages,
         BLS12381_CIPHERSITE_V1, // DST must match sign_v1/verify_bls12381_v1
         &pk_refs,
@@ -147,7 +151,7 @@ pub fn batch_verify_bls_different_messages_all_or_nothing(
         64, // rand_bits - 64 bits of randomness
     );
 
-    result == blst::BLST_ERROR::BLST_SUCCESS
+    result == BLST_ERROR::BLST_SUCCESS
 }
 
 /// Batch verify multiple BLS signatures over DIFFERENT messages.

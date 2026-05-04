@@ -20,9 +20,11 @@
 //! Engine V2's `ProposerTimestampRange` so the eventual integration is a
 //! field-rename rather than a struct redesign.
 
-use crate::WeightedTimestamp;
-use sbor::prelude::*;
 use std::time::Duration;
+
+use sbor::prelude::*;
+
+use crate::WeightedTimestamp;
 
 /// Hard upper bound on validity range length and forward edge from the
 /// anchoring `weighted_timestamp`.

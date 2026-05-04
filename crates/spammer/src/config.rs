@@ -1,9 +1,11 @@
 //! Configuration types for the spammer.
 
-use crate::accounts::SelectionMode;
+use std::time::Duration;
+
 use radix_common::math::Decimal;
 use radix_common::network::NetworkDefinition;
-use std::time::Duration;
+
+use crate::accounts::SelectionMode;
 
 /// Configuration for the transaction spammer.
 #[derive(Clone, Debug)]

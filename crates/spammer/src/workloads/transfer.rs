@@ -1,8 +1,7 @@
 //! XRD transfer workload generator.
 
-use crate::accounts::{AccountPool, FundedAccount, SelectionMode};
-use crate::validity::{ValidityClock, wall_clock};
-use crate::workloads::WorkloadGenerator;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use hyperscale_types::{
     RoutableTransaction, ShardGroupId, routable_from_notarized_v1, sign_and_notarize,
 };
@@ -11,8 +10,11 @@ use radix_common::math::Decimal;
 use radix_common::network::NetworkDefinition;
 use radix_transactions::builder::ManifestBuilder;
 use rand::{Rng, RngExt};
-use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::warn;
+
+use crate::accounts::{AccountPool, FundedAccount, SelectionMode};
+use crate::validity::{ValidityClock, wall_clock};
+use crate::workloads::WorkloadGenerator;
 
 /// Generates XRD transfer transactions.
 pub struct TransferWorkload {
@@ -282,10 +284,11 @@ impl WorkloadGenerator for TransferWorkload {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use hyperscale_types::shard_for_node;
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
+
+    use super::*;
 
     #[test]
     fn test_generate_same_shard_transfer() {

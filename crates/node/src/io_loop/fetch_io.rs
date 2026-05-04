@@ -1,13 +1,16 @@
 //! Generic fetch dispatch + tick-timer plumbing.
 
-use super::{IoLoop, TimerOp};
-use crate::io_loop::protocol::binding::FetchBinding;
+use std::time::Duration;
+
 use hyperscale_core::TimerId;
 use hyperscale_dispatch::Dispatch;
 use hyperscale_engine::Engine;
 use hyperscale_network::Network;
 use hyperscale_storage::Storage;
-use std::time::Duration;
+
+use super::{IoLoop, TimerOp};
+use crate::io_loop::protocol::binding::FetchBinding;
+use crate::io_loop::protocol::fetch::{FetchInput, FetchOutput};
 
 impl<S, N, D, E> IoLoop<S, N, D, E>
 where
@@ -24,10 +27,8 @@ where
     /// route the response through the binding's callback.
     pub(in crate::io_loop) fn process_fetch_outputs<B: FetchBinding>(
         &self,
-        outputs: Vec<crate::io_loop::protocol::fetch::FetchOutput<B::Id>>,
+        outputs: Vec<FetchOutput<B::Id>>,
     ) {
-        use crate::io_loop::protocol::fetch::FetchOutput;
-
         let local_shard = self.topology_snapshot.load().local_shard();
         for FetchOutput::Send { ids, peers, origin } in outputs {
             if B::PER_ID {
@@ -57,11 +58,7 @@ where
     /// Drive a single fetch binding: feed a `Request`, drain the resulting
     /// `Tick` outputs through `process_fetch_outputs`. Used by both the
     /// `Action::Fetch` arms and the `*FetchFailed` step arms.
-    pub(in crate::io_loop) fn drive_fetch<B: FetchBinding>(
-        &mut self,
-        input: crate::io_loop::protocol::fetch::FetchInput<B::Id>,
-    ) {
-        use crate::io_loop::protocol::fetch::FetchInput;
+    pub(in crate::io_loop) fn drive_fetch<B: FetchBinding>(&mut self, input: FetchInput<B::Id>) {
         if let FetchInput::Request { ids, peers, origin } = &input {
             tracing::trace!(
                 binding = B::NAME,

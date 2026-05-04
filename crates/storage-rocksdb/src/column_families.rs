@@ -3,13 +3,17 @@
 //! This is the single source of truth for what column families exist,
 //! what they store, and how their keys/values are encoded.
 
-use crate::typed_cf::{BeU64Codec, DbCodec, HashCodec, JmtKeyCodec, RawCodec, SborCodec, TypedCf};
-
-use crate::jmt_stored::{StoredNodeKey, VersionedStoredNode};
 use hyperscale_types::{
-    BlockMetadata, ExecutionCertificate, ExecutionMetadata, Hash, RoutableTransaction,
-    WaveCertificate, WaveId,
+    BlockMetadata, ConsensusReceipt, ExecutionCertificate, ExecutionMetadata, Hash,
+    RoutableTransaction, WaveCertificate, WaveId,
 };
+use radix_substate_store_interface::interface::{DbPartitionKey, DbSortKey};
+use rocksdb::{ColumnFamily, DB};
+
+use crate::jmt_stored::{StaleTreePart, StoredNodeKey, VersionedStoredNode};
+use crate::substate_key::SubstateKeyCodec;
+use crate::typed_cf::{BeU64Codec, DbCodec, HashCodec, JmtKeyCodec, RawCodec, SborCodec, TypedCf};
+use crate::versioned_key::VersionedSubstateKeyCodec;
 
 // ─── CF name constants ───────────────────────────────────────────────────────
 
@@ -114,18 +118,18 @@ pub const ALL_COLUMN_FAMILIES: &[&str] = &[
 /// Column family handles — fields are private, access only through
 /// [`TypedCf::handle()`](crate::typed_cf::TypedCf::handle).
 pub struct CfHandles<'a> {
-    state: &'a rocksdb::ColumnFamily,
-    state_history: &'a rocksdb::ColumnFamily,
-    stale_state_history: &'a rocksdb::ColumnFamily,
-    blocks: &'a rocksdb::ColumnFamily,
-    transactions: &'a rocksdb::ColumnFamily,
-    certificates: &'a rocksdb::ColumnFamily,
-    jmt_nodes: &'a rocksdb::ColumnFamily,
-    stale_jmt_nodes: &'a rocksdb::ColumnFamily,
-    consensus_receipts: &'a rocksdb::ColumnFamily,
-    execution_metadata: &'a rocksdb::ColumnFamily,
-    execution_certs: &'a rocksdb::ColumnFamily,
-    execution_certs_by_height: &'a rocksdb::ColumnFamily,
+    state: &'a ColumnFamily,
+    state_history: &'a ColumnFamily,
+    stale_state_history: &'a ColumnFamily,
+    blocks: &'a ColumnFamily,
+    transactions: &'a ColumnFamily,
+    certificates: &'a ColumnFamily,
+    jmt_nodes: &'a ColumnFamily,
+    stale_jmt_nodes: &'a ColumnFamily,
+    consensus_receipts: &'a ColumnFamily,
+    execution_metadata: &'a ColumnFamily,
+    execution_certs: &'a ColumnFamily,
+    execution_certs_by_height: &'a ColumnFamily,
 }
 
 impl<'a> CfHandles<'a> {
@@ -133,8 +137,8 @@ impl<'a> CfHandles<'a> {
     ///
     /// # Panics
     /// Panics if any expected column family is missing.
-    pub fn resolve(db: &'a rocksdb::DB) -> Self {
-        let resolve = |name: &str| -> &'a rocksdb::ColumnFamily {
+    pub fn resolve(db: &'a DB) -> Self {
+        let resolve = |name: &str| -> &'a ColumnFamily {
             db.cf_handle(name)
                 .unwrap_or_else(|| panic!("column family '{name}' must exist"))
         };
@@ -166,7 +170,7 @@ impl TypedCf for BlocksCf {
     type Value = BlockMetadata;
     type KeyCodec = BeU64Codec;
     type ValueCodec = SborCodec<BlockMetadata>;
-    fn handle<'a>(cf: &CfHandles<'a>) -> &'a rocksdb::ColumnFamily {
+    fn handle<'a>(cf: &CfHandles<'a>) -> &'a ColumnFamily {
         cf.blocks
     }
 }
@@ -178,7 +182,7 @@ impl TypedCf for TransactionsCf {
     type Value = RoutableTransaction;
     type KeyCodec = HashCodec;
     type ValueCodec = SborCodec<RoutableTransaction>;
-    fn handle<'a>(cf: &CfHandles<'a>) -> &'a rocksdb::ColumnFamily {
+    fn handle<'a>(cf: &CfHandles<'a>) -> &'a ColumnFamily {
         cf.transactions
     }
 }
@@ -190,7 +194,7 @@ impl TypedCf for CertificatesCf {
     type Value = WaveCertificate;
     type KeyCodec = SborCodec<WaveId>;
     type ValueCodec = SborCodec<WaveCertificate>;
-    fn handle<'a>(cf: &CfHandles<'a>) -> &'a rocksdb::ColumnFamily {
+    fn handle<'a>(cf: &CfHandles<'a>) -> &'a ColumnFamily {
         cf.certificates
     }
 }
@@ -204,7 +208,7 @@ impl TypedCf for JmtNodesCf {
     type Value = VersionedStoredNode;
     type KeyCodec = JmtKeyCodec;
     type ValueCodec = SborCodec<VersionedStoredNode>;
-    fn handle<'a>(cf: &CfHandles<'a>) -> &'a rocksdb::ColumnFamily {
+    fn handle<'a>(cf: &CfHandles<'a>) -> &'a ColumnFamily {
         cf.jmt_nodes
     }
 }
@@ -213,10 +217,10 @@ pub struct StaleJmtNodesCf;
 impl TypedCf for StaleJmtNodesCf {
     const NAME: &'static str = STALE_JMT_NODES_CF;
     type Key = u64; // version at which nodes became stale
-    type Value = Vec<crate::jmt_stored::StaleTreePart>;
+    type Value = Vec<StaleTreePart>;
     type KeyCodec = BeU64Codec;
-    type ValueCodec = SborCodec<Vec<crate::jmt_stored::StaleTreePart>>;
-    fn handle<'a>(cf: &CfHandles<'a>) -> &'a rocksdb::ColumnFamily {
+    type ValueCodec = SborCodec<Vec<StaleTreePart>>;
+    fn handle<'a>(cf: &CfHandles<'a>) -> &'a ColumnFamily {
         cf.stale_jmt_nodes
     }
 }
@@ -232,7 +236,7 @@ impl TypedCf for StaleStateHistoryCf {
     type Value = Vec<Vec<u8>>; // raw `state_history` keys (storage_key ++ BE8(version))
     type KeyCodec = BeU64Codec;
     type ValueCodec = SborCodec<Vec<Vec<u8>>>;
-    fn handle<'a>(cf: &CfHandles<'a>) -> &'a rocksdb::ColumnFamily {
+    fn handle<'a>(cf: &CfHandles<'a>) -> &'a ColumnFamily {
         cf.stale_state_history
     }
 }
@@ -250,14 +254,11 @@ impl TypedCf for StaleStateHistoryCf {
 pub struct StateCf;
 impl TypedCf for StateCf {
     const NAME: &'static str = STATE_CF;
-    type Key = (
-        radix_substate_store_interface::interface::DbPartitionKey,
-        radix_substate_store_interface::interface::DbSortKey,
-    );
+    type Key = (DbPartitionKey, DbSortKey);
     type Value = Vec<u8>;
-    type KeyCodec = crate::substate_key::SubstateKeyCodec;
+    type KeyCodec = SubstateKeyCodec;
     type ValueCodec = RawCodec;
-    fn handle<'a>(cf: &CfHandles<'a>) -> &'a rocksdb::ColumnFamily {
+    fn handle<'a>(cf: &CfHandles<'a>) -> &'a ColumnFamily {
         cf.state
     }
 }
@@ -281,17 +282,11 @@ impl TypedCf for StateCf {
 pub struct StateHistoryCf;
 impl TypedCf for StateHistoryCf {
     const NAME: &'static str = STATE_HISTORY_CF;
-    type Key = (
-        (
-            radix_substate_store_interface::interface::DbPartitionKey,
-            radix_substate_store_interface::interface::DbSortKey,
-        ),
-        u64,
-    ); // ((partition_key, sort_key), write_version)
+    type Key = ((DbPartitionKey, DbSortKey), u64); // ((partition_key, sort_key), write_version)
     type Value = Option<Vec<u8>>;
-    type KeyCodec = crate::versioned_key::VersionedSubstateKeyCodec;
+    type KeyCodec = VersionedSubstateKeyCodec;
     type ValueCodec = SborCodec<Option<Vec<u8>>>;
-    fn handle<'a>(cf: &CfHandles<'a>) -> &'a rocksdb::ColumnFamily {
+    fn handle<'a>(cf: &CfHandles<'a>) -> &'a ColumnFamily {
         cf.state_history
     }
 }
@@ -302,10 +297,10 @@ pub struct ConsensusReceiptsCf;
 impl TypedCf for ConsensusReceiptsCf {
     const NAME: &'static str = CONSENSUS_RECEIPTS_CF;
     type Key = Hash;
-    type Value = hyperscale_types::ConsensusReceipt;
+    type Value = ConsensusReceipt;
     type KeyCodec = HashCodec;
-    type ValueCodec = SborCodec<hyperscale_types::ConsensusReceipt>;
-    fn handle<'a>(cf: &CfHandles<'a>) -> &'a rocksdb::ColumnFamily {
+    type ValueCodec = SborCodec<ConsensusReceipt>;
+    fn handle<'a>(cf: &CfHandles<'a>) -> &'a ColumnFamily {
         cf.consensus_receipts
     }
 }
@@ -317,7 +312,7 @@ impl TypedCf for ExecutionMetadataCf {
     type Value = ExecutionMetadata;
     type KeyCodec = HashCodec;
     type ValueCodec = SborCodec<ExecutionMetadata>;
-    fn handle<'a>(cf: &CfHandles<'a>) -> &'a rocksdb::ColumnFamily {
+    fn handle<'a>(cf: &CfHandles<'a>) -> &'a ColumnFamily {
         cf.execution_metadata
     }
 }
@@ -331,7 +326,7 @@ impl TypedCf for ExecutionCertsCf {
     type Value = ExecutionCertificate;
     type KeyCodec = HashCodec;
     type ValueCodec = SborCodec<ExecutionCertificate>;
-    fn handle<'a>(cf: &CfHandles<'a>) -> &'a rocksdb::ColumnFamily {
+    fn handle<'a>(cf: &CfHandles<'a>) -> &'a ColumnFamily {
         cf.execution_certs
     }
 }
@@ -345,7 +340,7 @@ impl TypedCf for ExecutionCertsByHeightCf {
     type Value = ();
     type KeyCodec = HeightHashCodec;
     type ValueCodec = UnitCodec;
-    fn handle<'a>(cf: &CfHandles<'a>) -> &'a rocksdb::ColumnFamily {
+    fn handle<'a>(cf: &CfHandles<'a>) -> &'a ColumnFamily {
         cf.execution_certs_by_height
     }
 }

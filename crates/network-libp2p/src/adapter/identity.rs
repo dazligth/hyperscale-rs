@@ -1,11 +1,11 @@
 //! Libp2p identity generation.
 
-use libp2p::identity;
+use libp2p::identity::Keypair;
 
 /// Generate a random Ed25519 keypair for libp2p transport encryption.
 #[must_use]
-pub fn generate_random_keypair() -> identity::Keypair {
-    identity::Keypair::generate_ed25519()
+pub fn generate_random_keypair() -> Keypair {
+    Keypair::generate_ed25519()
 }
 
 #[cfg(test)]

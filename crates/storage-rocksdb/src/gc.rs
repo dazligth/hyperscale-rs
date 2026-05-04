@@ -7,12 +7,12 @@
 //!   values, so deleting old history entries only costs the ability to
 //!   serve historical reads beyond the retention window.
 
+use rocksdb::WriteBatch;
+
 use crate::column_families::{JmtNodesCf, StaleJmtNodesCf, StaleStateHistoryCf, StateHistoryCf};
 use crate::core::RocksDbStorage;
-use crate::typed_cf::{self, TypedCf};
-
 use crate::jmt_stored::StaleTreePart;
-use rocksdb::WriteBatch;
+use crate::typed_cf::{self, TypedCf};
 
 impl RocksDbStorage {
     /// Run garbage collection for stale JMT nodes.
@@ -230,12 +230,14 @@ impl RocksDbStorage {
 
 #[cfg(test)]
 mod tests {
-    use crate::core::RocksDbStorage;
     use hyperscale_storage::{
         DatabaseUpdate, DatabaseUpdates, DbPartitionKey, DbSortKey, NodeDatabaseUpdates,
         PartitionDatabaseUpdates, SubstateDatabase,
     };
     use tempfile::TempDir;
+
+    use crate::config::RocksDbConfig;
+    use crate::core::RocksDbStorage;
 
     /// Aggressive state-history GC must not affect current-tip reads.
     /// `StateCf` holds the authoritative current value per key; deleting
@@ -244,7 +246,7 @@ mod tests {
     #[test]
     fn state_history_gc_preserves_current_state() {
         let temp_dir = TempDir::new().unwrap();
-        let config = crate::config::RocksDbConfig {
+        let config = RocksDbConfig {
             jmt_history_length: 2, // tiny retention for test
             ..Default::default()
         };

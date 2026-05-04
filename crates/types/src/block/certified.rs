@@ -2,8 +2,9 @@
 //!
 //! Every committed block has exactly one QC where `qc.block_hash == block.hash()`.
 
-use crate::{Block, BlockHash, BlockHeight, QuorumCertificate};
 use sbor::prelude::*;
+
+use crate::{Block, BlockHash, BlockHeight, QuorumCertificate};
 
 /// A block alongside the QC that certifies it.
 ///

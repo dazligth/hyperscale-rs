@@ -755,11 +755,12 @@ impl<'a> ByteReader<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::hasher::Blake3Hasher;
     use crate::storage::MemoryStore;
     use crate::tree::Tree;
-    use std::collections::BTreeMap;
 
     type Jmt = Tree<Blake3Hasher, 1>;
 

@@ -29,8 +29,6 @@ mod topology;
 mod transaction;
 mod wave;
 
-pub use primitives::bloom::{BloomFilter, BloomKey, DEFAULT_FPR, MAX_BITS};
-
 pub use block::Block;
 pub use block::certified::{CertifiedBlock, CertifiedBlockHashMismatch};
 pub use block::committed_header::CommittedBlockHeader;
@@ -54,6 +52,7 @@ pub use crypto::{
     Ed25519PublicKey, Ed25519Signature, verify_bls12381_v1, verify_ed25519,
 };
 pub use network::{MessageClass, NetworkMessage, Request, ShardMessage};
+pub use primitives::bloom::{BloomFilter, BloomKey, DEFAULT_FPR, MAX_BITS};
 pub use primitives::hash::{Hash, TypedHash};
 pub use primitives::hash_kinds::{
     BlockHash, CertificateRoot, EventRoot, ExecutionCertificateHash, GlobalReceiptHash,
@@ -73,6 +72,8 @@ pub use provisioning::proof::MerkleInclusionProof;
 pub use provisioning::state_entry::{StateEntry, StateProvision};
 pub use provisioning::tx_entries::TxEntries;
 pub use quorum_certificate::QuorumCertificate;
+// Re-export DatabaseUpdates from radix for cross-crate use (execution cache, block commit)
+pub use radix_substate_store_interface::interface::DatabaseUpdates;
 pub use receipt::consensus::{ConsensusReceipt, FAILED_RECEIPT_HASH};
 pub use receipt::global::GlobalReceipt;
 pub use receipt::metadata::{ApplicationEvent, ExecutionMetadata, FeeSummary, LogLevel};
@@ -111,9 +112,6 @@ pub use wave::receipt_tree::{
     compute_global_receipt_root, compute_global_receipt_root_with_proof, tx_outcome_leaf,
 };
 pub use wave::vote::ExecutionVote;
-
-// Re-export DatabaseUpdates from radix for cross-crate use (execution cache, block commit)
-pub use radix_substate_store_interface::interface::DatabaseUpdates;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;

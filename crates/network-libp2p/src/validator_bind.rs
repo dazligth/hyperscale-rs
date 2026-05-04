@@ -19,19 +19,25 @@
 //! Each side sends `(ValidatorId, BLS-signature-over-own-PeerId)`.
 //! The receiver verifies the signature using the BLS public key from topology.
 
-use crate::stream_framing;
+use std::sync::Arc;
+use std::time::Duration;
+
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use hyperscale_network::ValidatorKeyMap;
+use hyperscale_network::compression::compress;
 use hyperscale_types::{
     Bls12381G2Signature, ValidatorId, validator_bind_message, verify_bls12381_v1,
 };
-use libp2p::{PeerId as Libp2pPeerId, StreamProtocol};
-use libp2p_stream as stream;
-use std::sync::Arc;
-use std::time::Duration;
+use libp2p::{PeerId as Libp2pPeerId, Stream, StreamProtocol};
+use libp2p_stream::{Control, IncomingStreams};
+use tokio::spawn;
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tokio::task::JoinHandle;
+use tokio::time::{sleep, timeout};
+use tracing::{error, info, warn};
+
+use crate::stream_framing;
 
 /// Shared validator key map, updated atomically on topology changes.
 type SharedValidatorKeys = Arc<ArcSwap<ValidatorKeyMap>>;
@@ -137,7 +143,7 @@ pub struct ValidatorBindHandle {
     pub(crate) bind_tx: mpsc::UnboundedSender<Libp2pPeerId>,
     /// Keep the background task alive.
     #[allow(dead_code)]
-    join_handle: tokio::task::JoinHandle<()>,
+    join_handle: JoinHandle<()>,
 }
 
 // ─── Service ────────────────────────────────────────────────────────────
@@ -149,7 +155,7 @@ pub struct ValidatorBindHandle {
 /// 2. **Outbound**: opens bind streams to peers when triggered by the event loop.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_validator_bind_service(
-    mut control: stream::Control,
+    mut control: Control,
     validator_peers: Arc<DashMap<ValidatorId, Libp2pPeerId>>,
     local_validator_id: ValidatorId,
     local_bind_signature: Bls12381G2Signature,
@@ -157,12 +163,12 @@ pub fn spawn_validator_bind_service(
 ) -> ValidatorBindHandle {
     let (bind_tx, bind_rx) = mpsc::unbounded_channel();
 
-    let join_handle = tokio::spawn(async move {
+    let join_handle = spawn(async move {
         // Accept incoming validator-bind streams.
         let mut incoming = match control.accept(VALIDATOR_BIND_PROTOCOL) {
             Ok(incoming) => incoming,
             Err(e) => {
-                tracing::error!(error = ?e, "Failed to register validator-bind protocol");
+                error!(error = ?e, "Failed to register validator-bind protocol");
                 return;
             }
         };
@@ -197,9 +203,9 @@ struct BindRetry {
 
 /// Main service loop: select between inbound streams and outbound triggers.
 async fn run_service(
-    incoming: &mut stream::IncomingStreams,
+    incoming: &mut IncomingStreams,
     mut bind_rx: mpsc::UnboundedReceiver<Libp2pPeerId>,
-    control: stream::Control,
+    control: Control,
     validator_peers: Arc<DashMap<ValidatorId, Libp2pPeerId>>,
     local_vid: ValidatorId,
     local_sig: Bls12381G2Signature,
@@ -218,7 +224,7 @@ async fn run_service(
                 let keys = validator_keys.clone();
                 let sig = local_sig;
 
-                tokio::spawn(async move {
+                spawn(async move {
                     let keys_guard = keys.load();
                     if let Err(e) = handle_inbound(peer_id, stream, &vp, local_vid, &sig, &keys_guard).await {
                         warn!(peer = %peer_id, error = %e, "Inbound validator-bind failed");
@@ -242,7 +248,7 @@ async fn run_service(
                 let sig = local_sig;
                 let rtx = retry_tx.clone();
 
-                tokio::spawn(async move {
+                spawn(async move {
                     let keys_guard = keys.load();
                     if let Err(e) = handle_outbound(peer_id, ctrl, &vp, local_vid, &sig, &keys_guard).await {
                         warn!(peer = %peer_id, error = %e, "Outbound validator-bind failed, scheduling retry");
@@ -269,7 +275,7 @@ async fn run_service(
                 let sig = local_sig;
                 let rtx = retry_tx.clone();
 
-                tokio::spawn(async move {
+                spawn(async move {
                     let keys_guard = keys.load();
                     if let Err(e) = handle_outbound(peer_id, ctrl, &vp, local_vid, &sig, &keys_guard).await {
                         if attempt + 1 < MAX_BIND_RETRIES {
@@ -304,8 +310,8 @@ async fn run_service(
 /// then sends the peer ID back to the retry channel.
 fn schedule_retry(retry_tx: mpsc::UnboundedSender<BindRetry>, peer_id: Libp2pPeerId, attempt: u32) {
     let delay = BIND_RETRY_BASE_DELAY * 2u32.saturating_pow(attempt);
-    tokio::spawn(async move {
-        tokio::time::sleep(delay).await;
+    spawn(async move {
+        sleep(delay).await;
         let _ = retry_tx.send(BindRetry { peer_id, attempt });
     });
 }
@@ -318,13 +324,13 @@ fn schedule_retry(retry_tx: mpsc::UnboundedSender<BindRetry>, peer_id: Libp2pPee
 /// 4. Send our bind message as response
 async fn handle_inbound(
     peer_id: Libp2pPeerId,
-    mut stream: libp2p::Stream,
+    mut stream: Stream,
     validator_peers: &DashMap<ValidatorId, Libp2pPeerId>,
     local_vid: ValidatorId,
     local_sig: &Bls12381G2Signature,
     keys: &ValidatorKeyMap,
 ) -> Result<(), BindError> {
-    let result = tokio::time::timeout(BIND_TIMEOUT, async {
+    let result = timeout(BIND_TIMEOUT, async {
         // Read remote's bind message.
         let remote_bytes = stream_framing::read_frame(&mut stream, MAX_BIND_FRAME)
             .await
@@ -366,13 +372,13 @@ async fn handle_inbound(
 /// 5. Register in `validator_peers`
 async fn handle_outbound(
     peer_id: Libp2pPeerId,
-    mut control: stream::Control,
+    mut control: Control,
     validator_peers: &DashMap<ValidatorId, Libp2pPeerId>,
     local_vid: ValidatorId,
     local_sig: &Bls12381G2Signature,
     keys: &ValidatorKeyMap,
 ) -> Result<(), BindError> {
-    let result = tokio::time::timeout(BIND_TIMEOUT, async {
+    let result = timeout(BIND_TIMEOUT, async {
         // Open a stream to the remote peer.
         let mut stream = control
             .open_stream(peer_id, VALIDATOR_BIND_PROTOCOL)
@@ -386,7 +392,7 @@ async fn handle_outbound(
         // we still need to read the response. Manually write the frame.
         {
             use futures::AsyncWriteExt;
-            let compressed = hyperscale_network::compression::compress(&our_bytes);
+            let compressed = compress(&our_bytes);
             let len = u32::try_from(compressed.len()).unwrap_or(u32::MAX);
             stream
                 .write_all(&len.to_be_bytes())
@@ -425,14 +431,12 @@ async fn handle_outbound(
 
 #[cfg(test)]
 mod tests {
+    use hyperscale_types::{Bls12381G1PublicKey, generate_bls_keypair, zero_bls_signature};
+
     use super::*;
-    use hyperscale_types::{generate_bls_keypair, zero_bls_signature};
 
     /// Build a single-validator key map for bind tests.
-    fn make_bind_keys(
-        vid: ValidatorId,
-        pubkey: hyperscale_types::Bls12381G1PublicKey,
-    ) -> ValidatorKeyMap {
+    fn make_bind_keys(vid: ValidatorId, pubkey: Bls12381G1PublicKey) -> ValidatorKeyMap {
         let mut keys = ValidatorKeyMap::new();
         keys.insert(vid, pubkey);
         keys

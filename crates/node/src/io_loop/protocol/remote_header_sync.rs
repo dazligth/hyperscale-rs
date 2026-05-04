@@ -8,8 +8,9 @@
 //! owns request dispatch, response decoding, and forwards delivered
 //! headers through the existing `RemoteHeaderReceived` path.
 
-use super::sync::{Sync, SyncBinding, SyncConfig, SyncInput, SyncOutput};
 use hyperscale_types::ShardGroupId;
+
+use super::sync::{Sync, SyncBinding, SyncConfig, SyncInput, SyncOutput};
 
 /// Default upper bound on heights packed into a single range fetch.
 /// Matches `MAX_REMOTE_HEADERS_PER_REQUEST` so the responder never has to

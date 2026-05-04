@@ -5,22 +5,23 @@
 //! given anchor — orphaned blocks are not ancestors of the canonical
 //! chain, so they are structurally invisible to anchored views.
 
-use crate::{
-    DatabaseUpdates, DbPartitionKey, DbSortKey, JmtSnapshot, PartitionDatabaseUpdates,
-    SubstateStore,
-};
-use ::hyperscale_jmt as jmt;
-#[cfg(test)]
-use hyperscale_types::Hash;
-#[cfg(test)]
-use hyperscale_types::TxHash;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, RwLock};
+
+use hyperscale_jmt::{Node as JmtNode, NodeKey as JmtNodeKey, TreeReader};
 use hyperscale_types::{
-    BlockHash, BlockHeight, ConsensusReceipt, MerkleInclusionProof, NodeId, StateRoot,
+    Block, BlockHash, BlockHeight, ConsensusReceipt, FinalizedWave, MerkleInclusionProof, NodeId,
+    QuorumCertificate, StateRoot,
 };
 use radix_common::prelude::DatabaseUpdate;
 use radix_substate_store_interface::interface::SubstateDatabase;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
+
+use crate::keys::node_entity_key;
+use crate::tree::proofs::generate_proof;
+use crate::{
+    ChainReader, ChainWriter, DatabaseUpdates, DbPartitionKey, DbSortKey, JmtSnapshot,
+    PartitionDatabaseUpdates, SubstateStore, VersionedStore,
+};
 
 /// Cached base-storage reads observed through a [`SubstateView`].
 ///
@@ -60,7 +61,7 @@ pub struct PendingChain<S> {
 
 impl<S> PendingChain<S>
 where
-    S: SubstateStore + jmt::TreeReader + crate::ChainReader + Sync + 'static,
+    S: SubstateStore + TreeReader + ChainReader + Sync + 'static,
 {
     /// Create a new empty `PendingChain` over the given base storage.
     pub fn new(base: Arc<S>) -> Self {
@@ -171,13 +172,13 @@ where
 type OverlayEntries = HashMap<(DbPartitionKey, DbSortKey), Option<Vec<u8>>>;
 
 /// JMT node index for O(1) tree-node lookup during proof generation.
-type JmtNodeIndex = HashMap<jmt::NodeKey, Arc<jmt::Node>>;
+type JmtNodeIndex = HashMap<JmtNodeKey, Arc<JmtNode>>;
 
 /// Anchored read view over base storage + a slice of pending blocks.
 ///
 /// Built once per anchor by [`PendingChain::view_at`] and cached via an
 /// `Arc`. Implements [`SubstateDatabase`], [`SubstateStore`],
-/// [`crate::ChainWriter`], and [`jmt::TreeReader`] so it can substitute
+/// [`ChainWriter`], and [`jmt::TreeReader`] so it can substitute
 /// for the base storage in delegated action handlers.
 ///
 /// Once built the view is immutable — interior data is never mutated.
@@ -462,7 +463,7 @@ impl<Snap: SubstateDatabase> SubstateDatabase for ViewSnapshot<Snap> {
     }
 }
 
-impl<S: SubstateStore + crate::VersionedStore> SubstateStore for SubstateView<S> {
+impl<S: SubstateStore + VersionedStore> SubstateStore for SubstateView<S> {
     type Snapshot<'a>
         = ViewSnapshot<S::Snapshot<'a>>
     where
@@ -512,7 +513,7 @@ impl<S: SubstateStore + crate::VersionedStore> SubstateStore for SubstateView<S>
 
         // Build a map from base result, then apply pending receipts in
         // commit order up to block_height.
-        let entity_key = crate::keys::node_entity_key(node_id);
+        let entity_key = node_entity_key(node_id);
         let mut substates: HashMap<(u8, DbSortKey), Vec<u8>> = base_result
             .unwrap_or_default()
             .into_iter()
@@ -581,7 +582,7 @@ impl<S: SubstateStore + crate::VersionedStore> SubstateStore for SubstateView<S>
 /// Override `generate_merkle_proofs` for callers that have a
 /// `jmt::TreeReader`-capable base, using the JMT overlay for unpersisted
 /// heights.
-impl<S: SubstateStore + jmt::TreeReader + Sync> SubstateView<S> {
+impl<S: SubstateStore + TreeReader + Sync> SubstateView<S> {
     /// Generate merkle proofs, falling back to the JMT overlay for
     /// unpersisted block heights.
     #[must_use]
@@ -593,20 +594,20 @@ impl<S: SubstateStore + jmt::TreeReader + Sync> SubstateView<S> {
         if let Some(proof) = (*self.base).generate_merkle_proofs(storage_keys, block_height) {
             return Some(proof);
         }
-        crate::tree::proofs::generate_proof(self, storage_keys, block_height)
+        generate_proof(self, storage_keys, block_height)
     }
 }
 
-impl<S: jmt::TreeReader + Send + Sync> jmt::TreeReader for SubstateView<S> {
-    fn get_node(&self, key: &jmt::NodeKey) -> Option<Arc<jmt::Node>> {
+impl<S: TreeReader + Send + Sync> TreeReader for SubstateView<S> {
+    fn get_node(&self, key: &JmtNodeKey) -> Option<Arc<JmtNode>> {
         self.jmt_nodes
             .get(key)
             .cloned()
             .or_else(|| (*self.base).get_node(key))
     }
 
-    fn get_root_key(&self, version: u64) -> Option<jmt::NodeKey> {
-        let root_key = jmt::NodeKey::root(version);
+    fn get_root_key(&self, version: u64) -> Option<JmtNodeKey> {
+        let root_key = JmtNodeKey::root(version);
         if self.jmt_nodes.contains_key(&root_key) {
             Some(root_key)
         } else {
@@ -615,14 +616,14 @@ impl<S: jmt::TreeReader + Send + Sync> jmt::TreeReader for SubstateView<S> {
     }
 }
 
-impl<S: crate::ChainWriter> crate::ChainWriter for SubstateView<S> {
+impl<S: ChainWriter> ChainWriter for SubstateView<S> {
     type PreparedCommit = S::PreparedCommit;
 
     fn prepare_block_commit(
         &self,
         parent_state_root: StateRoot,
         parent_block_height: BlockHeight,
-        finalized_waves: &[Arc<hyperscale_types::FinalizedWave>],
+        finalized_waves: &[Arc<FinalizedWave>],
         block_height: BlockHeight,
         pending_snapshots: &[Arc<JmtSnapshot>],
         base_reads: Option<&BaseReadCache>,
@@ -649,20 +650,12 @@ impl<S: crate::ChainWriter> crate::ChainWriter for SubstateView<S> {
 
     fn commit_prepared_blocks(
         &self,
-        blocks: Vec<(
-            Self::PreparedCommit,
-            Arc<hyperscale_types::Block>,
-            Arc<hyperscale_types::QuorumCertificate>,
-        )>,
+        blocks: Vec<(Self::PreparedCommit, Arc<Block>, Arc<QuorumCertificate>)>,
     ) -> Vec<StateRoot> {
         (*self.base).commit_prepared_blocks(blocks)
     }
 
-    fn commit_block(
-        &self,
-        block: &Arc<hyperscale_types::Block>,
-        qc: &Arc<hyperscale_types::QuorumCertificate>,
-    ) -> StateRoot {
+    fn commit_block(&self, block: &Arc<Block>, qc: &Arc<QuorumCertificate>) -> StateRoot {
         (*self.base).commit_block(block, qc)
     }
 
@@ -677,9 +670,16 @@ impl<S: crate::ChainWriter> crate::ChainWriter for SubstateView<S> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use hyperscale_types::{
+        CertifiedBlock, CommittedBlockHeader, ExecutionCertificate, ExecutionCertificateHash,
+        GlobalReceiptHash, Hash, RoutableTransaction, ShardGroupId, TxHash, WaveCertificate,
+        WaveId,
+    };
     use indexmap::IndexMap;
     use radix_substate_store_interface::interface::{DatabaseUpdates, PartitionDatabaseUpdates};
+
+    use super::*;
+    use crate::BlockForSync;
 
     /// Minimal stub implementing every trait `PendingChain<S>` requires.
     /// Returns no data — tests only exercise the overlay and chain-walk
@@ -749,29 +749,26 @@ mod tests {
         }
     }
 
-    impl crate::VersionedStore for StubStore {
+    impl VersionedStore for StubStore {
         fn snapshot_at(&self, _height: BlockHeight) -> Self::Snapshot<'_> {
             StubSnapshot
         }
     }
 
-    impl jmt::TreeReader for StubStore {
-        fn get_node(&self, _key: &jmt::NodeKey) -> Option<Arc<jmt::Node>> {
+    impl TreeReader for StubStore {
+        fn get_node(&self, _key: &JmtNodeKey) -> Option<Arc<JmtNode>> {
             None
         }
-        fn get_root_key(&self, _version: u64) -> Option<jmt::NodeKey> {
+        fn get_root_key(&self, _version: u64) -> Option<JmtNodeKey> {
             None
         }
     }
 
-    impl crate::ChainReader for StubStore {
-        fn get_block(&self, _height: BlockHeight) -> Option<hyperscale_types::CertifiedBlock> {
+    impl ChainReader for StubStore {
+        fn get_block(&self, _height: BlockHeight) -> Option<CertifiedBlock> {
             None
         }
-        fn get_committed_header(
-            &self,
-            _height: BlockHeight,
-        ) -> Option<hyperscale_types::CommittedBlockHeader> {
+        fn get_committed_header(&self, _height: BlockHeight) -> Option<CommittedBlockHeader> {
             None
         }
         fn committed_height(&self) -> BlockHeight {
@@ -780,51 +777,34 @@ mod tests {
         fn committed_hash(&self) -> Option<BlockHash> {
             None
         }
-        fn latest_qc(&self) -> Option<hyperscale_types::QuorumCertificate> {
+        fn latest_qc(&self) -> Option<QuorumCertificate> {
             None
         }
-        fn get_block_for_sync(&self, _height: BlockHeight) -> Option<crate::BlockForSync> {
+        fn get_block_for_sync(&self, _height: BlockHeight) -> Option<BlockForSync> {
             None
         }
-        fn get_transactions_batch(
-            &self,
-            _hashes: &[TxHash],
-        ) -> Vec<hyperscale_types::RoutableTransaction> {
+        fn get_transactions_batch(&self, _hashes: &[TxHash]) -> Vec<RoutableTransaction> {
             Vec::new()
         }
-        fn get_certificates_batch(
-            &self,
-            _ids: &[hyperscale_types::WaveId],
-        ) -> Vec<hyperscale_types::WaveCertificate> {
+        fn get_certificates_batch(&self, _ids: &[WaveId]) -> Vec<WaveCertificate> {
             Vec::new()
         }
-        fn get_consensus_receipt(
-            &self,
-            _tx_hash: &TxHash,
-        ) -> Option<Arc<hyperscale_types::ConsensusReceipt>> {
+        fn get_consensus_receipt(&self, _tx_hash: &TxHash) -> Option<Arc<ConsensusReceipt>> {
             None
         }
         fn get_execution_certificates_by_height(
             &self,
             _block_height: BlockHeight,
-        ) -> Vec<hyperscale_types::ExecutionCertificate> {
+        ) -> Vec<ExecutionCertificate> {
             Vec::new()
         }
-        fn get_wave_certificate_for_tx(
-            &self,
-            _tx_hash: &TxHash,
-        ) -> Option<hyperscale_types::WaveCertificate> {
+        fn get_wave_certificate_for_tx(&self, _tx_hash: &TxHash) -> Option<WaveCertificate> {
             None
         }
         fn get_ec_hashes_for_tx(
             &self,
             _tx_hash: &TxHash,
-        ) -> Option<
-            Vec<(
-                hyperscale_types::ShardGroupId,
-                hyperscale_types::ExecutionCertificateHash,
-            )>,
-        > {
+        ) -> Option<Vec<(ShardGroupId, ExecutionCertificateHash)>> {
             None
         }
     }
@@ -850,7 +830,7 @@ mod tests {
 
     fn make_receipt(updates: DatabaseUpdates) -> Arc<ConsensusReceipt> {
         Arc::new(ConsensusReceipt::Succeeded {
-            receipt_hash: hyperscale_types::GlobalReceiptHash::ZERO,
+            receipt_hash: GlobalReceiptHash::ZERO,
             database_updates: updates,
             application_events: vec![],
         })

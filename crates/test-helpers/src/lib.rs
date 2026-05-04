@@ -16,6 +16,9 @@
 //! assert!(verify_bls12381_v1(message, committee.public_key(0), &signature));
 //! ```
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+
 use hyperscale_types::{
     Block, BlockHash, BlockHeader, BlockHeight, Bls12381G1PrivateKey, Bls12381G1PublicKey,
     Bls12381G2Signature, CertificateRoot, CertifiedBlock, ExecutionCertificate, ExecutionOutcome,
@@ -25,8 +28,6 @@ use hyperscale_types::{
     ValidatorId, ValidatorInfo, ValidatorSet, WaveCertificate, WaveId, WeightedTimestamp,
     bls_keypair_from_seed,
 };
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 
 /// A test committee of validators with deterministic BLS keypairs.
 ///
@@ -300,8 +301,9 @@ pub fn make_finalized_wave(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use hyperscale_types::verify_bls12381_v1;
+
+    use super::*;
 
     #[test]
     fn test_committee_creation() {

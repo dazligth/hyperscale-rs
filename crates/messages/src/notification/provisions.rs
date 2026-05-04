@@ -1,10 +1,12 @@
 //! `ProvisionsNotification` message for cross-shard provisions.
 
-use crate::trace_context::TraceContext;
 use hyperscale_types::{
     Bls12381G2Signature, MessageClass, NetworkMessage, Provisions, ValidatorId,
+    state_provisions_message,
 };
 use sbor::prelude::BasicSbor;
+
+use crate::trace_context::TraceContext;
 
 /// Cross-shard state provisions for one (`source_block`, `target_shard`) pair.
 ///
@@ -42,7 +44,7 @@ impl ProvisionsNotification {
     /// Build the canonical signing message for this notification.
     #[must_use]
     pub fn signing_message(&self) -> Vec<u8> {
-        hyperscale_types::state_provisions_message(&self.provisions)
+        state_provisions_message(&self.provisions)
     }
 
     /// Get the trace context.

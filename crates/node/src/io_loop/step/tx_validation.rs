@@ -15,16 +15,18 @@
 //!
 //! Batch dispatch lives in [`super::super::batches`].
 
-use crate::batch_accumulator::BatchAccumulator;
-use crate::io_loop::IoLoop;
+use std::sync::Arc;
+
 use hyperscale_core::{NodeInput, ProtocolEvent, StateMachine};
 use hyperscale_dispatch::{Dispatch, DispatchPool};
 use hyperscale_engine::Engine;
 use hyperscale_messages::TransactionGossip;
 use hyperscale_network::Network;
 use hyperscale_storage::Storage;
-use hyperscale_types::{RoutableTransaction, ShardGroupId, TxHash};
-use std::sync::Arc;
+use hyperscale_types::{RoutableTransaction, ShardGroupId, TxHash, shard_for_node};
+
+use crate::batch_accumulator::BatchAccumulator;
+use crate::io_loop::IoLoop;
 
 impl<S, N, D, E> IoLoop<S, N, D, E>
 where
@@ -94,7 +96,7 @@ where
             .declared_reads
             .iter()
             .chain(tx.declared_writes.iter())
-            .map(|node_id| hyperscale_types::shard_for_node(node_id, num_shards))
+            .map(|node_id| shard_for_node(node_id, num_shards))
             .collect();
         for shard in shards {
             self.enqueue_tx_for_gossip(shard, Arc::clone(&tx));

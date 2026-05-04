@@ -1,7 +1,8 @@
 //! Core traits for state machines.
 
-use crate::{Action, ProtocolEvent};
 use hyperscale_types::LocalTimestamp;
+
+use crate::{Action, ProtocolEvent};
 
 /// A state machine that processes events.
 ///

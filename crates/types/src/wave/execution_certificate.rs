@@ -1,11 +1,19 @@
 //! [`ExecutionCertificate`] — aggregated 2f+1 BLS signature over a wave's
 //! per-tx outcomes, with cached canonical hash.
 
+use std::fmt::{self, Debug, Formatter};
+
+use blake3::Hasher;
+use sbor::prelude::*;
+use sbor::{
+    Categorize, Decode, DecodeError, Decoder, Describe, Encode, EncodeError, Encoder,
+    NoCustomTypeKind, NoCustomValueKind, RustTypeId, TypeData, TypeKind, ValueKind,
+};
+
 use crate::{
     BlockHeight, Bls12381G2Signature, ExecutionCertificateHash, GlobalReceiptRoot, Hash,
     RETENTION_HORIZON, ShardGroupId, SignerBitfield, TxOutcome, WaveId, WeightedTimestamp,
 };
-use sbor::prelude::*;
 
 /// Aggregated certificate for an execution wave.
 ///
@@ -34,8 +42,8 @@ pub struct ExecutionCertificate {
     cached_sbor: Option<Vec<u8>>,
 }
 
-impl std::fmt::Debug for ExecutionCertificate {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Debug for ExecutionCertificate {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("ExecutionCertificate")
             .field("wave_id", &self.wave_id)
             .field("vote_anchor_ts", &self.vote_anchor_ts)
@@ -78,14 +86,12 @@ impl PartialEq for ExecutionCertificate {
 impl Eq for ExecutionCertificate {}
 
 // Manual SBOR: cached_sbor and canonical_hash are derived, not serialized.
-impl<E: sbor::Encoder<sbor::NoCustomValueKind>> sbor::Encode<sbor::NoCustomValueKind, E>
-    for ExecutionCertificate
-{
-    fn encode_value_kind(&self, encoder: &mut E) -> Result<(), sbor::EncodeError> {
-        encoder.write_value_kind(sbor::ValueKind::Tuple)
+impl<E: Encoder<NoCustomValueKind>> Encode<NoCustomValueKind, E> for ExecutionCertificate {
+    fn encode_value_kind(&self, encoder: &mut E) -> Result<(), EncodeError> {
+        encoder.write_value_kind(ValueKind::Tuple)
     }
 
-    fn encode_body(&self, encoder: &mut E) -> Result<(), sbor::EncodeError> {
+    fn encode_body(&self, encoder: &mut E) -> Result<(), EncodeError> {
         encoder.write_size(6)?;
         encoder.encode(&self.wave_id)?;
         encoder.encode(&self.vote_anchor_ts)?;
@@ -97,17 +103,15 @@ impl<E: sbor::Encoder<sbor::NoCustomValueKind>> sbor::Encode<sbor::NoCustomValue
     }
 }
 
-impl<D: sbor::Decoder<sbor::NoCustomValueKind>> sbor::Decode<sbor::NoCustomValueKind, D>
-    for ExecutionCertificate
-{
+impl<D: Decoder<NoCustomValueKind>> Decode<NoCustomValueKind, D> for ExecutionCertificate {
     fn decode_body_with_value_kind(
         decoder: &mut D,
-        value_kind: sbor::ValueKind<sbor::NoCustomValueKind>,
-    ) -> Result<Self, sbor::DecodeError> {
-        decoder.check_preloaded_value_kind(value_kind, sbor::ValueKind::Tuple)?;
+        value_kind: ValueKind<NoCustomValueKind>,
+    ) -> Result<Self, DecodeError> {
+        decoder.check_preloaded_value_kind(value_kind, ValueKind::Tuple)?;
         let length = decoder.read_size()?;
         if length != 6 {
-            return Err(sbor::DecodeError::UnexpectedSize {
+            return Err(DecodeError::UnexpectedSize {
                 expected: 6,
                 actual: length,
             });
@@ -139,18 +143,17 @@ impl<D: sbor::Decoder<sbor::NoCustomValueKind>> sbor::Decode<sbor::NoCustomValue
     }
 }
 
-impl sbor::Categorize<sbor::NoCustomValueKind> for ExecutionCertificate {
-    fn value_kind() -> sbor::ValueKind<sbor::NoCustomValueKind> {
-        sbor::ValueKind::Tuple
+impl Categorize<NoCustomValueKind> for ExecutionCertificate {
+    fn value_kind() -> ValueKind<NoCustomValueKind> {
+        ValueKind::Tuple
     }
 }
 
-impl sbor::Describe<sbor::NoCustomTypeKind> for ExecutionCertificate {
-    const TYPE_ID: sbor::RustTypeId =
-        sbor::RustTypeId::novel_with_code("ExecutionCertificate", &[], &[]);
+impl Describe<NoCustomTypeKind> for ExecutionCertificate {
+    const TYPE_ID: RustTypeId = RustTypeId::novel_with_code("ExecutionCertificate", &[], &[]);
 
-    fn type_data() -> sbor::TypeData<sbor::NoCustomTypeKind, sbor::RustTypeId> {
-        sbor::TypeData::unnamed(sbor::TypeKind::Any)
+    fn type_data() -> TypeData<NoCustomTypeKind, RustTypeId> {
+        TypeData::unnamed(TypeKind::Any)
     }
 }
 
@@ -236,7 +239,7 @@ impl ExecutionCertificate {
         global_receipt_root: &GlobalReceiptRoot,
         tx_outcomes: &[TxOutcome],
     ) -> ExecutionCertificateHash {
-        let mut hasher = blake3::Hasher::new();
+        let mut hasher = Hasher::new();
         hasher.update(&basic_encode(wave_id).unwrap());
         hasher.update(&vote_anchor_ts.as_millis().to_le_bytes());
         hasher.update(global_receipt_root.as_raw().as_bytes());

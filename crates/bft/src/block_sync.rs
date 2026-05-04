@@ -4,12 +4,13 @@
 //! synced block QC verifications. `BftCoordinator` owns this as a field and
 //! delegates sync-specific bookkeeping here.
 
+use std::collections::{BTreeMap, HashMap};
+
 use hyperscale_core::Action;
 use hyperscale_types::{
     BlockHash, BlockHeight, Bls12381G1PublicKey, CertifiedBlock, QuorumCertificate,
     TopologySnapshot,
 };
-use std::collections::{BTreeMap, HashMap};
 use tracing::{debug, info, warn};
 
 use crate::commit_pipeline::CommitPipeline;
@@ -629,14 +630,16 @@ impl BlockSyncManager {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::collections::BTreeMap;
+
     use hyperscale_test_helpers::TestCommittee;
     use hyperscale_types::{
         Block, BlockHeader, CertificateRoot, Hash, LocalReceiptRoot, ProposerTimestamp,
         ProvisionsRoot, Round, ShardGroupId, StateRoot, TransactionRoot, ValidatorId,
         ValidatorInfo, ValidatorSet,
     };
-    use std::collections::BTreeMap;
+
+    use super::*;
 
     fn topology() -> TopologySnapshot {
         let committee = TestCommittee::new(4, 42);

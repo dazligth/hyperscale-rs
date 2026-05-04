@@ -10,21 +10,25 @@
 //! values whose `DatabaseUpdates` the state machine caches and applies
 //! later, when the wave's certificate is included in a committed block.
 
-use crate::engine::Engine;
-use crate::output::{ExecutedTx, ExecutionOutput};
-use crate::provisioned_snapshot::ProvisionedSnapshot;
-use crate::receipt::build_executed_tx;
+use std::sync::Arc;
+use std::time::Instant;
+
 use hyperscale_storage::{SubstateDatabase, SubstateStore};
 use hyperscale_types::{
     BlockHeight, NodeId, RoutableTransaction, ShardGroupId, StateEntry, StateProvision,
 };
 use radix_common::network::NetworkDefinition;
+use radix_common::types::NodeId as RadixNodeId;
 use radix_engine::transaction::{ExecutionConfig, execute_transaction};
 use radix_engine::vm::DefaultVmModules;
 use radix_transactions::validation::TransactionValidator;
-use std::sync::Arc;
-use std::time::Instant;
-use tracing::{Level, instrument};
+use tracing::field::Empty;
+use tracing::{Level, Span, instrument};
+
+use crate::engine::Engine;
+use crate::output::{ExecutedTx, ExecutionOutput};
+use crate::provisioned_snapshot::ProvisionedSnapshot;
+use crate::receipt::build_executed_tx;
 
 /// Fetch state entries for the given nodes from storage at a specific block height.
 ///
@@ -46,7 +50,7 @@ pub fn fetch_state_entries<S: SubstateStore>(
 
     for node in nodes {
         // Compute the db_node_key once per node (expensive hash computation).
-        let radix_node_id = radix_common::types::NodeId(node.0);
+        let radix_node_id = RadixNodeId(node.0);
         let db_node_key = SpreadPrefixKeyMapper::to_db_node_key(&radix_node_id);
 
         let substates = storage.list_substates_for_node_at_height(node, block_height)?;
@@ -188,7 +192,7 @@ impl Engine for RadixExecutor {
     /// a committed block.
     #[instrument(level = Level::DEBUG, skip_all, fields(
         tx_count = transactions.len(),
-        latency_us = tracing::field::Empty,
+        latency_us = Empty,
     ))]
     fn execute_single_shard<D: SubstateDatabase>(
         &self,
@@ -204,7 +208,7 @@ impl Engine for RadixExecutor {
             results.push(self.execute_one(snapshot, tx, local_shard, num_shards));
         }
 
-        tracing::Span::current().record(
+        Span::current().record(
             "latency_us",
             u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX),
         );
@@ -220,7 +224,7 @@ impl Engine for RadixExecutor {
     #[instrument(level = Level::DEBUG, skip_all, fields(
         tx_count = transactions.len(),
         provision_count = provisions.len(),
-        latency_us = tracing::field::Empty,
+        latency_us = Empty,
     ))]
     fn execute_cross_shard<D: SubstateDatabase>(
         &self,
@@ -260,7 +264,7 @@ impl Engine for RadixExecutor {
             ));
         }
 
-        tracing::Span::current().record(
+        Span::current().record(
             "latency_us",
             u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX),
         );

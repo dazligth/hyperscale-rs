@@ -26,11 +26,12 @@
 //! report.print_summary();
 //! ```
 
+use std::collections::{HashMap, HashSet};
+
 use hyperscale_simulation::SimulationRunner;
 use hyperscale_types::{
     NodeId, RoutableTransaction, ShardGroupId, TransactionStatus, TxHash, shard_for_node,
 };
-use std::collections::{HashMap, HashSet};
 
 /// Information about a stuck transaction.
 #[derive(Debug, Clone)]
@@ -385,8 +386,9 @@ fn status_name(status: &TransactionStatus) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use hyperscale_types::{BlockHeight, TransactionDecision};
+
+    use super::*;
 
     #[test]
     fn test_status_name() {

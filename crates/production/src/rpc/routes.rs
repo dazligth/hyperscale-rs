@@ -1,14 +1,13 @@
 //! Route configuration for the RPC API.
 
+use axum::Router;
+use axum::routing::{get, post};
+
 use super::handlers::{
     get_transaction_handler, health_handler, mempool_handler, metrics_handler, ready_handler,
     status_handler, submit_transaction_handler, sync_handler,
 };
 use super::state::RpcState;
-use axum::{
-    Router,
-    routing::{get, post},
-};
 
 /// Create the full router with all RPC routes.
 pub fn create_router(state: RpcState) -> Router {
@@ -38,20 +37,27 @@ fn api_v1_routes() -> Router<RpcState> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::rpc::{MempoolSnapshot, NodeStatusResponse, NodeStatusState};
-    use arc_swap::ArcSwap;
-    use axum::{body::Body, http::Request};
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
     use std::time::Instant;
+
+    use arc_swap::ArcSwap;
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request, StatusCode};
+    use crossbeam::channel::unbounded;
+    use quick_cache::sync::Cache;
+    use serde_json::from_slice;
     use tower::ServiceExt;
 
+    use super::*;
+    use crate::rpc::{MempoolSnapshot, NodeStatusResponse, NodeStatusState};
+    use crate::status::SyncStatus;
+
     fn create_test_state() -> RpcState {
-        let (tx_submission_tx, _rx) = crossbeam::channel::unbounded();
+        let (tx_submission_tx, _rx) = unbounded();
         RpcState {
             ready: Arc::new(AtomicBool::new(true)),
-            sync_status: Arc::new(ArcSwap::new(Arc::new(crate::status::SyncStatus::default()))),
+            sync_status: Arc::new(ArcSwap::new(Arc::new(SyncStatus::default()))),
             node_status: Arc::new(ArcSwap::new(Arc::new(NodeStatusState {
                 validator_id: 1,
                 shard: 0,
@@ -63,7 +69,7 @@ mod tests {
             }))),
             tx_submission_tx,
             start_time: Instant::now(),
-            tx_status_cache: Arc::new(quick_cache::sync::Cache::new(1000)),
+            tx_status_cache: Arc::new(Cache::new(1000)),
             mempool_snapshot: Arc::new(ArcSwap::new(Arc::new(MempoolSnapshot::default()))),
             sync_backpressure_threshold: Some(10),
         }
@@ -83,7 +89,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -100,12 +106,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(response.into_body(), 1024)
-            .await
-            .unwrap();
-        let status: NodeStatusResponse = serde_json::from_slice(&body).unwrap();
+        let body = to_bytes(response.into_body(), 1024).await.unwrap();
+        let status: NodeStatusResponse = from_slice(&body).unwrap();
         assert_eq!(status.version, "localdev");
     }
 
@@ -123,6 +127,6 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }

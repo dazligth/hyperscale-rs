@@ -37,19 +37,19 @@
 //! Validators collect shard execution proofs from all participating shards. When all
 //! proofs are received, a `WaveCertificate` is created.
 
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
+
 use hyperscale_core::{
     Action, FetchOrigin, FetchPeers, FetchRequest, ProtocolEvent, ProvisionsRequest,
 };
 use hyperscale_types::{
-    Attempt, Block, BlockHash, BlockHeight, BloomFilter, ExecutionCertificate, ExecutionVote,
-    GlobalReceiptRoot, NodeId, Provisions, RoutableTransaction, ShardGroupId, StoredReceipt,
-    TopologySnapshot, TxHash, TxOutcome, ValidatorId, WAVE_TIMEOUT, WaveCertificate, WaveId,
-    WeightedTimestamp,
+    Attempt, Block, BlockHash, BlockHeader, BlockHeight, BloomFilter, CertifiedBlock,
+    ExecutionCertificate, ExecutionVote, FinalizedWave, GlobalReceiptRoot, NodeId, Provisions,
+    RoutableTransaction, ShardGroupId, StoredReceipt, TopologySnapshot, TxHash, TxOutcome,
+    ValidatorId, WAVE_TIMEOUT, WaveCertificate, WaveId, WeightedTimestamp, wave_leader,
+    wave_leader_at,
 };
-#[cfg(test)]
-use hyperscale_types::{ExecutionOutcome, Hash};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::sync::Arc;
 use tracing::instrument;
 
 use crate::action_handlers::build_dispatch_action;
@@ -84,10 +84,8 @@ pub struct CompletionData {
     /// Merkle root over per-tx outcome leaves (cross-shard agreement).
     pub global_receipt_root: GlobalReceiptRoot,
     /// Per-tx outcomes in wave order.
-    pub tx_outcomes: Vec<hyperscale_types::TxOutcome>,
+    pub tx_outcomes: Vec<TxOutcome>,
 }
-
-use hyperscale_types::FinalizedWave;
 
 /// Execution memory statistics for monitoring collection sizes.
 #[derive(Clone, Copy, Debug, Default)]
@@ -398,7 +396,7 @@ impl ExecutionCoordinator {
             self.waves.insert_wave(wave_id.clone(), wave_state);
 
             // Only the wave leader creates a VoteTracker for aggregation.
-            let leader = hyperscale_types::wave_leader(&wave_id, topology.local_committee());
+            let leader = wave_leader(&wave_id, topology.local_committee());
             if topology.local_validator_id() == leader {
                 let tracker = VoteTracker::new(wave_id.clone(), block_hash, quorum);
                 self.waves.insert_tracker(wave_id.clone(), tracker);
@@ -538,7 +536,7 @@ impl ExecutionCoordinator {
         let completions = self.scan_complete_waves();
         let mut actions = Vec::with_capacity(completions.len());
         for completion in completions {
-            let leader = hyperscale_types::wave_leader(&completion.wave_id, &committee);
+            let leader = wave_leader(&completion.wave_id, &committee);
             // Track retry state for non-leaders so we can re-send to a
             // rotated leader if this one doesn't produce an EC.
             let tx_outcomes = Arc::new(completion.tx_outcomes);
@@ -575,10 +573,7 @@ impl ExecutionCoordinator {
     /// Per-tx terminal state for the mempool is driven by
     /// `mempool::on_block_committed` reading `block.certificates` directly.
     /// This function only handles execution's own bookkeeping.
-    pub fn cleanup_committed_waves(
-        &mut self,
-        certificates: &[Arc<hyperscale_types::FinalizedWave>],
-    ) {
+    pub fn cleanup_committed_waves(&mut self, certificates: &[Arc<FinalizedWave>]) {
         for fw in certificates {
             // No-op for synced waves we never aggregated locally; for waves we
             // tracked, releases accumulator/cache state for the wave's txs.
@@ -1186,7 +1181,7 @@ impl ExecutionCoordinator {
             tx_outcomes,
         } in effects
         {
-            let new_leader = hyperscale_types::wave_leader_at(&wave_id, attempt, &committee);
+            let new_leader = wave_leader_at(&wave_id, attempt, &committee);
             tracing::info!(
                 wave = %wave_id,
                 attempt = attempt.0,
@@ -1244,7 +1239,7 @@ impl ExecutionCoordinator {
     pub fn on_block_committed(
         &mut self,
         topology: &TopologySnapshot,
-        certified: &hyperscale_types::CertifiedBlock,
+        certified: &CertifiedBlock,
     ) -> Vec<Action> {
         let block = &certified.block;
         let height = block.height();
@@ -1343,7 +1338,7 @@ impl ExecutionCoordinator {
         &mut self,
         topology: &TopologySnapshot,
         block_hash: BlockHash,
-        header: &hyperscale_types::BlockHeader,
+        header: &BlockHeader,
         transactions: &[Arc<RoutableTransaction>],
         provisions: &[Arc<Provisions>],
     ) -> Vec<Action> {
@@ -1411,7 +1406,7 @@ impl ExecutionCoordinator {
     fn on_sealed_block_committed(
         &mut self,
         topology: &TopologySnapshot,
-        header: &hyperscale_types::BlockHeader,
+        header: &BlockHeader,
         transactions: &[Arc<RoutableTransaction>],
     ) -> Vec<Action> {
         if transactions.is_empty() {
@@ -1635,7 +1630,7 @@ impl ExecutionCoordinator {
     /// cleanup works even when the wave was never aggregated locally — e.g.
     /// for blocks received via sync. The committed `FinalizedWave` is the
     /// authoritative tx-set source.
-    pub fn remove_finalized_wave(&mut self, fw: &hyperscale_types::FinalizedWave) {
+    pub fn remove_finalized_wave(&mut self, fw: &FinalizedWave) {
         let wave_id = fw.wave_id();
         self.finalized.remove(wave_id);
         // The local-shard EC is now durable in storage via the committed
@@ -1717,7 +1712,7 @@ impl ExecutionCoordinator {
     ///
     /// Used by the node orchestrator to pass to BFT for conflict filtering.
     #[must_use]
-    pub fn finalized_tx_hashes(&self) -> std::collections::HashSet<TxHash> {
+    pub fn finalized_tx_hashes(&self) -> HashSet<TxHash> {
         self.finalized.all_tx_hashes()
     }
 
@@ -1884,11 +1879,16 @@ impl std::fmt::Debug for ExecutionCoordinator {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use hyperscale_test_helpers::{
+        certify as test_certify, make_live_block as helpers_make_live_block,
+    };
     use hyperscale_types::test_utils::test_transaction;
     use hyperscale_types::{
-        Bls12381G1PrivateKey, GlobalReceiptHash, ValidatorInfo, ValidatorSet, generate_bls_keypair,
+        Bls12381G1PrivateKey, ConsensusReceipt, ExecutionOutcome, GlobalReceiptHash, Hash,
+        SignerBitfield, ValidatorInfo, ValidatorSet, generate_bls_keypair, zero_bls_signature,
     };
+
+    use super::*;
 
     fn make_test_topology() -> TopologySnapshot {
         let keys: Vec<Bls12381G1PrivateKey> = (0..4).map(|_| generate_bls_keypair()).collect();
@@ -1918,7 +1918,7 @@ mod tests {
         proposer: ValidatorId,
         transactions: Vec<Arc<RoutableTransaction>>,
     ) -> Block {
-        hyperscale_test_helpers::make_live_block(
+        helpers_make_live_block(
             topology.local_shard(),
             height,
             timestamp_ms,
@@ -1928,8 +1928,8 @@ mod tests {
         )
     }
 
-    fn certify(block: Block) -> hyperscale_types::CertifiedBlock {
-        hyperscale_test_helpers::certify(block, 0)
+    fn certify(block: Block) -> CertifiedBlock {
+        test_certify(block, 0)
     }
 
     #[test]
@@ -2006,7 +2006,7 @@ mod tests {
             .map(|(wid, _)| wid.clone())
             .unwrap();
 
-        let leader = hyperscale_types::wave_leader(&wave_id, &committee);
+        let leader = wave_leader(&wave_id, &committee);
 
         // Leader should have a VoteTracker.
         let topo_leader = make_topology_for(leader.0);
@@ -2065,7 +2065,7 @@ mod tests {
             .next()
             .map(|(wid, _)| wid.clone())
             .unwrap();
-        let leader = hyperscale_types::wave_leader(&wave_id, &committee);
+        let leader = wave_leader(&wave_id, &committee);
 
         // If we're the leader, this test doesn't apply — find a non-leader topology.
         let non_leader_id = committee.iter().find(|&&v| v != leader).unwrap();
@@ -2094,7 +2094,7 @@ mod tests {
             tx_count: 1,
             tx_outcomes: vec![],
             validator: leader, // vote from the original leader
-            signature: hyperscale_types::zero_bls_signature(),
+            signature: zero_bls_signature(),
         };
 
         state_non.on_execution_vote(&topo_non, fake_vote);
@@ -2143,8 +2143,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(wid, &wave_id);
-                let expected_leader =
-                    hyperscale_types::wave_leader_at(&wave_id, Attempt(1), &committee);
+                let expected_leader = wave_leader_at(&wave_id, Attempt(1), &committee);
                 assert_eq!(*leader, expected_leader, "Should rotate to attempt 1");
             }
             other => panic!(
@@ -2160,7 +2159,7 @@ mod tests {
         let next = state.check_vote_retry_timeouts(&topo);
         assert_eq!(next.len(), 1);
         if let Action::SignAndSendExecutionVote { leader, .. } = &next[0] {
-            let expected = hyperscale_types::wave_leader_at(&wave_id, Attempt(2), &committee);
+            let expected = wave_leader_at(&wave_id, Attempt(2), &committee);
             assert_eq!(*leader, expected, "second fire rotates to attempt 2");
         } else {
             panic!("expected SignAndSendExecutionVote");
@@ -2194,8 +2193,8 @@ mod tests {
             WeightedTimestamp::ZERO,
             GlobalReceiptRoot::ZERO,
             vec![],
-            hyperscale_types::zero_bls_signature(),
-            hyperscale_types::SignerBitfield::new(4),
+            zero_bls_signature(),
+            SignerBitfield::new(4),
         );
         state.on_certificate_verified(&topo, Arc::new(cert), true);
 
@@ -2225,8 +2224,8 @@ mod tests {
             WeightedTimestamp::ZERO,
             GlobalReceiptRoot::ZERO,
             vec![],
-            hyperscale_types::zero_bls_signature(),
-            hyperscale_types::SignerBitfield::new(4),
+            zero_bls_signature(),
+            SignerBitfield::new(4),
         );
 
         let actions = state.on_certificate_aggregated(&topo, &wave_id, &Arc::new(cert));
@@ -2279,12 +2278,12 @@ mod tests {
             wave_id,
             WeightedTimestamp::ZERO,
             GlobalReceiptRoot::ZERO,
-            vec![hyperscale_types::TxOutcome {
+            vec![TxOutcome {
                 tx_hash: TxHash::from_raw(Hash::from_bytes(b"untracked_tx")),
                 outcome: ExecutionOutcome::Aborted,
             }],
-            hyperscale_types::zero_bls_signature(),
-            hyperscale_types::SignerBitfield::new(4),
+            zero_bls_signature(),
+            SignerBitfield::new(4),
         );
 
         let actions = state.on_wave_certificate(&topo, cert);
@@ -2326,8 +2325,9 @@ mod tests {
     /// continuing to fire.
     #[test]
     fn test_expected_exec_cert_retained_while_tracker_pending() {
-        use hyperscale_types::test_utils::test_transaction;
         use std::collections::BTreeSet;
+
+        use hyperscale_types::test_utils::test_transaction;
 
         let topo = make_two_shard_topology();
         let mut state = make_test_state();
@@ -2434,9 +2434,9 @@ mod tests {
 
         // Record per-tx execution results + receipts.
         let tx_hashes: Vec<TxHash> = wave.tx_hashes().to_vec();
-        let tx_outcomes: Vec<hyperscale_types::TxOutcome> = tx_hashes
+        let tx_outcomes: Vec<TxOutcome> = tx_hashes
             .iter()
-            .map(|h| hyperscale_types::TxOutcome {
+            .map(|h| TxOutcome {
                 tx_hash: *h,
                 outcome: ExecutionOutcome::Succeeded {
                     receipt_hash: GlobalReceiptHash::ZERO,
@@ -2450,9 +2450,9 @@ mod tests {
                     receipt_hash: GlobalReceiptHash::ZERO,
                 },
             );
-            wave.record_receipt(hyperscale_types::StoredReceipt {
+            wave.record_receipt(StoredReceipt {
                 tx_hash: *h,
-                consensus: Arc::new(hyperscale_types::ConsensusReceipt::Succeeded {
+                consensus: Arc::new(ConsensusReceipt::Succeeded {
                     receipt_hash: GlobalReceiptHash::ZERO,
                     #[allow(clippy::default_trait_access)]
                     database_updates: Default::default(),
@@ -2468,8 +2468,8 @@ mod tests {
             WeightedTimestamp(1_000),
             GlobalReceiptRoot::from_raw(Hash::from_bytes(b"global_receipt_root")),
             tx_outcomes,
-            hyperscale_types::zero_bls_signature(),
-            hyperscale_types::SignerBitfield::new(4),
+            zero_bls_signature(),
+            SignerBitfield::new(4),
         ));
         wave.add_execution_certificate(local_ec);
         assert!(

@@ -1,14 +1,17 @@
 //! Domain-specific identifier types.
 
+use std::fmt::{self, Display};
+use std::ops::{Add, AddAssign, Sub};
+
+use hex::encode as hex_encode;
 use sbor::prelude::*;
-use std::fmt;
 
 /// Validator identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, BasicSbor)]
 #[sbor(transparent)]
 pub struct ValidatorId(pub u64);
 
-impl fmt::Display for ValidatorId {
+impl Display for ValidatorId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Validator({})", self.0)
     }
@@ -19,7 +22,7 @@ impl fmt::Display for ValidatorId {
 #[sbor(transparent)]
 pub struct ShardGroupId(pub u64);
 
-impl fmt::Display for ShardGroupId {
+impl Display for ShardGroupId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Shard({})", self.0)
     }
@@ -63,34 +66,34 @@ impl BlockHeight {
     }
 }
 
-impl std::ops::Add<u64> for BlockHeight {
+impl Add<u64> for BlockHeight {
     type Output = Self;
     fn add(self, rhs: u64) -> Self {
         Self(self.0 + rhs)
     }
 }
 
-impl std::ops::Sub<u64> for BlockHeight {
+impl Sub<u64> for BlockHeight {
     type Output = Self;
     fn sub(self, rhs: u64) -> Self {
         Self(self.0 - rhs)
     }
 }
 
-impl std::ops::Sub<Self> for BlockHeight {
+impl Sub<Self> for BlockHeight {
     type Output = u64;
     fn sub(self, rhs: Self) -> u64 {
         self.0 - rhs.0
     }
 }
 
-impl std::ops::AddAssign<u64> for BlockHeight {
+impl AddAssign<u64> for BlockHeight {
     fn add_assign(&mut self, rhs: u64) {
         self.0 += rhs;
     }
 }
 
-impl fmt::Display for BlockHeight {
+impl Display for BlockHeight {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Block({})", self.0)
     }
@@ -124,34 +127,34 @@ impl Round {
     }
 }
 
-impl std::ops::Add<u64> for Round {
+impl Add<u64> for Round {
     type Output = Self;
     fn add(self, rhs: u64) -> Self {
         Self(self.0 + rhs)
     }
 }
 
-impl std::ops::Sub<u64> for Round {
+impl Sub<u64> for Round {
     type Output = Self;
     fn sub(self, rhs: u64) -> Self {
         Self(self.0 - rhs)
     }
 }
 
-impl std::ops::Sub<Self> for Round {
+impl Sub<Self> for Round {
     type Output = u64;
     fn sub(self, rhs: Self) -> u64 {
         self.0 - rhs.0
     }
 }
 
-impl std::ops::AddAssign<u64> for Round {
+impl AddAssign<u64> for Round {
     fn add_assign(&mut self, rhs: u64) {
         self.0 += rhs;
     }
 }
 
-impl fmt::Display for Round {
+impl Display for Round {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Round({})", self.0)
     }
@@ -179,27 +182,27 @@ impl Attempt {
     }
 }
 
-impl std::ops::Add<u32> for Attempt {
+impl Add<u32> for Attempt {
     type Output = Self;
     fn add(self, rhs: u32) -> Self {
         Self(self.0 + rhs)
     }
 }
 
-impl std::ops::Sub<u32> for Attempt {
+impl Sub<u32> for Attempt {
     type Output = Self;
     fn sub(self, rhs: u32) -> Self {
         Self(self.0 - rhs)
     }
 }
 
-impl std::ops::AddAssign<u32> for Attempt {
+impl AddAssign<u32> for Attempt {
     fn add_assign(&mut self, rhs: u32) {
         self.0 += rhs;
     }
 }
 
-impl fmt::Display for Attempt {
+impl Display for Attempt {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Attempt({})", self.0)
     }
@@ -239,7 +242,7 @@ impl VotePower {
     }
 }
 
-impl fmt::Display for VotePower {
+impl Display for VotePower {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
@@ -273,9 +276,9 @@ impl NodeId {
     }
 }
 
-impl fmt::Display for NodeId {
+impl Display for NodeId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "NodeId({}..)", &hex::encode(&self.0[..4]))
+        write!(f, "NodeId({}..)", &hex_encode(&self.0[..4]))
     }
 }
 
@@ -292,7 +295,7 @@ impl PartitionNumber {
     }
 }
 
-impl fmt::Display for PartitionNumber {
+impl Display for PartitionNumber {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Partition({})", self.0)
     }

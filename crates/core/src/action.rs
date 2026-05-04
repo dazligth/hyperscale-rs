@@ -1,6 +1,10 @@
 //! Action types for the deterministic state machine.
 
-use crate::{FetchAbandon, FetchRequest, ProtocolEvent, TimerId};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+use hyperscale_dispatch::DispatchPool;
 use hyperscale_types::{
     Block, BlockHash, BlockHeader, BlockHeight, BlockManifest, BlockVote, Bls12381G1PublicKey,
     CertificateRoot, CommittedBlockHeader, ExecutionCertificate, ExecutionVote, FinalizedWave,
@@ -9,9 +13,8 @@ use hyperscale_types::{
     StateProvision, StateRoot, TopologySnapshot, TransactionRoot, TransactionStatus, TxHash,
     TxOutcome, ValidatorId, WaveId, WeightedTimestamp,
 };
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
+
+use crate::{CommitSource, FetchAbandon, FetchRequest, ProtocolEvent, TimerId};
 
 /// A request to execute a cross-shard transaction with its provisions.
 #[derive(Debug, Clone)]
@@ -516,7 +519,7 @@ pub enum Action {
         /// The QC that certified this block.
         qc: QuorumCertificate,
         /// How this node learned the certifying QC (aggregator vs header).
-        source: crate::CommitSource,
+        source: CommitSource,
     },
 
     /// Commit a block trusted via QC only — no cached `PreparedCommit` exists
@@ -537,7 +540,7 @@ pub enum Action {
         /// Parent block's height — JMT parent version.
         parent_block_height: BlockHeight,
         /// How this node learned the certifying QC (aggregator vs header).
-        source: crate::CommitSource,
+        source: CommitSource,
     },
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -665,7 +668,7 @@ impl Action {
     /// delegated (timers, network broadcasts, persist — handled inline by
     /// the runner).
     #[must_use]
-    pub const fn dispatch_pool(&self) -> Option<hyperscale_dispatch::DispatchPool> {
+    pub const fn dispatch_pool(&self) -> Option<DispatchPool> {
         use hyperscale_dispatch::DispatchPool;
         match self {
             // Consensus-critical crypto + state root computation + sign-and-broadcast.

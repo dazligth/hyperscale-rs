@@ -9,13 +9,12 @@
 //! Own votes are recorded as already-verified via
 //! [`VoteSet::add_verified_vote`] since we just signed them.
 
+#[cfg(test)]
+use hyperscale_types::QuorumCertificate;
 use hyperscale_types::{
     BlockHash, BlockHeader, BlockHeight, BlockVote, Bls12381G1PublicKey, Round, VotePower,
     WeightedTimestamp,
 };
-
-#[cfg(test)]
-use hyperscale_types::QuorumCertificate;
 
 /// Votes for a specific block.
 ///
@@ -335,6 +334,7 @@ impl VoteSet {
     ///
     /// Returns error if called before reaching quorum or with no votes.
     #[cfg(test)]
+    #[allow(clippy::absolute_paths)] // test-only fn; avoids cfg(test) use at module top
     pub fn build_qc(
         &mut self,
         block_hash: BlockHash,
@@ -410,12 +410,13 @@ impl VoteSet {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use hyperscale_types::{
-        Bls12381G1PrivateKey, CertificateRoot, Hash, LocalReceiptRoot, ProvisionsRoot,
-        QuorumCertificate, ShardGroupId, StateRoot, TransactionRoot, ValidatorId,
+        Bls12381G1PrivateKey, CertificateRoot, Hash, LocalReceiptRoot, ProposerTimestamp,
+        ProvisionsRoot, QuorumCertificate, ShardGroupId, StateRoot, TransactionRoot, ValidatorId,
         generate_bls_keypair,
     };
+
+    use super::*;
 
     fn test_shard_group() -> ShardGroupId {
         ShardGroupId(0)
@@ -428,7 +429,7 @@ mod tests {
             parent_block_hash: BlockHash::from_raw(Hash::from_bytes(b"parent")),
             parent_qc: QuorumCertificate::genesis(),
             proposer: ValidatorId(0),
-            timestamp: hyperscale_types::ProposerTimestamp(1_234_567_890),
+            timestamp: ProposerTimestamp(1_234_567_890),
             round: Round::INITIAL,
             is_fallback: false,
             state_root: StateRoot::ZERO,
@@ -455,7 +456,7 @@ mod tests {
             Round::INITIAL,
             ValidatorId(voter_index as u64),
             &keys[voter_index],
-            hyperscale_types::ProposerTimestamp(1_000_000_000_000),
+            ProposerTimestamp(1_000_000_000_000),
         )
     }
 

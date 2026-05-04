@@ -12,17 +12,20 @@
 //! backoff. The next `send()` call spawns a new actor after the backoff
 //! period elapses.
 
+use std::sync::Arc;
+use std::time::Instant;
+
+use dashmap::DashMap;
+use futures::AsyncWriteExt;
+use hyperscale_metrics::record_libp2p_bandwidth;
+use libp2p::PeerId;
+use tokio::runtime::Handle;
+use tokio::sync::mpsc;
+use tracing::warn;
+
 use crate::adapter::Libp2pAdapter;
 use crate::peer_backoff::{self, BackoffState};
 use crate::stream_framing;
-use dashmap::DashMap;
-use futures::AsyncWriteExt;
-use hyperscale_metrics as metrics;
-use libp2p::PeerId;
-use std::sync::Arc;
-use std::time::Instant;
-use tokio::sync::mpsc;
-use tracing::warn;
 
 /// Channel capacity per peer. Bounds memory usage and provides backpressure.
 /// At ~1KB per notification, 256 frames ≈ 256KB buffer per peer.
@@ -56,11 +59,11 @@ pub struct NotifyStreamPool {
     /// Backoff tracking for reconnection after failures.
     backoff: Arc<DashMap<PeerId, BackoffState>>,
     /// Tokio runtime handle for spawning actor tasks.
-    tokio_handle: tokio::runtime::Handle,
+    tokio_handle: Handle,
 }
 
 impl NotifyStreamPool {
-    pub fn new(adapter: Arc<Libp2pAdapter>, tokio_handle: tokio::runtime::Handle) -> Self {
+    pub fn new(adapter: Arc<Libp2pAdapter>, tokio_handle: Handle) -> Self {
         Self {
             adapter,
             peers: Arc::new(DashMap::new()),
@@ -150,7 +153,7 @@ impl NotifyStreamPool {
             .await
             {
                 Ok(wire_bytes) => {
-                    metrics::record_libp2p_bandwidth(0, wire_bytes as u64);
+                    record_libp2p_bandwidth(0, wire_bytes as u64);
                 }
                 Err(e) => {
                     warn!(

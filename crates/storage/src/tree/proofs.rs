@@ -5,8 +5,8 @@
 //! format is owned by the JMT crate; this module only wraps it in the
 //! hyperscale type system.
 
-use hyperscale_jmt::{self as jmt, Blake3Hasher, MultiProof, Tree};
-use hyperscale_types::{BlockHeight, MerkleInclusionProof, StateRoot};
+use hyperscale_jmt::{Blake3Hasher, Key, MultiProof, NodeKey, Tree, TreeReader, ValueHash};
+use hyperscale_types::{BlockHeight, MerkleInclusionProof, StateEntry, StateRoot};
 
 use super::{Jmt, hash_storage_key, hash_value};
 
@@ -17,16 +17,16 @@ use super::{Jmt, hash_storage_key, hash_value};
 /// Generate a batched merkle multiproof for a set of storage keys against
 /// a committed root.
 ///
-/// Takes any `jmt::TreeReader` backed by the caller's storage. Returns
+/// Takes any `TreeReader` backed by the caller's storage. Returns
 /// `None` if the root at `block_height` is not in the store.
-pub fn generate_proof<S: jmt::TreeReader>(
+pub fn generate_proof<S: TreeReader>(
     store: &S,
     storage_keys: &[Vec<u8>],
     block_height: BlockHeight,
 ) -> Option<MerkleInclusionProof> {
-    let root_key = jmt::NodeKey::root(block_height.0);
+    let root_key = NodeKey::root(block_height.0);
 
-    let jmt_keys: Vec<jmt::Key> = storage_keys.iter().map(|sk| hash_storage_key(sk)).collect();
+    let jmt_keys: Vec<Key> = storage_keys.iter().map(|sk| hash_storage_key(sk)).collect();
 
     Jmt::prove(store, &root_key, &jmt_keys)
         .ok()
@@ -39,9 +39,9 @@ pub fn generate_proof<S: jmt::TreeReader>(
 /// (with `hash_value(value)` for `Set`) or non-inclusion (for `None`).
 pub fn verify_proof(
     proof: &MerkleInclusionProof,
-    entries: &[hyperscale_types::StateEntry],
+    entries: &[StateEntry],
     state_root: StateRoot,
-    storage_key_for_entry: impl Fn(&hyperscale_types::StateEntry) -> &[u8],
+    storage_key_for_entry: impl Fn(&StateEntry) -> &[u8],
 ) -> bool {
     if proof.as_bytes().is_empty() {
         return entries.is_empty();
@@ -51,7 +51,7 @@ pub fn verify_proof(
         return false;
     };
 
-    let expected: Vec<(jmt::Key, Option<jmt::ValueHash>)> = entries
+    let expected: Vec<(Key, Option<ValueHash>)> = entries
         .iter()
         .map(|e| {
             let key = hash_storage_key(storage_key_for_entry(e));

@@ -16,9 +16,10 @@
 //! provisions, expectation cleared on verification, or orphan cutoff in
 //! `on_block_committed`.
 
-use hyperscale_types::{BlockHeight, CommittedBlockHeader, ShardGroupId};
 use std::collections::HashMap;
 use std::sync::Arc;
+
+use hyperscale_types::{BlockHeight, CommittedBlockHeader, ShardGroupId};
 
 type Key = (ShardGroupId, BlockHeight);
 
@@ -57,12 +58,14 @@ impl VerifiedHeaderBuffer {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use hyperscale_types::{
-        BlockHash, BlockHeader, CertificateRoot, LocalReceiptRoot, ProvisionsRoot,
-        QuorumCertificate, Round, StateRoot, TransactionRoot, ValidatorId,
-    };
     use std::collections::BTreeMap;
+
+    use hyperscale_types::{
+        BlockHash, BlockHeader, CertificateRoot, LocalReceiptRoot, ProposerTimestamp,
+        ProvisionsRoot, QuorumCertificate, Round, StateRoot, TransactionRoot, ValidatorId,
+    };
+
+    use super::*;
 
     fn make_header(shard: ShardGroupId, height: BlockHeight) -> Arc<CommittedBlockHeader> {
         let header = BlockHeader {
@@ -71,7 +74,7 @@ mod tests {
             parent_block_hash: BlockHash::ZERO,
             parent_qc: QuorumCertificate::genesis(),
             proposer: ValidatorId(0),
-            timestamp: hyperscale_types::ProposerTimestamp(0),
+            timestamp: ProposerTimestamp(0),
             round: Round::INITIAL,
             is_fallback: false,
             state_root: StateRoot::ZERO,

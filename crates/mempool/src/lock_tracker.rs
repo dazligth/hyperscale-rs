@@ -11,8 +11,9 @@
 //!   `Pending → Committed` and `Committed → Completed` transitions. Read by
 //!   backpressure checks.
 
-use hyperscale_types::NodeId;
 use std::collections::HashSet;
+
+use hyperscale_types::NodeId;
 
 pub struct LockTracker {
     locked_nodes: HashSet<NodeId>,
@@ -71,8 +72,9 @@ impl LockTracker {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use hyperscale_types::test_utils::test_node;
+
+    use super::*;
 
     #[test]
     fn fresh_tracker_is_empty() {

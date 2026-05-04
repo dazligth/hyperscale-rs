@@ -4,10 +4,11 @@
 //! so any regression in the documented API is caught here rather than by
 //! inline tests that can reach into private fields.
 
+use std::time::Duration;
+
 use hyperscale_bft::{BftConfig, BftCoordinator, BftMemoryStats, BftStats, RecoveredState};
 use hyperscale_test_helpers::TestCommittee;
 use hyperscale_types::{BlockHeight, LocalTimestamp, Round, TopologySnapshot};
-use std::time::Duration;
 
 fn fresh_coordinator(config: BftConfig) -> BftCoordinator {
     BftCoordinator::new(0, config, RecoveredState::default())

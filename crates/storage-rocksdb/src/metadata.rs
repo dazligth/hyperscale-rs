@@ -4,13 +4,13 @@
 //! the key bytes, value type, and codec are declared once in `typed_cf.rs`.
 //! These thin wrappers provide domain-specific names and handle default values.
 
+use hyperscale_types::{BlockHeight, Hash, QuorumCertificate, StateRoot};
+use rocksdb::WriteBatch;
+
 use crate::typed_cf::{
     self, CommittedHashEntry, CommittedHeightEntry, CommittedQcEntry, JmtMetadataEntry,
     ReadableStore,
 };
-
-use hyperscale_types::{BlockHeight, Hash, QuorumCertificate, StateRoot};
-use rocksdb::WriteBatch;
 
 // ─── Chain metadata ──────────────────────────────────────────────────────────
 
