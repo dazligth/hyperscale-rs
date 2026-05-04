@@ -320,10 +320,11 @@ impl FetchBinding for ExecCertBinding {
                                 .filter(|id| !delivered.contains(id))
                                 .collect();
                             let had_misses = !missing.is_empty();
+                            // Refcount is 1 right after decode, so each unwrap moves.
+                            let certificates =
+                                certs.into_iter().map(Arc::unwrap_or_clone).collect();
                             let _ = es.send(NodeInput::Protocol(Box::new(
-                                ProtocolEvent::ExecutionCertificatesReceived {
-                                    certificates: certs,
-                                },
+                                ProtocolEvent::ExecutionCertificatesReceived { certificates },
                             )));
                             if had_misses {
                                 let _ = es.send(NodeInput::ExecCertFetchFailed { hashes: missing });

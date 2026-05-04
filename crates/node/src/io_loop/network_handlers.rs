@@ -277,10 +277,10 @@ where
                 move |req: hyperscale_messages::request::GetExecutionCertsRequest| {
                     use hyperscale_messages::response::GetExecutionCertsResponse;
 
-                    let mut certs = Vec::new();
+                    let mut certs: Vec<Arc<hyperscale_types::ExecutionCertificate>> = Vec::new();
                     for wave_id in &req.wave_ids {
                         if let Some(cert) = exec_cert_store.get(wave_id) {
-                            certs.push(cert.as_ref().clone());
+                            certs.push(cert);
                         }
                     }
 
@@ -294,7 +294,7 @@ where
                         let stored = storage.get_execution_certificates_by_height(block_height);
                         for cert in stored {
                             if req.wave_ids.contains(&cert.wave_id) {
-                                certs.push(cert);
+                                certs.push(Arc::new(cert));
                             }
                         }
                     }

@@ -2,6 +2,7 @@
 
 use hyperscale_types::{ExecutionCertificate, MessageClass, NetworkMessage};
 use sbor::prelude::BasicSbor;
+use std::sync::Arc;
 
 /// Response to an execution certificate fetch request.
 ///
@@ -15,7 +16,10 @@ pub struct GetExecutionCertsResponse {
     /// - `Some(certs)` — successfully found certificates (may be empty if
     ///   no matching waves were cached).
     /// - `None` — the source shard cannot serve this request.
-    pub certificates: Option<Vec<ExecutionCertificate>>,
+    ///
+    /// `Arc`-wrapped because the server-side `ExecCertStore` holds each
+    /// cert behind `Arc` already.
+    pub certificates: Option<Vec<Arc<ExecutionCertificate>>>,
 }
 
 impl NetworkMessage for GetExecutionCertsResponse {
