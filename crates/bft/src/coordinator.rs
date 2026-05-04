@@ -3621,6 +3621,17 @@ mod tests {
         (state, topology, keys)
     }
 
+    /// The vote-lock invariant: after `try_vote_on_block` returns a non-empty
+    /// action set, `voted_heights[height]` is populated.
+    fn voted_block_at(state: &BftCoordinator, height: BlockHeight) -> BlockHash {
+        state
+            .votes
+            .voted_heights
+            .get(&height)
+            .expect("voted_heights must contain height after try_vote_on_block")
+            .0
+    }
+
     #[test]
     fn test_vote_locking_prevents_voting_for_different_block_at_same_height() {
         let (mut state, topology) = make_multi_validator_state();
@@ -3643,19 +3654,13 @@ mod tests {
 
         let actions = state.try_vote_on_block(&topology, first_hash, height, round_0);
         assert!(!actions.is_empty());
-        assert_eq!(
-            state.votes.voted_heights.get(&height).unwrap().0,
-            first_hash
-        );
+        assert_eq!(voted_block_at(&state, height), first_hash);
 
         // Vote lock prevents voting for a different block at the same height,
         // even in a later round.
         let actions = state.try_vote_on_block(&topology, second_hash, height, round_1);
         assert!(actions.is_empty());
-        assert_eq!(
-            state.votes.voted_heights.get(&height).unwrap().0,
-            first_hash
-        );
+        assert_eq!(voted_block_at(&state, height), first_hash);
     }
 
     #[test]
@@ -3672,10 +3677,7 @@ mod tests {
 
         let actions = state.try_vote_on_block(&topology, block_hash, height, Round(1));
         assert!(actions.is_empty());
-        assert_eq!(
-            state.votes.voted_heights.get(&height).unwrap().0,
-            block_hash
-        );
+        assert_eq!(voted_block_at(&state, height), block_hash);
     }
 
     #[test]

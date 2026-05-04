@@ -430,8 +430,8 @@ impl ExecutionCoordinator {
     ///
     /// # Panics
     ///
-    /// Panics if a wave reported in the votable set is missing from the
-    /// registry — the filter and lookup race-free, so this is unreachable.
+    /// Panics if `waves_iter()` and `get_wave_mut()` disagree about wave
+    /// presence — unreachable, no concurrent mutation between them.
     pub fn scan_complete_waves(&mut self) -> Vec<CompletionData> {
         let committed_ts = self.committed_ts;
 
@@ -448,7 +448,10 @@ impl ExecutionCoordinator {
 
         let mut completions = Vec::new();
         for wave_id in votable_wave_ids {
-            let wave = self.waves.get_wave_mut(&wave_id).unwrap();
+            let wave = self
+                .waves
+                .get_wave_mut(&wave_id)
+                .expect("wave_id was just produced by waves_iter() in this method");
             let block_hash = wave.block_hash();
             let block_height = wave.block_height();
             let Some((vote_anchor_ts, global_receipt_root, tx_outcomes)) =
@@ -716,7 +719,11 @@ impl ExecutionCoordinator {
             // Wave exists but no VoteTracker and no EC yet. This validator
             // was targeted as a fallback leader (rotated attempt). Create tracker.
             let quorum = topology.local_quorum_threshold();
-            let block_hash = self.waves.get_wave(&wave_id).unwrap().block_hash();
+            let block_hash = self
+                .waves
+                .get_wave(&wave_id)
+                .expect("contains_wave returned true two lines above")
+                .block_hash();
             tracing::info!(
                 wave = %wave_id,
                 "Creating fallback VoteTracker — receiving votes as rotated leader"
@@ -760,7 +767,10 @@ impl ExecutionCoordinator {
 
         let voting_power = topology.voting_power(validator_id).unwrap_or(0);
 
-        let tracker = self.waves.get_tracker_mut(&wave_id).unwrap();
+        let tracker = self
+            .waves
+            .get_tracker_mut(&wave_id)
+            .expect("tracker was inserted above when contains_tracker returned false");
 
         // buffer_unverified_vote handles dedup per (validator, vote_anchor_ts).
         // Same validator can vote at multiple heights (round voting).
