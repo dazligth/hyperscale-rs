@@ -29,12 +29,12 @@ use crate::wave_state::WaveState;
 pub fn aggregate_execution_certificate(
     wave_id: &WaveId,
     global_receipt_root: GlobalReceiptRoot,
-    votes: &[ExecutionVote],
+    mut votes: Vec<ExecutionVote>,
     committee: &[ValidatorId],
 ) -> ExecutionCertificate {
     let tx_outcomes = votes
-        .first()
-        .map(|v| v.tx_outcomes.clone())
+        .first_mut()
+        .map(|v| std::mem::take(&mut v.tx_outcomes))
         .unwrap_or_default();
     // Deduplicate votes by validator
     let mut seen_validators = HashSet::new();
@@ -265,7 +265,7 @@ where
             committee,
         } => {
             let certificate =
-                aggregate_execution_certificate(&wave_id, global_receipt_root, &votes, &committee);
+                aggregate_execution_certificate(&wave_id, global_receipt_root, votes, &committee);
             (ctx.notify)(NodeInput::Protocol(Box::new(
                 ProtocolEvent::ExecutionCertificateAggregated {
                     wave_id,
@@ -555,7 +555,7 @@ mod tests {
             ),
         ];
 
-        let ec = aggregate_execution_certificate(&wid, root, &votes, &committee);
+        let ec = aggregate_execution_certificate(&wid, root, votes, &committee);
         assert!(ec.signers.is_set(1));
         assert!(ec.signers.is_set(3));
         assert!(!ec.signers.is_set(0));
@@ -591,7 +591,7 @@ mod tests {
             ),
         ];
 
-        let ec = aggregate_execution_certificate(&wid, root, &votes, &committee);
+        let ec = aggregate_execution_certificate(&wid, root, votes, &committee);
         assert!(ec.signers.is_set(0));
         assert!(!ec.signers.is_set(1));
         assert_eq!(ec.signers.count_ones(), 1, "duplicate votes must collapse");
@@ -600,8 +600,12 @@ mod tests {
     #[test]
     fn aggregate_empty_votes_yields_zero_signature() {
         let committee = vec![ValidatorId(0)];
-        let ec =
-            aggregate_execution_certificate(&wave_id(1), GlobalReceiptRoot::ZERO, &[], &committee);
+        let ec = aggregate_execution_certificate(
+            &wave_id(1),
+            GlobalReceiptRoot::ZERO,
+            vec![],
+            &committee,
+        );
         assert_eq!(ec.aggregated_signature, zero_bls_signature());
         assert_eq!(ec.signers.count_ones(), 0);
         assert!(ec.tx_outcomes.is_empty());
@@ -737,7 +741,7 @@ mod tests {
                 )
             })
             .collect();
-        let ec = aggregate_execution_certificate(&wid, root, &votes, &committee);
+        let ec = aggregate_execution_certificate(&wid, root, votes, &committee);
 
         let pubs: Vec<_> = sks.iter().map(Bls12381G1PrivateKey::public_key).collect();
         assert!(verify_execution_certificate_signature(&ec, &pubs));
@@ -770,7 +774,7 @@ mod tests {
                 outcomes,
             ),
         ];
-        let ec = aggregate_execution_certificate(&wid, root, &votes, &committee);
+        let ec = aggregate_execution_certificate(&wid, root, votes, &committee);
 
         // Provide the wrong public keys — signature must not verify.
         let wrong_pubs = vec![keypair(42).public_key(), keypair(43).public_key()];
