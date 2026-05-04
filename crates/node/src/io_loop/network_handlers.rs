@@ -236,11 +236,11 @@ where
                 move |req: hyperscale_messages::request::GetFinalizedWavesRequest| {
                     use hyperscale_messages::response::GetFinalizedWavesResponse;
 
-                    let mut waves: Vec<hyperscale_types::FinalizedWave> = Vec::new();
+                    let mut waves: Vec<Arc<hyperscale_types::FinalizedWave>> = Vec::new();
                     let mut missing: Vec<hyperscale_types::WaveId> = Vec::new();
                     for id in &req.wave_ids {
                         if let Some(fw) = fw_cache.get(id) {
-                            waves.push((*fw).clone());
+                            waves.push(fw);
                         } else {
                             missing.push(id.clone());
                         }
@@ -259,7 +259,7 @@ where
                                     fw_storage.get_consensus_receipt(h)
                                 })
                             {
-                                waves.push(fw);
+                                waves.push(Arc::new(fw));
                             }
                         }
                     }

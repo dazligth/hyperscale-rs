@@ -1,24 +1,25 @@
 //! Finalized wave fetch response (intra-shard DA).
 
 use hyperscale_types::{FinalizedWave, MessageClass, NetworkMessage};
+use std::sync::Arc;
 
 /// Response to a finalized wave fetch request.
 ///
 /// Contains the requested finalized waves that the responder has.
 /// Missing waves are simply not included in the response.
-///
-/// `FinalizedWave` has manual SBOR impl (Arc fields) so it can be
-/// encoded/decoded directly without a wire wrapper.
 #[derive(Debug, Clone)]
 pub struct GetFinalizedWavesResponse {
     /// The requested finalized waves that were found.
-    pub waves: Vec<FinalizedWave>,
+    ///
+    /// `Arc`-wrapped because both the server-side cache and every
+    /// downstream consumer hold `FinalizedWave` behind `Arc` already.
+    pub waves: Vec<Arc<FinalizedWave>>,
 }
 
 impl GetFinalizedWavesResponse {
     /// Build a response carrying the supplied finalized waves.
     #[must_use]
-    pub const fn new(waves: Vec<FinalizedWave>) -> Self {
+    pub const fn new(waves: Vec<Arc<FinalizedWave>>) -> Self {
         Self { waves }
     }
 
@@ -70,7 +71,7 @@ impl<D: sbor::Decoder<sbor::NoCustomValueKind>> sbor::Decode<sbor::NoCustomValue
                 actual: length,
             });
         }
-        let waves: Vec<FinalizedWave> = decoder.decode()?;
+        let waves: Vec<Arc<FinalizedWave>> = decoder.decode()?;
         Ok(Self { waves })
     }
 }

@@ -255,9 +255,8 @@ impl FetchBinding for FinalizedWaveBinding {
                         .into_iter()
                         .filter(|id| !delivered.contains(id))
                         .collect();
-                    let waves = resp.waves.into_iter().map(Arc::new).collect();
                     let _ = es.send(NodeInput::Protocol(Box::new(
-                        ProtocolEvent::FinalizedWavesReceived { waves },
+                        ProtocolEvent::FinalizedWavesReceived { waves: resp.waves },
                     )));
                     if !missing_ids.is_empty() {
                         let _ = es.send(NodeInput::FinalizedWavesFetchFailed { ids: missing_ids });
@@ -439,7 +438,7 @@ impl FetchBinding for ProvisionBinding {
                     return ResponseVerdict::Reject;
                 }
                 // Refcount is 1 right after decode, so this moves rather than clones.
-                let provisions = std::sync::Arc::unwrap_or_clone(provisions);
+                let provisions = Arc::unwrap_or_clone(provisions);
                 let _ = es.send(NodeInput::Protocol(Box::new(
                     ProtocolEvent::ProvisionsReceived { provisions },
                 )));
