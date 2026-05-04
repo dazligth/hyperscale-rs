@@ -681,7 +681,7 @@ impl ProductionRunner {
         // Flush any batches from the genesis commit step.
         io_loop.flush_all_batches();
 
-        // Genesis path: state machine is now in sync with the JMT root.
+        // Genesis path: state machine is in sync with the JMT root.
         io_loop.register_inbound_handlers();
 
         timer_ops

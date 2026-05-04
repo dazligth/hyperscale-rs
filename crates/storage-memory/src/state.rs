@@ -71,15 +71,11 @@ impl SharedState {
             self.tree_store
                 .insert(jmt_key.clone(), Arc::clone(jmt_node));
         }
-        // NOTE: stale JMT nodes are NOT deleted here. Historical JMT nodes
-        // must be retained so that provision fetch (generate_merkle_proofs) can
-        // read the tree at past block heights. In production, RocksDB GC handles
-        // pruning after `jmt_history_length` blocks (default 256). In simulation,
-        // we retain all nodes (tests are short-lived).
-        //
-        // Previously this deleted stale nodes immediately, causing a race: the
-        // delegated FetchAndBroadcastProvisions action would run after the next
-        // block committed, finding the proof-generation root already pruned.
+        // Stale JMT nodes are NOT deleted here. Historical JMT nodes must be
+        // retained so that provision fetch (generate_merkle_proofs) can read
+        // the tree at past block heights. In production, RocksDB GC handles
+        // pruning after `jmt_history_length` blocks (default 256). In
+        // simulation, we retain all nodes (tests are short-lived).
         for a in snapshot.leaf_substate_associations {
             self.associations.insert(a.tree_node_key, a.substate_value);
         }

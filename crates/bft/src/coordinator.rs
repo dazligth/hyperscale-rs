@@ -29,9 +29,9 @@ pub struct BftStats {
     /// still see its `view` climb to thousands while peers churn. Watch
     /// both to see cluster-wide view-change activity.
     pub view_syncs: u64,
-    /// Current round within the current height.
+    /// Round within the current height; resets to 0 on commit, increments on view change.
     pub current_round: u64,
-    /// Current committed height.
+    /// Highest height committed to local storage.
     pub committed_height: BlockHeight,
 }
 
@@ -104,7 +104,7 @@ use crate::vote_keeper::{LockDecision, VoteKeeper};
 /// For a fresh start, use `RecoveredState::default()`.
 #[derive(Debug, Clone, Default)]
 pub struct RecoveredState {
-    /// Last committed block height.
+    /// Last committed height; the resume point for proposal/voting after restart.
     pub committed_height: BlockHeight,
 
     /// Last committed block hash (None for fresh start).

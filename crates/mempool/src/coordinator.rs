@@ -323,7 +323,7 @@ impl MempoolCoordinator {
                 admitted_at: now,
             },
         );
-        // Tx is now in pool — any pending cross-shard expectation is satisfied,
+        // Tx is in the pool — any pending cross-shard expectation is satisfied,
         // regardless of which source originally signaled it.
         self.expected_txs.forget(&hash);
 

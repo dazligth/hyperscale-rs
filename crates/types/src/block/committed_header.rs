@@ -11,10 +11,11 @@ use sbor::prelude::*;
 /// the `state_root` in the header for merkle inclusion proof verification.
 #[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
 pub struct CommittedBlockHeader {
-    /// The block header.
+    /// Header whose `hash()` matches the QC's `block_hash` (see [`Self::qc`]).
     pub header: BlockHeader,
 
-    /// The quorum certificate that committed this block.
+    /// QC committing [`Self::header`]; verifiable against the source shard's
+    /// validator keys without access to the block body.
     pub qc: QuorumCertificate,
 }
 

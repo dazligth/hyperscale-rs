@@ -17,7 +17,7 @@ use sbor::prelude::*;
 /// certifies the block it's paired with.
 #[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
 pub struct CertifiedBlock {
-    /// The certified block.
+    /// Block whose hash matches `qc.block_hash` — see invariant on [`Self::qc`].
     pub block: Block,
     /// QC certifying [`Self::block`]. Invariant: `qc.block_hash == block.hash()`.
     pub qc: QuorumCertificate,

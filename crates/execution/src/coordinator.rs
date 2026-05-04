@@ -71,7 +71,7 @@ use crate::waves::{PendingVoteRetry, RetryEffect, WaveRegistry};
 /// and broadcast (since the state machine doesn't hold the signing key).
 #[derive(Debug)]
 pub struct CompletionData {
-    /// Block this wave belongs to.
+    /// Block this wave belongs to; pairs with `wave_id` to identify the vote target.
     pub block_hash: BlockHash,
     /// Block height (= `wave_starting_height`).
     pub block_height: BlockHeight,
@@ -79,7 +79,7 @@ pub struct CompletionData {
     /// fixed. Included in the vote payload and the EC canonical hash, so all
     /// validators aggregate under the same identifier.
     pub vote_anchor_ts: WeightedTimestamp,
-    /// Wave identifier.
+    /// Wave identifier; unique within `block_hash`.
     pub wave_id: WaveId,
     /// Merkle root over per-tx outcome leaves (cross-shard agreement).
     pub global_receipt_root: GlobalReceiptRoot,
@@ -96,7 +96,7 @@ pub struct ExecutionMemoryStats {
     pub wave_execution_receipts: usize,
     /// Finalized waves cached in memory until their proposing block commits.
     pub finalized_wave_certificates: usize,
-    /// Active wave states being tracked.
+    /// In-flight wave states (created, not yet finalized or evicted).
     pub waves: usize,
     /// Per-wave vote trackers awaiting quorum.
     pub vote_trackers: usize,
@@ -513,7 +513,7 @@ impl ExecutionCoordinator {
             wave.record_execution_result(wr.tx_hash, wr.outcome);
         }
 
-        // With local receipts now in hand, the wave may have crossed into
+        // With local receipts in hand, the wave may have crossed into
         // `is_complete` if its local EC arrived ahead of the engine. Drive
         // finalization from here so the deferred finalize happens on the
         // same event that unblocked it.
@@ -646,7 +646,7 @@ impl ExecutionCoordinator {
             }
         }
 
-        // Step 2: for each affected wave, mark newly-ready txs provisioned. If
+        // Phase 3: for each affected wave, mark newly-ready txs provisioned. If
         // a wave transitions from partial → fully provisioned, emit the one-shot
         // dispatch action. A wave that already dispatched is left alone.
         let mut actions: Vec<Action> = Vec::new();

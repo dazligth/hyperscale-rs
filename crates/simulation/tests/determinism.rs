@@ -2124,8 +2124,7 @@ fn test_committed_blocks_stored_for_sync() {
 
 /// Test sync state is tracked per-node.
 ///
-/// Sync tracking is now done by the runner, not the node state machine.
-/// Each node's sync progress is independent.
+/// Sync tracking lives on the runner; each node's sync progress is independent.
 #[traced_test]
 #[test]
 fn test_sync_state_isolation() {
