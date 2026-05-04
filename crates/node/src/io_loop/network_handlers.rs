@@ -198,8 +198,7 @@ where
                     g.cache.insert(cache_key, response.clone());
                     // Evict oldest entry (keep last 256)
                     if g.cache.len() > 256 {
-                        let min_key = *g.cache.first_key_value().unwrap().0;
-                        g.cache.remove(&min_key);
+                        g.cache.pop_first();
                     }
                 }
 
