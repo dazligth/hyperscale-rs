@@ -23,7 +23,7 @@ use hyperscale_messages::request::{
     GetProvisionsRequest, GetTransactionsRequest,
 };
 use hyperscale_network::{Network, ResponseVerdict};
-use hyperscale_types::{BlockHeight, ProvisionHash, Provisions, ShardGroupId, TxHash, WaveId};
+use hyperscale_types::{BlockHeight, ProvisionHash, ShardGroupId, TxHash, WaveId};
 use std::hash::Hash;
 use std::sync::Arc;
 
@@ -184,11 +184,13 @@ impl FetchBinding for LocalProvisionBinding {
             Box::new(move |result| {
                 if let Ok(resp) = result {
                     let delivered: std::collections::HashSet<ProvisionHash> =
-                        resp.provisions.iter().map(Provisions::hash).collect();
+                        resp.provisions.iter().map(|p| p.hash()).collect();
                     let missing_hashes: Vec<ProvisionHash> =
                         hs.into_iter().filter(|h| !delivered.contains(h)).collect();
                     let had_misses = !missing_hashes.is_empty();
                     for provisions in resp.provisions {
+                        // Refcount is 1 right after decode, so this moves rather than clones.
+                        let provisions = Arc::unwrap_or_clone(provisions);
                         let _ = es.send(NodeInput::Protocol(Box::new(
                             ProtocolEvent::ProvisionsReceived { provisions },
                         )));

@@ -219,7 +219,7 @@ where
                     let mut provisions = Vec::with_capacity(req.batch_hashes.len());
                     for h in &req.batch_hashes {
                         if let Some(b) = provision_store.get(h) {
-                            provisions.push((*b).clone());
+                            provisions.push(b);
                         }
                     }
 

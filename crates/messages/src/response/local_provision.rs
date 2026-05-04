@@ -2,6 +2,7 @@
 
 use hyperscale_types::{MessageClass, NetworkMessage, Provisions};
 use sbor::prelude::BasicSbor;
+use std::sync::Arc;
 
 /// Response to a local provisions fetch request.
 ///
@@ -11,13 +12,16 @@ use sbor::prelude::BasicSbor;
 #[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
 pub struct GetLocalProvisionsResponse {
     /// Provision batches the responder had locally.
-    pub provisions: Vec<Provisions>,
+    ///
+    /// `Arc`-wrapped because the server-side provision store holds each
+    /// batch behind `Arc` already.
+    pub provisions: Vec<Arc<Provisions>>,
 }
 
 impl GetLocalProvisionsResponse {
     /// Build a response carrying `provisions`.
     #[must_use]
-    pub const fn new(provisions: Vec<Provisions>) -> Self {
+    pub const fn new(provisions: Vec<Arc<Provisions>>) -> Self {
         Self { provisions }
     }
 
