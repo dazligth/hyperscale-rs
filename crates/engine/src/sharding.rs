@@ -143,13 +143,9 @@ fn resolve_owned_nodes<S: SubstateDatabase>(
 /// We look for this tag followed by a known internal entity type byte.
 /// False positives are near-impossible since `NodeId`s are random hashes.
 fn extract_owned_node_ids(value: &[u8], owner: NodeId, ownership: &mut HashMap<NodeId, NodeId>) {
-    if value.len() < 31 {
-        return;
-    }
-    for i in 0..value.len() - 30 {
-        if value[i] == SBOR_OWN_TAG && INTERNAL_ENTITY_TYPES.contains(&value[i + 1]) {
-            let mut id = [0u8; 30];
-            id.copy_from_slice(&value[i + 1..i + 31]);
+    for window in value.windows(31) {
+        if window[0] == SBOR_OWN_TAG && INTERNAL_ENTITY_TYPES.contains(&window[1]) {
+            let id: [u8; 30] = window[1..31].try_into().expect("window len is 31");
             ownership.entry(NodeId(id)).or_insert(owner);
         }
     }
