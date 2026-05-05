@@ -149,7 +149,7 @@ where
     // arm, with no architectural payoff.
 
     fn handle_continuation(&mut self, pe: ProtocolEvent) {
-        self.fetches.apply_admission(&pe);
+        self.drive_fetch_admission(&pe);
 
         // Serving-cache insertion is io_loop's own state, not an
         // instance concern — keep it here.

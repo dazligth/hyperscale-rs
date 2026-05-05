@@ -37,7 +37,7 @@ where
     /// drain hooks (so e.g. `TransactionsReceived` clears in-flight tracking)
     /// and feed the variant into the state machine.
     pub(in crate::io_loop) fn handle_protocol_passthrough(&mut self, event: ProtocolEvent) {
-        self.fetches.apply_admission(&event);
+        self.drive_fetch_admission(&event);
         self.feed_event(event);
     }
 }

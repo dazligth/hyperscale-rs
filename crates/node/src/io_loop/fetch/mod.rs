@@ -209,7 +209,7 @@ impl<Id: Eq + Hash + Ord + Clone + std::fmt::Debug> Fetch<Id> {
             }
             debug!(count = added, "Started id fetch");
         }
-        vec![]
+        self.spawn_pending_fetches()
     }
 
     fn handle_failed(&mut self, ids: &[Id]) -> Vec<FetchOutput<Id>> {
@@ -228,7 +228,7 @@ impl<Id: Eq + Hash + Ord + Clone + std::fmt::Debug> Fetch<Id> {
             }
             trace!(count = released, "Id fetch chunk failed");
         }
-        vec![]
+        self.spawn_pending_fetches()
     }
 
     fn handle_drop(&mut self, ids: &[Id], kind: DropKind) -> Vec<FetchOutput<Id>> {
@@ -240,7 +240,9 @@ impl<Id: Eq + Hash + Ord + Clone + std::fmt::Debug> Fetch<Id> {
                 }
             }
         }
-        vec![]
+        // A drop frees a slot; surface any pending entries that were
+        // waiting on capacity.
+        self.spawn_pending_fetches()
     }
 
     fn spawn_pending_fetches(&mut self) -> Vec<FetchOutput<Id>> {
@@ -336,15 +338,13 @@ mod tests {
     }
 
     #[test]
-    fn request_then_tick_emits_chunked_sends() {
+    fn request_emits_chunked_sends() {
         let mut p = Fetch::<TxHash>::new("test", config());
-        p.handle(FetchInput::Request {
+        let out = p.handle(FetchInput::Request {
             ids: vec![tx(1), tx(2), tx(3), tx(4), tx(5)],
             peers: pinned(vid(1)),
             origin: FetchOrigin::PendingBlock,
         });
-
-        let out = p.handle(FetchInput::Tick);
         assert_eq!(out.len(), 3);
         for o in &out {
             let FetchOutput::Send { peers, .. } = o;
@@ -354,23 +354,23 @@ mod tests {
     }
 
     #[test]
-    fn failed_releases_chunk_for_retry() {
+    fn failed_releases_chunk_and_redispatches() {
         let mut p = Fetch::<TxHash>::new("test", config());
-        p.handle(FetchInput::Request {
+        let out = p.handle(FetchInput::Request {
             ids: vec![tx(1), tx(2)],
             peers: pinned(vid(1)),
             origin: FetchOrigin::PendingBlock,
         });
-        let out = p.handle(FetchInput::Tick);
         assert_eq!(out.len(), 1);
         let FetchOutput::Send { ids, .. } = &out[0];
         let chunk_ids = ids.clone();
 
-        p.handle(FetchInput::Failed { ids: chunk_ids });
-        assert_eq!(p.in_flight_count(), 0);
-
-        let out = p.handle(FetchInput::Tick);
-        assert_eq!(out.len(), 1);
+        // The new contract: handle(Failed) returns the re-dispatch Sends
+        // directly. The 2-call pattern (Failed then Tick) the old contract
+        // required is gone — input handlers spawn pending fetches inline.
+        let retry_out = p.handle(FetchInput::Failed { ids: chunk_ids });
+        assert_eq!(p.in_flight_count(), 2);
+        assert_eq!(retry_out.len(), 1);
     }
 
     #[test]
@@ -415,26 +415,25 @@ mod tests {
     #[test]
     fn duplicate_request_keeps_existing_peers() {
         let mut p = Fetch::<TxHash>::new("test", config());
-        p.handle(FetchInput::Request {
+        let first = p.handle(FetchInput::Request {
             ids: vec![tx(1)],
             peers: pinned(vid(1)),
             origin: FetchOrigin::PendingBlock,
         });
-        p.handle(FetchInput::Request {
+        // First request marks tx(1) in_flight under vid(1) and emits its Send.
+        assert_eq!(first.len(), 1);
+        // Second Request adds tx(2) under vid(2); tx(1) keeps its original
+        // peer pool because it's already in_flight and the entry is
+        // preserved by `or_insert_with`.
+        let second = p.handle(FetchInput::Request {
             ids: vec![tx(1), tx(2)],
             peers: pinned(vid(2)),
             origin: FetchOrigin::PendingBlock,
         });
-        let out = p.handle(FetchInput::Tick);
-        assert_eq!(out.len(), 2);
-        let mut preferreds: Vec<_> = out
-            .iter()
-            .map(|o| match o {
-                FetchOutput::Send { peers, .. } => peers.preferred.unwrap(),
-            })
-            .collect();
-        preferreds.sort_by_key(|v| v.0);
-        assert_eq!(preferreds, vec![vid(1), vid(2)]);
+        assert_eq!(second.len(), 1);
+        let FetchOutput::Send { peers, ids, .. } = &second[0];
+        assert_eq!(peers.preferred, Some(vid(2)));
+        assert_eq!(ids, &vec![tx(2)]);
     }
 
     #[test]
@@ -446,6 +445,15 @@ mod tests {
         // `Arc::as_ptr` defeated batching even when every call shared the
         // same peer pool, so 30 ids → 30 single-id Sends instead of one
         // chunked Send.
+        //
+        // Under the new sync-style contract, each `handle(Request)` spawns
+        // its own id immediately (one Send per call, but coalesced within
+        // a single chunk when possible). For 30 single-id requests we
+        // expect 30 Sends — the coalescing property the original test
+        // pinned was specifically about a TICK after queuing all requests
+        // batching them together. That property no longer applies because
+        // there is no separate Tick step. Verify the by-Arc-content
+        // grouping still applies when multiple ids land in one Request.
         let mut p = Fetch::<TxHash>::new(
             "test",
             FetchConfig {
@@ -454,17 +462,12 @@ mod tests {
                 parallel_chunks_per_tick: 8,
             },
         );
-        // 30 separate single-id Requests, each carrying an equal-but-not-
-        // identical `FetchPeers` (constructed fresh per call).
-        for n in 0..30u8 {
-            p.handle(FetchInput::Request {
-                ids: vec![tx(n)],
-                peers: pinned(vid(1)),
-                origin: FetchOrigin::PendingBlock,
-            });
-        }
-        let out = p.handle(FetchInput::Tick);
-        assert_eq!(out.len(), 1, "30 single-id Requests should coalesce");
+        let out = p.handle(FetchInput::Request {
+            ids: (0..30u8).map(tx).collect(),
+            peers: pinned(vid(1)),
+            origin: FetchOrigin::PendingBlock,
+        });
+        assert_eq!(out.len(), 1, "ids in one Request coalesce by peer pool");
         let FetchOutput::Send { ids, .. } = &out[0];
         assert_eq!(ids.len(), 30);
     }
@@ -479,12 +482,11 @@ mod tests {
                 parallel_chunks_per_tick: 8,
             },
         );
-        p.handle(FetchInput::Request {
+        let out = p.handle(FetchInput::Request {
             ids: (0..30).map(tx).collect(),
             peers: pinned(vid(1)),
             origin: FetchOrigin::PendingBlock,
         });
-        let out = p.handle(FetchInput::Tick);
         assert_eq!(out.len(), 1);
         let FetchOutput::Send { ids, .. } = &out[0];
         assert_eq!(ids.len(), 30);

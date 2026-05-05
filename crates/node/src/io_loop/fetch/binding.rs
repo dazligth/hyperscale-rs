@@ -27,8 +27,8 @@ use hyperscale_messages::request::{
 use hyperscale_network::{Network, ResponseVerdict};
 use hyperscale_types::{BlockHeight, ProvisionHash, ShardGroupId, TxHash, WaveId};
 
+use super::Fetch;
 use super::host::FetchHost;
-use super::{Fetch, FetchInput};
 
 // ─── Type aliases used across the module tree ──────────────────────────
 
@@ -73,10 +73,6 @@ pub trait FetchBinding: 'static {
         network: &N,
         sender: &Sender<NodeInput>,
     );
-
-    /// Drain admitted ids on the matching `ProtocolEvent`. No-op for events
-    /// the binding doesn't subscribe to.
-    fn apply_admission(fetch: &mut Fetch<Self::Id>, event: &ProtocolEvent);
 }
 
 // ─── Bindings ──────────────────────────────────────────────────────────
@@ -188,24 +184,6 @@ impl FetchBinding for TransactionBinding {
             }),
         );
     }
-
-    fn apply_admission(fetch: &mut Fetch<TxHash>, event: &ProtocolEvent) {
-        // Drain on TransactionsReceived to catch every delivered hash —
-        // duplicates / tombstoned / validity-expired txs don't surface via
-        // TransactionsAdmitted, so without this they'd pin the in-flight
-        // set forever. Also drain on TransactionsAdmitted so the broadcast
-        // path (no Received event precursor) still drains.
-        let ids: Vec<TxHash> = match event {
-            ProtocolEvent::TransactionsReceived { transactions } => {
-                transactions.iter().map(|tx| tx.hash()).collect()
-            }
-            ProtocolEvent::TransactionsAdmitted { txs } => txs.iter().map(|tx| tx.hash()).collect(),
-            _ => return,
-        };
-        if !ids.is_empty() {
-            fetch.handle(FetchInput::Admitted { ids });
-        }
-    }
 }
 
 /// Marker type for the per-block local-provision fetch.
@@ -265,14 +243,6 @@ impl FetchBinding for LocalProvisionBinding {
             }),
         );
     }
-
-    fn apply_admission(fetch: &mut Fetch<ProvisionHash>, event: &ProtocolEvent) {
-        if let ProtocolEvent::ProvisionsAdmitted { provisions, .. } = event {
-            fetch.handle(FetchInput::Admitted {
-                ids: vec![provisions.hash()],
-            });
-        }
-    }
 }
 
 /// Marker type for the per-block finalized-wave fetch.
@@ -330,13 +300,6 @@ impl FetchBinding for FinalizedWaveBinding {
                 }
             }),
         );
-    }
-
-    fn apply_admission(fetch: &mut Fetch<WaveId>, event: &ProtocolEvent) {
-        if let ProtocolEvent::FinalizedWavesAdmitted { waves } = event {
-            let ids: Vec<WaveId> = waves.iter().map(|w| w.wave_id().clone()).collect();
-            fetch.handle(FetchInput::Admitted { ids });
-        }
     }
 }
 
@@ -399,14 +362,6 @@ impl FetchBinding for ExecCertBinding {
                 }
             }),
         );
-    }
-
-    fn apply_admission(fetch: &mut Fetch<WaveId>, event: &ProtocolEvent) {
-        if let ProtocolEvent::ExecutionCertificateAdmitted { certificate } = event {
-            fetch.handle(FetchInput::Admitted {
-                ids: vec![certificate.wave_id.clone()],
-            });
-        }
     }
 }
 
@@ -501,14 +456,6 @@ impl FetchBinding for ProvisionBinding {
                 ResponseVerdict::Accept
             }),
         );
-    }
-
-    fn apply_admission(fetch: &mut Fetch<Self::Id>, event: &ProtocolEvent) {
-        if let ProtocolEvent::ProvisionsAdmitted { provisions, .. } = event {
-            fetch.handle(FetchInput::Admitted {
-                ids: vec![(provisions.source_shard, provisions.block_height)],
-            });
-        }
     }
 }
 

@@ -1,17 +1,13 @@
 //! Bundle of per-payload fetch state machines owned by the I/O loop.
 //!
-//! [`FetchHost`] holds one [`Fetch<Id>`] per payload binding, plus the
-//! cross-binding fanout (`apply_admission`) and metric readouts. Lifting
-//! these out of `IoLoop` makes "what fetches the I/O loop is orchestrating"
-//! explicit and isolates per-payload state from sync state.
-
-use hyperscale_core::ProtocolEvent;
+//! [`FetchHost`] holds one [`Fetch<Id>`] per payload binding plus metric
+//! readouts. Lifting these out of `IoLoop` makes "what fetches the I/O
+//! loop is orchestrating" explicit and isolates per-payload state from
+//! sync state.
 
 use super::FetchConfig;
 use super::binding::{
-    ExecCertBinding, ExecCertFetch, FetchBinding, FinalizedWaveBinding, FinalizedWaveFetch,
-    LocalProvisionBinding, LocalProvisionFetch, ProvisionBinding, ProvisionFetch,
-    TransactionBinding, TransactionFetch,
+    ExecCertFetch, FinalizedWaveFetch, LocalProvisionFetch, ProvisionFetch, TransactionFetch,
 };
 use crate::config::NodeConfig;
 
@@ -70,17 +66,6 @@ impl FetchHost {
             || self.finalized_wave.has_pending()
             || self.provision.has_pending()
             || self.exec_cert.has_pending()
-    }
-
-    /// Fan an admission `ProtocolEvent` across every binding. Each
-    /// binding's `apply_admission` is a no-op for events it doesn't
-    /// subscribe to.
-    pub fn apply_admission(&mut self, event: &ProtocolEvent) {
-        TransactionBinding::apply_admission(&mut self.transaction, event);
-        LocalProvisionBinding::apply_admission(&mut self.local_provision, event);
-        FinalizedWaveBinding::apply_admission(&mut self.finalized_wave, event);
-        ProvisionBinding::apply_admission(&mut self.provision, event);
-        ExecCertBinding::apply_admission(&mut self.exec_cert, event);
     }
 
     /// Snapshot per-binding fetch counts. The I/O loop flattens this into
