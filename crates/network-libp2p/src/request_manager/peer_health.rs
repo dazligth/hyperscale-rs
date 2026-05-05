@@ -342,7 +342,7 @@ impl PeerHealthTracker {
         self.peers.retain(|_, health| {
             let last_activity = health.last_success.max(health.last_failure);
             // Keep peers we've never contacted (recently added).
-            last_activity.is_none_or(|t| now.duration_since(t) < stale_threshold)
+            last_activity.is_none_or(|t| now.saturating_duration_since(t) < stale_threshold)
         });
     }
 

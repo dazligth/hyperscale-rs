@@ -299,8 +299,11 @@ impl InboundRouter {
             .or_insert_with(PeerRateState::new);
         let state = entry.value_mut();
 
-        // Reset window if expired.
-        if now.duration_since(state.window_start) > FAILURE_WINDOW {
+        // Reset window if expired. `saturating_duration_since` rather than
+        // `duration_since` so a non-monotonic clock step (rare on Linux,
+        // observed on some virtualized macOS/FreeBSD timers) doesn't panic
+        // the inbound-router task — the worst case is a missed window reset.
+        if now.saturating_duration_since(state.window_start) > FAILURE_WINDOW {
             state.failures = 0;
             state.window_start = now;
         }

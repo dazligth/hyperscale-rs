@@ -147,7 +147,7 @@ pub(super) async fn run(
                 }
 
                 // Periodic Kademlia refresh for peer discovery
-                if kademlia_bootstrapped && now.duration_since(last_kademlia_refresh) > KADEMLIA_REFRESH_INTERVAL {
+                if kademlia_bootstrapped && now.saturating_duration_since(last_kademlia_refresh) > KADEMLIA_REFRESH_INTERVAL {
                     // Trigger a random walk to discover new peers
                     let random_peer = Libp2pPeerId::random();
                     swarm.behaviour_mut().kademlia.get_closest_peers(random_peer);
