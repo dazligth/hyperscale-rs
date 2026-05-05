@@ -8,6 +8,7 @@ use hyperscale_storage::{DbSortKey, SubstateStore, VersionedStore};
 use hyperscale_types::{BlockHeight, MerkleInclusionProof, NodeId, StateRoot};
 
 use crate::core::SimStorage;
+use crate::lock_recover::read_or_recover;
 use crate::snapshot::SimSnapshot;
 
 impl SubstateStore for SimStorage {
@@ -20,11 +21,11 @@ impl SubstateStore for SimStorage {
     }
 
     fn jmt_height(&self) -> BlockHeight {
-        self.state.read().unwrap().current_block_height
+        read_or_recover(&self.state).current_block_height
     }
 
     fn state_root(&self) -> StateRoot {
-        self.state.read().unwrap().current_root_hash
+        read_or_recover(&self.state).current_root_hash
     }
 
     fn list_substates_for_node_at_height(
@@ -32,7 +33,7 @@ impl SubstateStore for SimStorage {
         node_id: &NodeId,
         block_height: BlockHeight,
     ) -> Option<Vec<(u8, DbSortKey, Vec<u8>)>> {
-        let current_version = self.state.read().unwrap().current_block_height.0;
+        let current_version = read_or_recover(&self.state).current_block_height.0;
         if block_height.0 > current_version {
             return None;
         }
@@ -55,7 +56,7 @@ impl SubstateStore for SimStorage {
         storage_keys: &[Vec<u8>],
         block_height: BlockHeight,
     ) -> Option<MerkleInclusionProof> {
-        let s = self.state.read().unwrap();
+        let s = read_or_recover(&self.state);
         generate_proof(&s.tree_store, storage_keys, block_height)
     }
 }
@@ -65,7 +66,7 @@ impl VersionedStore for SimStorage {
         // Retention invariant: see `RocksDbStorage::snapshot_at` for the
         // full reasoning. Below the floor we can't serve historical
         // reads; hitting this is a DA-assumption bug in the caller.
-        let guard = self.state.read().unwrap();
+        let guard = read_or_recover(&self.state);
         let current_version = guard.current_block_height.0;
         let floor = current_version.saturating_sub(self.jmt_history_length);
         assert!(
@@ -89,10 +90,12 @@ impl VersionedStore for SimStorage {
 
 impl TreeReader for SimStorage {
     fn get_node(&self, key: &JmtNodeKey) -> Option<Arc<JmtNode>> {
-        self.state.read().unwrap().tree_store.get_node(key)
+        read_or_recover(&self.state).tree_store.get_node(key)
     }
 
     fn get_root_key(&self, version: u64) -> Option<JmtNodeKey> {
-        self.state.read().unwrap().tree_store.get_root_key(version)
+        read_or_recover(&self.state)
+            .tree_store
+            .get_root_key(version)
     }
 }

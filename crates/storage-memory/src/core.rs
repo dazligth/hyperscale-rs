@@ -17,6 +17,7 @@ use hyperscale_storage::{
 };
 use hyperscale_types::{BlockHeight, StateRoot};
 
+use crate::lock_recover::{read_or_recover, write_or_recover};
 use crate::state::{ConsensusState, SharedState, apply_updates};
 
 /// In-memory storage for simulation and testing.
@@ -87,8 +88,8 @@ impl SimStorage {
     ///
     /// Panics if either internal `RwLock` is poisoned.
     pub fn clear(&mut self) {
-        *self.state.write().unwrap() = SharedState::new();
-        *self.consensus.write().unwrap() = ConsensusState::new();
+        *write_or_recover(&self.state) = SharedState::new();
+        *write_or_recover(&self.consensus) = ConsensusState::new();
     }
 
     /// Number of live substate entries (current tip). Historical
@@ -100,7 +101,7 @@ impl SimStorage {
     /// Panics if the internal `RwLock` is poisoned.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.state.read().unwrap().current_state.len()
+        read_or_recover(&self.state).current_state.len()
     }
 
     /// Whether the substate store has any live entries.
@@ -110,7 +111,7 @@ impl SimStorage {
     /// Panics if the internal `RwLock` is poisoned.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.state.read().unwrap().current_state.is_empty()
+        read_or_recover(&self.state).current_state.is_empty()
     }
 
     /// Write substate data at version 0 (no JMT computation).
@@ -125,7 +126,7 @@ impl SimStorage {
     ///
     /// Panics if the internal `RwLock` is poisoned.
     pub fn commit_substates_only(&self, updates: &DatabaseUpdates) {
-        let mut s = self.state.write().unwrap();
+        let mut s = write_or_recover(&self.state);
         apply_updates(&mut s, updates, 0, /* write_history */ false);
     }
 
@@ -143,7 +144,7 @@ impl SimStorage {
     /// Panics if the internal `RwLock` is poisoned, or if the JMT has
     /// already been initialized.
     pub fn finalize_genesis_jmt(&self, merged: &DatabaseUpdates) -> StateRoot {
-        let mut s = self.state.write().unwrap();
+        let mut s = write_or_recover(&self.state);
 
         // Guard: finalize_genesis_jmt must only be called once, on an uninitialized JMT.
         assert!(

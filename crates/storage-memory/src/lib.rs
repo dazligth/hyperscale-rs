@@ -15,6 +15,7 @@
 mod chain_reader;
 mod chain_writer;
 pub(crate) mod core;
+pub(crate) mod lock_recover;
 mod snapshot;
 mod state;
 mod store;

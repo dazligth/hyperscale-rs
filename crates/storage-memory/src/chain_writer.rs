@@ -13,6 +13,7 @@ use hyperscale_types::{
 };
 
 use crate::core::SimStorage;
+use crate::lock_recover::{read_or_recover, write_or_recover};
 use crate::state::apply_updates;
 
 /// Precomputed commit work for a `SimStorage` block commit.
@@ -52,7 +53,7 @@ impl ChainWriter for SimStorage {
         // Build a no-op JmtSnapshot directly, avoiding put_at_version which
         // would fail if the parent's tree nodes aren't in the store yet.
         if receipts.is_empty() {
-            let s = self.state.read().unwrap();
+            let s = read_or_recover(&self.state);
             let snapshot = noop_jmt_snapshot(
                 &s.tree_store,
                 pending_snapshots,
@@ -70,7 +71,7 @@ impl ChainWriter for SimStorage {
         }
 
         // Read lock: compute speculative JMT root.
-        let s = self.state.read().unwrap();
+        let s = read_or_recover(&self.state);
 
         let parent_version = jmt_parent_height(parent_block_height, parent_state_root).map(|h| h.0);
 
@@ -133,7 +134,7 @@ impl ChainWriter for SimStorage {
                 let result_root = prepared.snapshot.result_root;
 
                 {
-                    let mut s = self.state.write().unwrap();
+                    let mut s = write_or_recover(&self.state);
 
                     s.apply_jmt_snapshot(prepared.snapshot);
 
@@ -145,7 +146,7 @@ impl ChainWriter for SimStorage {
                     );
                 }
 
-                let mut c = self.consensus.write().unwrap();
+                let mut c = write_or_recover(&self.consensus);
                 for tx in block.transactions().iter() {
                     c.transactions.insert(tx.hash(), tx.as_ref().clone());
                 }
@@ -204,7 +205,7 @@ impl SimStorage {
         receipts: &[StoredReceipt],
     ) -> StateRoot {
         let block_height = block.height();
-        let mut s = self.state.write().unwrap();
+        let mut s = write_or_recover(&self.state);
 
         assert!(
             block_height == s.current_block_height + 1
@@ -247,7 +248,7 @@ impl SimStorage {
 
         // Store block + certificate + consensus state atomically.
         {
-            let mut c = self.consensus.write().unwrap();
+            let mut c = write_or_recover(&self.consensus);
             for tx in block.transactions().iter() {
                 c.transactions.insert(tx.hash(), tx.as_ref().clone());
             }
