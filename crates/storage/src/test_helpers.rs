@@ -16,6 +16,7 @@ use hyperscale_types::{
     WaveCertificate, WaveId, WeightedTimestamp, compute_global_receipt_root, zero_bls_signature,
 };
 use indexmap::IndexMap;
+use radix_common::math::Decimal;
 use radix_common::prelude::DatabaseUpdate;
 use radix_common::types::{NodeId as RadixNodeId, PartitionNumber};
 use radix_substate_store_interface::db_key_mapper::{DatabaseKeyMapper, SpreadPrefixKeyMapper};
@@ -168,10 +169,10 @@ pub fn make_test_receipt(seed: u8) -> StoredReceipt {
     };
     let metadata = Some(ExecutionMetadata {
         fee_summary: FeeSummary {
-            total_execution_cost: vec![seed],
-            total_royalty_cost: vec![],
-            total_storage_cost: vec![],
-            total_tipping_cost: vec![],
+            total_execution_cost: Some(Decimal::from(u64::from(seed))),
+            total_royalty_cost: None,
+            total_storage_cost: None,
+            total_tipping_cost: None,
         },
         log_messages: vec![(LogLevel::Info, format!("tx {seed}"))],
         error_message: None,

@@ -129,10 +129,10 @@ mod tests {
             consensus: Arc::new(ConsensusReceipt::Failed),
             metadata: Some(ExecutionMetadata {
                 fee_summary: FeeSummary {
-                    total_execution_cost: vec![],
-                    total_royalty_cost: vec![],
-                    total_storage_cost: vec![],
-                    total_tipping_cost: vec![],
+                    total_execution_cost: None,
+                    total_royalty_cost: None,
+                    total_storage_cost: None,
+                    total_tipping_cost: None,
                 },
                 log_messages: vec![],
                 error_message: Some("test error".into()),

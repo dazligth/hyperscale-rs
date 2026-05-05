@@ -158,16 +158,13 @@ fn extract_application_events(commit: &CommitResult) -> Vec<ApplicationEvent> {
 }
 
 /// Build a `FeeSummary` from a Radix Engine receipt.
-///
-/// Fee costs are SBOR-encoded as raw bytes to avoid a direct dependency on
-/// the Decimal type in the types crate.
-fn build_fee_summary(receipt: &TransactionReceipt) -> FeeSummary {
+const fn build_fee_summary(receipt: &TransactionReceipt) -> FeeSummary {
     let fees = &receipt.fee_summary;
     FeeSummary {
-        total_execution_cost: scrypto_encode(&fees.total_execution_cost_in_xrd).unwrap_or_default(),
-        total_royalty_cost: scrypto_encode(&fees.total_royalty_cost_in_xrd).unwrap_or_default(),
-        total_storage_cost: scrypto_encode(&fees.total_storage_cost_in_xrd).unwrap_or_default(),
-        total_tipping_cost: scrypto_encode(&fees.total_tipping_cost_in_xrd).unwrap_or_default(),
+        total_execution_cost: Some(fees.total_execution_cost_in_xrd),
+        total_royalty_cost: Some(fees.total_royalty_cost_in_xrd),
+        total_storage_cost: Some(fees.total_storage_cost_in_xrd),
+        total_tipping_cost: Some(fees.total_tipping_cost_in_xrd),
     }
 }
 
@@ -273,14 +270,12 @@ mod tests {
         let receipt = TransactionReceipt::empty_commit_success();
         let local = build_execution_metadata(&receipt);
 
-        // Default fee summary has zero Decimals, which still SBOR-encode to non-empty bytes.
-        assert!(
-            !local.fee_summary.total_execution_cost.is_empty(),
-            "SBOR-encoded zero Decimal should be non-empty"
-        );
-        assert!(!local.fee_summary.total_royalty_cost.is_empty());
-        assert!(!local.fee_summary.total_storage_cost.is_empty());
-        assert!(!local.fee_summary.total_tipping_cost.is_empty());
+        // Real receipts always have populated cost fields — `None` is reserved
+        // for the synthetic-failure path (`ExecutionMetadata::empty`).
+        assert!(local.fee_summary.total_execution_cost.is_some());
+        assert!(local.fee_summary.total_royalty_cost.is_some());
+        assert!(local.fee_summary.total_storage_cost.is_some());
+        assert!(local.fee_summary.total_tipping_cost.is_some());
     }
 
     #[test]
