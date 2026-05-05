@@ -66,6 +66,9 @@ impl NodeStateMachine {
                 }
                 actions
             }
+            ProtocolEvent::FinalizedWaveVerified { wave, valid } => {
+                self.execution.on_finalized_wave_verified(wave, valid)
+            }
             ProtocolEvent::ExecutionCertificateSignatureVerified { certificate, valid } => self
                 .execution
                 .on_certificate_verified(self.topology.snapshot(), certificate, valid),

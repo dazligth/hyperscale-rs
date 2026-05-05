@@ -233,7 +233,8 @@ impl StateMachine for NodeStateMachine {
             | ProtocolEvent::ExecutionCertificatesReceived { .. }
             | ProtocolEvent::ExecutionCertificateSignatureVerified { .. }
             | ProtocolEvent::ExecutionCertificateAdmitted { .. }
-            | ProtocolEvent::FinalizedWavesReceived { .. }) => self.handle_execution(evt),
+            | ProtocolEvent::FinalizedWavesReceived { .. }
+            | ProtocolEvent::FinalizedWaveVerified { .. }) => self.handle_execution(evt),
 
             // ── Transactions ─────────────────────────────────────────────
             evt @ (ProtocolEvent::TransactionValidated { .. }

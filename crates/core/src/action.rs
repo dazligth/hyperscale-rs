@@ -274,6 +274,20 @@ pub enum Action {
         public_keys: Vec<Bls12381G1PublicKey>,
     },
 
+    /// Verify every EC inside a fetched [`FinalizedWave`] in one async dispatch.
+    ///
+    /// Used by `ExecutionCoordinator::admit_finalized_wave` to keep the
+    /// state-machine call off the BLS verification critical path. Carries
+    /// per-EC public-key vectors aligned with `wave.execution_certificates()`.
+    /// Returns `ProtocolEvent::FinalizedWaveVerified` when complete.
+    VerifyFinalizedWave {
+        /// The wave whose every EC needs BLS verification before admission.
+        wave: Arc<FinalizedWave>,
+        /// Public keys for each EC, indexed parallel to
+        /// `wave.execution_certificates()`.
+        ec_public_keys: Vec<Vec<Bls12381G1PublicKey>>,
+    },
+
     /// Verify a Quorum Certificate's aggregated BLS signature.
     ///
     /// This is CRITICAL for BFT safety: we must verify that the QC's aggregated signature
@@ -689,6 +703,7 @@ impl Action {
             Self::AggregateExecutionCertificate { .. }
             | Self::VerifyAndAggregateExecutionVotes { .. }
             | Self::VerifyExecutionCertificateSignature { .. }
+            | Self::VerifyFinalizedWave { .. }
             | Self::VerifyProvisions { .. }
             | Self::FetchAndBroadcastProvisions { .. }
             | Self::SignAndSendExecutionVote { .. }

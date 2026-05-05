@@ -52,7 +52,7 @@ use hyperscale_types::{
 };
 use tracing::instrument;
 
-use crate::action_handlers::{build_dispatch_action, verify_execution_certificate_signature};
+use crate::action_handlers::build_dispatch_action;
 use crate::conflict::DetectedConflict;
 use crate::early_arrivals::{EARLY_VOTE_RETENTION, EarlyArrivalBuffer};
 use crate::exec_cert_store::ExecCertStore;
@@ -1592,16 +1592,22 @@ impl ExecutionCoordinator {
     }
 
     /// Admission entry point for fetch-delivered (or otherwise externally
-    /// sourced) finalized waves. Verifies every contained EC's BLS signature
-    /// and quorum power before emitting `Continuation(FinalizedWavesAdmitted)`
-    /// — without this, a peer answering a `finalized_wave.request` could
-    /// poison `caches.finalized_wave` with a bogus wave we'd then re-serve
-    /// to other peers.
+    /// sourced) finalized waves.
     ///
-    /// Locally finalized waves bypass this entry point: `finalize_wave`
-    /// emits the same event from a WC built out of already-verified ECs.
-    /// Synced blocks are likewise trusted at admission — the QC chain plus
-    /// the synced-block apply path's quorum gate established their integrity
+    /// Runs the cheap synchronous gates inline (per-EC quorum power and
+    /// committee-key resolution) and dispatches BLS verification to the
+    /// crypto pool via [`Action::VerifyFinalizedWave`]. The matching
+    /// [`ProtocolEvent::FinalizedWaveVerified`] feeds
+    /// [`Self::on_finalized_wave_verified`], which emits
+    /// `Continuation(FinalizedWavesAdmitted)` only when every EC's
+    /// signature passed.
+    ///
+    /// Without this gate a peer answering a `finalized_wave.request` could
+    /// poison `caches.finalized_wave` with a bogus wave we'd re-serve.
+    /// Locally finalized waves bypass this path: `finalize_wave` emits the
+    /// same event from a WC built out of already-verified ECs. Synced
+    /// blocks are likewise trusted at admission — the QC chain plus the
+    /// synced-block apply path's quorum gate established their integrity
     /// upstream.
     #[must_use]
     pub fn admit_finalized_wave(
@@ -1609,7 +1615,9 @@ impl ExecutionCoordinator {
         topology: &TopologySnapshot,
         wave: Arc<FinalizedWave>,
     ) -> Vec<Action> {
-        for ec in wave.execution_certificates() {
+        let ecs = wave.execution_certificates();
+        let mut ec_public_keys = Vec::with_capacity(ecs.len());
+        for ec in ecs {
             let shard = ec.shard_group_id();
             if !ec_has_shard_quorum_power(topology, ec) {
                 tracing::warn!(
@@ -1627,14 +1635,24 @@ impl ExecutionCoordinator {
                 );
                 return Vec::new();
             };
-            if !verify_execution_certificate_signature(ec, &public_keys) {
-                tracing::warn!(
-                    wave = %wave.wave_id(),
-                    shard = shard.0,
-                    "Rejecting fetched FinalizedWave: contained EC signature invalid"
-                );
-                return Vec::new();
-            }
+            ec_public_keys.push(public_keys);
+        }
+        vec![Action::VerifyFinalizedWave {
+            wave,
+            ec_public_keys,
+        }]
+    }
+
+    /// Handle the result of [`Action::VerifyFinalizedWave`]. Emits the
+    /// admission continuation only when every EC's BLS signature passed.
+    #[must_use]
+    pub fn on_finalized_wave_verified(&self, wave: Arc<FinalizedWave>, valid: bool) -> Vec<Action> {
+        if !valid {
+            tracing::warn!(
+                wave = %wave.wave_id(),
+                "Dropping fetched FinalizedWave: contained EC signature invalid"
+            );
+            return Vec::new();
         }
         vec![Action::Continuation(
             ProtocolEvent::FinalizedWavesAdmitted { waves: vec![wave] },
@@ -2351,6 +2369,104 @@ mod tests {
             _ => false,
         });
         assert!(has_remote, "Should include remote shard broadcast");
+    }
+
+    /// `admit_finalized_wave` must NOT emit `FinalizedWavesAdmitted`
+    /// inline — that would mean BLS verification ran on the state-machine
+    /// thread, bringing back the pre-async stall on the consensus path.
+    /// The expected output is a single `VerifyFinalizedWave` action; the
+    /// admission continuation only fires once the verify event lands.
+    #[test]
+    fn admit_finalized_wave_dispatches_async_verify() {
+        let topo = make_test_topology();
+        let state = make_test_state();
+
+        let wave_id = WaveId::new(ShardGroupId(0), BlockHeight(1), BTreeSet::new());
+        let mut signers = SignerBitfield::new(4);
+        signers.set(0);
+        signers.set(1);
+        signers.set(2);
+        let ec = Arc::new(ExecutionCertificate::new(
+            wave_id.clone(),
+            WeightedTimestamp::ZERO,
+            GlobalReceiptRoot::ZERO,
+            vec![],
+            zero_bls_signature(),
+            signers,
+        ));
+        let wave = Arc::new(FinalizedWave {
+            certificate: Arc::new(WaveCertificate {
+                wave_id,
+                execution_certificates: vec![ec],
+            }),
+            receipts: vec![],
+        });
+
+        let actions = state.admit_finalized_wave(&topo, wave);
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], Action::VerifyFinalizedWave { .. }));
+        assert!(
+            !actions.iter().any(|a| matches!(
+                a,
+                Action::Continuation(ProtocolEvent::FinalizedWavesAdmitted { .. })
+            )),
+            "admission continuation must only fire after async verify"
+        );
+    }
+
+    /// `on_finalized_wave_verified` with `valid = false` must drop the wave
+    /// rather than emit the admission continuation — that's exactly the
+    /// poisoning vector this gate exists to close.
+    #[test]
+    fn on_finalized_wave_verified_drops_invalid() {
+        let state = make_test_state();
+        let wave_id = WaveId::new(ShardGroupId(0), BlockHeight(1), BTreeSet::new());
+        let ec = Arc::new(ExecutionCertificate::new(
+            wave_id.clone(),
+            WeightedTimestamp::ZERO,
+            GlobalReceiptRoot::ZERO,
+            vec![],
+            zero_bls_signature(),
+            SignerBitfield::new(4),
+        ));
+        let wave = Arc::new(FinalizedWave {
+            certificate: Arc::new(WaveCertificate {
+                wave_id,
+                execution_certificates: vec![ec],
+            }),
+            receipts: vec![],
+        });
+        let actions = state.on_finalized_wave_verified(wave, false);
+        assert!(actions.is_empty());
+    }
+
+    /// `on_finalized_wave_verified` with `valid = true` emits exactly the
+    /// admission continuation — same shape as the prior synchronous path.
+    #[test]
+    fn on_finalized_wave_verified_admits_valid() {
+        let state = make_test_state();
+        let wave_id = WaveId::new(ShardGroupId(0), BlockHeight(1), BTreeSet::new());
+        let ec = Arc::new(ExecutionCertificate::new(
+            wave_id.clone(),
+            WeightedTimestamp::ZERO,
+            GlobalReceiptRoot::ZERO,
+            vec![],
+            zero_bls_signature(),
+            SignerBitfield::new(4),
+        ));
+        let wave = Arc::new(FinalizedWave {
+            certificate: Arc::new(WaveCertificate {
+                wave_id,
+                execution_certificates: vec![ec],
+            }),
+            receipts: vec![],
+        });
+        let actions = state.on_finalized_wave_verified(wave, true);
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(
+            actions[0],
+            Action::Continuation(ProtocolEvent::FinalizedWavesAdmitted { .. })
+        ));
     }
 
     /// A `FinalizedWave` delivered by `admit_finalized_wave` (the fetch

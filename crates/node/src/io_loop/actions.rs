@@ -52,6 +52,7 @@ where
             Action::AggregateExecutionCertificate { .. }
             | Action::VerifyAndAggregateExecutionVotes { .. }
             | Action::VerifyExecutionCertificateSignature { .. }
+            | Action::VerifyFinalizedWave { .. }
             | Action::BuildProposal { .. }
             | Action::VerifyAndBuildQuorumCertificate { .. }
             | Action::VerifyQcSignature { .. }
@@ -564,6 +565,7 @@ where
                 Action::AggregateExecutionCertificate { .. }
                 | Action::VerifyAndAggregateExecutionVotes { .. }
                 | Action::VerifyExecutionCertificateSignature { .. }
+                | Action::VerifyFinalizedWave { .. }
                 | Action::ExecuteTransactions { .. }
                 | Action::ExecuteCrossShardTransactions { .. }
                 | Action::SignAndSendExecutionVote { .. }

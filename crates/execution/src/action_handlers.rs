@@ -310,6 +310,19 @@ where
                 },
             )));
         }
+        Action::VerifyFinalizedWave {
+            wave,
+            ec_public_keys,
+        } => {
+            let valid = wave
+                .execution_certificates()
+                .iter()
+                .zip(ec_public_keys.iter())
+                .all(|(ec, keys)| verify_execution_certificate_signature(ec, keys));
+            (ctx.notify)(NodeInput::Protocol(Box::new(
+                ProtocolEvent::FinalizedWaveVerified { wave, valid },
+            )));
+        }
         Action::ExecuteTransactions {
             wave_id,
             block_hash,

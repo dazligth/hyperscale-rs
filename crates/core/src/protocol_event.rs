@@ -353,6 +353,18 @@ pub enum ProtocolEvent {
         valid: bool,
     },
 
+    /// All BLS verifications for a fetched [`FinalizedWave`] completed.
+    ///
+    /// Routed to `ExecutionCoordinator::on_finalized_wave_verified`, which
+    /// emits the matching `Continuation(FinalizedWavesAdmitted)` only when
+    /// every contained EC's signature passed.
+    FinalizedWaveVerified {
+        /// The wave whose ECs were verified.
+        wave: Arc<FinalizedWave>,
+        /// `true` when every contained EC's signature passed verification.
+        valid: bool,
+    },
+
     /// An execution certificate was just admitted to the canonical EC store.
     ///
     /// Emitted by `ExecutionCoordinator::on_certificate_verified` only when
