@@ -14,7 +14,7 @@ use std::sync::Arc;
 use hyperscale_core::{Action, VerificationKind};
 use hyperscale_types::{
     Block, BlockHash, BlockHeader, BlockHeight, BlockManifest, FinalizedWave, LocalReceiptRoot,
-    ProvisionsRoot, StateRoot, TopologySnapshot,
+    ProvisionsRoot, QuorumCertificate, StateRoot, TopologySnapshot,
 };
 use tracing::{debug, trace, warn};
 
@@ -105,9 +105,14 @@ pub struct VerificationPipeline {
     /// Maps `block_hash` -> pending verification info.
     pending_qc_verifications: HashMap<BlockHash, PendingQcVerification>,
 
-    /// Cache of already-verified QC signatures.
-    /// Maps QC's `block_hash` (the block the QC certifies) -> height.
-    verified_qcs: HashMap<BlockHash, BlockHeight>,
+    /// Cache of already-verified QCs, keyed by the QC's `block_hash` (the
+    /// block the QC certifies). Stores the full canonical QC so cache hits
+    /// can confirm the candidate QC is byte-equal to the verified one before
+    /// skipping BLS verification — without this, a Byzantine peer could
+    /// reuse a known-cached `block_hash` while fabricating `signers`,
+    /// `round`, or `parent_block_hash` and have those fields adopted into
+    /// `latest_qc` / drive view sync without re-verification.
+    verified_qcs: HashMap<BlockHash, QuorumCertificate>,
 
     // === State root verification ===
     /// Blocks where state root verification is currently in-flight.
@@ -246,9 +251,12 @@ impl VerificationPipeline {
             .insert(block_hash, PendingQcVerification { header });
     }
 
-    /// Check if a QC has already been verified (cache hit).
-    pub fn is_qc_verified(&self, qc_block_hash: &BlockHash) -> bool {
-        self.verified_qcs.contains_key(qc_block_hash)
+    /// Look up the canonical verified QC for `qc_block_hash`. Returns `None`
+    /// when no QC for that block has been verified yet. Callers MUST compare
+    /// the candidate QC to the cached value byte-for-byte before treating it
+    /// as a cache hit — see the field doc on [`Self::verified_qcs`].
+    pub fn cached_qc(&self, qc_block_hash: &BlockHash) -> Option<&QuorumCertificate> {
+        self.verified_qcs.get(qc_block_hash)
     }
 
     /// Record a QC signature verification result. Returns the pending header if found.
@@ -262,11 +270,13 @@ impl VerificationPipeline {
     }
 
     /// Cache a verified QC to skip future re-verification.
-    pub fn cache_verified_qc(&mut self, qc_block_hash: BlockHash, height: BlockHeight) {
-        self.verified_qcs.insert(qc_block_hash, height);
+    pub fn cache_verified_qc(&mut self, qc: QuorumCertificate) {
+        let qc_block_hash = qc.block_hash;
+        let qc_height = qc.height;
+        self.verified_qcs.insert(qc_block_hash, qc);
         trace!(
             qc_block_hash = ?qc_block_hash,
-            qc_height = height.0,
+            qc_height = qc_height.0,
             "Cached verified QC"
         );
     }
@@ -1083,7 +1093,7 @@ impl VerificationPipeline {
         // committed_height covers view-change scenarios where multiple proposals
         // at the same height reference the same parent QC.
         self.verified_qcs
-            .retain(|_, height| *height > committed_height.saturating_sub(2));
+            .retain(|_, qc| qc.height > committed_height.saturating_sub(2));
     }
 
     /// Number of pending QC verifications.

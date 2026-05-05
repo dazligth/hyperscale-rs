@@ -1107,10 +1107,17 @@ impl BftCoordinator {
         // dispatches `Action::VerifyQcSignature` when we want to vote on
         // this block; on success `on_qc_signature_verified` re-enters the
         // adoption logic via `try_adopt_verified_qc`.
+        //
+        // The cache hit must match the candidate QC byte-for-byte, not just
+        // by `block_hash`. Otherwise a Byzantine peer could reuse a known-
+        // cached `block_hash` X while fabricating `signers` / `round` /
+        // `parent_block_hash`, and have those forged fields adopted into
+        // `latest_qc` / drive view sync without re-verification.
         if have_parent
             && self
                 .verification
-                .is_qc_verified(&header.parent_qc.block_hash)
+                .cached_qc(&header.parent_qc.block_hash)
+                .is_some_and(|cached| cached == &header.parent_qc)
         {
             actions.extend(self.try_adopt_verified_qc(topology_snapshot, &header.parent_qc));
         }
@@ -1360,11 +1367,17 @@ impl BftCoordinator {
         // This is CRITICAL for BFT safety - prevents Byzantine proposers from
         // including fake QCs with invalid signatures.
         if !header.parent_qc.is_genesis() {
-            // Check if we've already verified this exact QC (by its block_hash).
-            // This happens during view changes when multiple proposals at the same
-            // height share the same parent_qc. Avoids redundant crypto work.
+            // Check if we've already verified this exact QC. The cache hit
+            // must match byte-for-byte, not just by `block_hash` — see
+            // `absorb_parent_qc_from_header` for the same trust gap. A
+            // mismatch falls through to BLS verification rather than being
+            // accepted.
             let qc_block_hash = header.parent_qc.block_hash;
-            if self.verification.is_qc_verified(&qc_block_hash) {
+            if self
+                .verification
+                .cached_qc(&qc_block_hash)
+                .is_some_and(|cached| cached == &header.parent_qc)
+            {
                 trace!(
                     qc_block_hash = ?qc_block_hash,
                     block_hash = ?block_hash,
@@ -1760,11 +1773,11 @@ impl BftCoordinator {
         );
 
         // Cache the verified QC so we don't re-verify it for other blocks
-        // with the same parent_qc (e.g., during view changes).
-        let qc_block_hash = header.parent_qc.block_hash;
-        let qc_height = header.parent_qc.height;
+        // with the same parent_qc (e.g., during view changes). Cache hits
+        // require full byte equality with the cached QC — see the field
+        // doc on `VerificationPipeline::verified_qcs`.
         self.verification
-            .cache_verified_qc(qc_block_hash, qc_height);
+            .cache_verified_qc(header.parent_qc.clone());
 
         // The parent QC is now provably authentic; perform the adoption
         // that `absorb_parent_qc_from_header` deferred. Safe to run before
@@ -4258,9 +4271,7 @@ mod tests {
         );
 
         // Simulate verification success; same path as on_qc_signature_verified(valid=true).
-        state
-            .verification
-            .cache_verified_qc(parent_block_hash, BlockHeight(1));
+        state.verification.cache_verified_qc(parent_qc.clone());
 
         // Second block at round 1 sharing the same parent QC.
         let header2 = BlockHeader {
@@ -4283,6 +4294,80 @@ mod tests {
                 .iter()
                 .any(|a| matches!(a, Action::VerifyQcSignature { .. })),
             "second block must reuse cached verification"
+        );
+    }
+
+    #[test]
+    fn qc_cache_hit_requires_byte_equal_qc_not_just_block_hash() {
+        // A Byzantine peer who sees a legitimately-cached `block_hash` must
+        // not be able to ship a header whose parent_qc reuses that block_hash
+        // with fabricated `signers` / `round` / `parent_block_hash` and have
+        // those forged fields adopted into `latest_qc` without re-verification.
+
+        let (mut state, topology) = make_multi_validator_state_at(0);
+        state.set_time(LocalTimestamp::from_millis(100_000));
+
+        let parent_block_hash = BlockHash::from_raw(Hash::from_bytes(b"parent_block"));
+        state.committed_height = BlockHeight(1);
+        state.committed_hash = parent_block_hash;
+        state
+            .commits
+            .certified_blocks
+            .insert(parent_block_hash, make_empty_block(BlockHeight(1)));
+
+        let mut signers = SignerBitfield::new(4);
+        signers.set(0);
+        signers.set(1);
+        signers.set(2);
+        let honest_qc = QuorumCertificate {
+            signers: signers.clone(),
+            weighted_timestamp: WeightedTimestamp(99_000),
+            ..make_test_qc(parent_block_hash, BlockHeight(1))
+        };
+
+        // Cache the honest QC as if it had been verified.
+        state.verification.cache_verified_qc(honest_qc.clone());
+
+        // Byzantine header reuses the honest QC's block_hash + signers + height
+        // (so `validate_header`'s quorum-power and structural checks still pass)
+        // but mutates fields the cache previously didn't bind, e.g. the
+        // aggregated signature itself — exactly what the cache hit was meant
+        // to skip re-verifying.
+        let forged_qc = QuorumCertificate {
+            weighted_timestamp: WeightedTimestamp(123_456_789),
+            ..honest_qc
+        };
+        let forged_header = BlockHeader {
+            parent_block_hash,
+            parent_qc: forged_qc,
+            ..make_header_at_height(BlockHeight(2), 100_000)
+        };
+
+        let actions = state.on_block_header(
+            &topology,
+            &forged_header,
+            BlockManifest::default(),
+            |_| None,
+            |_| None,
+            |_| None,
+        );
+
+        // The forged QC must trigger BLS verification rather than being
+        // accepted as a cache hit.
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::VerifyQcSignature { .. })),
+            "forged QC reusing cached block_hash must still trigger BLS verification"
+        );
+
+        // And `latest_qc` must not have been mutated to reflect the forged
+        // weighted_timestamp on the cache-hit path.
+        assert!(
+            state.latest_qc.as_ref().is_none_or(
+                |qc| qc.weighted_timestamp != forged_header.parent_qc.weighted_timestamp
+            ),
+            "forged QC must not be adopted as latest_qc on cache hit"
         );
     }
 
