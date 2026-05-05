@@ -258,6 +258,18 @@ impl<T, D: Decoder<NoCustomValueKind>> Decode<NoCustomValueKind, D> for BloomFil
         }
         let bits: Vec<u64> = decoder.decode()?;
         let k: u8 = decoder.decode()?;
+        // bits.len() == 0 lets `probe(...) % m` divide by zero in
+        // contains/insert; bits.len() > MAX_BITS/64 lets a peer push a
+        // ~128 KiB filter past our own outbound cap; k == 0 makes
+        // contains() vacuously true (peer claims to have everything);
+        // k > MAX_K lets a peer multiply per-item probe work. All of
+        // these are reachable from a single peer over `block.request`.
+        if bits.is_empty() || bits.len() > MAX_BITS / 64 {
+            return Err(DecodeError::InvalidCustomValue);
+        }
+        if k == 0 || k > MAX_K {
+            return Err(DecodeError::InvalidCustomValue);
+        }
         Ok(Self {
             bits,
             k,
@@ -369,5 +381,73 @@ mod tests {
         let bf_prov: BloomFilter<ProvisionHash> = BloomFilter::empty();
         let bytes_prov = basic_encode(&bf_prov).unwrap();
         assert_eq!(bytes_tx, bytes_prov);
+    }
+
+    /// Mirror of the `BloomFilter` wire layout, used to forge payloads
+    /// that the production decoder must reject. The derive emits the
+    /// same `(Vec<u64>, u8)` tuple shape as the manual codec.
+    #[derive(sbor::BasicSbor)]
+    struct ManualBloom {
+        bits: Vec<u64>,
+        k: u8,
+    }
+
+    #[test]
+    fn decode_rejects_empty_bits() {
+        // The exact divide-by-zero attack: bits.len() == 0 makes
+        // `probe(...) % m` divide by zero in contains/insert.
+        let attacker = ManualBloom {
+            bits: Vec::new(),
+            k: 1,
+        };
+        let bytes = basic_encode(&attacker).unwrap();
+        assert!(matches!(
+            basic_decode::<BloomFilter<TxHash>>(&bytes),
+            Err(DecodeError::InvalidCustomValue),
+        ));
+    }
+
+    #[test]
+    fn decode_rejects_oversized_bits() {
+        // Above-cap bits would let a peer push a >128 KiB filter past
+        // our own outbound MAX_BITS gate.
+        let attacker = ManualBloom {
+            bits: vec![0u64; (MAX_BITS / 64) + 1],
+            k: 1,
+        };
+        let bytes = basic_encode(&attacker).unwrap();
+        assert!(matches!(
+            basic_decode::<BloomFilter<TxHash>>(&bytes),
+            Err(DecodeError::InvalidCustomValue),
+        ));
+    }
+
+    #[test]
+    fn decode_rejects_zero_k() {
+        // k == 0 makes contains() vacuously true for every probe,
+        // letting a peer claim to already have every item.
+        let attacker = ManualBloom {
+            bits: vec![0u64; 1],
+            k: 0,
+        };
+        let bytes = basic_encode(&attacker).unwrap();
+        assert!(matches!(
+            basic_decode::<BloomFilter<TxHash>>(&bytes),
+            Err(DecodeError::InvalidCustomValue),
+        ));
+    }
+
+    #[test]
+    fn decode_rejects_oversized_k() {
+        // k > MAX_K multiplies per-item probe work without bound.
+        let attacker = ManualBloom {
+            bits: vec![0u64; 1],
+            k: MAX_K + 1,
+        };
+        let bytes = basic_encode(&attacker).unwrap();
+        assert!(matches!(
+            basic_decode::<BloomFilter<TxHash>>(&bytes),
+            Err(DecodeError::InvalidCustomValue),
+        ));
     }
 }
