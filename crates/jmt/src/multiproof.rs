@@ -553,6 +553,23 @@ const TERM_LEAF: u8 = 0x01;
 const TERM_EMPTY: u8 = 0x02;
 const TERM_LEAF_MISMATCH: u8 = 0x03;
 
+/// Cap on claims accepted from a single peer-supplied multiproof.
+///
+/// Bounds attacker-controlled `claim_count` (a `u32` read from the wire,
+/// up to 4 G) before it reaches `Vec::with_capacity`. A claim is ~80
+/// bytes; without this cap a peer crafting a tiny request can force a
+/// multi-GB pre-allocation. Real provision proofs cover at most a few
+/// thousand keys; `10_000` leaves comfortable headroom.
+const MAX_PROOF_CLAIMS: usize = 10_000;
+
+/// Cap on sibling hashes in a single multiproof.
+///
+/// Each claim contributes O(log N) siblings on its key path (≤ 256 in
+/// the worst case, far fewer in practice once shared prefixes dedup).
+/// `100_000` is ~10× the claim cap and bounds the pre-allocation at a
+/// few MB.
+const MAX_PROOF_SIBLINGS: usize = 100_000;
+
 /// Errors produced by [`MultiProof::decode`].
 #[derive(Debug, thiserror::Error)]
 pub enum DecodeError {
@@ -571,6 +588,15 @@ pub enum DecodeError {
     /// A claim's termination discriminator is not one of the defined values.
     #[error("unknown termination discriminator {0:#04x}")]
     InvalidTermination(u8),
+
+    /// A length prefix exceeded the configured maximum.
+    #[error("length prefix {actual} exceeds maximum {max}")]
+    LengthOverLimit {
+        /// The configured maximum.
+        max: usize,
+        /// The length the wire claimed.
+        actual: usize,
+    },
 }
 
 impl MultiProof {
@@ -617,11 +643,23 @@ impl MultiProof {
             return Err(DecodeError::UnsupportedVersion(version));
         }
         let claim_count = r.u32_be()? as usize;
+        if claim_count > MAX_PROOF_CLAIMS {
+            return Err(DecodeError::LengthOverLimit {
+                max: MAX_PROOF_CLAIMS,
+                actual: claim_count,
+            });
+        }
         let mut claims = Vec::with_capacity(claim_count);
         for _ in 0..claim_count {
             claims.push(decode_claim(&mut r)?);
         }
         let sibling_count = r.u32_be()? as usize;
+        if sibling_count > MAX_PROOF_SIBLINGS {
+            return Err(DecodeError::LengthOverLimit {
+                max: MAX_PROOF_SIBLINGS,
+                actual: sibling_count,
+            });
+        }
         let mut siblings = Vec::with_capacity(sibling_count);
         for _ in 0..sibling_count {
             siblings.push(r.bytes32()?);
@@ -1048,6 +1086,38 @@ mod tests {
         bytes.push(0xAA); // invalid discriminator
         let err = MultiProof::decode(&bytes).unwrap_err();
         assert!(matches!(err, DecodeError::InvalidTermination(0xAA)));
+    }
+
+    #[test]
+    fn decode_rejects_oversized_claim_count() {
+        // The exact attack: tiny payload, large claim_count claim.
+        // Without the cap, this triggers a multi-GB Vec::with_capacity.
+        let mut bytes = vec![WIRE_VERSION];
+        bytes.extend_from_slice(&u32::MAX.to_be_bytes());
+        let err = MultiProof::decode(&bytes).unwrap_err();
+        assert!(matches!(
+            err,
+            DecodeError::LengthOverLimit {
+                max: MAX_PROOF_CLAIMS,
+                actual,
+            } if actual == u32::MAX as usize
+        ));
+    }
+
+    #[test]
+    fn decode_rejects_oversized_sibling_count() {
+        // claim_count=0, then huge sibling_count.
+        let mut bytes = vec![WIRE_VERSION];
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        bytes.extend_from_slice(&u32::MAX.to_be_bytes());
+        let err = MultiProof::decode(&bytes).unwrap_err();
+        assert!(matches!(
+            err,
+            DecodeError::LengthOverLimit {
+                max: MAX_PROOF_SIBLINGS,
+                actual,
+            } if actual == u32::MAX as usize
+        ));
     }
 
     #[test]

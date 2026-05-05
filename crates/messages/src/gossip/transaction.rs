@@ -18,6 +18,14 @@ use sbor::{
 
 use crate::trace_context::TraceContext;
 
+/// Cap on transactions accepted in a single gossip batch at decode time.
+///
+/// Bounds attacker-controlled `tx_count` decoded from the wire so a peer
+/// can't pack a 28-bit LEB128 count into a few bytes and force a multi-GB
+/// `Vec::with_capacity` pre-allocation per delivered gossip message.
+/// Production batches sit in the low hundreds; 1000 leaves headroom.
+const MAX_GOSSIP_TX_BATCH: usize = 1_000;
+
 /// Gossips a batch of transactions to a single destination shard.
 ///
 /// Each tx is broadcast on its declared (read ∪ write) shard set; a tx
@@ -133,6 +141,12 @@ impl<D: Decoder<NoCustomValueKind>> Decode<NoCustomValueKind, D> for Transaction
         decoder.read_and_check_value_kind(ValueKind::Array)?;
         let elem_kind = decoder.read_value_kind()?;
         let tx_count = decoder.read_size()?;
+        if tx_count > MAX_GOSSIP_TX_BATCH {
+            return Err(DecodeError::UnexpectedSize {
+                expected: MAX_GOSSIP_TX_BATCH,
+                actual: tx_count,
+            });
+        }
         let mut transactions = Vec::with_capacity(tx_count);
         for _ in 0..tx_count {
             let tx: RoutableTransaction = decoder.decode_deeper_body_with_value_kind(elem_kind)?;
@@ -255,5 +269,33 @@ mod tests {
         let decoded: TransactionGossip = basic_decode(&bytes).expect("decode");
         assert_eq!(original, decoded);
         assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn decode_rejects_oversized_tx_count() {
+        // Hand-roll the prefix: a TransactionGossip whose tx_count exceeds
+        // MAX_GOSSIP_TX_BATCH. Without the cap the decoder would call
+        // Vec::with_capacity(huge) and OOM; with the cap it errors before
+        // touching memory.
+        use sbor::{BASIC_SBOR_V1_MAX_DEPTH, BASIC_SBOR_V1_PAYLOAD_PREFIX, VecEncoder};
+        let mut buf = Vec::with_capacity(32);
+        {
+            let mut enc = VecEncoder::<NoCustomValueKind>::new(&mut buf, BASIC_SBOR_V1_MAX_DEPTH);
+            enc.write_payload_prefix(BASIC_SBOR_V1_PAYLOAD_PREFIX)
+                .unwrap();
+            enc.write_value_kind(ValueKind::Tuple).unwrap();
+            enc.write_size(2).unwrap();
+            enc.write_value_kind(ValueKind::Array).unwrap();
+            enc.write_value_kind(ValueKind::Tuple).unwrap();
+            enc.write_size(MAX_GOSSIP_TX_BATCH + 1).unwrap();
+        }
+        let err = basic_decode::<TransactionGossip>(&buf).unwrap_err();
+        assert!(matches!(
+            err,
+            DecodeError::UnexpectedSize {
+                expected,
+                actual,
+            } if expected == MAX_GOSSIP_TX_BATCH && actual == MAX_GOSSIP_TX_BATCH + 1
+        ));
     }
 }
