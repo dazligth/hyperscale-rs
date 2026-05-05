@@ -49,6 +49,16 @@ struct ValidatorInfoEntry {
 ///
 /// Subsystem crates depend on this (via `hyperscale-types`) instead of the
 /// full `hyperscale-topology` crate.
+///
+/// # Invariants
+///
+/// Every validator listed in any committee's `active_validators` is present
+/// in `validator_info` (with the same voting power that contributed to
+/// `total_voting_power`). Constructors enforce this — `with_shard_committees`
+/// panics on a missing entry, `build_modulo` and `with_local_shard` derive
+/// committees from the same `ValidatorSet` that seeds `validator_info`.
+/// Downstream code relies on this to call `voting_power(committee_member)`
+/// and `public_key(committee_member)` with `expect` rather than fallback.
 #[derive(Clone)]
 pub struct TopologySnapshot {
     local_validator_id: ValidatorId,
@@ -560,6 +570,50 @@ mod tests {
 
         assert_eq!(snapshot.committee_for_shard(ShardGroupId(0)).len(), 2);
         assert_eq!(snapshot.committee_for_shard(ShardGroupId(1)).len(), 2);
+    }
+
+    /// `with_shard_committees` panics on a committee referencing a
+    /// validator absent from the global validator set. Pinned here so any
+    /// future refactor that quietly relaxes the invariant fails.
+    #[test]
+    #[should_panic(expected = "committee for shard")]
+    fn test_with_shard_committees_panics_on_unknown_validator() {
+        let validators: Vec<_> = (0..2).map(|i| make_test_validator(i, 1)).collect();
+        let vs = ValidatorSet::new(validators);
+        let mut committees = HashMap::new();
+        // ValidatorId(99) isn't in `vs`; constructor must reject.
+        committees.insert(ShardGroupId(0), vec![ValidatorId(0), ValidatorId(99)]);
+        let _ = TopologySnapshot::with_shard_committees(
+            ValidatorId(0),
+            ShardGroupId(0),
+            1,
+            &vs,
+            committees,
+        );
+    }
+
+    /// Sum-of-voting-power invariant — committee `total_voting_power`
+    /// matches the sum of constituent members' `voting_power`. Locked at
+    /// constructor exit by `debug_assert_invariants` so any drift
+    /// (e.g. a future constructor populating one but not the other)
+    /// fires in development.
+    #[test]
+    fn test_total_voting_power_matches_sum_of_members() {
+        let validators: Vec<_> = (0..4).map(|i| make_test_validator(i, 7)).collect();
+        let vs = ValidatorSet::new(validators);
+        let mut committees = HashMap::new();
+        committees.insert(
+            ShardGroupId(0),
+            vec![ValidatorId(0), ValidatorId(1), ValidatorId(2)],
+        );
+        let snapshot = TopologySnapshot::with_shard_committees(
+            ValidatorId(0),
+            ShardGroupId(0),
+            1,
+            &vs,
+            committees,
+        );
+        assert_eq!(snapshot.voting_power_for_shard(ShardGroupId(0)), 21);
     }
 
     #[test]
