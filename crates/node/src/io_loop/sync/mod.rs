@@ -90,16 +90,15 @@ impl DeferralBackoff {
         self.next_retry_at.is_none_or(|deadline| now >= deadline)
     }
 
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        clippy::cast_precision_loss,
-        clippy::cast_possible_wrap
-    )] // backoff ms fits u64 in practice; rounds is small
     fn advance_round(&mut self, now: Instant) {
         self.rounds = self.rounds.saturating_add(1);
-        let backoff_ms =
-            ((DEFERRAL_BASE_MS as f64) * DEFERRAL_MULTIPLIER.powi(self.rounds as i32 - 1)) as u64;
+        let exp = i32::try_from(self.rounds.saturating_sub(1)).unwrap_or(i32::MAX);
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss
+        )] // float→u64 truncation is intentional; result is clamped below
+        let backoff_ms = ((DEFERRAL_BASE_MS as f64) * DEFERRAL_MULTIPLIER.powi(exp)) as u64;
         let backoff_ms = backoff_ms.min(DEFERRAL_MAX_MS);
         self.next_retry_at = Some(now + Duration::from_millis(backoff_ms));
     }

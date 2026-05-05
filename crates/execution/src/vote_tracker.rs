@@ -205,9 +205,15 @@ impl VoteTracker {
     }
 
     /// Return the total verified voting power across all (`global_receipt_root`, `vote_anchor_ts`) groups.
+    ///
+    /// Saturates at `u64::MAX` if the sum would overflow — quorum gates
+    /// already cap at the topology's voting-power total, so a saturated
+    /// reading still gives a correct "well above quorum" answer.
     #[must_use]
     pub fn total_verified_power(&self) -> u64 {
-        self.power_by_key.values().sum()
+        self.power_by_key
+            .values()
+            .fold(0u64, |acc, &p| acc.saturating_add(p))
     }
 
     /// Return the number of distinct receipt roots across all verified vote groups.
