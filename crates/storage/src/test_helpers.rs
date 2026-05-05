@@ -13,7 +13,7 @@ use hyperscale_types::{
     FeeSummary, FinalizedWave, GlobalReceiptHash, GlobalReceiptRoot, Hash, LocalReceiptRoot,
     LogLevel, NodeId, ProposerTimestamp, ProvisionsRoot, QuorumCertificate, Round, ShardGroupId,
     SignerBitfield, StateRoot, StoredReceipt, TransactionRoot, TxHash, TxOutcome, ValidatorId,
-    WaveCertificate, WaveId, WeightedTimestamp, zero_bls_signature,
+    WaveCertificate, WaveId, WeightedTimestamp, compute_global_receipt_root, zero_bls_signature,
 };
 use indexmap::IndexMap;
 use radix_common::prelude::DatabaseUpdate;
@@ -194,16 +194,18 @@ pub fn make_test_execution_certificate(
     seed: u8,
     block_height: BlockHeight,
 ) -> ExecutionCertificate {
+    let outcomes = vec![TxOutcome {
+        tx_hash: TxHash::from_raw(Hash::from_bytes(&[seed + 100; 32])),
+        outcome: ExecutionOutcome::Succeeded {
+            receipt_hash: GlobalReceiptHash::from_raw(Hash::from_bytes(&[seed + 150; 32])),
+        },
+    }];
+    let global_receipt_root = compute_global_receipt_root(&outcomes);
     ExecutionCertificate::new(
         WaveId::new(ShardGroupId(0), block_height, BTreeSet::new()),
         WeightedTimestamp(block_height.0 + 1),
-        GlobalReceiptRoot::from_raw(Hash::from_bytes(&[seed + 50; 32])),
-        vec![TxOutcome {
-            tx_hash: TxHash::from_raw(Hash::from_bytes(&[seed + 100; 32])),
-            outcome: ExecutionOutcome::Succeeded {
-                receipt_hash: GlobalReceiptHash::from_raw(Hash::from_bytes(&[seed + 150; 32])),
-            },
-        }],
+        global_receipt_root,
+        outcomes,
         Bls12381G2Signature([0u8; 96]),
         SignerBitfield::new(4),
     )

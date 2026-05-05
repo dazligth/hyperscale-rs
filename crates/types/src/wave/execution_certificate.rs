@@ -13,6 +13,7 @@ use sbor::{
 use crate::{
     BlockHeight, Bls12381G2Signature, ExecutionCertificateHash, GlobalReceiptRoot, Hash,
     RETENTION_HORIZON, ShardGroupId, SignerBitfield, TxOutcome, WaveId, WeightedTimestamp,
+    compute_global_receipt_root,
 };
 
 /// Cap on per-tx outcomes carried in a single `ExecutionCertificate` at
@@ -145,6 +146,15 @@ impl<D: Decoder<NoCustomValueKind>> Decode<NoCustomValueKind, D> for ExecutionCe
         }
         let aggregated_signature: Bls12381G2Signature = decoder.decode()?;
         let signers: SignerBitfield = decoder.decode()?;
+        // The BLS aggregate only commits to (global_receipt_root, tx_count),
+        // not to tx_outcomes content. Without this check a Byzantine
+        // aggregator could ship a signature-valid EC whose outcomes don't
+        // hash to the signed root, slipping bogus per-tx results past every
+        // downstream consumer (gossip ingress, fetch ingress, FinalizedWave
+        // admission).
+        if compute_global_receipt_root(&tx_outcomes) != global_receipt_root {
+            return Err(DecodeError::InvalidCustomValue);
+        }
         let canonical_hash = Self::compute_canonical_hash(
             &wave_id,
             vote_anchor_ts,

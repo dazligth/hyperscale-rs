@@ -488,6 +488,47 @@ mod tests {
     }
 
     #[test]
+    fn decode_rejects_tx_outcomes_not_matching_receipt_root() {
+        use sbor::{
+            BASIC_SBOR_V1_PAYLOAD_PREFIX, DecodeError, Encoder, NoCustomValueKind, ValueKind,
+            VecEncoder, basic_decode,
+        };
+
+        use crate::{Bls12381G2Signature, GlobalReceiptRoot, SignerBitfield, TxOutcome};
+
+        // Encode an EC where global_receipt_root is ZERO but tx_outcomes is
+        // a non-empty list whose merkle root is non-zero. The BLS aggregate
+        // commits only to (root, count); without the decode-time check a
+        // peer could ship this through every downstream consumer.
+        let wave_id = make_wave_id(0, BlockHeight(7), &[1]);
+        let outcomes = vec![make_outcome(1), make_outcome(2)];
+        let real_root = compute_global_receipt_root(&outcomes);
+        assert_ne!(real_root, GlobalReceiptRoot::ZERO);
+
+        let mut buf = Vec::with_capacity(256);
+        {
+            let mut enc = VecEncoder::<NoCustomValueKind>::new(&mut buf, BASIC_SBOR_V1_MAX_DEPTH);
+            enc.write_payload_prefix(BASIC_SBOR_V1_PAYLOAD_PREFIX)
+                .unwrap();
+            enc.write_value_kind(ValueKind::Tuple).unwrap();
+            enc.write_size(6).unwrap();
+            enc.encode(&wave_id).unwrap();
+            enc.encode(&WeightedTimestamp(1)).unwrap();
+            enc.encode(&GlobalReceiptRoot::ZERO).unwrap();
+            enc.write_value_kind(ValueKind::Array).unwrap();
+            enc.write_value_kind(TxOutcome::value_kind()).unwrap();
+            enc.write_size(outcomes.len()).unwrap();
+            for outcome in &outcomes {
+                enc.encode_deeper_body(outcome).unwrap();
+            }
+            enc.encode(&Bls12381G2Signature([0u8; 96])).unwrap();
+            enc.encode(&SignerBitfield::new(4)).unwrap();
+        }
+        let err = basic_decode::<ExecutionCertificate>(&buf).unwrap_err();
+        assert!(matches!(err, DecodeError::InvalidCustomValue));
+    }
+
+    #[test]
     fn test_wave_leader_is_attempt_zero() {
         let committee = vec![
             ValidatorId(1),
