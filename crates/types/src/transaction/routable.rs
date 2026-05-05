@@ -236,24 +236,15 @@ impl<E: Encoder<NoCustomValueKind>> Encode<NoCustomValueKind, E> for RoutableTra
     }
 
     fn encode_body(&self, encoder: &mut E) -> Result<(), EncodeError> {
-        encoder.write_size(5)?; // 5 fields
-
-        // Encode hash as [u8; 32]
-        let hash_bytes: [u8; 32] = *self.hash.as_bytes();
-        encoder.encode(&hash_bytes)?;
-
-        // Encode transaction as bytes (using cached serialized_bytes)
+        // Hash is content-derived (blake3 over `serialized_bytes`); the
+        // decoder recomputes it. Sending the hash on the wire would let a
+        // peer ship `(hash=X, tx_bytes=Y)` and have us key the bogus body
+        // by X, diverging from any later re-hash from `tx_bytes`.
+        encoder.write_size(4)?;
         encoder.encode(&self.serialized_bytes)?;
-
-        // Encode declared_reads
         encoder.encode(&self.declared_reads)?;
-
-        // Encode declared_writes
         encoder.encode(&self.declared_writes)?;
-
-        // Encode validity_range
         encoder.encode(&self.validity_range)?;
-
         Ok(())
     }
 }
@@ -266,30 +257,25 @@ impl<D: Decoder<NoCustomValueKind>> Decode<NoCustomValueKind, D> for RoutableTra
         decoder.check_preloaded_value_kind(value_kind, ValueKind::Tuple)?;
         let length = decoder.read_size()?;
 
-        if length != 5 {
+        if length != 4 {
             return Err(DecodeError::UnexpectedSize {
-                expected: 5,
+                expected: 4,
                 actual: length,
             });
         }
 
-        // Decode hash (stored as [u8; 32])
-        let hash_bytes: [u8; 32] = decoder.decode()?;
-        let hash = Hash::from_hash_bytes(&hash_bytes);
-
-        // Decode transaction bytes and convert to UserTransaction
         let tx_bytes: Vec<u8> = decoder.decode()?;
         let transaction: UserTransaction =
             manifest_decode(&tx_bytes).map_err(|_| DecodeError::InvalidCustomValue)?;
-
-        // Decode declared_reads
         let declared_reads: Vec<NodeId> = decoder.decode()?;
-
-        // Decode declared_writes
         let declared_writes: Vec<NodeId> = decoder.decode()?;
-
-        // Decode validity_range
         let validity_range: TimestampRange = decoder.decode()?;
+
+        // Recompute the hash from `tx_bytes` — it's content-derived and
+        // must not be trusted from the wire (see Encode::encode_body).
+        let mut hasher = Hasher::new();
+        hasher.update(&tx_bytes);
+        let hash = Hash::from_hash_bytes(hasher.finalize().as_bytes());
 
         let mut tx = Self {
             hash,
@@ -317,5 +303,70 @@ impl Describe<NoCustomTypeKind> for RoutableTransaction {
 
     fn type_data() -> TypeData<NoCustomTypeKind, RustTypeId> {
         TypeData::unnamed(TypeKind::Any)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sbor::{
+        BASIC_SBOR_V1_MAX_DEPTH, BASIC_SBOR_V1_PAYLOAD_PREFIX, VecEncoder, basic_decode,
+        basic_encode,
+    };
+
+    use super::*;
+    use crate::test_utils::{test_node, test_transaction_with_nodes};
+
+    #[test]
+    fn roundtrip_preserves_content_hash() {
+        let tx = test_transaction_with_nodes(&[1, 2, 3], vec![test_node(1)], vec![test_node(2)]);
+        let original_hash = tx.hash();
+        let bytes = basic_encode(&tx).unwrap();
+        let decoded: RoutableTransaction = basic_decode(&bytes).unwrap();
+        assert_eq!(decoded.hash(), original_hash);
+        assert_eq!(decoded.serialized_bytes(), tx.serialized_bytes());
+    }
+
+    #[test]
+    fn decoded_hash_is_blake3_of_tx_bytes_not_wire_value() {
+        // Hand-roll a 4-field payload where field 0 (tx_bytes) is the real
+        // tx, and confirm the decoded hash matches blake3(tx_bytes) — i.e.
+        // there is no wire field a peer could populate to spoof the hash.
+        let tx = test_transaction_with_nodes(&[7, 8, 9], vec![test_node(3)], vec![test_node(4)]);
+        let bytes = basic_encode(&tx).unwrap();
+        let decoded: RoutableTransaction = basic_decode(&bytes).unwrap();
+        let mut hasher = Hasher::new();
+        hasher.update(decoded.serialized_bytes());
+        let expected = TxHash::from_raw(Hash::from_hash_bytes(hasher.finalize().as_bytes()));
+        assert_eq!(decoded.hash(), expected);
+    }
+
+    #[test]
+    fn decode_rejects_old_5_field_shape() {
+        // Hand-roll the prior wire layout (with a leading hash field) to
+        // confirm a peer can't keep shipping the spoofable shape.
+        let tx = test_transaction_with_nodes(&[1, 2, 3], vec![test_node(1)], vec![test_node(2)]);
+        let mut buf = Vec::with_capacity(256);
+        {
+            let mut enc = VecEncoder::<NoCustomValueKind>::new(&mut buf, BASIC_SBOR_V1_MAX_DEPTH);
+            enc.write_payload_prefix(BASIC_SBOR_V1_PAYLOAD_PREFIX)
+                .unwrap();
+            enc.write_value_kind(ValueKind::Tuple).unwrap();
+            enc.write_size(5).unwrap();
+            // Forged hash (peer-chosen, would diverge from real tx hash).
+            let bogus_hash = [0xAAu8; 32];
+            enc.encode(&bogus_hash).unwrap();
+            enc.encode(&tx.serialized_bytes().to_vec()).unwrap();
+            enc.encode(&tx.declared_reads).unwrap();
+            enc.encode(&tx.declared_writes).unwrap();
+            enc.encode(&tx.validity_range).unwrap();
+        }
+        let err = basic_decode::<RoutableTransaction>(&buf).unwrap_err();
+        assert!(matches!(
+            err,
+            DecodeError::UnexpectedSize {
+                expected: 4,
+                actual: 5
+            }
+        ));
     }
 }
