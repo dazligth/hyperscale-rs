@@ -159,6 +159,23 @@ impl<D: Decoder<NoCustomValueKind>> Decode<NoCustomValueKind, D> for SignerBitfi
         if bits.len() != num_validators.div_ceil(8) {
             return Err(DecodeError::InvalidCustomValue);
         }
+        // Reject non-canonical encodings where padding bits in the trailing
+        // byte (positions ≥ num_validators within the final byte) are set.
+        // `count_ones()` / `is_empty()` walk the raw `bits` vec, so a peer
+        // could inflate signer counts with up to 7 spurious bits per QC
+        // without this check — and two byte-distinct encodings would decode
+        // to functionally-equal bitfields, breaking content-addressed
+        // hashing.
+        let used_bits_in_last_byte = num_validators % 8;
+        if used_bits_in_last_byte != 0 {
+            let last = *bits
+                .last()
+                .expect("bits non-empty when num_validators % 8 != 0");
+            let padding_mask = !((1u8 << used_bits_in_last_byte) - 1);
+            if last & padding_mask != 0 {
+                return Err(DecodeError::InvalidCustomValue);
+            }
+        }
         Ok(Self {
             bits,
             num_validators,
@@ -278,6 +295,34 @@ mod tests {
         };
         let bytes = basic_encode(&attacker).unwrap();
         assert!(basic_decode::<SignerBitfield>(&bytes).is_err());
+    }
+
+    #[test]
+    fn decode_rejects_nonzero_padding_bits() {
+        // num_validators = 5 means the trailing byte uses bits 0..=4; bits
+        // 5..=7 must be zero. Setting bit 7 there inflates count_ones() by
+        // one and breaks canonical encoding without affecting set_indices.
+        let attacker = ManualBitfield {
+            bits: vec![0b1000_0000],
+            num_validators: 5,
+        };
+        let bytes = basic_encode(&attacker).unwrap();
+        let err = basic_decode::<SignerBitfield>(&bytes).unwrap_err();
+        assert!(matches!(err, DecodeError::InvalidCustomValue));
+    }
+
+    #[test]
+    fn decode_accepts_canonical_partial_byte() {
+        // num_validators = 5 with all valid bits set and padding bits zero.
+        // Confirms the new check doesn't reject legitimate encodings.
+        let attacker = ManualBitfield {
+            bits: vec![0b0001_1111],
+            num_validators: 5,
+        };
+        let bytes = basic_encode(&attacker).unwrap();
+        let decoded: SignerBitfield = basic_decode(&bytes).unwrap();
+        assert_eq!(decoded.num_validators(), 5);
+        assert_eq!(decoded.count_ones(), 5);
     }
 
     /// Mirror of the `SignerBitfield` wire layout, used in tests to forge
