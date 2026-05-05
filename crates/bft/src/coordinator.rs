@@ -1083,34 +1083,53 @@ impl BftCoordinator {
             actions = self.start_block_sync(topology, parent_height);
         }
 
-        // Only adopt the QC if we have the parent it certifies — otherwise we
-        // can't look up the parent's state_root when proposing, which would
-        // yield blocks with state_root=Hash::ZERO.
-        let should_update_qc = have_parent
+        // Defer adoption until the BLS signature has been verified. Without
+        // this gate a Byzantine proposer can pass `validate_header` (which
+        // only checks signer-power, not signatures) and have us unlock vote
+        // locks / fire two-chain commit on a forged QC. The vote-flow path
+        // dispatches `Action::VerifyQcSignature` when we want to vote on
+        // this block; on success `on_qc_signature_verified` re-enters the
+        // adoption logic via `try_adopt_verified_qc`.
+        if have_parent
             && self
-                .latest_qc
-                .as_ref()
-                .is_none_or(|existing| header.parent_qc.height.0 > existing.height.0);
-        if should_update_qc {
-            debug!(
-                validator = ?topology.local_validator_id(),
-                qc_height = header.parent_qc.height.0,
-                "Updated latest_qc from received block header"
-            );
-            self.latest_qc = Some(header.parent_qc.clone());
-            self.maybe_unlock_for_qc(topology, &header.parent_qc);
-
-            // Non-proposers learn about QCs via block headers rather than
-            // forming them locally — they need two-chain commit + a proposal
-            // kick to advance the chain in the event-driven model.
-            actions.extend(self.try_two_chain_commit(
-                topology,
-                &header.parent_qc,
-                CommitSource::Header,
-            ));
-            self.queue_ready_proposal();
+                .verification
+                .is_qc_verified(&header.parent_qc.block_hash)
+        {
+            actions.extend(self.try_adopt_verified_qc(topology, &header.parent_qc));
         }
 
+        actions
+    }
+
+    /// Adopt `qc` as the new `latest_qc` if it advances the chain, fire
+    /// two-chain commit, and unlock vote locks. Caller MUST have confirmed
+    /// the QC's BLS signature (or it's the genesis QC) — see
+    /// [`Self::absorb_parent_qc_from_header`] for the consensus-path entry
+    /// and [`Self::on_qc_signature_verified`] for the post-verify entry.
+    fn try_adopt_verified_qc(
+        &mut self,
+        topology: &TopologySnapshot,
+        qc: &QuorumCertificate,
+    ) -> Vec<Action> {
+        let advances = self
+            .latest_qc
+            .as_ref()
+            .is_none_or(|existing| qc.height.0 > existing.height.0);
+        if !advances {
+            return Vec::new();
+        }
+        debug!(
+            validator = ?topology.local_validator_id(),
+            qc_height = qc.height.0,
+            "Adopted verified parent QC"
+        );
+        self.latest_qc = Some(qc.clone());
+        self.maybe_unlock_for_qc(topology, qc);
+        // Non-proposers learn about QCs via block headers rather than
+        // forming them locally — they need two-chain commit + a proposal
+        // kick to advance the chain in the event-driven model.
+        let actions = self.try_two_chain_commit(topology, qc, CommitSource::Header);
+        self.queue_ready_proposal();
         actions
     }
 
@@ -1705,10 +1724,20 @@ impl BftCoordinator {
         self.verification
             .cache_verified_qc(qc_block_hash, qc_height);
 
+        // The parent QC is now provably authentic; perform the adoption
+        // that `absorb_parent_qc_from_header` deferred. Safe to run before
+        // `try_vote_on_block` — adoption only mutates `latest_qc` /
+        // commit-related state, not the per-block voting machinery.
+        let mut actions = Vec::new();
+        if self.has_complete_block_at_height(header.parent_qc.height) {
+            actions.extend(self.try_adopt_verified_qc(topology, &header.parent_qc));
+        }
+
         // QC is valid - proceed to vote on the block
         let height = header.height;
         let round = header.round;
-        self.try_vote_on_block(topology, block_hash, height, round)
+        actions.extend(self.try_vote_on_block(topology, block_hash, height, round));
+        actions
     }
 
     /// Handle state root verification result.
@@ -3409,6 +3438,112 @@ mod tests {
             actions
                 .iter()
                 .any(|a| matches!(a, Action::VerifyQcSignature { .. }))
+        );
+    }
+
+    /// `absorb_parent_qc_from_header` must NOT mutate `latest_qc` until the
+    /// parent QC's BLS signature has been verified — otherwise a Byzantine
+    /// proposer can forge a signers-pass-but-signature-invalid QC and have
+    /// us advance the chain (and unlock vote locks via
+    /// `maybe_unlock_for_qc`) on a non-existent quorum.
+    #[test]
+    fn test_header_with_unverified_parent_qc_does_not_update_latest_qc() {
+        let (mut state, topology) = make_multi_validator_state_at(1);
+        state.set_time(LocalTimestamp::from_millis(100_000));
+
+        let parent_block_hash = BlockHash::from_raw(Hash::from_bytes(b"parent_block"));
+        state.committed_height = BlockHeight(1);
+        state.committed_hash = parent_block_hash;
+        state
+            .commits
+            .certified_blocks
+            .insert(parent_block_hash, make_empty_block(BlockHeight(1)));
+        let prior_latest_qc = state.latest_qc.clone();
+
+        let mut signers = SignerBitfield::new(4);
+        signers.set(0);
+        signers.set(1);
+        signers.set(2);
+        let parent_qc = QuorumCertificate {
+            signers,
+            weighted_timestamp: WeightedTimestamp(99_000),
+            ..make_test_qc(parent_block_hash, BlockHeight(1))
+        };
+        let header = BlockHeader {
+            parent_block_hash,
+            parent_qc,
+            ..make_header_at_height(BlockHeight(2), 100_000)
+        };
+
+        let _ = state.on_block_header(
+            &topology,
+            &header,
+            BlockManifest::default(),
+            |_| None,
+            |_| None,
+            |_| None,
+        );
+
+        // latest_qc must still be the pre-header value — adoption is gated
+        // on BLS verification, which hasn't happened yet.
+        assert_eq!(
+            state.latest_qc.as_ref().map(|q| q.height),
+            prior_latest_qc.as_ref().map(|q| q.height),
+            "unverified parent_qc must not advance latest_qc"
+        );
+    }
+
+    /// After successful BLS verification, the deferred `latest_qc`
+    /// adoption should run as part of `on_qc_signature_verified` — so
+    /// adoption is just one verify-round late, not lost entirely.
+    #[test]
+    fn test_qc_signature_verified_success_adopts_latest_qc() {
+        let (mut state, topology) = make_multi_validator_state_at(1);
+        state.set_time(LocalTimestamp::from_millis(100_000));
+
+        let parent_block_hash = BlockHash::from_raw(Hash::from_bytes(b"parent_block"));
+        state.committed_height = BlockHeight(1);
+        state.committed_hash = parent_block_hash;
+        state
+            .commits
+            .certified_blocks
+            .insert(parent_block_hash, make_empty_block(BlockHeight(1)));
+
+        let mut signers = SignerBitfield::new(4);
+        signers.set(0);
+        signers.set(1);
+        signers.set(2);
+        let parent_qc = QuorumCertificate {
+            signers,
+            weighted_timestamp: WeightedTimestamp(99_000),
+            ..make_test_qc(parent_block_hash, BlockHeight(1))
+        };
+        let header = BlockHeader {
+            parent_block_hash,
+            parent_qc,
+            ..make_header_at_height(BlockHeight(2), 100_000)
+        };
+        let block_hash = header.hash();
+
+        let _ = state.on_block_header(
+            &topology,
+            &header,
+            BlockManifest::default(),
+            |_| None,
+            |_| None,
+            |_| None,
+        );
+        assert_ne!(
+            state.latest_qc.as_ref().map(|q| q.height),
+            Some(BlockHeight(1)),
+            "precondition: latest_qc not yet at height 1"
+        );
+
+        let _ = state.on_qc_signature_verified(&topology, block_hash, true);
+        assert_eq!(
+            state.latest_qc.as_ref().map(|q| q.height),
+            Some(BlockHeight(1)),
+            "successful verification must trigger the deferred adoption"
         );
     }
 
