@@ -525,7 +525,7 @@ impl MempoolCoordinator {
         // but didn't receive them via gossip. We need them in the mempool for
         // status tracking (execution status updates).
         let mut abandoned_tx_fetches: Vec<TxHash> = Vec::new();
-        for tx in block.transactions() {
+        for tx in block.transactions().iter() {
             let hash = tx.hash();
             let num_shards = topology.num_shards();
             self.pool.entry(hash).or_insert_with(|| {
@@ -563,7 +563,7 @@ impl MempoolCoordinator {
         // Update transaction status to Committed and add locks.
         // This must happen synchronously to prevent the same transactions from being
         // re-proposed before the status update is processed.
-        for tx in block.transactions() {
+        for tx in block.transactions().iter() {
             let hash = tx.hash();
             if let Some(entry) = self.pool.get_mut(&hash) {
                 // Only update if still Pending (avoid overwriting later states during sync)
@@ -664,7 +664,7 @@ impl MempoolCoordinator {
         // Per-tx terminal state from committed wave certificates. Decisions are
         // derived from each FinalizedWave directly, so this works identically
         // for consensus and sync commit paths.
-        for fw in block.certificates() {
+        for fw in block.certificates().iter() {
             for (tx_hash, decision) in fw.tx_decisions() {
                 if matches!(decision, TransactionDecision::Aborted) {
                     record_transaction_aborted();
@@ -1131,7 +1131,7 @@ mod tests {
                 header,
                 transactions,
                 certificates,
-                provisions: vec![Arc::new(provision)],
+                provisions: Arc::new(vec![Arc::new(provision)]),
             },
             sealed @ Block::Sealed { .. } => sealed,
         };

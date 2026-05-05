@@ -128,27 +128,29 @@ fn commit_with(
             Block::Live {
                 header,
                 transactions,
-                mut certificates,
+                certificates,
                 provisions,
             } => {
+                let mut certificates = (*certificates).clone();
                 certificates.push(new_fw);
                 Block::Live {
                     header,
                     transactions,
-                    certificates,
+                    certificates: Arc::new(certificates),
                     provisions,
                 }
             }
             Block::Sealed {
                 header,
                 transactions,
-                mut certificates,
+                certificates,
             } => {
+                let mut certificates = (*certificates).clone();
                 certificates.push(new_fw);
                 Block::Sealed {
                     header,
                     transactions,
-                    certificates,
+                    certificates: Arc::new(certificates),
                 }
             }
         }
@@ -390,7 +392,7 @@ fn test_transactions_batch_with_indexed_block() {
             ..
         } => Block::Live {
             header,
-            transactions: vec![tx],
+            transactions: Arc::new(vec![tx]),
             certificates,
             provisions,
         },
@@ -400,7 +402,7 @@ fn test_transactions_batch_with_indexed_block() {
             ..
         } => Block::Sealed {
             header,
-            transactions: vec![tx],
+            transactions: Arc::new(vec![tx]),
             certificates,
         },
     };

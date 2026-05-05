@@ -530,9 +530,9 @@ pub fn build_proposal<S: ChainWriter + SubstateStore>(
 
     let block = Block::Live {
         header,
-        transactions,
-        certificates,
-        provisions,
+        transactions: Arc::new(transactions),
+        certificates: Arc::new(certificates),
+        provisions: Arc::new(provisions),
     };
 
     let block_hash = block.hash();

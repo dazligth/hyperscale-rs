@@ -1312,9 +1312,9 @@ mod tests {
         header.height = height;
         let block = Block::Live {
             header,
-            transactions: vec![],
-            certificates: vec![],
-            provisions: vec![],
+            transactions: Arc::new(vec![]),
+            certificates: Arc::new(vec![]),
+            provisions: Arc::new(vec![]),
         };
         let qc = QuorumCertificate {
             block_hash: block.hash(),

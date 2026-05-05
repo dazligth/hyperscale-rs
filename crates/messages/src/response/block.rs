@@ -194,6 +194,8 @@ impl ElidedCertifiedBlock {
 
         let txs: Vec<Arc<RoutableTransaction>> = txs.into_iter().map(Option::unwrap).collect();
         let certs: Vec<Arc<FinalizedWave>> = certs.into_iter().map(Option::unwrap).collect();
+        let txs = Arc::new(txs);
+        let certs = Arc::new(certs);
         let block = match provs {
             Some(entries) => {
                 let provisions: Vec<Arc<Provisions>> =
@@ -202,7 +204,7 @@ impl ElidedCertifiedBlock {
                     header: self.header.clone(),
                     transactions: txs,
                     certificates: certs,
-                    provisions,
+                    provisions: Arc::new(provisions),
                 }
             }
             None => Block::Sealed {
@@ -373,9 +375,9 @@ mod tests {
                 provision_tx_roots: BTreeMap::new(),
                 in_flight: 0,
             },
-            transactions: vec![Arc::new(tx)],
-            certificates: vec![],
-            provisions: vec![],
+            transactions: Arc::new(vec![Arc::new(tx)]),
+            certificates: Arc::new(vec![]),
+            provisions: Arc::new(vec![]),
         }
     }
 

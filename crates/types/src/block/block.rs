@@ -14,6 +14,16 @@ use crate::{
     encode_finalized_wave_vec,
 };
 
+/// Shared transaction list — wrapped in `Arc` so root-verification actions
+/// can hold their own owner without deep-cloning the per-tx `Arc` array.
+pub type SharedTransactions = Arc<Vec<Arc<RoutableTransaction>>>;
+
+/// Shared certificate list — same rationale as [`SharedTransactions`].
+pub type SharedCertificates = Arc<Vec<Arc<FinalizedWave>>>;
+
+/// Shared provision list — same rationale as [`SharedTransactions`].
+pub type SharedProvisions = Arc<Vec<Arc<Provisions>>>;
+
 /// Complete block with header and transaction data.
 ///
 /// Transactions are stored in a single flat list, sorted by hash for deterministic ordering.
@@ -36,20 +46,20 @@ pub enum Block {
         /// Block header (contains all merkle roots).
         header: BlockHeader,
         /// Transactions in this block, sorted by hash.
-        transactions: Vec<Arc<RoutableTransaction>>,
+        transactions: SharedTransactions,
         /// Wave certificates finalized in this block.
-        certificates: Vec<Arc<FinalizedWave>>,
+        certificates: SharedCertificates,
         /// Provisions needed to execute cross-shard waves locally.
-        provisions: Vec<Arc<Provisions>>,
+        provisions: SharedProvisions,
     },
     /// Block past its execution window — provisions dropped.
     Sealed {
         /// Block header (contains all merkle roots).
         header: BlockHeader,
         /// Transactions in this block, sorted by hash.
-        transactions: Vec<Arc<RoutableTransaction>>,
+        transactions: SharedTransactions,
         /// Wave certificates finalized in this block.
-        certificates: Vec<Arc<FinalizedWave>>,
+        certificates: SharedCertificates,
     },
 }
 
@@ -222,9 +232,12 @@ impl<D: Decoder<NoCustomValueKind>> Decode<NoCustomValueKind, D> for Block {
                     });
                 }
                 let header: BlockHeader = decoder.decode()?;
-                let transactions = decode_tx_vec(decoder)?;
-                let certificates = decode_finalized_wave_vec(decoder, MAX_SBOR_COLLECTION_SIZE)?;
-                let provisions = decode_provision_vec(decoder)?;
+                let transactions = Arc::new(decode_tx_vec(decoder)?);
+                let certificates = Arc::new(decode_finalized_wave_vec(
+                    decoder,
+                    MAX_SBOR_COLLECTION_SIZE,
+                )?);
+                let provisions = Arc::new(decode_provision_vec(decoder)?);
                 Ok(Self::Live {
                     header,
                     transactions,
@@ -240,8 +253,11 @@ impl<D: Decoder<NoCustomValueKind>> Decode<NoCustomValueKind, D> for Block {
                     });
                 }
                 let header: BlockHeader = decoder.decode()?;
-                let transactions = decode_tx_vec(decoder)?;
-                let certificates = decode_finalized_wave_vec(decoder, MAX_SBOR_COLLECTION_SIZE)?;
+                let transactions = Arc::new(decode_tx_vec(decoder)?);
+                let certificates = Arc::new(decode_finalized_wave_vec(
+                    decoder,
+                    MAX_SBOR_COLLECTION_SIZE,
+                )?);
                 Ok(Self::Sealed {
                     header,
                     transactions,
@@ -280,9 +296,9 @@ impl Block {
     ) -> Self {
         Self::Live {
             header: BlockHeader::genesis(shard_group_id, proposer, state_root),
-            transactions: vec![],
-            certificates: vec![],
-            provisions: vec![],
+            transactions: Arc::new(vec![]),
+            certificates: Arc::new(vec![]),
+            provisions: Arc::new(vec![]),
         }
     }
 
@@ -294,17 +310,21 @@ impl Block {
         }
     }
 
-    /// Transactions in the block — present in both variants.
+    /// Transactions in the block — present in both variants. Returns a borrow
+    /// of the shared handle; callers that need to hand the list to an action
+    /// crossing thread boundaries `.clone()` the `Arc` (refcount bump only,
+    /// no Vec or per-tx clone).
     #[must_use]
-    pub fn transactions(&self) -> &[Arc<RoutableTransaction>] {
+    pub const fn transactions(&self) -> &SharedTransactions {
         match self {
             Self::Live { transactions, .. } | Self::Sealed { transactions, .. } => transactions,
         }
     }
 
     /// Finalized waves (certificates) in the block — present in both variants.
+    /// See [`Self::transactions`] for the sharing rationale.
     #[must_use]
-    pub fn certificates(&self) -> &[Arc<FinalizedWave>] {
+    pub const fn certificates(&self) -> &SharedCertificates {
         match self {
             Self::Live { certificates, .. } | Self::Sealed { certificates, .. } => certificates,
         }
@@ -358,7 +378,7 @@ impl Block {
     /// Panics if invoked on a `Live` block — that would silently discard
     /// the existing provision set.
     #[must_use]
-    pub fn into_live(self, provisions: Vec<Arc<Provisions>>) -> Self {
+    pub fn into_live(self, provisions: SharedProvisions) -> Self {
         match self {
             Self::Sealed {
                 header,

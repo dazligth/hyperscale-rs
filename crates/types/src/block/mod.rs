@@ -17,7 +17,7 @@ pub mod manifest;
 pub mod roots;
 pub mod vote;
 
-pub use block::Block;
+pub use block::{Block, SharedCertificates, SharedProvisions, SharedTransactions};
 
 #[cfg(test)]
 mod tests {

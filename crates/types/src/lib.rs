@@ -29,7 +29,6 @@ mod topology;
 mod transaction;
 mod wave;
 
-pub use block::Block;
 pub use block::certified::{CertifiedBlock, CertifiedBlockHashMismatch};
 pub use block::committed_header::CommittedBlockHeader;
 pub use block::header::BlockHeader;
@@ -39,6 +38,7 @@ pub use block::roots::{
     compute_transaction_root,
 };
 pub use block::vote::BlockVote;
+pub use block::{Block, SharedCertificates, SharedProvisions, SharedTransactions};
 pub use crypto::batch_verify::{
     batch_verify_bls_different_messages, batch_verify_bls_different_messages_all_or_nothing,
     batch_verify_bls_same_message, batch_verify_ed25519,

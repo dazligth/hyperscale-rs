@@ -146,14 +146,14 @@ impl ChainWriter for SimStorage {
                 }
 
                 let mut c = self.consensus.write().unwrap();
-                for tx in block.transactions() {
+                for tx in block.transactions().iter() {
                     c.transactions.insert(tx.hash(), tx.as_ref().clone());
                 }
                 c.blocks.insert(
                     block.height(),
                     CertifiedBlock::new_unchecked((*block).clone().into_sealed(), (*qc).clone()),
                 );
-                for fw in block.certificates() {
+                for fw in block.certificates().iter() {
                     let cert = &fw.certificate;
                     let wave_id = cert.wave_id.clone();
                     c.certificates.insert(wave_id.clone(), (**cert).clone());
@@ -163,7 +163,7 @@ impl ChainWriter for SimStorage {
                         .push(wave_id);
                 }
                 c.insert_receipts(&prepared.receipts);
-                for fw in block.certificates() {
+                for fw in block.certificates().iter() {
                     for ec in &fw.certificate.execution_certificates {
                         let canonical_hash = ec.canonical_hash();
                         c.execution_certs.insert(canonical_hash, (**ec).clone());
@@ -248,14 +248,14 @@ impl SimStorage {
         // Store block + certificate + consensus state atomically.
         {
             let mut c = self.consensus.write().unwrap();
-            for tx in block.transactions() {
+            for tx in block.transactions().iter() {
                 c.transactions.insert(tx.hash(), tx.as_ref().clone());
             }
             c.blocks.insert(
                 block.height(),
                 CertifiedBlock::new_unchecked((**block).clone().into_sealed(), (**qc).clone()),
             );
-            for fw in block.certificates() {
+            for fw in block.certificates().iter() {
                 let cert = &fw.certificate;
                 let wave_id = cert.wave_id.clone();
                 c.certificates.insert(wave_id.clone(), (**cert).clone());
@@ -267,7 +267,7 @@ impl SimStorage {
             // Store receipts atomically with block commit.
             c.insert_receipts(receipts);
             // Store execution certificates (extracted from wave certs) atomically.
-            for fw in block.certificates() {
+            for fw in block.certificates().iter() {
                 for ec in &fw.certificate.execution_certificates {
                     let canonical_hash = ec.canonical_hash();
                     c.execution_certs.insert(canonical_hash, (**ec).clone());

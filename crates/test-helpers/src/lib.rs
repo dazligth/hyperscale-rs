@@ -211,7 +211,7 @@ impl TestCommittee {
 /// is `Round::INITIAL`, and there are no wave roots or provisions. Callers
 /// pass only the bits that vary between tests.
 #[must_use]
-pub const fn make_live_block(
+pub fn make_live_block(
     shard_group_id: ShardGroupId,
     height: BlockHeight,
     timestamp_ms: u64,
@@ -239,9 +239,9 @@ pub const fn make_live_block(
     };
     Block::Live {
         header,
-        transactions,
-        certificates,
-        provisions: vec![],
+        transactions: Arc::new(transactions),
+        certificates: Arc::new(certificates),
+        provisions: Arc::new(vec![]),
     }
 }
 

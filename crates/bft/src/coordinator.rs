@@ -3335,9 +3335,9 @@ mod tests {
     fn make_empty_block(height: BlockHeight) -> Block {
         Block::Live {
             header: make_header_at_height(height, 1000),
-            transactions: vec![],
-            certificates: vec![],
-            provisions: vec![],
+            transactions: Arc::new(vec![]),
+            certificates: Arc::new(vec![]),
+            provisions: Arc::new(vec![]),
         }
     }
 
@@ -4296,9 +4296,9 @@ mod tests {
                 timestamp: ProposerTimestamp(1000),
                 ..make_header_at_height(BlockHeight(1), 1000)
             },
-            transactions: vec![],
-            certificates: vec![],
-            provisions: vec![],
+            transactions: Arc::new(vec![]),
+            certificates: Arc::new(vec![]),
+            provisions: Arc::new(vec![]),
         };
         let qc = QuorumCertificate {
             weighted_timestamp: WeightedTimestamp(1000),
@@ -4431,9 +4431,9 @@ mod tests {
                 parent_block_hash: BlockHash::from_raw(Hash::from_bytes(b"grandparent")),
                 ..make_header_at_height(BlockHeight(5), 100_000)
             },
-            transactions: vec![tx1.clone()],
-            certificates: vec![],
-            provisions: vec![],
+            transactions: Arc::new(vec![tx1.clone()]),
+            certificates: Arc::new(vec![]),
+            provisions: Arc::new(vec![]),
         };
         let ancestor_hash = ancestor_block.hash();
         state
@@ -4449,9 +4449,9 @@ mod tests {
                 parent_block_hash: ancestor_hash,
                 ..make_header_at_height(BlockHeight(6), 100_001)
             },
-            transactions: txs,
-            certificates: vec![],
-            provisions: vec![],
+            transactions: Arc::new(txs),
+            certificates: Arc::new(vec![]),
+            provisions: Arc::new(vec![]),
         };
 
         let result = {
@@ -4475,9 +4475,9 @@ mod tests {
                 parent_block_hash: BlockHash::from_raw(Hash::from_bytes(b"grandparent")),
                 ..make_header_at_height(BlockHeight(5), 100_000)
             },
-            transactions: vec![tx1.clone()],
-            certificates: vec![],
-            provisions: vec![],
+            transactions: Arc::new(vec![tx1.clone()]),
+            certificates: Arc::new(vec![]),
+            provisions: Arc::new(vec![]),
         };
         let ancestor_hash = ancestor_block.hash();
         state
@@ -4492,9 +4492,9 @@ mod tests {
                 parent_block_hash: ancestor_hash,
                 ..make_header_at_height(BlockHeight(6), 100_001)
             },
-            transactions: vec![tx1],
-            certificates: vec![],
-            provisions: vec![],
+            transactions: Arc::new(vec![tx1]),
+            certificates: Arc::new(vec![]),
+            provisions: Arc::new(vec![]),
         };
 
         // Ancestor is at committed height, so walk stops before checking it

@@ -345,35 +345,37 @@ fn push_wave(block: &mut Block, fw: Arc<FinalizedWave>) {
         block,
         Block::Sealed {
             header: block.header().clone(),
-            transactions: vec![],
-            certificates: vec![],
+            transactions: Arc::new(vec![]),
+            certificates: Arc::new(vec![]),
         },
     );
     *block = match taken {
         Block::Live {
             header,
             transactions,
-            mut certificates,
+            certificates,
             provisions,
         } => {
+            let mut certificates = (*certificates).clone();
             certificates.push(fw);
             Block::Live {
                 header,
                 transactions,
-                certificates,
+                certificates: Arc::new(certificates),
                 provisions,
             }
         }
         Block::Sealed {
             header,
             transactions,
-            mut certificates,
+            certificates,
         } => {
+            let mut certificates = (*certificates).clone();
             certificates.push(fw);
             Block::Sealed {
                 header,
                 transactions,
-                certificates,
+                certificates: Arc::new(certificates),
             }
         }
     };
@@ -399,35 +401,37 @@ fn attach_receipts(block: &mut Block, receipts: Vec<StoredReceipt>) {
         block,
         Block::Sealed {
             header: block.header().clone(),
-            transactions: vec![],
-            certificates: vec![],
+            transactions: Arc::new(vec![]),
+            certificates: Arc::new(vec![]),
         },
     );
     *block = match taken {
         Block::Live {
             header,
             transactions,
-            mut certificates,
+            certificates,
             provisions,
         } => {
+            let mut certificates = (*certificates).clone();
             certificates.push(new_fw);
             Block::Live {
                 header,
                 transactions,
-                certificates,
+                certificates: Arc::new(certificates),
                 provisions,
             }
         }
         Block::Sealed {
             header,
             transactions,
-            mut certificates,
+            certificates,
         } => {
+            let mut certificates = (*certificates).clone();
             certificates.push(new_fw);
             Block::Sealed {
                 header,
                 transactions,
-                certificates,
+                certificates: Arc::new(certificates),
             }
         }
     };
@@ -526,10 +530,10 @@ fn test_commit_block_stores_certificates() {
         } => Block::Live {
             header,
             transactions,
-            certificates: vec![Arc::new(FinalizedWave {
+            certificates: Arc::new(vec![Arc::new(FinalizedWave {
                 certificate: cert,
                 receipts: vec![],
-            })],
+            })]),
             provisions,
         },
         Block::Sealed {
@@ -539,10 +543,10 @@ fn test_commit_block_stores_certificates() {
         } => Block::Sealed {
             header,
             transactions,
-            certificates: vec![Arc::new(FinalizedWave {
+            certificates: Arc::new(vec![Arc::new(FinalizedWave {
                 certificate: cert,
                 receipts: vec![],
-            })],
+            })]),
         },
     };
     let qc = make_test_qc(&block);

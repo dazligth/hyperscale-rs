@@ -131,10 +131,10 @@ impl ChainView<'_> {
             if block.height() <= self.committed_height {
                 break;
             }
-            for cert in block.certificates() {
+            for cert in block.certificates().iter() {
                 cert_ids.insert(cert.wave_id().clone());
             }
-            for tx in block.transactions() {
+            for tx in block.transactions().iter() {
                 tx_hashes.insert(tx.hash());
             }
             current_hash = block.header().parent_block_hash;
@@ -165,6 +165,7 @@ impl ChainView<'_> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::sync::Arc;
 
     use hyperscale_types::{
         BlockManifest, CertificateRoot, LocalReceiptRoot, LocalTimestamp, ProposerTimestamp,
@@ -197,9 +198,9 @@ mod tests {
     fn make_block(height: u8, parent_block_hash: BlockHash) -> Block {
         Block::Live {
             header: make_header(height, parent_block_hash),
-            transactions: vec![],
-            certificates: vec![],
-            provisions: vec![],
+            transactions: Arc::new(vec![]),
+            certificates: Arc::new(vec![]),
+            provisions: Arc::new(vec![]),
         }
     }
 

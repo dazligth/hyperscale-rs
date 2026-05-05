@@ -627,7 +627,7 @@ impl VerificationPipeline {
         vec![Action::VerifyTransactionRoot {
             block_hash,
             expected_root: block.header().transaction_root,
-            transactions: block.transactions().to_vec(),
+            transactions: block.transactions().clone(),
             validity_anchor: block.header().parent_qc.weighted_timestamp,
         }]
     }
@@ -648,7 +648,7 @@ impl VerificationPipeline {
         vec![Action::VerifyCertificateRoot {
             block_hash,
             expected_root: block.header().certificate_root,
-            certificates: block.certificates().to_vec(),
+            certificates: block.certificates().clone(),
         }]
     }
 
@@ -689,7 +689,7 @@ impl VerificationPipeline {
         vec![Action::VerifyProvisionTxRoots {
             block_hash,
             expected: block.header().provision_tx_roots.clone(),
-            transactions: block.transactions().to_vec(),
+            transactions: block.transactions().clone(),
             topology_snapshot: topology.clone(),
         }]
     }
@@ -1148,9 +1148,9 @@ mod tests {
     ) -> Block {
         Block::Live {
             header: header(height, parent_block_hash, in_flight),
-            transactions,
-            certificates: Vec::new(),
-            provisions: Vec::new(),
+            transactions: Arc::new(transactions),
+            certificates: Arc::new(Vec::new()),
+            provisions: Arc::new(Vec::new()),
         }
     }
 
@@ -1210,9 +1210,9 @@ mod tests {
         h.parent_qc = parent_qc;
         let block = Block::Live {
             header: h,
-            transactions: Vec::new(),
-            certificates: Vec::new(),
-            provisions: Vec::new(),
+            transactions: Arc::new(Vec::new()),
+            certificates: Arc::new(Vec::new()),
+            provisions: Arc::new(Vec::new()),
         };
         let block_hash = block.hash();
         let certified = HashMap::new();

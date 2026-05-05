@@ -170,7 +170,7 @@ pub fn validate_no_duplicate_transactions(
         return Ok(());
     }
 
-    for tx in block.transactions() {
+    for tx in block.transactions().iter() {
         let tx_hash = tx.hash();
         if qc_chain_tx_hashes.contains(&tx_hash) {
             return Err(format!(
@@ -203,7 +203,7 @@ pub fn validate_no_duplicate_certificates(
         return Ok(());
     }
 
-    for fw in block.certificates() {
+    for fw in block.certificates().iter() {
         let wave_id = fw.wave_id();
         if qc_chain_cert_ids.contains(wave_id) {
             return Err(format!(
@@ -358,9 +358,9 @@ mod tests {
         };
         Block::Live {
             header,
-            transactions: Vec::new(),
-            certificates: Vec::new(),
-            provisions: Vec::new(),
+            transactions: Arc::new(Vec::new()),
+            certificates: Arc::new(Vec::new()),
+            provisions: Arc::new(Vec::new()),
         }
     }
 
@@ -481,9 +481,9 @@ mod tests {
     ) -> Block {
         Block::Live {
             header: header_at_height(height, 100_000),
-            transactions,
-            certificates: Vec::new(),
-            provisions: Vec::new(),
+            transactions: Arc::new(transactions),
+            certificates: Arc::new(Vec::new()),
+            provisions: Arc::new(Vec::new()),
         }
     }
 
@@ -577,9 +577,9 @@ mod tests {
     ) -> Block {
         Block::Live {
             header: header_at_height(height, 100_000),
-            transactions: Vec::new(),
-            certificates,
-            provisions: Vec::new(),
+            transactions: Arc::new(Vec::new()),
+            certificates: Arc::new(certificates),
+            provisions: Arc::new(Vec::new()),
         }
     }
 
@@ -638,9 +638,9 @@ mod tests {
     fn block_with_provisions(height: BlockHeight, provisions: Vec<Arc<Provisions>>) -> Block {
         Block::Live {
             header: header_at_height(height, 100_000),
-            transactions: Vec::new(),
-            certificates: Vec::new(),
-            provisions,
+            transactions: Arc::new(Vec::new()),
+            certificates: Arc::new(Vec::new()),
+            provisions: Arc::new(provisions),
         }
     }
 

@@ -76,7 +76,7 @@ pub fn serve_block_request(
 
     if let Some(provisions) = resolved {
         GetBlockResponse::found(ElidedCertifiedBlock::elide(
-            &block.into_live(provisions),
+            &block.into_live(Arc::new(provisions)),
             qc,
             &req.inventory,
         ))

@@ -10,8 +10,8 @@ use hyperscale_types::{
     CertificateRoot, CommittedBlockHeader, ExecutionCertificate, ExecutionVote, FinalizedWave,
     GlobalReceiptRoot, LocalReceiptRoot, NodeId, ProposerTimestamp, ProvisionHash, ProvisionTxRoot,
     Provisions, ProvisionsRoot, QuorumCertificate, Round, RoutableTransaction, ShardGroupId,
-    StateProvision, StateRoot, TopologySnapshot, TransactionRoot, TransactionStatus, TxHash,
-    TxOutcome, ValidatorId, WaveId, WeightedTimestamp,
+    SharedCertificates, SharedTransactions, StateProvision, StateRoot, TopologySnapshot,
+    TransactionRoot, TransactionStatus, TxHash, TxOutcome, ValidatorId, WaveId, WeightedTimestamp,
 };
 
 use crate::{CommitSource, FetchAbandon, FetchRequest, ProtocolEvent, TimerId};
@@ -372,7 +372,7 @@ pub enum Action {
         /// Expected transaction root from block header.
         expected_root: TransactionRoot,
         /// Transactions in the block.
-        transactions: Vec<Arc<RoutableTransaction>>,
+        transactions: SharedTransactions,
         /// Parent QC's `weighted_timestamp` — the BFT-authenticated clock
         /// every honest validator agrees on for this block. The validity
         /// check is `start_inclusive <= anchor < end_exclusive`. The
@@ -407,7 +407,7 @@ pub enum Action {
         /// Expected receipt root from block header.
         expected_root: CertificateRoot,
         /// Finalized waves whose underlying cert `receipt_hash` values form the merkle leaves.
-        certificates: Vec<Arc<FinalizedWave>>,
+        certificates: SharedCertificates,
     },
 
     /// Verify a block's per-target-shard provisions commitments.
@@ -424,7 +424,7 @@ pub enum Action {
         /// Expected per-target roots from block header.
         expected: std::collections::BTreeMap<ShardGroupId, ProvisionTxRoot>,
         /// Transactions in the block.
-        transactions: Vec<Arc<RoutableTransaction>>,
+        transactions: SharedTransactions,
         /// Topology snapshot used to route txs to target shards.
         topology_snapshot: TopologySnapshot,
     },

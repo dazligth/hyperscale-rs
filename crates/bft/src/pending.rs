@@ -126,7 +126,7 @@ impl PendingBlock {
             created_at,
         };
         // Fill in all transactions
-        for tx in block.transactions() {
+        for tx in block.transactions().iter() {
             pending
                 .received_transactions
                 .insert(tx.hash(), Arc::clone(tx));
@@ -279,9 +279,9 @@ impl PendingBlock {
 
         let block = Arc::new(Block::Live {
             header: self.header.clone(),
-            transactions,
-            certificates,
-            provisions,
+            transactions: Arc::new(transactions),
+            certificates: Arc::new(certificates),
+            provisions: Arc::new(provisions),
         });
 
         self.constructed_block = Some(Arc::clone(&block));
@@ -579,9 +579,9 @@ mod tests {
 
         let block = Block::Live {
             header: make_header(BlockHeight(1)),
-            transactions: vec![],
-            certificates: vec![Arc::clone(&fw)],
-            provisions: vec![],
+            transactions: Arc::new(vec![]),
+            certificates: Arc::new(vec![Arc::clone(&fw)]),
+            provisions: Arc::new(vec![]),
         };
 
         let pending =

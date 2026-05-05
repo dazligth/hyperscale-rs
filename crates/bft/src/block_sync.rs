@@ -631,6 +631,7 @@ impl BlockSyncManager {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::sync::Arc;
 
     use hyperscale_test_helpers::TestCommittee;
     use hyperscale_types::{
@@ -677,9 +678,9 @@ mod tests {
     fn certified(height: BlockHeight, tag: &[u8]) -> CertifiedBlock {
         let block = Block::Live {
             header: header(height, tag),
-            transactions: Vec::new(),
-            certificates: Vec::new(),
-            provisions: Vec::new(),
+            transactions: Arc::new(Vec::new()),
+            certificates: Arc::new(Vec::new()),
+            provisions: Arc::new(Vec::new()),
         };
         let mut qc = QuorumCertificate::genesis();
         qc.block_hash = block.hash();

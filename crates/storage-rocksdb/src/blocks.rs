@@ -116,7 +116,7 @@ impl RocksDbStorage {
     ) {
         let metadata = BlockMetadata::from_block(block, qc.clone());
         self.cf_put::<BlocksCf>(batch, &block.height().0, &metadata);
-        for tx in block.transactions() {
+        for tx in block.transactions().iter() {
             self.cf_put_raw::<TransactionsCf>(
                 batch,
                 tx.hash().as_raw(),
@@ -124,7 +124,7 @@ impl RocksDbStorage {
                 tx.cached_sbor_bytes(),
             );
         }
-        for fw in block.certificates() {
+        for fw in block.certificates().iter() {
             self.cf_put::<CertificatesCf>(batch, fw.wave_id(), fw.certificate.as_ref());
         }
     }
@@ -193,8 +193,8 @@ impl RocksDbStorage {
         // execution window.
         let block = Block::Sealed {
             header: metadata.header,
-            transactions,
-            certificates,
+            transactions: Arc::new(transactions),
+            certificates: Arc::new(certificates),
         };
 
         let elapsed = start.elapsed().as_secs_f64();
@@ -309,8 +309,8 @@ impl RocksDbStorage {
         // in-memory cache when the requester needs them.
         let block = Block::Sealed {
             header: metadata.header,
-            transactions,
-            certificates,
+            transactions: Arc::new(transactions),
+            certificates: Arc::new(certificates),
         };
         let provision_hashes = metadata.manifest.provision_hashes;
 

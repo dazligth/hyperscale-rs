@@ -121,9 +121,9 @@ pub fn make_test_block(height: BlockHeight) -> Block {
             provision_tx_roots: BTreeMap::new(),
             in_flight: 0,
         },
-        transactions: vec![],
-        certificates: vec![],
-        provisions: vec![],
+        transactions: Arc::new(vec![]),
+        certificates: Arc::new(vec![]),
+        provisions: Arc::new(vec![]),
     }
 }
 
@@ -217,27 +217,29 @@ fn make_test_block_with_ecs(height: BlockHeight, ecs: Vec<Arc<ExecutionCertifica
         Block::Live {
             header,
             transactions,
-            mut certificates,
+            certificates,
             provisions,
         } => {
+            let mut certificates = (*certificates).clone();
             certificates.push(new_fw);
             Block::Live {
                 header,
                 transactions,
-                certificates,
+                certificates: Arc::new(certificates),
                 provisions,
             }
         }
         Block::Sealed {
             header,
             transactions,
-            mut certificates,
+            certificates,
         } => {
+            let mut certificates = (*certificates).clone();
             certificates.push(new_fw);
             Block::Sealed {
                 header,
                 transactions,
-                certificates,
+                certificates: Arc::new(certificates),
             }
         }
     }
