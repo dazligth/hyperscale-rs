@@ -395,12 +395,12 @@ mod tests {
             "Large values near u64::MAX/3 should work"
         );
 
-        // SAFETY NOTE: The current implementation will panic on overflow
-        // for values where voted > u64::MAX / 3 or total > u64::MAX / 2.
-        // In practice, total voting power should never approach these limits
-        // since typical voting power is in the range of 1-1000 per validator.
-        // A 10,000 validator network with max power 1000 each = 10M total,
-        // which is far below the overflow threshold of ~6 quintillion.
+        // The arithmetic widens to u128 internally, so even pathological
+        // voting powers near u64::MAX cannot overflow. This guard pins the
+        // edge case so a future regression to plain u64 multiplication
+        // would surface here.
+        assert!(VotePower::has_quorum(u64::MAX, u64::MAX));
+        assert!(!VotePower::has_quorum(0, u64::MAX));
     }
 
     #[test]
