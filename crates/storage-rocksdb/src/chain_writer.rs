@@ -170,15 +170,15 @@ impl ChainWriter for RocksDbStorage {
             if applied {
                 roots.push(result_root);
             } else {
-                // Fast path failed — RocksDB state advanced since preparation
-                // (e.g., sync path committed blocks between prepare and flush).
-                // Check if this height was already committed (sync path got
-                // there first) — if so, skip. Otherwise, fall back to full
-                // recomputation from current RocksDB state.
-                let (current_version, _) = {
-                    let _guard = self.commit_lock.lock().unwrap();
-                    SnapshotTreeStore::new(&self.db).read_jmt_metadata()
-                };
+                // Fast path failed — RocksDB state advanced since
+                // preparation (sync path committed blocks between prepare
+                // and flush). Hold `commit_lock` across the version check
+                // AND the commit so `base_version` can't move under us;
+                // splitting the lock would let a concurrent sync commit
+                // open a gap and trip the contiguity assert in
+                // `commit_block_inner_locked`.
+                let _guard = self.commit_lock.lock().unwrap();
+                let (current_version, _) = SnapshotTreeStore::new(&self.db).read_jmt_metadata();
                 if block.height().0 <= current_version {
                     tracing::debug!(
                         height = block.height().0,
@@ -192,7 +192,14 @@ impl ChainWriter for RocksDbStorage {
                         current_version,
                         "PreparedCommit stale, falling back to commit_block"
                     );
-                    let root = self.commit_block(&block, &qc);
+                    let receipts: Vec<StoredReceipt> = block
+                        .certificates()
+                        .iter()
+                        .flat_map(|fw| fw.receipts.iter().cloned())
+                        .collect();
+                    let merged_updates = merge_updates_from_receipts(&receipts);
+                    let root =
+                        self.commit_block_inner_locked(&merged_updates, &block, &qc, &receipts);
                     roots.push(root);
                 }
             }
@@ -208,7 +215,8 @@ impl ChainWriter for RocksDbStorage {
             .flat_map(|fw| fw.receipts.iter().cloned())
             .collect();
         let merged_updates = merge_updates_from_receipts(&receipts);
-        self.commit_block_inner(&merged_updates, block, qc, &receipts)
+        let _commit_guard = self.commit_lock.lock().unwrap();
+        self.commit_block_inner_locked(&merged_updates, block, qc, &receipts)
     }
 
     fn memory_usage_bytes(&self) -> (u64, u64) {
@@ -240,7 +248,13 @@ impl ChainWriter for RocksDbStorage {
 
 impl RocksDbStorage {
     /// Internal commit path used by `commit_block` (sync blocks without a `PreparedCommit`).
-    fn commit_block_inner(
+    ///
+    /// The caller MUST hold `self.commit_lock`. The callers that do are
+    /// [`Self::commit_block`] and the fallback branch in
+    /// [`Self::commit_prepared_blocks`]; the latter holds the lock across
+    /// its own `read_jmt_metadata` so the contiguity check and the commit
+    /// see the same `base_version`.
+    fn commit_block_inner_locked(
         &self,
         merged_updates: &DatabaseUpdates,
         block: &Arc<Block>,
@@ -248,7 +262,6 @@ impl RocksDbStorage {
         receipts: &[StoredReceipt],
     ) -> StateRoot {
         let block_height = block.height().0;
-        let _commit_guard = self.commit_lock.lock().unwrap();
 
         let snapshot_store = SnapshotTreeStore::new(&self.db);
         let (base_version, base_root) = snapshot_store.read_jmt_metadata();
