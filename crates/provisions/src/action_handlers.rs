@@ -138,12 +138,10 @@ where
     sorted_shard_entries.sort_by_key(|(shard, _)| *shard);
     let mut batches = Vec::with_capacity(sorted_shard_entries.len());
     for (shard, transactions) in sorted_shard_entries {
-        let mut shard_keys: Vec<Vec<u8>> = transactions
+        let shard_keys: Vec<Vec<u8>> = transactions
             .iter()
             .flat_map(|te| te.entries.iter().map(|e| e.storage_key.clone()))
             .collect();
-        shard_keys.sort();
-        shard_keys.dedup();
 
         let Some(proof) = view.generate_merkle_proofs_overlay(&shard_keys, block_height) else {
             warn!(
