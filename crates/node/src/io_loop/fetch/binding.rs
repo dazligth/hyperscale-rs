@@ -25,9 +25,7 @@ use hyperscale_messages::request::{
     GetProvisionsRequest, GetTransactionsRequest,
 };
 use hyperscale_network::{Network, ResponseVerdict};
-use hyperscale_types::{
-    BlockHeight, ProvisionHash, RoutableTransaction, ShardGroupId, TxHash, WaveId,
-};
+use hyperscale_types::{BlockHeight, ProvisionHash, ShardGroupId, TxHash, WaveId};
 
 use super::host::FetchHost;
 use super::{Fetch, FetchInput};
@@ -84,44 +82,49 @@ pub trait FetchBinding: 'static {
 // ─── Bindings ──────────────────────────────────────────────────────────
 
 /// Result of partitioning a fetch response against the requested set.
-struct TxPartition {
-    /// Transactions whose hash matched a requested id.
-    kept: Vec<Arc<RoutableTransaction>>,
-    /// Requested hashes that didn't appear in the response.
-    missing: Vec<TxHash>,
-    /// Count of returned transactions whose hash was NOT requested.
-    /// A non-zero value indicates a buggy or malicious peer trying to
-    /// inject txs we never asked for.
+struct Partition<T, Id> {
+    /// Items whose extracted id matched a requested id.
+    kept: Vec<T>,
+    /// Requested ids that didn't appear in the response.
+    missing: Vec<Id>,
+    /// Count of returned items whose id was NOT requested. A non-zero
+    /// value indicates a buggy or malicious peer trying to inject items
+    /// we never asked for.
     unsolicited: usize,
 }
 
 /// Split a fetch response into solicited / missing / unsolicited buckets.
 ///
-/// Without this filter `on_transactions_fetched` would admit every returned
-/// tx regardless of whether we requested it — it only checks tombstones,
-/// pool dedup, and validity range, not "did we ask for this?".
-fn partition_solicited_transactions(
-    returned: Vec<Arc<RoutableTransaction>>,
-    requested: &[TxHash],
-) -> TxPartition {
-    let requested_set: HashSet<TxHash> = requested.iter().copied().collect();
+/// Per-binding admit handlers downstream check binding-specific invariants
+/// (mempool dedup + validity range for txs, BLS quorum for ECs, merkle
+/// proof for provisions) but none of them ask "did we request this?".
+/// Filtering at the response boundary keeps unsolicited items from
+/// reaching pre-verification state mutations and from racing the legitimate
+/// fetch path.
+fn partition_solicited<T, Id, F>(returned: Vec<T>, requested: &[Id], extract: F) -> Partition<T, Id>
+where
+    Id: Clone + Eq + Hash,
+    F: Fn(&T) -> Id,
+{
+    let requested_set: HashSet<Id> = requested.iter().cloned().collect();
     let mut kept = Vec::with_capacity(returned.len().min(requested.len()));
-    let mut delivered = HashSet::with_capacity(requested.len());
+    let mut delivered: HashSet<Id> = HashSet::with_capacity(requested.len());
     let mut unsolicited = 0usize;
-    for tx in returned {
-        if requested_set.contains(&tx.hash()) {
-            delivered.insert(tx.hash());
-            kept.push(tx);
+    for item in returned {
+        let id = extract(&item);
+        if requested_set.contains(&id) {
+            delivered.insert(id);
+            kept.push(item);
         } else {
             unsolicited += 1;
         }
     }
     let missing = requested
         .iter()
-        .copied()
-        .filter(|h| !delivered.contains(h))
+        .filter(|id| !delivered.contains(id))
+        .cloned()
         .collect();
-    TxPartition {
+    Partition {
         kept,
         missing,
         unsolicited,
@@ -157,7 +160,7 @@ impl FetchBinding for TransactionBinding {
             origin.class_override(),
             Box::new(move |result| {
                 if let Ok(resp) = result {
-                    let split = partition_solicited_transactions(resp.into_transactions(), &hs);
+                    let split = partition_solicited(resp.into_transactions(), &hs, |tx| tx.hash());
                     if !split.kept.is_empty() {
                         let _ = es.send(NodeInput::Protocol(Box::new(
                             ProtocolEvent::TransactionsReceived {
@@ -234,22 +237,23 @@ impl FetchBinding for LocalProvisionBinding {
             origin.class_override(),
             Box::new(move |result| {
                 if let Ok(resp) = result {
-                    let delivered: HashSet<ProvisionHash> =
-                        resp.provisions.iter().map(|p| p.hash()).collect();
-                    let missing_hashes: Vec<ProvisionHash> =
-                        hs.into_iter().filter(|h| !delivered.contains(h)).collect();
-                    let had_misses = !missing_hashes.is_empty();
-                    for provisions in resp.provisions {
+                    let split = partition_solicited(resp.provisions, &hs, |p| p.hash());
+                    for provisions in split.kept {
                         // Refcount is 1 right after decode, so this moves rather than clones.
                         let provisions = Arc::unwrap_or_clone(provisions);
                         let _ = es.send(NodeInput::Protocol(Box::new(
                             ProtocolEvent::ProvisionsReceived { provisions },
                         )));
                     }
+                    let had_misses = !split.missing.is_empty();
                     if had_misses {
                         let _ = es.send(NodeInput::LocalProvisionsFetchFailed {
-                            hashes: missing_hashes,
+                            hashes: split.missing,
                         });
+                    }
+                    // Reject the response if the peer shipped unsolicited
+                    // provisions OR if any requested hash was missing.
+                    if split.unsolicited > 0 || had_misses {
                         ResponseVerdict::Reject
                     } else {
                         ResponseVerdict::Accept
@@ -300,21 +304,22 @@ impl FetchBinding for FinalizedWaveBinding {
             origin.class_override(),
             Box::new(move |result| {
                 if let Ok(resp) = result {
-                    let returned = resp.waves.len();
-                    let requested = requested_ids.len();
-                    let delivered: HashSet<WaveId> =
-                        resp.waves.iter().map(|w| w.wave_id().clone()).collect();
-                    let missing_ids: Vec<WaveId> = requested_ids
-                        .into_iter()
-                        .filter(|id| !delivered.contains(id))
-                        .collect();
-                    let _ = es.send(NodeInput::Protocol(Box::new(
-                        ProtocolEvent::FinalizedWavesReceived { waves: resp.waves },
-                    )));
-                    if !missing_ids.is_empty() {
-                        let _ = es.send(NodeInput::FinalizedWavesFetchFailed { ids: missing_ids });
+                    let split =
+                        partition_solicited(resp.waves, &requested_ids, |w| w.wave_id().clone());
+                    if !split.kept.is_empty() {
+                        let _ = es.send(NodeInput::Protocol(Box::new(
+                            ProtocolEvent::FinalizedWavesReceived { waves: split.kept },
+                        )));
                     }
-                    if returned < requested {
+                    let had_misses = !split.missing.is_empty();
+                    if had_misses {
+                        let _ =
+                            es.send(NodeInput::FinalizedWavesFetchFailed { ids: split.missing });
+                    }
+                    // Reject responses with unsolicited waves (peer scoring;
+                    // also avoids wasted BLS verification on items we never
+                    // asked for) or with any missing requested id.
+                    if split.unsolicited > 0 || had_misses {
                         ResponseVerdict::Reject
                     } else {
                         ResponseVerdict::Accept
@@ -512,12 +517,17 @@ impl FetchBinding for ProvisionBinding {
 
 #[cfg(test)]
 mod tests {
+    use hyperscale_types::RoutableTransaction;
     use hyperscale_types::test_utils::test_transaction;
 
     use super::*;
 
     fn tx_arc(seed: u8) -> Arc<RoutableTransaction> {
         Arc::new(test_transaction(seed))
+    }
+
+    fn tx_hash(tx: &Arc<RoutableTransaction>) -> TxHash {
+        tx.hash()
     }
 
     #[test]
@@ -530,9 +540,10 @@ mod tests {
         let extra = tx_arc(99);
         let other_requested = tx_arc(2).hash();
 
-        let split = partition_solicited_transactions(
+        let split = partition_solicited(
             vec![Arc::clone(&asked), Arc::clone(&extra)],
             &[asked_hash, other_requested],
+            tx_hash,
         );
         assert_eq!(split.kept.len(), 1);
         assert_eq!(split.kept[0].hash(), asked_hash);
@@ -544,9 +555,10 @@ mod tests {
     fn partition_full_delivery_yields_no_missing_no_unsolicited() {
         let a = tx_arc(1);
         let b = tx_arc(2);
-        let split = partition_solicited_transactions(
+        let split = partition_solicited(
             vec![Arc::clone(&a), Arc::clone(&b)],
             &[a.hash(), b.hash()],
+            tx_hash,
         );
         assert_eq!(split.kept.len(), 2);
         assert!(split.missing.is_empty());
@@ -555,15 +567,77 @@ mod tests {
 
     #[test]
     fn partition_only_unsolicited_yields_kept_empty_all_missing() {
-        // Pre-fix this would have inserted both bogus txs into mempool.
         let bogus_a = tx_arc(50);
         let bogus_b = tx_arc(51);
         let wanted_1 = tx_arc(1).hash();
         let wanted_2 = tx_arc(2).hash();
 
-        let split = partition_solicited_transactions(vec![bogus_a, bogus_b], &[wanted_1, wanted_2]);
+        let split = partition_solicited(vec![bogus_a, bogus_b], &[wanted_1, wanted_2], tx_hash);
         assert!(split.kept.is_empty());
         assert_eq!(split.unsolicited, 2);
         assert_eq!(split.missing.len(), 2);
+    }
+
+    #[test]
+    fn partition_works_for_non_copy_id_via_clone() {
+        // Sanity-check that the generic helper accepts a Clone (non-Copy)
+        // id type; WaveId is the production motivator here.
+        #[derive(Clone, Eq, Hash, PartialEq, Debug)]
+        struct CompoundId(String);
+        struct Item(CompoundId);
+
+        let a = Item(CompoundId("a".into()));
+        let b = Item(CompoundId("b".into()));
+        let split = partition_solicited(
+            vec![a, b],
+            &[CompoundId("a".into()), CompoundId("c".into())],
+            |it| it.0.clone(),
+        );
+        assert_eq!(split.kept.len(), 1);
+        assert_eq!(split.unsolicited, 1);
+        assert_eq!(split.missing, vec![CompoundId("c".into())]);
+    }
+
+    #[test]
+    fn partition_filters_unsolicited_local_provisions() {
+        // The LocalProvisionBinding admits each kept item as a separate
+        // ProvisionsReceived event, which buffers in the provision pipeline
+        // before signature/merkle verification — so unsolicited deliveries
+        // must be dropped at the response boundary.
+        use hyperscale_types::{
+            BlockHeight, Hash, MerkleInclusionProof, Provisions, ShardGroupId, TxEntries, TxHash,
+        };
+        let asked = Arc::new(Provisions::new(
+            ShardGroupId(1),
+            ShardGroupId(2),
+            BlockHeight(10),
+            MerkleInclusionProof::dummy(),
+            vec![TxEntries {
+                tx_hash: TxHash::from_raw(Hash::from_bytes(b"asked")),
+                entries: vec![],
+                target_nodes: vec![],
+            }],
+        ));
+        let extra = Arc::new(Provisions::new(
+            ShardGroupId(3),
+            ShardGroupId(2),
+            BlockHeight(11),
+            MerkleInclusionProof::dummy(),
+            vec![TxEntries {
+                tx_hash: TxHash::from_raw(Hash::from_bytes(b"extra")),
+                entries: vec![],
+                target_nodes: vec![],
+            }],
+        ));
+        let asked_hash = asked.hash();
+        let split = partition_solicited(
+            vec![Arc::clone(&asked), Arc::clone(&extra)],
+            &[asked_hash],
+            |p| p.hash(),
+        );
+        assert_eq!(split.kept.len(), 1);
+        assert_eq!(split.kept[0].hash(), asked_hash);
+        assert_eq!(split.unsolicited, 1);
+        assert!(split.missing.is_empty());
     }
 }
