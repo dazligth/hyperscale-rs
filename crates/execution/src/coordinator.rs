@@ -708,6 +708,21 @@ impl ExecutionCoordinator {
         let wave_id = vote.wave_id.clone();
         let validator_id = vote.validator;
 
+        // Only votes from local-committee members count. A globally-known
+        // validator outside this shard's committee whose vote pooled into
+        // `unverified_power` would puff up the tracker into early
+        // aggregation, producing an EC whose BLS aggregate carries
+        // signatures the verifier's bitfield-derived pubkey pool excludes
+        // — guaranteed to fail verification and waste a leader rotation.
+        // Mirrors `vote_keeper::record_received_vote`.
+        if topology.local_committee_index(validator_id).is_none() {
+            tracing::warn!(
+                validator = validator_id.0,
+                "Execution vote from validator not in local committee"
+            );
+            return vec![];
+        }
+
         if !self.waves.contains_tracker(&wave_id) {
             if !self.waves.contains_wave(&wave_id) {
                 // Block hasn't committed yet — buffer as early vote.
@@ -758,16 +773,15 @@ impl ExecutionCoordinator {
             return self.handle_verified_vote(topology, vote);
         }
 
-        // Get public key for signature verification
-        let Some(public_key) = topology.public_key(validator_id) else {
-            tracing::warn!(
-                validator = validator_id.0,
-                "Unknown validator for execution vote"
-            );
-            return vec![];
-        };
-
-        let voting_power = topology.voting_power(validator_id).unwrap_or(0);
+        // Committee membership was confirmed above; the topology snapshot
+        // invariant guarantees both the public key and the voting power
+        // resolve.
+        let public_key = topology
+            .public_key(validator_id)
+            .expect("committee member has public key (TopologySnapshot invariant)");
+        let voting_power = topology
+            .voting_power(validator_id)
+            .expect("committee member has voting power (TopologySnapshot invariant)");
 
         let tracker = self
             .waves
@@ -820,7 +834,12 @@ impl ExecutionCoordinator {
         vote: ExecutionVote,
     ) -> Vec<Action> {
         let wave_id = vote.wave_id.clone();
-        let voting_power = topology.voting_power(vote.validator).unwrap_or(0);
+        // Callers (`on_execution_vote` for own votes, `on_votes_verified`
+        // for verified votes that already passed the committee filter)
+        // guarantee `vote.validator` is in the local committee.
+        let voting_power = topology
+            .voting_power(vote.validator)
+            .expect("committee member has voting power (TopologySnapshot invariant)");
 
         let Some(tracker) = self.waves.get_tracker_mut(&wave_id) else {
             return vec![];
@@ -2179,6 +2198,48 @@ mod tests {
         assert!(
             state_non.waves.contains_tracker(&wave_id),
             "Fallback VoteTracker should be created"
+        );
+    }
+
+    #[test]
+    fn on_execution_vote_drops_non_committee_voter() {
+        // Vote claiming to be from a validator outside the local shard
+        // committee must be rejected at the top of on_execution_vote, with
+        // no early-buffer or tracker side effect. Otherwise the vote could
+        // pool its cross-shard power into the tracker and trigger premature
+        // aggregation that produces an EC the BLS verifier will reject.
+        let topo = make_two_shard_topology();
+        let local = topo.local_committee();
+        let outsider = (0u64..4)
+            .map(ValidatorId)
+            .find(|v| !local.contains(v))
+            .expect("two-shard topology has at least one non-local validator");
+
+        let mut state = make_test_state();
+        let wave_id = WaveId::new(ShardGroupId(0), BlockHeight(1), BTreeSet::new());
+        let vote = ExecutionVote {
+            block_hash: BlockHash::ZERO,
+            block_height: BlockHeight(1),
+            vote_anchor_ts: WeightedTimestamp::ZERO,
+            wave_id: wave_id.clone(),
+            shard_group_id: ShardGroupId(0),
+            global_receipt_root: GlobalReceiptRoot::ZERO,
+            tx_count: 0,
+            tx_outcomes: vec![],
+            validator: outsider,
+            signature: zero_bls_signature(),
+        };
+
+        let actions = state.on_execution_vote(&topo, vote);
+        assert!(actions.is_empty(), "non-committee vote must be dropped");
+        assert!(
+            !state.waves.contains_tracker(&wave_id),
+            "rejected vote must not seed a fallback VoteTracker"
+        );
+        assert_eq!(
+            state.memory_stats().pending_routing,
+            0,
+            "rejected vote must not be early-buffered"
         );
     }
 
