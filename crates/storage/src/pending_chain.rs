@@ -6,7 +6,7 @@
 //! chain, so they are structurally invisible to anchored views.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use hyperscale_jmt::{Node as JmtNode, NodeKey as JmtNodeKey, TreeReader};
 use hyperscale_types::{
@@ -30,6 +30,22 @@ use crate::{
 /// can source priors without a fresh `multi_get_cf` on `StateCf`. Entries
 /// are `(partition_key, sort_key) → value-at-anchor`.
 pub type BaseReadCache = HashMap<(DbPartitionKey, DbSortKey), Option<Vec<u8>>>;
+
+// Lock helpers that recover from poison rather than propagating it. The
+// guarded data has whole-entry mutation only (insert / retain) and never
+// holds a half-updated state across a panic boundary, so reading through
+// a poisoned guard cannot expose a torn invariant.
+fn entries_read<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    lock.read().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn entries_write<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    lock.write().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 /// One block's worth of pending state, indexed by block hash in
 /// [`PendingChain::entries`].
@@ -72,46 +88,27 @@ where
     }
 
     /// Append an entry.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the internal `RwLock` is poisoned.
     pub fn insert(&self, block_hash: BlockHash, entry: ChainEntry) {
-        self.entries.write().unwrap().insert(block_hash, entry);
+        entries_write(&self.entries).insert(block_hash, entry);
     }
 
     /// Drop all entries with `height ≤ committed_height`. Called on
     /// `BlockPersisted`. Also drops cache entries whose anchor is at or
     /// below the committed height — higher-anchor views remain valid.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the internal `RwLock` is poisoned.
     pub fn prune(&self, committed_height: BlockHeight) {
-        self.entries
-            .write()
-            .unwrap()
-            .retain(|_, e| e.height > committed_height);
+        entries_write(&self.entries).retain(|_, e| e.height > committed_height);
     }
 
     /// Number of pending entries (for diagnostics / metrics).
-    ///
-    /// # Panics
-    ///
-    /// Panics if the internal `RwLock` is poisoned.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.entries.read().unwrap().len()
+        entries_read(&self.entries).len()
     }
 
     /// Whether the chain has any pending entries.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the internal `RwLock` is poisoned.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.entries.read().unwrap().is_empty()
+        entries_read(&self.entries).is_empty()
     }
 
     /// Build a view anchored at `parent_block_hash`.
@@ -147,7 +144,7 @@ where
     /// Holds the read lock for the duration of the walk; no per-entry
     /// clones.
     fn build_view(&self, parent_block_hash: BlockHash) -> SubstateView<S> {
-        let entries = self.entries.read().unwrap();
+        let entries = entries_read(&self.entries);
         let mut chain: Vec<&ChainEntry> = Vec::new();
         let mut cursor = parent_block_hash;
         while let Some(entry) = entries.get(&cursor) {
@@ -286,13 +283,9 @@ impl<S> SubstateView<S> {
     /// otherwise re-read from `StateCf` at commit time. Called by the
     /// commit pipeline to skip the `multi_get_cf` on `StateCf` for keys
     /// already in the cache.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the internal `Mutex` is poisoned.
     #[must_use]
     pub fn take_base_reads(&self) -> BaseReadCache {
-        std::mem::take(&mut *self.base_reads.lock().unwrap())
+        std::mem::take(&mut *lock_or_recover(&self.base_reads))
     }
 }
 
@@ -347,9 +340,7 @@ fn overlay_get(
     }
     let value = base.get_raw_substate_by_db_key(partition_key, sort_key);
     if let Some(cache) = base_reads_cache {
-        cache
-            .lock()
-            .unwrap()
+        lock_or_recover(cache)
             .entry((partition_key.clone(), sort_key.clone()))
             .or_insert_with(|| value.clone());
     }
