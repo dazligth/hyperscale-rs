@@ -14,6 +14,7 @@
 //! payload means writing one impl block here — not editing three parallel
 //! files.
 
+use std::collections::HashSet;
 use std::hash::Hash;
 use std::sync::Arc;
 
@@ -24,7 +25,9 @@ use hyperscale_messages::request::{
     GetProvisionsRequest, GetTransactionsRequest,
 };
 use hyperscale_network::{Network, ResponseVerdict};
-use hyperscale_types::{BlockHeight, ProvisionHash, ShardGroupId, TxHash, WaveId};
+use hyperscale_types::{
+    BlockHeight, ProvisionHash, RoutableTransaction, ShardGroupId, TxHash, WaveId,
+};
 
 use super::host::FetchHost;
 use super::{Fetch, FetchInput};
@@ -80,6 +83,51 @@ pub trait FetchBinding: 'static {
 
 // ─── Bindings ──────────────────────────────────────────────────────────
 
+/// Result of partitioning a fetch response against the requested set.
+struct TxPartition {
+    /// Transactions whose hash matched a requested id.
+    kept: Vec<Arc<RoutableTransaction>>,
+    /// Requested hashes that didn't appear in the response.
+    missing: Vec<TxHash>,
+    /// Count of returned transactions whose hash was NOT requested.
+    /// A non-zero value indicates a buggy or malicious peer trying to
+    /// inject txs we never asked for.
+    unsolicited: usize,
+}
+
+/// Split a fetch response into solicited / missing / unsolicited buckets.
+///
+/// Without this filter `on_transactions_fetched` would admit every returned
+/// tx regardless of whether we requested it — it only checks tombstones,
+/// pool dedup, and validity range, not "did we ask for this?".
+fn partition_solicited_transactions(
+    returned: Vec<Arc<RoutableTransaction>>,
+    requested: &[TxHash],
+) -> TxPartition {
+    let requested_set: HashSet<TxHash> = requested.iter().copied().collect();
+    let mut kept = Vec::with_capacity(returned.len().min(requested.len()));
+    let mut delivered = HashSet::with_capacity(requested.len());
+    let mut unsolicited = 0usize;
+    for tx in returned {
+        if requested_set.contains(&tx.hash()) {
+            delivered.insert(tx.hash());
+            kept.push(tx);
+        } else {
+            unsolicited += 1;
+        }
+    }
+    let missing = requested
+        .iter()
+        .copied()
+        .filter(|h| !delivered.contains(h))
+        .collect();
+    TxPartition {
+        kept,
+        missing,
+        unsolicited,
+    }
+}
+
 /// Marker type for the per-block transaction fetch.
 pub struct TransactionBinding;
 
@@ -109,22 +157,23 @@ impl FetchBinding for TransactionBinding {
             origin.class_override(),
             Box::new(move |result| {
                 if let Ok(resp) = result {
-                    let txs = resp.into_transactions();
-                    let returned = txs.len();
-                    let requested = hs.len();
-                    let delivered: std::collections::HashSet<TxHash> =
-                        txs.iter().map(|tx| tx.hash()).collect();
-                    let missing_hashes: Vec<TxHash> =
-                        hs.into_iter().filter(|h| !delivered.contains(h)).collect();
-                    let _ = es.send(NodeInput::Protocol(Box::new(
-                        ProtocolEvent::TransactionsReceived { transactions: txs },
-                    )));
-                    if !missing_hashes.is_empty() {
+                    let split = partition_solicited_transactions(resp.into_transactions(), &hs);
+                    if !split.kept.is_empty() {
+                        let _ = es.send(NodeInput::Protocol(Box::new(
+                            ProtocolEvent::TransactionsReceived {
+                                transactions: split.kept,
+                            },
+                        )));
+                    }
+                    if !split.missing.is_empty() {
                         let _ = es.send(NodeInput::TransactionsFetchFailed {
-                            hashes: missing_hashes,
+                            hashes: split.missing.clone(),
                         });
                     }
-                    if returned < requested {
+                    // Reject the response if the peer shipped unsolicited
+                    // txs (injection attempt or buggy peer) OR if any
+                    // requested hash was missing from the delivery.
+                    if split.unsolicited > 0 || !split.missing.is_empty() {
                         ResponseVerdict::Reject
                     } else {
                         ResponseVerdict::Accept
@@ -185,7 +234,7 @@ impl FetchBinding for LocalProvisionBinding {
             origin.class_override(),
             Box::new(move |result| {
                 if let Ok(resp) = result {
-                    let delivered: std::collections::HashSet<ProvisionHash> =
+                    let delivered: HashSet<ProvisionHash> =
                         resp.provisions.iter().map(|p| p.hash()).collect();
                     let missing_hashes: Vec<ProvisionHash> =
                         hs.into_iter().filter(|h| !delivered.contains(h)).collect();
@@ -253,7 +302,7 @@ impl FetchBinding for FinalizedWaveBinding {
                 if let Ok(resp) = result {
                     let returned = resp.waves.len();
                     let requested = requested_ids.len();
-                    let delivered: std::collections::HashSet<WaveId> =
+                    let delivered: HashSet<WaveId> =
                         resp.waves.iter().map(|w| w.wave_id().clone()).collect();
                     let missing_ids: Vec<WaveId> = requested_ids
                         .into_iter()
@@ -317,7 +366,7 @@ impl FetchBinding for ExecCertBinding {
                 if let Ok(response) = result {
                     match response.certificates {
                         Some(certs) if !certs.is_empty() => {
-                            let delivered: std::collections::HashSet<WaveId> =
+                            let delivered: HashSet<WaveId> =
                                 certs.iter().map(|c| c.wave_id.clone()).collect();
                             let missing: Vec<WaveId> = failed_ids
                                 .into_iter()
@@ -458,5 +507,63 @@ impl FetchBinding for ProvisionBinding {
                 ids: vec![(provisions.source_shard, provisions.block_height)],
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use hyperscale_types::test_utils::test_transaction;
+
+    use super::*;
+
+    fn tx_arc(seed: u8) -> Arc<RoutableTransaction> {
+        Arc::new(test_transaction(seed))
+    }
+
+    #[test]
+    fn partition_keeps_only_solicited_and_flags_extras() {
+        // Requested two known hashes; peer ships one we asked for plus one
+        // we never asked for. The unsolicited tx must be dropped from the
+        // delivery and counted in `unsolicited`.
+        let asked = tx_arc(1);
+        let asked_hash = asked.hash();
+        let extra = tx_arc(99);
+        let other_requested = tx_arc(2).hash();
+
+        let split = partition_solicited_transactions(
+            vec![Arc::clone(&asked), Arc::clone(&extra)],
+            &[asked_hash, other_requested],
+        );
+        assert_eq!(split.kept.len(), 1);
+        assert_eq!(split.kept[0].hash(), asked_hash);
+        assert_eq!(split.unsolicited, 1);
+        assert_eq!(split.missing, vec![other_requested]);
+    }
+
+    #[test]
+    fn partition_full_delivery_yields_no_missing_no_unsolicited() {
+        let a = tx_arc(1);
+        let b = tx_arc(2);
+        let split = partition_solicited_transactions(
+            vec![Arc::clone(&a), Arc::clone(&b)],
+            &[a.hash(), b.hash()],
+        );
+        assert_eq!(split.kept.len(), 2);
+        assert!(split.missing.is_empty());
+        assert_eq!(split.unsolicited, 0);
+    }
+
+    #[test]
+    fn partition_only_unsolicited_yields_kept_empty_all_missing() {
+        // Pre-fix this would have inserted both bogus txs into mempool.
+        let bogus_a = tx_arc(50);
+        let bogus_b = tx_arc(51);
+        let wanted_1 = tx_arc(1).hash();
+        let wanted_2 = tx_arc(2).hash();
+
+        let split = partition_solicited_transactions(vec![bogus_a, bogus_b], &[wanted_1, wanted_2]);
+        assert!(split.kept.is_empty());
+        assert_eq!(split.unsolicited, 2);
+        assert_eq!(split.missing.len(), 2);
     }
 }
