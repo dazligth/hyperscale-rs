@@ -1044,16 +1044,26 @@ impl ExecutionCoordinator {
             return vec![];
         }
 
+        // A single Byzantine signer can produce a cryptographically valid
+        // EC; require 2f+1 voting power on the EC's own shard before any
+        // state mutation downstream.
+        if !ec_has_shard_quorum_power(topology, &certificate) {
+            tracing::warn!(
+                shard = certificate.shard_group_id().0,
+                wave = %certificate.wave_id,
+                "Discarding sub-quorum execution certificate"
+            );
+            return vec![];
+        }
+
         let shard = certificate.shard_group_id();
         let ec_arc = certificate;
 
-        // Now that the BLS signature is verified, clear expected-cert
-        // tracking for this wave. Doing this before verification would let
-        // a Byzantine peer ship an EC with a far-future `vote_anchor_ts`,
-        // populating the fulfilled tombstone (deadline =
-        // vote_anchor_ts + RETENTION_HORIZON) and suppressing legitimate
-        // fallback fetches indefinitely while the verify pool silently
-        // rejects the forgery.
+        // Clearing the tombstone before verification would let a Byzantine
+        // peer ship an EC with a far-future `vote_anchor_ts`, populating
+        // the fulfilled tombstone (deadline = vote_anchor_ts +
+        // RETENTION_HORIZON) and suppressing legitimate fallback fetches
+        // indefinitely while the verify pool silently rejects the forgery.
         let cleared = self.expected_certs.mark_fulfilled(
             shard,
             ec_arc.block_height(),
@@ -2235,14 +2245,18 @@ mod tests {
             },
         );
 
-        // Simulate receiving a verified local shard EC.
+        // Simulate receiving a verified local shard EC with quorum signers.
+        let mut signers = SignerBitfield::new(4);
+        signers.set(0);
+        signers.set(1);
+        signers.set(2);
         let cert = ExecutionCertificate::new(
             wave_id,
             WeightedTimestamp::ZERO,
             GlobalReceiptRoot::ZERO,
             vec![],
             zero_bls_signature(),
-            SignerBitfield::new(4),
+            signers,
         );
         state.on_certificate_verified(&topo, Arc::new(cert), true);
 
@@ -2253,6 +2267,40 @@ mod tests {
         assert!(
             actions.is_empty(),
             "EC receipt must cancel the retry so no action fires"
+        );
+    }
+
+    #[test]
+    fn on_certificate_verified_rejects_subquorum_ec() {
+        // A single Byzantine signer can produce a BLS-valid EC. Without a
+        // quorum-power gate, that sub-quorum EC would clear the expected-
+        // cert tombstone, populate the local-shard fallback-serving cache,
+        // and feed wave attestation.
+        let topo = make_test_topology();
+        let mut state = make_test_state();
+        state.committed_height = BlockHeight(10);
+
+        let wave_id = WaveId::new(ShardGroupId(0), BlockHeight(1), BTreeSet::new());
+
+        let mut signers = SignerBitfield::new(4);
+        signers.set(0); // single signer — well below 2f+1 = 3
+        let cert = Arc::new(ExecutionCertificate::new(
+            wave_id.clone(),
+            WeightedTimestamp::ZERO,
+            GlobalReceiptRoot::ZERO,
+            vec![],
+            zero_bls_signature(),
+            signers,
+        ));
+
+        let actions = state.on_certificate_verified(&topo, cert, true);
+        assert!(
+            actions.is_empty(),
+            "sub-quorum EC must produce no Continuation"
+        );
+        assert!(
+            state.exec_certs.get(&wave_id).is_none(),
+            "sub-quorum EC must not enter the local-shard serving cache"
         );
     }
 
