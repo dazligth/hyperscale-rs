@@ -45,9 +45,7 @@ use crate::metadata::{
     write_jmt_metadata,
 };
 use crate::substate_key::partition_prefix;
-use crate::typed_cf::{
-    DbEncode, TypedCf, batch_delete, batch_put, batch_put_raw, get, multi_get, prefix_iter,
-};
+use crate::typed_cf::{DbEncode, TypedCf, batch_delete, batch_put, get, multi_get, prefix_iter};
 use crate::versioned_key::VersionedSubstateKeyCodec;
 
 /// Sort keys deleted by partition Reset operations, keyed by `(entity_key, partition_num)`.
@@ -261,7 +259,11 @@ impl RocksDbStorage {
         get::<CF>(&*self.db, CF::handle(&self.cf()), key)
     }
 
-    /// Put a typed key/value into a `WriteBatch`.
+    /// Put a typed key/value into a `WriteBatch`. Production per-block
+    /// loops pre-resolve column-family handles outside the loop and call
+    /// [`batch_put`] directly; this method is the right shape for one-shot
+    /// writes where re-resolving handles per call doesn't matter.
+    #[allow(dead_code)]
     pub(crate) fn cf_put<CF: TypedCf>(
         &self,
         batch: &mut WriteBatch,
@@ -269,17 +271,6 @@ impl RocksDbStorage {
         value: &CF::Value,
     ) {
         batch_put::<CF>(batch, CF::handle(&self.cf()), key, value);
-    }
-
-    /// Put a typed key/value into a `WriteBatch`, using pre-serialized bytes if available.
-    pub(crate) fn cf_put_raw<CF: TypedCf>(
-        &self,
-        batch: &mut WriteBatch,
-        key: &CF::Key,
-        value: &CF::Value,
-        raw_value: Option<&[u8]>,
-    ) {
-        batch_put_raw::<CF>(batch, CF::handle(&self.cf()), key, value, raw_value);
     }
 
     /// Batch get typed values (`RocksDB` `multi_get_cf`).

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use hyperscale_types::{ConsensusReceipt, ExecutionMetadata, StoredReceipt, TxHash};
-use rocksdb::WriteBatch;
+use rocksdb::{ColumnFamily, WriteBatch};
 
 use crate::column_families::{ConsensusReceiptsCf, ExecutionMetadataCf};
 use crate::core::RocksDbStorage;
@@ -17,7 +17,10 @@ impl RocksDbStorage {
     /// Panics if the underlying `RocksDB` write fails.
     pub fn store_receipt(&self, receipt: &StoredReceipt) {
         let mut batch = WriteBatch::default();
-        self.add_receipt_to_batch(&mut batch, receipt);
+        let cf = self.cf();
+        let consensus_cf = ConsensusReceiptsCf::handle(&cf);
+        let metadata_cf = ExecutionMetadataCf::handle(&cf);
+        add_receipt_to_batch(&mut batch, consensus_cf, metadata_cf, receipt);
         self.db.write(batch).expect("failed to persist receipt");
     }
 
@@ -33,8 +36,11 @@ impl RocksDbStorage {
             return;
         }
         let mut batch = WriteBatch::default();
+        let cf = self.cf();
+        let consensus_cf = ConsensusReceiptsCf::handle(&cf);
+        let metadata_cf = ExecutionMetadataCf::handle(&cf);
         for receipt in receipts {
-            self.add_receipt_to_batch(&mut batch, receipt);
+            add_receipt_to_batch(&mut batch, consensus_cf, metadata_cf, receipt);
         }
         tracing::debug!(
             count = receipts.len(),
@@ -42,29 +48,6 @@ impl RocksDbStorage {
             "Persisting receipts to RocksDB"
         );
         self.db.write(batch).expect("failed to persist receipts");
-    }
-
-    /// Append the receipt's writes to a caller-owned `WriteBatch` so it
-    /// can land atomically with the rest of the block commit (header,
-    /// substate, JMT). Used by `commit_block` / `prepare_block_commit`.
-    pub(crate) fn add_receipt_to_batch(&self, batch: &mut WriteBatch, receipt: &StoredReceipt) {
-        let cf = self.cf();
-
-        batch_put::<ConsensusReceiptsCf>(
-            batch,
-            ConsensusReceiptsCf::handle(&cf),
-            receipt.tx_hash.as_raw(),
-            &receipt.consensus,
-        );
-
-        if let Some(ref metadata) = receipt.metadata {
-            batch_put::<ExecutionMetadataCf>(
-                batch,
-                ExecutionMetadataCf::handle(&cf),
-                receipt.tx_hash.as_raw(),
-                metadata,
-            );
-        }
     }
 
     /// Read the consensus portion. Present for any tx that committed
@@ -79,5 +62,28 @@ impl RocksDbStorage {
     /// the consensus portion.
     pub fn get_execution_metadata(&self, tx_hash: &TxHash) -> Option<ExecutionMetadata> {
         self.cf_get::<ExecutionMetadataCf>(tx_hash.as_raw())
+    }
+}
+
+/// Append a single receipt's writes against pre-resolved column-family
+/// handles. Use this from per-block receipt loops where the caller has
+/// already paid for one [`RocksDbStorage::cf`] resolution; the
+/// `&mut self`-method form on `RocksDbStorage` repeats that resolution
+/// per call and is the right shape only for one-shot writes.
+pub fn add_receipt_to_batch(
+    batch: &mut WriteBatch,
+    consensus_cf: &ColumnFamily,
+    metadata_cf: &ColumnFamily,
+    receipt: &StoredReceipt,
+) {
+    batch_put::<ConsensusReceiptsCf>(
+        batch,
+        consensus_cf,
+        receipt.tx_hash.as_raw(),
+        &receipt.consensus,
+    );
+
+    if let Some(ref metadata) = receipt.metadata {
+        batch_put::<ExecutionMetadataCf>(batch, metadata_cf, receipt.tx_hash.as_raw(), metadata);
     }
 }

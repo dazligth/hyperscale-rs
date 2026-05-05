@@ -14,10 +14,12 @@ use hyperscale_types::{
 use radix_substate_store_interface::interface::DatabaseUpdates;
 use rocksdb::{WriteBatch, WriteOptions};
 
-use crate::column_families::ALL_COLUMN_FAMILIES;
+use crate::column_families::{ALL_COLUMN_FAMILIES, ConsensusReceiptsCf, ExecutionMetadataCf};
 use crate::core::RocksDbStorage;
 use crate::execution_certs::append_block_certs_to_batch;
 use crate::jmt_snapshot_store::SnapshotTreeStore;
+use crate::receipts::add_receipt_to_batch;
+use crate::typed_cf::TypedCf;
 
 /// Precomputed commit work for a `RocksDB` block commit.
 ///
@@ -127,8 +129,11 @@ impl ChainWriter for RocksDbStorage {
             base_reads,
         );
 
+        let cf = self.cf();
+        let consensus_cf = ConsensusReceiptsCf::handle(&cf);
+        let metadata_cf = ExecutionMetadataCf::handle(&cf);
         for receipt in &receipts {
-            self.add_receipt_to_batch(&mut write_batch, receipt);
+            add_receipt_to_batch(&mut write_batch, consensus_cf, metadata_cf, receipt);
         }
 
         let prepared = RocksDbPreparedCommit {
@@ -286,8 +291,11 @@ impl RocksDbStorage {
         append_block_certs_to_batch(self, &mut batch, block);
 
         // Add receipts to the batch atomically.
+        let cf = self.cf();
+        let consensus_cf = ConsensusReceiptsCf::handle(&cf);
+        let metadata_cf = ExecutionMetadataCf::handle(&cf);
         for receipt in receipts {
-            self.add_receipt_to_batch(&mut batch, receipt);
+            add_receipt_to_batch(&mut batch, consensus_cf, metadata_cf, receipt);
         }
 
         // Compute JMT update.
