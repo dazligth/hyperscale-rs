@@ -190,14 +190,12 @@ impl VoteKeeper {
             return vec![];
         };
 
-        let voting_power = topology.voting_power(vote.voter).unwrap_or(0);
-        if voting_power == 0 {
-            warn!(
-                "Vote from validator {:?} with zero voting power",
-                vote.voter
-            );
-            return vec![];
-        }
+        // `local_committee_index` returning `Some` means the voter is in the
+        // local committee, and the topology snapshot invariant guarantees
+        // every committee member has a positive voting power entry.
+        let voting_power = topology
+            .voting_power(vote.voter)
+            .expect("committee member has voting power (TopologySnapshot invariant)");
 
         let committee_size = topology.local_committee().len();
         let total_power = topology.local_voting_power();

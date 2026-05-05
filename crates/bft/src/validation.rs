@@ -35,7 +35,11 @@ pub fn qc_has_local_quorum_power(topology: &TopologySnapshot, qc: &QuorumCertifi
         .signers
         .set_indices()
         .filter_map(|i| committee.get(i))
-        .map(|&vid| topology.voting_power(vid).unwrap_or(0))
+        .map(|&vid| {
+            topology
+                .voting_power(vid)
+                .expect("committee member has voting power (TopologySnapshot invariant)")
+        })
         .sum();
     VotePower::has_quorum(qc_power, topology.local_voting_power())
 }

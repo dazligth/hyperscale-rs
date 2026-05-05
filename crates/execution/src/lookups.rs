@@ -38,7 +38,11 @@ pub fn ec_has_shard_quorum_power(topology: &TopologySnapshot, ec: &ExecutionCert
         .signers
         .set_indices()
         .filter_map(|i| committee.get(i))
-        .map(|&vid| topology.voting_power(vid).unwrap_or(0))
+        .map(|&vid| {
+            topology
+                .voting_power(vid)
+                .expect("committee member has voting power (TopologySnapshot invariant)")
+        })
         .sum();
     VotePower::has_quorum(signers_power, topology.voting_power_for_shard(shard))
 }
