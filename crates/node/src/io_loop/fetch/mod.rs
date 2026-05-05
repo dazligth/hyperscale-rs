@@ -437,42 +437,6 @@ mod tests {
     }
 
     #[test]
-    fn separate_requests_with_equal_peers_coalesce_into_one_send() {
-        // Regression: emitters that dispatch one Action per id (e.g.
-        // `FetchRequest::ExecutionCerts { wave_id }`) hand the protocol a
-        // fresh `Vec<Id>::with one entry` per call. Each call wraps its
-        // peers in a fresh `Arc<FetchPeers>` — pre-fix, grouping by
-        // `Arc::as_ptr` defeated batching even when every call shared the
-        // same peer pool, so 30 ids → 30 single-id Sends instead of one
-        // chunked Send.
-        //
-        // Under the new sync-style contract, each `handle(Request)` spawns
-        // its own id immediately (one Send per call, but coalesced within
-        // a single chunk when possible). For 30 single-id requests we
-        // expect 30 Sends — the coalescing property the original test
-        // pinned was specifically about a TICK after queuing all requests
-        // batching them together. That property no longer applies because
-        // there is no separate Tick step. Verify the by-Arc-content
-        // grouping still applies when multiple ids land in one Request.
-        let mut p = Fetch::<TxHash>::new(
-            "test",
-            FetchConfig {
-                max_in_flight: 100,
-                max_ids_per_request: 50,
-                parallel_chunks_per_tick: 8,
-            },
-        );
-        let out = p.handle(FetchInput::Request {
-            ids: (0..30u8).map(tx).collect(),
-            peers: pinned(vid(1)),
-            origin: FetchOrigin::PendingBlock,
-        });
-        assert_eq!(out.len(), 1, "ids in one Request coalesce by peer pool");
-        let FetchOutput::Send { ids, .. } = &out[0];
-        assert_eq!(ids.len(), 30);
-    }
-
-    #[test]
     fn siblings_share_peer_pool_via_arc_grouping() {
         let mut p = Fetch::<TxHash>::new(
             "test",
