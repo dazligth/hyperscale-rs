@@ -30,7 +30,7 @@
 //! derived. Compare against the signed root.
 
 use crate::hasher::{EMPTY_HASH, Hash, Hasher};
-use crate::node::{Key, NibblePath, Node, NodeKey, ValueHash};
+use crate::node::{Key, Node, NodeKey, ValueHash};
 use crate::storage::TreeReader;
 use crate::tree::Tree;
 
@@ -143,7 +143,14 @@ impl<H: Hasher, const ARITY_BITS: u8> Tree<H, ARITY_BITS> {
         }
 
         let claim_refs: Vec<&Key> = sorted.iter().collect();
-        prove_rec::<S, H, ARITY_BITS>(store, root_key, &claim_refs, &mut claims, &mut siblings)?;
+        let mut current_key = root_key.clone();
+        prove_rec::<S, H, ARITY_BITS>(
+            store,
+            &mut current_key,
+            &claim_refs,
+            &mut claims,
+            &mut siblings,
+        )?;
 
         Ok(MultiProof { claims, siblings })
     }
@@ -247,12 +254,6 @@ fn bits_at(key: &Key, depth_bits: u16, count: u8) -> u8 {
     u8::try_from((combined >> shift) & mask).unwrap_or(u8::MAX)
 }
 
-fn child_path(parent: &NibblePath, bucket: u8, count: u8) -> NibblePath {
-    let mut p = parent.clone();
-    p.push_bits(bucket, count);
-    p
-}
-
 fn termination_hash<H: Hasher>(claim: &ProofClaim) -> Hash {
     match &claim.termination {
         ClaimTermination::Leaf => {
@@ -272,7 +273,7 @@ fn termination_hash<H: Hasher>(claim: &ProofClaim) -> Hash {
 
 fn prove_rec<S, H, const ARITY_BITS: u8>(
     store: &S,
-    node_key: &NodeKey,
+    node_key: &mut NodeKey,
     claim_keys: &[&Key],
     claims_out: &mut Vec<ProofClaim>,
     siblings_out: &mut Vec<Hash>,
@@ -328,15 +329,22 @@ where
                 if claimed_here {
                     let bucket_byte = u8::try_from(bucket).unwrap_or(u8::MAX);
                     if let Some(child) = child {
-                        let sub_path = child_path(&node_key.path, bucket_byte, ARITY_BITS);
-                        let sub_key = NodeKey::new(child.version, sub_path);
-                        prove_rec::<S, H, ARITY_BITS>(
+                        // Mutate the path in place, recurse, then truncate
+                        // back to the parent depth so the next bucket's
+                        // descent starts from the same point.
+                        let saved_version = node_key.version;
+                        node_key.version = child.version;
+                        node_key.path.push_bits(bucket_byte, ARITY_BITS);
+                        let result = prove_rec::<S, H, ARITY_BITS>(
                             store,
-                            &sub_key,
+                            node_key,
                             &claim_keys[start..pos],
                             claims_out,
                             siblings_out,
-                        )?;
+                        );
+                        node_key.path.truncate(depth);
+                        node_key.version = saved_version;
+                        result?;
                     } else {
                         // Claimed path hits empty slot — emit non-inclusion.
                         for key in &claim_keys[start..pos] {

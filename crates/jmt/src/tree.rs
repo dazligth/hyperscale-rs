@@ -118,8 +118,10 @@ impl<H: Hasher, const ARITY_BITS: u8> Tree<H, ARITY_BITS> {
     where
         S: TreeReader,
     {
-        let mut current = store.get_node(root_key)?;
-        let mut current_path = root_key.path.clone();
+        // Single key reused down the descent: each level pushes ARITY_BITS
+        // onto the path in place rather than cloning.
+        let mut current_key = root_key.clone();
+        let mut current = store.get_node(&current_key)?;
 
         loop {
             match &*current {
@@ -131,12 +133,11 @@ impl<H: Hasher, const ARITY_BITS: u8> Tree<H, ARITY_BITS> {
                     };
                 }
                 Node::Internal(internal) => {
-                    let bucket = bits_at(key, current_path.len(), ARITY_BITS);
+                    let bucket = bits_at(key, current_key.path.len(), ARITY_BITS);
                     let child = internal.children.get(usize::from(bucket))?.as_ref()?;
-                    let next_path = child_path(&current_path, bucket, ARITY_BITS);
-                    let child_key = NodeKey::new(child.version, next_path.clone());
-                    current = store.get_node(&child_key)?;
-                    current_path = next_path;
+                    current_key.version = child.version;
+                    current_key.path.push_bits(bucket, ARITY_BITS);
+                    current = store.get_node(&current_key)?;
                 }
             }
         }

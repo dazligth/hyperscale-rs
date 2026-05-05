@@ -117,6 +117,27 @@ impl NibblePath {
         u8::try_from((combined >> shift) & mask).unwrap_or(u8::MAX)
     }
 
+    /// Drop trailing bits so the path has exactly `new_bits` meaningful bits.
+    /// Trailing bytes are zeroed to preserve the "bits beyond `self.bits`
+    /// must be 0" invariant.
+    ///
+    /// # Panics
+    ///
+    /// Panics (in debug) if `new_bits > self.bits`.
+    pub fn truncate(&mut self, new_bits: u16) {
+        debug_assert!(new_bits <= self.bits);
+        self.bits = new_bits;
+        let needed_bytes = usize::from(new_bits).div_ceil(8);
+        self.bytes.truncate(needed_bytes);
+        // Zero any bits in the final byte that fall past `new_bits`.
+        let trailing = (8 - (usize::from(new_bits) % 8)) % 8;
+        if trailing > 0
+            && let Some(last) = self.bytes.last_mut()
+        {
+            *last &= 0xFFu8 << trailing;
+        }
+    }
+
     /// Append `count` bits (right-aligned in `nibble`, where `count <= 8`).
     pub fn push_bits(&mut self, nibble: u8, count: u8) {
         debug_assert!(count <= 8);
