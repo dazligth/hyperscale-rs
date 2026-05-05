@@ -278,7 +278,7 @@ impl NodeId {
 
 impl Display for NodeId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "NodeId({}..)", &hex_encode(&self.0[..4]))
+        write!(f, "NodeId({}..)", hex_encode(&self.0[..4]))
     }
 }
 

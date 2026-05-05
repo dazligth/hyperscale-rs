@@ -758,6 +758,7 @@ impl SubstateDatabase for RocksDbStorage {
     ) -> Box<dyn Iterator<Item = PartitionEntry> + '_> {
         // Partition scan at current version. Same rationale as `get` —
         // one canonical read path through the snapshot.
+        #[allow(clippy::needless_collect)] // snapshot iterator borrows from temporary
         let items: Vec<_> = <Self as SubstateStore>::snapshot(self)
             .list_raw_values_from_db_key(partition_key, from_sort_key)
             .collect();

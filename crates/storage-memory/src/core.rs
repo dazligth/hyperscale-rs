@@ -198,6 +198,7 @@ impl SubstateDatabase for SimStorage {
         partition_key: &DbPartitionKey,
         from_sort_key: Option<&DbSortKey>,
     ) -> Box<dyn Iterator<Item = PartitionEntry> + '_> {
+        #[allow(clippy::needless_collect)] // snapshot iterator borrows from temporary
         let items: Vec<_> = <Self as SubstateStore>::snapshot(self)
             .list_raw_values_from_db_key(partition_key, from_sort_key)
             .collect();

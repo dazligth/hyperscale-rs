@@ -205,11 +205,10 @@ pub fn parse_topic(topic_str: &str) -> Option<ParsedTopic<'_>> {
                 return None;
             }
             let shard_str = parts[2];
-            let shard_id = if let Some(id_str) = shard_str.strip_prefix("shard-") {
+            let shard_id = {
+                let id_str = shard_str.strip_prefix("shard-")?;
                 let shard_id: u64 = id_str.parse().ok()?;
                 Some(ShardGroupId(shard_id))
-            } else {
-                return None;
             };
 
             if !validate_version(parts[3]) {
