@@ -35,7 +35,7 @@ impl TransactionGossip {
     /// Build a gossip batch from a vector of `Arc`-wrapped transactions.
     /// Each entry gets a default trace context.
     #[must_use]
-    pub fn from_arcs(transactions: Vec<Arc<RoutableTransaction>>) -> Self {
+    pub fn new(transactions: Vec<Arc<RoutableTransaction>>) -> Self {
         let trace_contexts = std::iter::repeat_with(TraceContext::default)
             .take(transactions.len())
             .collect();
@@ -198,7 +198,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn from_arcs_carries_transactions_and_default_traces() {
+    fn new_carries_transactions_and_default_traces() {
         let tx1 = Arc::new(test_transaction_with_nodes(
             &[1, 2, 3],
             vec![test_node(1)],
@@ -210,7 +210,7 @@ mod tests {
             vec![test_node(4)],
         ));
 
-        let gossip = TransactionGossip::from_arcs(vec![Arc::clone(&tx1), Arc::clone(&tx2)]);
+        let gossip = TransactionGossip::new(vec![Arc::clone(&tx1), Arc::clone(&tx2)]);
         assert_eq!(gossip.len(), 2);
         assert!(!gossip.is_empty());
         assert_eq!(gossip.transactions[0].hash(), tx1.hash());
@@ -223,7 +223,7 @@ mod tests {
 
     #[test]
     fn empty_batch() {
-        let gossip = TransactionGossip::from_arcs(vec![]);
+        let gossip = TransactionGossip::new(vec![]);
         assert!(gossip.is_empty());
         assert_eq!(gossip.len(), 0);
     }
@@ -239,7 +239,7 @@ mod tests {
                 ))
             })
             .collect();
-        let original = TransactionGossip::from_arcs(txs);
+        let original = TransactionGossip::new(txs);
 
         let bytes = basic_encode(&original).expect("encode");
         let decoded: TransactionGossip = basic_decode(&bytes).expect("decode");
@@ -250,7 +250,7 @@ mod tests {
 
     #[test]
     fn sbor_roundtrip_empty() {
-        let original = TransactionGossip::from_arcs(vec![]);
+        let original = TransactionGossip::new(vec![]);
         let bytes = basic_encode(&original).expect("encode");
         let decoded: TransactionGossip = basic_decode(&bytes).expect("decode");
         assert_eq!(original, decoded);

@@ -1,7 +1,5 @@
 //! Utilities for merging, filtering, and reconstructing `DatabaseUpdates`.
 
-use std::sync::Arc;
-
 use hyperscale_types::StoredReceipt;
 use indexmap::map::Entry;
 use radix_common::prelude::DatabaseUpdate;
@@ -36,24 +34,6 @@ pub fn merge_database_updates(updates_list: &[DatabaseUpdates]) -> DatabaseUpdat
     }
     if updates_list.len() == 1 {
         return updates_list[0].clone();
-    }
-    let mut merged = DatabaseUpdates::default();
-    for updates in updates_list {
-        merge_into(&mut merged, updates);
-    }
-    merged
-}
-
-/// Merge a slice of Arc-wrapped per-certificate `DatabaseUpdates` into a single combined update.
-///
-/// Same semantics as [`merge_database_updates`] but dereferences through `Arc`.
-#[must_use]
-pub fn merge_database_updates_from_arcs(updates_list: &[Arc<DatabaseUpdates>]) -> DatabaseUpdates {
-    if updates_list.is_empty() {
-        return DatabaseUpdates::default();
-    }
-    if updates_list.len() == 1 {
-        return (*updates_list[0]).clone();
     }
     let mut merged = DatabaseUpdates::default();
     for updates in updates_list {

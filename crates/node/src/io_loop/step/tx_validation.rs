@@ -140,7 +140,7 @@ where
         if txs.is_empty() {
             return;
         }
-        let gossip = TransactionGossip::from_arcs(txs);
+        let gossip = TransactionGossip::new(txs);
         self.network.broadcast_to_shard(shard, &gossip);
     }
 

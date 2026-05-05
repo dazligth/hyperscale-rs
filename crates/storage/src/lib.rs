@@ -43,10 +43,7 @@ pub use overlay::{SubstateDbLookup, SubstateLookup};
 pub use pending_chain::{BaseReadCache, ChainEntry, PendingChain, SubstateView};
 pub use store::{SubstateStore, VersionedStore};
 pub use tree::{CollectedWrites, JmtSnapshot, LeafSubstateKeyAssociation};
-pub use writes::{
-    merge_database_updates, merge_database_updates_from_arcs, merge_into,
-    merge_updates_from_receipts,
-};
+pub use writes::{merge_database_updates, merge_into, merge_updates_from_receipts};
 
 /// Umbrella bound for storage backends threaded as a generic `S` through
 /// node-side machinery (the `IoLoop` and its delegated action handler).

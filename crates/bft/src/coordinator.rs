@@ -1173,7 +1173,7 @@ impl BftCoordinator {
             .filter_map(&lookup_tx)
             .collect();
         for tx in txs {
-            pending.add_transaction_arc(tx);
+            pending.add_transaction(tx);
         }
 
         let waves: Vec<Arc<FinalizedWave>> = pending
@@ -2757,7 +2757,7 @@ impl BftCoordinator {
                 "transaction",
                 |pending| pending.needs_transaction(&tx_hash),
                 |pending| {
-                    pending.add_transaction_arc(Arc::clone(tx));
+                    pending.add_transaction(Arc::clone(tx));
                 },
             ));
         }

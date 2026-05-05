@@ -141,7 +141,7 @@ impl PendingBlock {
     /// Add a received transaction.
     ///
     /// Returns true if this transaction was needed, false if duplicate or not in this block.
-    pub fn add_transaction_arc(&mut self, tx: Arc<RoutableTransaction>) -> bool {
+    pub fn add_transaction(&mut self, tx: Arc<RoutableTransaction>) -> bool {
         let hash = tx.hash();
         if self.missing_transaction_hashes.remove(&hash) {
             self.received_transactions.insert(hash, tx);
@@ -548,7 +548,7 @@ mod tests {
         assert!(!pb.is_complete());
 
         // Add transaction
-        pb.add_transaction_arc(tx);
+        pb.add_transaction(tx);
         assert!(pb.has_all_transactions());
         assert!(!pb.is_complete()); // Still missing wave
 

@@ -258,7 +258,7 @@ mod tests {
     use super::*;
 
     fn test_gossip() -> TransactionGossip {
-        TransactionGossip::from_arcs(vec![Arc::new(test_transaction_with_nodes(
+        TransactionGossip::new(vec![Arc::new(test_transaction_with_nodes(
             &[1, 2, 3],
             vec![test_node(1)],
             vec![test_node(2)],
