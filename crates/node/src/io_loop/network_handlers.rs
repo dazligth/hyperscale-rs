@@ -191,10 +191,13 @@ where
                     // Decrement the per-key waiter count regardless of how
                     // we left the wait (timeout, success, or producer drop).
                     // The producer's `InFlightGuard` may have already
-                    // removed the slot; in that case the decrement is a
-                    // no-op.
+                    // removed the slot, and a fresh producer may have
+                    // inserted a new one under the same key — `ptr_eq`
+                    // ensures we only decrement against the slot we
+                    // actually joined.
                     if let Ok(mut g) = dedup.lock()
                         && let Some(slot) = g.in_flight.get_mut(&cache_key)
+                        && Arc::ptr_eq(&slot.waiter, &waiter)
                     {
                         slot.waiters = slot.waiters.saturating_sub(1);
                     }
