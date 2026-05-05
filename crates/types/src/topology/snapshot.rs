@@ -118,6 +118,13 @@ impl TopologySnapshot {
     /// Create a snapshot with explicit shard committees.
     ///
     /// Shard membership is taken directly from the provided map.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a committee references a validator that is not present in
+    /// `global_validator_set`. Snapshots must be internally consistent so
+    /// downstream code can look up `public_key`/`voting_power` for any
+    /// committee member without a fallback.
     #[must_use]
     pub fn with_shard_committees(
         local_validator_id: ValidatorId,
@@ -133,11 +140,14 @@ impl TopologySnapshot {
         for (shard, validators) in shard_committees {
             if let Some(committee) = committees.get_mut(&shard) {
                 for validator_id in validators {
-                    let voting_power = validator_info
-                        .get(&validator_id)
-                        .map_or(1, |v| v.voting_power);
+                    let info = validator_info.get(&validator_id).unwrap_or_else(|| {
+                        panic!(
+                            "committee for shard {shard:?} references validator {validator_id:?} \
+                             that is not in the global validator set",
+                        )
+                    });
                     committee.active_validators.push(validator_id);
-                    committee.total_voting_power += voting_power;
+                    committee.total_voting_power += info.voting_power;
                 }
             }
         }

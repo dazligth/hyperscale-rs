@@ -558,7 +558,11 @@ impl RemoteHeaderCoordinator {
             .collect();
         let committee_voting_power: Vec<u64> = committee
             .iter()
-            .map(|v| topology.voting_power(*v).unwrap_or(0))
+            .map(|v| {
+                topology
+                    .voting_power(*v)
+                    .expect("committee member must have voting power")
+            })
             .collect();
         let quorum_threshold = topology.quorum_threshold_for_shard(shard);
 
