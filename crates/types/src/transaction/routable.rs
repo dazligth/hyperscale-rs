@@ -230,6 +230,60 @@ impl RoutableTransaction {
 // Manual SBOR implementation since UserTransaction uses ManifestSbor
 // ============================================================================
 
+/// Cap on `tx_bytes` length at decode time.
+///
+/// Bounds the manifest payload a peer can pre-allocate via the SBOR `Vec<u8>`
+/// fast path. Realistic transactions sit comfortably below this; it exists
+/// to reject obviously malformed or oversized payloads early instead of
+/// admitting them and stressing mempool / commit pipelines.
+const MAX_TX_BYTES_LEN: usize = 256 * 1024;
+
+/// Cap on a transaction's declared read or write set length at decode time.
+///
+/// Each `NodeId` is 30 bytes; this cap leaves ~120 KB of declared-set
+/// allocation as the worst case. Tx authors with unusual access patterns
+/// have ample headroom; everything beyond is rejected.
+const MAX_DECLARED_NODES_PER_TX: usize = 4_096;
+
+fn decode_bounded_bytes<D: Decoder<NoCustomValueKind>>(
+    decoder: &mut D,
+    max_len: usize,
+) -> Result<Vec<u8>, DecodeError> {
+    decoder.read_and_check_value_kind(ValueKind::Array)?;
+    decoder.read_and_check_value_kind(ValueKind::U8)?;
+    let len = decoder.read_size()?;
+    if len > max_len {
+        return Err(DecodeError::UnexpectedSize {
+            expected: max_len,
+            actual: len,
+        });
+    }
+    let slice = decoder.read_slice(len)?;
+    Ok(slice.to_vec())
+}
+
+fn decode_bounded_node_ids<D: Decoder<NoCustomValueKind>>(
+    decoder: &mut D,
+    max_len: usize,
+) -> Result<Vec<NodeId>, DecodeError> {
+    decoder.read_and_check_value_kind(ValueKind::Array)?;
+    let element_kind = decoder.read_and_check_value_kind(NodeId::value_kind())?;
+    let len = decoder.read_size()?;
+    if len > max_len {
+        return Err(DecodeError::UnexpectedSize {
+            expected: max_len,
+            actual: len,
+        });
+    }
+    // Cap the with_capacity hint so a peer-claimed huge `len` can't
+    // pre-allocate before the decode loop short-circuits on missing data.
+    let mut out = Vec::with_capacity(len.min(1024));
+    for _ in 0..len {
+        out.push(decoder.decode_deeper_body_with_value_kind(element_kind)?);
+    }
+    Ok(out)
+}
+
 impl<E: Encoder<NoCustomValueKind>> Encode<NoCustomValueKind, E> for RoutableTransaction {
     fn encode_value_kind(&self, encoder: &mut E) -> Result<(), EncodeError> {
         encoder.write_value_kind(ValueKind::Tuple)
@@ -264,11 +318,11 @@ impl<D: Decoder<NoCustomValueKind>> Decode<NoCustomValueKind, D> for RoutableTra
             });
         }
 
-        let tx_bytes: Vec<u8> = decoder.decode()?;
+        let tx_bytes = decode_bounded_bytes(decoder, MAX_TX_BYTES_LEN)?;
         let transaction: UserTransaction =
             manifest_decode(&tx_bytes).map_err(|_| DecodeError::InvalidCustomValue)?;
-        let declared_reads: Vec<NodeId> = decoder.decode()?;
-        let declared_writes: Vec<NodeId> = decoder.decode()?;
+        let declared_reads = decode_bounded_node_ids(decoder, MAX_DECLARED_NODES_PER_TX)?;
+        let declared_writes = decode_bounded_node_ids(decoder, MAX_DECLARED_NODES_PER_TX)?;
         let validity_range: TimestampRange = decoder.decode()?;
 
         // Recompute the hash from `tx_bytes` — it's content-derived and
@@ -338,6 +392,58 @@ mod tests {
         hasher.update(decoded.serialized_bytes());
         let expected = TxHash::from_raw(Hash::from_hash_bytes(hasher.finalize().as_bytes()));
         assert_eq!(decoded.hash(), expected);
+    }
+
+    #[test]
+    fn decode_rejects_oversized_tx_bytes() {
+        // Hand-roll a 4-field payload whose `tx_bytes` length prefix
+        // exceeds MAX_TX_BYTES_LEN. The decoder must error before the
+        // SBOR fast path attempts a Vec::with_capacity(huge_len).
+        let mut buf = Vec::with_capacity(32);
+        {
+            let mut enc = VecEncoder::<NoCustomValueKind>::new(&mut buf, BASIC_SBOR_V1_MAX_DEPTH);
+            enc.write_payload_prefix(BASIC_SBOR_V1_PAYLOAD_PREFIX)
+                .unwrap();
+            enc.write_value_kind(ValueKind::Tuple).unwrap();
+            enc.write_size(4).unwrap();
+            // tx_bytes prefix: Array<U8> with claimed_len = MAX + 1.
+            enc.write_value_kind(ValueKind::Array).unwrap();
+            enc.write_value_kind(ValueKind::U8).unwrap();
+            enc.write_size(MAX_TX_BYTES_LEN + 1).unwrap();
+        }
+        let err = basic_decode::<RoutableTransaction>(&buf).unwrap_err();
+        assert!(matches!(
+            err,
+            DecodeError::UnexpectedSize { expected, actual }
+                if expected == MAX_TX_BYTES_LEN && actual == MAX_TX_BYTES_LEN + 1
+        ));
+    }
+
+    #[test]
+    fn decode_rejects_oversized_declared_reads() {
+        // Hand-roll a 4-field payload: a real (decodable) tx_bytes
+        // followed by a declared_reads array whose length exceeds the
+        // cap. The cap fires before the loop attempts to consume any
+        // element bytes.
+        let real = test_transaction_with_nodes(&[1], vec![test_node(1)], vec![test_node(1)]);
+        let mut buf = Vec::with_capacity(real.serialized_bytes().len() + 16);
+        {
+            let mut enc = VecEncoder::<NoCustomValueKind>::new(&mut buf, BASIC_SBOR_V1_MAX_DEPTH);
+            enc.write_payload_prefix(BASIC_SBOR_V1_PAYLOAD_PREFIX)
+                .unwrap();
+            enc.write_value_kind(ValueKind::Tuple).unwrap();
+            enc.write_size(4).unwrap();
+            enc.encode(&real.serialized_bytes().to_vec()).unwrap();
+            enc.write_value_kind(ValueKind::Array).unwrap();
+            enc.write_value_kind(NodeId::value_kind()).unwrap();
+            enc.write_size(MAX_DECLARED_NODES_PER_TX + 1).unwrap();
+        }
+        let err = basic_decode::<RoutableTransaction>(&buf).unwrap_err();
+        assert!(matches!(
+            err,
+            DecodeError::UnexpectedSize { expected, actual }
+                if expected == MAX_DECLARED_NODES_PER_TX && actual == MAX_DECLARED_NODES_PER_TX + 1
+        ));
     }
 
     #[test]
