@@ -82,8 +82,8 @@ pub fn serve_provision_request(
     }
 
     // Phase 2: Generate ONE batched proof covering all entries.
-    all_storage_keys.sort();
-    all_storage_keys.dedup();
+    // `Jmt::prove` sorts and dedups its keys internally, so we hand it the
+    // raw accumulated list.
     let proof = if per_tx.is_empty() {
         MerkleInclusionProof::dummy()
     } else if let Some(p) = storage.generate_merkle_proofs(&all_storage_keys, jmt_height) {
