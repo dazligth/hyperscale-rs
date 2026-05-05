@@ -5,7 +5,7 @@ use std::sync::Arc;
 use hyperscale_jmt::{Node as JmtNode, NodeKey as JmtNodeKey, TreeReader};
 use hyperscale_storage::{DbPartitionKey, DbSortKey, SubstateLookup};
 use hyperscale_types::StateRoot;
-use rocksdb::{DB, Snapshot};
+use rocksdb::{ColumnFamily, DB, Snapshot};
 
 use crate::column_families::{CfHandles, JmtNodesCf, StateCf};
 use crate::jmt_stored::StoredNodeKey;
@@ -25,14 +25,22 @@ use crate::typed_cf::{self, TypedCf};
 /// garbage collection.
 pub struct SnapshotTreeStore<'a> {
     snapshot: Snapshot<'a>,
-    db: &'a DB,
+    /// Pre-resolved at construction so repeated `TreeReader::get_node`
+    /// calls don't re-walk all 12 column families per JMT node lookup.
+    /// Proof generation walks O(log N) nodes per key; with K keys per
+    /// proof and ~12 hashmap lookups per `CfHandles::resolve`, the
+    /// uncached overhead grows quickly.
+    jmt_nodes_cf: &'a ColumnFamily,
+    state_cf: &'a ColumnFamily,
 }
 
 impl<'a> SnapshotTreeStore<'a> {
     pub fn new(db: &'a DB) -> Self {
+        let cf = CfHandles::resolve(db);
         Self {
             snapshot: db.snapshot(),
-            db,
+            jmt_nodes_cf: JmtNodesCf::handle(&cf),
+            state_cf: StateCf::handle(&cf),
         }
     }
 
@@ -44,11 +52,8 @@ impl<'a> SnapshotTreeStore<'a> {
         partition_key: &DbPartitionKey,
         sort_key: &DbSortKey,
     ) -> Option<Vec<u8>> {
-        let cf = CfHandles::resolve(self.db);
-        let state_cf = StateCf::handle(&cf);
-        // Direct point lookup on the unversioned state CF.
         let state_key = (partition_key.clone(), sort_key.clone());
-        typed_cf::get::<StateCf>(&self.snapshot, state_cf, &state_key)
+        typed_cf::get::<StateCf>(&self.snapshot, self.state_cf, &state_key)
     }
 
     /// Read the JMT version and root hash from this snapshot. Uses the
@@ -64,18 +69,14 @@ impl<'a> SnapshotTreeStore<'a> {
 impl TreeReader for SnapshotTreeStore<'_> {
     fn get_node(&self, key: &JmtNodeKey) -> Option<Arc<JmtNode>> {
         let stored_key = StoredNodeKey::from_jmt(key);
-        let cf = CfHandles::resolve(self.db);
-        typed_cf::get::<JmtNodesCf>(&self.snapshot, JmtNodesCf::handle(&cf), &stored_key)
+        typed_cf::get::<JmtNodesCf>(&self.snapshot, self.jmt_nodes_cf, &stored_key)
             .map(|v| Arc::new(v.into_latest().to_jmt()))
     }
 
     fn get_root_key(&self, version: u64) -> Option<JmtNodeKey> {
         let root = JmtNodeKey::root(version);
         let stored_key = StoredNodeKey::from_jmt(&root);
-        let cf = CfHandles::resolve(self.db);
-        if typed_cf::get::<JmtNodesCf>(&self.snapshot, JmtNodesCf::handle(&cf), &stored_key)
-            .is_some()
-        {
+        if typed_cf::get::<JmtNodesCf>(&self.snapshot, self.jmt_nodes_cf, &stored_key).is_some() {
             Some(root)
         } else {
             None

@@ -28,6 +28,7 @@ use crate::metadata::{
     read_committed_hash, read_committed_height, read_committed_qc, write_committed_hash,
     write_committed_height, write_committed_qc,
 };
+use crate::typed_cf::{TypedCf, batch_put, batch_put_raw};
 
 impl RocksDbStorage {
     /// Get a range of committed blocks [from, to).
@@ -114,18 +115,33 @@ impl RocksDbStorage {
         block: &Block,
         qc: &QuorumCertificate,
     ) {
+        // Resolve column-family handles once for the whole append loop.
+        // Per-call `cf_put`/`cf_put_raw` would each invoke `self.cf()`,
+        // re-walking all 12 CFs through `RocksDB`'s name → handle map per
+        // transaction and per certificate.
+        let cf = self.cf();
+        let blocks_cf = BlocksCf::handle(&cf);
+        let transactions_cf = TransactionsCf::handle(&cf);
+        let certificates_cf = CertificatesCf::handle(&cf);
+
         let metadata = BlockMetadata::from_block(block, qc.clone());
-        self.cf_put::<BlocksCf>(batch, &block.height().0, &metadata);
+        batch_put::<BlocksCf>(batch, blocks_cf, &block.height().0, &metadata);
         for tx in block.transactions().iter() {
-            self.cf_put_raw::<TransactionsCf>(
+            batch_put_raw::<TransactionsCf>(
                 batch,
+                transactions_cf,
                 tx.hash().as_raw(),
                 tx.as_ref(),
                 tx.cached_sbor_bytes(),
             );
         }
         for fw in block.certificates().iter() {
-            self.cf_put::<CertificatesCf>(batch, fw.wave_id(), fw.certificate.as_ref());
+            batch_put::<CertificatesCf>(
+                batch,
+                certificates_cf,
+                fw.wave_id(),
+                fw.certificate.as_ref(),
+            );
         }
     }
 
