@@ -55,9 +55,14 @@ where
             std::sync::Condvar,
         )>;
 
+        struct InFlightSlot {
+            waiter: ProvisionWaiter,
+            waiters: usize,
+        }
+
         struct ProvisionsRequestDedup {
             cache: std::collections::BTreeMap<(u64, u64), ProvisionResponse>,
-            in_flight: HashMap<(u64, u64), ProvisionWaiter>,
+            in_flight: HashMap<(u64, u64), InFlightSlot>,
         }
 
         // Single-flight guard: clears the `in_flight` slot and wakes waiters
@@ -84,6 +89,15 @@ where
         // above already wakes waiters on producer panic — this bound covers
         // the rest (deadlock, deep stalls, runaway work).
         const PRODUCER_WAIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
+        // Cap concurrent waiters on a single producer. Honest fan-out from
+        // a remote committee can stack dozens of waiters on one (height,
+        // shard) key; this cap covers that case while bounding the
+        // blocking-pool footprint when a producer stalls. Waiters past
+        // the cap return `None` immediately and let the caller retry —
+        // by then the producer has typically published a result that the
+        // cache fast path will serve.
+        const MAX_WAITERS_PER_KEY: usize = 64;
 
         // ── block.request → sync protocol ────────────────────────────
 
@@ -142,25 +156,49 @@ where
                     };
                 }
 
-                // Fast path: check cache or join an existing in-flight computation.
+                // Fast path: check cache or join an existing in-flight
+                // computation. Reservation happens under `dedup` lock so
+                // the per-key waiter cap is checked atomically with the
+                // count increment.
                 let waiter_to_join = {
-                    let guard = dedup.lock().unwrap();
+                    let mut guard = dedup.lock().unwrap();
                     if let Some(cached) = guard.cache.get(&cache_key) {
                         if let Some(p) = &cached.provisions {
                             record_fetch_response_sent("provision", p.transactions.len().max(1));
                         }
                         return cached.clone();
                     }
-                    guard.in_flight.get(&cache_key).cloned()
+                    if let Some(slot) = guard.in_flight.get_mut(&cache_key) {
+                        if slot.waiters >= MAX_WAITERS_PER_KEY {
+                            // Cap reached — return a soft failure so the
+                            // caller can retry once the producer publishes;
+                            // the cache fast path will then serve.
+                            return GetProvisionResponse { provisions: None };
+                        }
+                        slot.waiters += 1;
+                        Some(Arc::clone(&slot.waiter))
+                    } else {
+                        None
+                    }
                 };
 
                 if let Some(waiter) = waiter_to_join {
                     let (lock, cvar) = &*waiter;
-                    let (result, wait_outcome) = cvar
-                        .wait_timeout_while(lock.lock().unwrap(), PRODUCER_WAIT_BUDGET, |r| {
+                    let wait_result =
+                        cvar.wait_timeout_while(lock.lock().unwrap(), PRODUCER_WAIT_BUDGET, |r| {
                             r.is_none()
-                        })
-                        .unwrap();
+                        });
+                    // Decrement the per-key waiter count regardless of how
+                    // we left the wait (timeout, success, or producer drop).
+                    // The producer's `InFlightGuard` may have already
+                    // removed the slot; in that case the decrement is a
+                    // no-op.
+                    if let Ok(mut g) = dedup.lock()
+                        && let Some(slot) = g.in_flight.get_mut(&cache_key)
+                    {
+                        slot.waiters = slot.waiters.saturating_sub(1);
+                    }
+                    let (result, wait_outcome) = wait_result.unwrap();
                     if wait_outcome.timed_out() {
                         return GetProvisionResponse { provisions: None };
                     }
@@ -176,11 +214,13 @@ where
                     std::sync::Mutex::new(None::<GetProvisionResponse>),
                     std::sync::Condvar::new(),
                 ));
-                dedup
-                    .lock()
-                    .unwrap()
-                    .in_flight
-                    .insert(cache_key, Arc::clone(&waiter));
+                dedup.lock().unwrap().in_flight.insert(
+                    cache_key,
+                    InFlightSlot {
+                        waiter: Arc::clone(&waiter),
+                        waiters: 0,
+                    },
+                );
 
                 let _guard = InFlightGuard {
                     dedup: Arc::clone(&dedup),
