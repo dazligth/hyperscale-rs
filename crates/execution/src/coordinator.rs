@@ -1008,29 +1008,6 @@ impl ExecutionCoordinator {
     ) -> Vec<Action> {
         let shard = cert.shard_group_id();
 
-        // Clear expected cert tracking and mark as fulfilled so late-arriving
-        // duplicate headers don't re-register the expectation. The tombstone
-        // is drained primarily by `on_txs_terminated` as the EC's txs reach
-        // terminal state in finalized local waves; the deadline is just a
-        // backstop for outcomes that don't touch our shard.
-        let cleared = self.expected_certs.mark_fulfilled(
-            shard,
-            cert.block_height(),
-            &cert.wave_id,
-            cert.tx_outcomes.iter().map(|o| o.tx_hash),
-            cert.deadline(),
-        );
-
-        if cleared {
-            tracing::debug!(
-                source_shard = shard.0,
-                block_height = cert.block_height().0,
-                wave = %cert.wave_id,
-                at_local_ts_ms = self.committed_ts.as_millis(),
-                "Fulfilled expected exec cert"
-            );
-        }
-
         let Some(public_keys) = committee_public_keys_for_shard(topology, shard) else {
             tracing::warn!(
                 shard = shard.0,
@@ -1067,6 +1044,31 @@ impl ExecutionCoordinator {
 
         let shard = certificate.shard_group_id();
         let ec_arc = certificate;
+
+        // Now that the BLS signature is verified, clear expected-cert
+        // tracking for this wave. Doing this before verification would let
+        // a Byzantine peer ship an EC with a far-future `vote_anchor_ts`,
+        // populating the fulfilled tombstone (deadline =
+        // vote_anchor_ts + RETENTION_HORIZON) and suppressing legitimate
+        // fallback fetches indefinitely while the verify pool silently
+        // rejects the forgery.
+        let cleared = self.expected_certs.mark_fulfilled(
+            shard,
+            ec_arc.block_height(),
+            &ec_arc.wave_id,
+            ec_arc.tx_outcomes.iter().map(|o| o.tx_hash),
+            ec_arc.deadline(),
+        );
+        if cleared {
+            tracing::debug!(
+                source_shard = shard.0,
+                block_height = ec_arc.block_height().0,
+                wave = %ec_arc.wave_id,
+                at_local_ts_ms = self.committed_ts.as_millis(),
+                "Fulfilled expected exec cert"
+            );
+        }
+
         let mut actions = vec![Action::Continuation(
             ProtocolEvent::ExecutionCertificateAdmitted {
                 certificate: Arc::clone(&ec_arc),
@@ -2265,6 +2267,59 @@ mod tests {
             _ => false,
         });
         assert!(has_remote, "Should include remote shard broadcast");
+    }
+
+    /// Receipt of a cross-shard EC must NOT mark its expectation
+    /// fulfilled until the BLS signature has been verified. Otherwise a
+    /// Byzantine peer can ship a forged EC, the tombstone is set with
+    /// `vote_anchor_ts + RETENTION_HORIZON` (peer-controlled), legitimate
+    /// fallback fetches are suppressed, and the verify pool's silent
+    /// rejection leaves us stranded.
+    #[test]
+    fn test_on_wave_certificate_does_not_mark_fulfilled_before_verification() {
+        let topo = make_two_shard_topology();
+        let mut state = make_test_state();
+
+        let remote_shard = ShardGroupId(1);
+        let wave_id = WaveId::new(
+            remote_shard,
+            BlockHeight(5),
+            std::iter::once(ShardGroupId(0)).collect(),
+        );
+        state.on_verified_remote_header(
+            &topo,
+            remote_shard,
+            BlockHeight(5),
+            std::slice::from_ref(&wave_id),
+        );
+        assert_eq!(state.expected_certs.expected_len(), 1);
+        assert_eq!(state.expected_certs.fulfilled_len(), 0);
+
+        let cert = ExecutionCertificate::new(
+            wave_id.clone(),
+            WeightedTimestamp(1_000_000),
+            GlobalReceiptRoot::ZERO,
+            vec![],
+            zero_bls_signature(),
+            SignerBitfield::new(4),
+        );
+        let _ = state.on_wave_certificate(&topo, cert.clone());
+        assert_eq!(
+            state.expected_certs.expected_len(),
+            1,
+            "expectation must remain pending until verification completes"
+        );
+        assert_eq!(
+            state.expected_certs.fulfilled_len(),
+            0,
+            "no tombstone must be created from an unverified EC"
+        );
+
+        // Verification fails — the EC was a forgery. State is unchanged;
+        // the legitimate cert can still arrive and clear the expectation.
+        let _ = state.on_certificate_verified(&topo, Arc::new(cert), false);
+        assert_eq!(state.expected_certs.expected_len(), 1);
+        assert_eq!(state.expected_certs.fulfilled_len(), 0);
     }
 
     /// A received cross-shard EC must always dispatch BLS verification
