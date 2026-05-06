@@ -38,8 +38,9 @@ pub type ProvisionBatch = (Provisions, Vec<ValidatorId>);
 /// Fetch state entries and assemble per-shard provision batches with merkle proofs.
 ///
 /// Returns an empty `Vec` when no entries could be fetched (e.g. JMT version
-/// unavailable for `block_height`); callers still emit a `ProvisionsReady` event
-/// so the state machine can mark the action complete.
+/// unavailable for `block_height`); callers still emit an
+/// `OutboundProvisionBroadcast` event so the state machine can mark the
+/// action complete.
 pub fn fetch_and_broadcast_provision<S, H>(
     view: &SubstateView<S>,
     source_shard: ShardGroupId,

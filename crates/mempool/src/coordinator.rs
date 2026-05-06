@@ -1,4 +1,30 @@
-//! Mempool state.
+//! Mempool coordinator: admission, eligibility, and lifecycle of pending
+//! transactions.
+//!
+//! Owns the per-validator transaction pool and the bookkeeping that surrounds
+//! it: a [`TxStore`] of pending transactions, a [`ReadySet`] of admission-
+//! eligible candidates, a [`LockTracker`] that tracks transactions holding
+//! state locks (the in-flight set), a [`TombstoneStore`] for recently
+//! decided hashes, and an [`ExpectedTxs`] sub-machine that backfills
+//! cross-shard transactions referenced by remote provisions before their
+//! source-shard gossip arrives.
+//!
+//! # Backpressure
+//!
+//! Two limits gate proposal and ingress:
+//! - [`MempoolConfig::max_in_flight`] caps simultaneous lock-holding
+//!   transactions, preventing the execution pipeline from being overrun.
+//! - [`MempoolConfig::max_pending`] caps RPC-submitted pending transactions
+//!   so that arrival rate exceeding processing capacity translates to
+//!   rejected submissions rather than unbounded memory growth.
+//!
+//! # Cross-shard DA
+//!
+//! Cross-shard transactions referenced by remote provisions must be locally
+//! retrievable to participate in execution. `ExpectedTxs` waits an
+//! [`EXPECTED_TX_GRACE`] window for source-shard gossip; past the grace
+//! period it falls back to a BFT-weighted fetch from the source committee,
+//! and drops entries past `RETENTION_HORIZON`.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

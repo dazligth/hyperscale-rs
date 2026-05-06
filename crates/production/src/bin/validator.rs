@@ -725,8 +725,8 @@ fn build_topology(
             shard_committees,
         ))
     } else {
-        // Legacy mode: all validators in genesis belong to local shard only
-        // This only works for single-shard deployments
+        // No explicit shard assignments: all genesis validators belong to the
+        // local shard, which only works for single-shard deployments.
         if num_shards > 1 {
             warn!(
                 "Multi-shard deployment without explicit shard assignments in genesis config. \

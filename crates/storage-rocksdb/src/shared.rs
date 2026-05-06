@@ -1,12 +1,13 @@
 //! `SharedStorage` newtype — Arc-wrapped `RocksDbStorage` with full trait impls.
 //!
-//! Production uses `CachingStorage<SharedStorage>` on the pinned `IoLoop`
-//! thread while sharing the same underlying `RocksDbStorage` with async tasks
-//! (`InboundRouter`, `FetchManager`) via cheap Arc clones.
+//! Production wraps `Arc<RocksDbStorage>` in this newtype so that the pinned
+//! `IoLoop` thread and async tasks (e.g. `InboundRouter`) can both hold the
+//! same underlying database via cheap Arc clones, each going through the same
+//! storage-trait implementations.
 //!
 //! The orphan rule prevents implementing foreign traits (`SubstateDatabase`,
-//! `CommittableSubstateDatabase`) for `Arc<RocksDbStorage>` directly.
-//! This newtype sidesteps that while providing zero-cost delegation.
+//! `CommittableSubstateDatabase`) for `Arc<RocksDbStorage>` directly. This
+//! newtype sidesteps that while providing zero-cost delegation.
 
 use std::sync::Arc;
 
@@ -30,8 +31,8 @@ use crate::snapshot::RocksDbSnapshot;
 /// Shared `RocksDB` storage handle with full storage trait implementations.
 ///
 /// A cheap-to-clone wrapper around `Arc<RocksDbStorage>` that implements all
-/// storage traits needed by `IoLoop`. Use this as the storage type parameter
-/// for `CachingStorage` in production.
+/// storage traits needed by `IoLoop`. The pinned thread and async tasks
+/// share the same underlying database via Arc clones of this handle.
 ///
 /// # Why a newtype?
 ///

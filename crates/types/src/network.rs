@@ -63,11 +63,11 @@ pub enum MessageClass {
     ///
     /// Includes:
     /// - `CommittedBlockHeader` gossip — proposer broadcast on commit
-    /// - `StateProvisionNotification` — cross-shard state delivery
+    /// - `ProvisionsNotification` — cross-shard state delivery
     /// - `ExecutionVotesNotification` — execution votes
     /// - `ExecutionCertificatesNotification` — execution certificates
     /// - `GetProvisionsRequest/Response` — cross-shard fallback
-    /// - `GetExecutionCertRequest/Response` — EC fallback
+    /// - `GetExecutionCertsRequest/Response` — EC fallback
     ///
     /// Delay stalls cross-shard progress but not local consensus.
     CrossShardProgress = 2,

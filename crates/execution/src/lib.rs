@@ -1,12 +1,27 @@
 //! Deterministic execution state machine.
 //!
-//! This crate implements the transaction execution layer as a pure, synchronous
-//! state machine. It handles:
+//! Implements the transaction execution layer as a pure, synchronous state
+//! machine. The [`ExecutionCoordinator`] consumes `ProtocolEvent`s from the
+//! BFT layer and the network, drives the wave/EC lifecycle, and emits
+//! `Action`s for asynchronous work (BLS verification, state provisioning,
+//! transaction execution against substate).
 //!
-//! - Single-shard transaction execution
-//! - Cross-shard coordination (atomic execution protocol)
-//! - State provisioning
-//! - Vote aggregation and certificate formation
+//! # Wave lifecycle
+//!
+//! Cross-shard transactions are grouped into deterministic *waves*. Each
+//! wave is provisioned by the source shards (state entries with JMT
+//! proofs), executed once provisions are complete, and certified by an
+//! `ExecutionCertificate` aggregating execution votes from the committee.
+//! Resolved waves are finalized into a `FinalizedWave` receipt that lives
+//! in the corresponding block.
+//!
+//! # Conflict handling
+//!
+//! When two transactions in flight contend on overlapping state, the
+//! conflict detector ([`crate::conflict`]) deterministically aborts one
+//! using `committed_at` ordering and replays the survivor. The
+//! `WAVE_TIMEOUT` floor bounds how long detector entries are retained
+//! past commit; see the prune call in the coordinator for the rationale.
 
 pub mod action_handlers;
 pub mod conflict;

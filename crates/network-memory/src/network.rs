@@ -1,4 +1,30 @@
-//! Simulated network with deterministic latency, packet loss, and partitions.
+//! Simulated in-memory network used by deterministic-replay tests.
+//!
+//! Implements the same [`Network`](hyperscale_network) trait as the libp2p
+//! transport but routes messages through a single-process priority queue
+//! ordered by `(deliver_at, sequence)`, so that a fixed seed always
+//! produces an identical event interleaving.
+//!
+//! # Determinism
+//!
+//! Latency, jitter, and packet loss draw from a [`ChaCha8Rng`] seeded by
+//! the test harness. Inter-shard latency and intra-shard latency are
+//! configurable independently. All randomness flows through this RNG, so
+//! reordering of network events between runs only happens if the harness
+//! reseeds.
+//!
+//! # Fault injection
+//!
+//! [`FaultInjector`] (from `crate::fault`) hooks every outbound message
+//! and request, letting tests drop, delay, or rewrite messages by class,
+//! peer, or time window. Used by the `simulation` crate's fault-tests to
+//! exercise crash recovery, network partitions, and gossip outages.
+//!
+//! # Traffic accounting
+//!
+//! [`NetworkTrafficAnalyzer`] aggregates bytes/messages by message type
+//! and shard pair. Read by the simulator's metrics layer to render
+//! per-test traffic summaries.
 
 // `NodeIndex = u32` and `ValidatorId = u64` are interchangeable identifiers in
 // the simulator (validator counts are bounded by the test harness, well under

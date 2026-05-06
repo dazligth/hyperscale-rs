@@ -49,7 +49,7 @@ hash_newtype!(
 );
 
 hash_newtype!(
-    /// Identity hash of a [`Provision`](crate::Provision) batch.
+    /// Identity hash of a [`Provisions`](crate::Provisions) batch.
     ///
     /// Computed from the content fields (source shard, block height, proof,
     /// transactions) at construction / deserialization. Used as the fetch
@@ -109,8 +109,8 @@ hash_newtype!(
     /// Jellyfish Merkle Tree root identifying a specific state version.
     ///
     /// Appears as `state_root`, `parent_state_root`, `committed_state_root`,
-    /// and the generic `root_hash` / `current_root_hash` / `base_root` used by
-    /// the JMT and `CommitStore` APIs.
+    /// and the generic `root_hash` / `current_root_hash` / `base_root` used
+    /// by the JMT and chain-storage APIs.
     pub StateRoot,
     "StateRoot"
 );

@@ -39,8 +39,8 @@ const MAX_EXECUTION_CERTIFICATES_PER_WAVE: usize = 1024;
 /// the local shard, by construction, produces a single EC per wave.
 ///
 /// Enforced at construction by `WaveCertificateTracker::create_wave_certificate`
-/// and at the wire boundary by [`WaveCertificate::Decode`]. Downstream
-/// helpers like [`FinalizedWave::local_ec`](crate::FinalizedWave::local_ec)
+/// and at the wire boundary by `WaveCertificate`'s SBOR `Decode` impl.
+/// Downstream helpers like [`FinalizedWave::local_ec`](crate::FinalizedWave::local_ec)
 /// `expect` this invariant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WaveCertificate {

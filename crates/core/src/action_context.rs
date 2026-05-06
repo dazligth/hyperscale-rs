@@ -31,7 +31,7 @@ pub struct ActionContext<'a, S: Storage, E: Engine, N: Network> {
     pub pending_chain: &'a Arc<PendingChain<S>>,
     /// Network handle for broadcast/notify/request actions. The local
     /// validator's identity and shard are read from `topology` (see
-    /// [`TopologySnapshot::local_validator_id`] / [`local_shard`]).
+    /// [`TopologySnapshot::local_validator_id`] / [`TopologySnapshot::local_shard`]).
     pub network: &'a Arc<N>,
     /// Local validator's BLS signing key. Used by handlers that sign
     /// votes/headers before broadcast.

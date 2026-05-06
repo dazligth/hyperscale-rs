@@ -215,20 +215,6 @@ impl Default for ExecutionCoordinator {
     }
 }
 
-// Stored provisions are pruned `WAVE_TIMEOUT` past their `committed_at`.
-// After that, the remote tx that emitted the provision is provably terminal
-// (its wave has either finalized or hit the deterministic abort path), so
-// the detector entry can no longer flag a meaningful conflict.
-//
-// `MAX_VALIDITY_RANGE` is *not* the right bound here — that governs
-// admission, not post-inclusion lifetime. Once a remote tx is in a block
-// (which is the precondition for storing its provision), the existing
-// wave/execution timeout owns its termination. Same reasoning that drives
-// `RETENTION_HORIZON`'s `MAX_VALIDITY_RANGE + WAVE_TIMEOUT` bound, just
-// applied per-stored-provision: each entry's `committed_at` already
-// accounts for the admission window, so only the post-inclusion
-// `WAVE_TIMEOUT` portion remains.
-
 /// Per-shard recipient lists for provision broadcasting.
 type ShardRecipients = HashMap<ShardGroupId, Vec<ValidatorId>>;
 
@@ -1377,8 +1363,18 @@ impl ExecutionCoordinator {
         // Drop conflict-detector entries past `WAVE_TIMEOUT` from their
         // commit. `register_tx` iterates over these per cross-shard tx;
         // left unbounded they drive quadratic TPS decay. Past the bound
-        // the remote tx is provably terminal — see the constant block
-        // above for the full reasoning.
+        // the remote tx is provably terminal (its wave has either
+        // finalized or hit the deterministic abort path), so the detector
+        // entry can no longer flag a meaningful conflict.
+        //
+        // `MAX_VALIDITY_RANGE` is *not* the right bound here — that
+        // governs admission, not post-inclusion lifetime. Once a remote
+        // tx is in a block, the wave/execution timeout owns its
+        // termination. This mirrors `RETENTION_HORIZON`'s
+        // `MAX_VALIDITY_RANGE + WAVE_TIMEOUT` split, applied
+        // per-stored-provision: each entry's `committed_at` already
+        // accounts for the admission window, so only the post-inclusion
+        // `WAVE_TIMEOUT` portion remains.
         let cutoff = self.committed_ts.minus(WAVE_TIMEOUT);
         if cutoff.as_millis() > 0 {
             let dropped = self.provisioning.prune_old_provisions(cutoff);
@@ -1555,7 +1551,7 @@ impl ExecutionCoordinator {
     /// outcomes for transactions in MULTIPLE local waves.
     ///
     /// Routing: iterate `tx_outcomes` → look up local wave via `wave_assignments` →
-    /// feed the EC to each affected local wave tracker. `Tx_hashes` without a
+    /// feed the EC to each affected local wave tracker. `tx_hashes` without a
     /// local assignment are buffered (or kept buffered) via `pending_routing`
     /// until their blocks commit; routed `tx_hashes` are cleared from the
     /// pending set, dropping the EC entirely once fully routed.

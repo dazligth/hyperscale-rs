@@ -17,7 +17,7 @@
 //! same bound and can be dropped deterministically on every node.
 //!
 //! Field naming and the inclusive/exclusive convention align with Radix
-//! Engine V2's `ProposerTimestampRange` so the eventual integration is a
+//! Engine V2's proposer-timestamp range so the eventual integration is a
 //! field-rename rather than a struct redesign.
 
 use std::time::Duration;

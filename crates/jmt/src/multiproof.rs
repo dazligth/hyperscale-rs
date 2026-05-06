@@ -28,6 +28,43 @@
 //! Walk the same structure bottom-up, rehashing computed subtree roots
 //! together with the supplied siblings until a single root hash is
 //! derived. Compare against the signed root.
+//!
+//! # Wire format
+//!
+//! A multiproof serializes to a canonical byte sequence with a one-byte
+//! version prefix so decoders can cleanly reject future formats.
+//!
+//! ```text
+//! byte 0       : version (u8) = 0x01
+//! bytes 1..5   : claim_count (u32 big-endian)
+//! bytes 5..    : claim_count × claim
+//! next 4 bytes : sibling_count (u32 big-endian)
+//! then         : sibling_count × hash (32 bytes each)
+//! ```
+//!
+//! A claim has the layout:
+//!
+//! ```text
+//! 32 bytes : key
+//! 2 bytes  : depth_bits (u16 big-endian)
+//! 1 byte   : termination discriminator
+//! ...      : termination-specific body:
+//!              0x01 Leaf          → 32 bytes value_hash
+//!              0x02 EmptySubtree  → (no additional data)
+//!              0x03 LeafMismatch  → 32 bytes stored_key ||
+//!                                   32 bytes stored_value_hash
+//! ```
+//!
+//! Invariants enforced by the decoder:
+//! - `version` must equal `0x01` (other values yield `UnsupportedVersion`).
+//! - The buffer must be fully consumed (`TrailingBytes` otherwise).
+//! - Every length claimed in a count prefix must fit in the buffer
+//!   (`Truncated` otherwise).
+//! - The termination discriminator must be one of the three defined
+//!   values (`InvalidTermination` otherwise).
+//!
+//! The decoder does NOT cross-check the structural validity of the
+//! decoded proof against a root or key set. Use [`Tree::verify`] for that.
 
 use crate::hasher::{EMPTY_HASH, Hash, Hasher};
 use crate::node::{Key, Node, NodeKey, ValueHash};
@@ -508,45 +545,6 @@ fn siblings_needed<const ARITY_BITS: u8>(claims: &[ProofClaim], depth: u16) -> u
     }
     total
 }
-
-// ============================================================
-// Wire format
-// ============================================================
-//
-// A multiproof serializes to a canonical byte sequence with a one-byte
-// version prefix so decoders can cleanly reject future formats.
-//
-// ```text
-// byte 0       : version (u8) = 0x01
-// bytes 1..5   : claim_count (u32 big-endian)
-// bytes 5..    : claim_count × claim
-// next 4 bytes : sibling_count (u32 big-endian)
-// then         : sibling_count × hash (32 bytes each)
-// ```
-//
-// A claim has the layout:
-//
-// ```text
-// 32 bytes : key
-// 2 bytes  : depth_bits (u16 big-endian)
-// 1 byte   : termination discriminator
-// ...      : termination-specific body:
-//              0x01 Leaf          → 32 bytes value_hash
-//              0x02 EmptySubtree  → (no additional data)
-//              0x03 LeafMismatch  → 32 bytes stored_key ||
-//                                   32 bytes stored_value_hash
-// ```
-//
-// Invariants enforced by the decoder:
-// - `version` must equal `0x01` (other values yield `UnsupportedVersion`).
-// - The buffer must be fully consumed (`TrailingBytes` otherwise).
-// - Every length claimed in a count prefix must fit in the buffer
-//   (`Truncated` otherwise).
-// - The termination discriminator must be one of the three defined
-//   values (`InvalidTermination` otherwise).
-//
-// Note: the decoder does NOT cross-check the structural validity of the
-// decoded proof against a root or key set. Use [`Tree::verify`] for that.
 
 const WIRE_VERSION: u8 = 0x01;
 const TERM_LEAF: u8 = 0x01;

@@ -690,11 +690,10 @@ fn test_ec_storage_batch() {
 // Persistence-lag determinism
 // ═══════════════════════════════════════════════════════════════════════
 
-/// Regression test: two validators with different `persisted_height`
-/// but reading at the same historical version must observe identical substate
-/// values. This is the scenario that caused the shard-0 state-root
-/// divergence — base snapshots used to read "current `StateCf`" which
-/// leaked post-anchor writes on the faster-persisting validator.
+/// Two validators with different `persisted_height` but reading at the
+/// same historical version must observe identical substate values —
+/// historical reads must not be influenced by writes committed past the
+/// requested version on the faster-persisting validator.
 #[test]
 fn test_snapshot_at_version_is_deterministic_across_persistence_lag() {
     let nid = NodeId([1u8; 30]);
@@ -723,8 +722,7 @@ fn test_snapshot_at_version_is_deterministic_across_persistence_lag() {
     assert_eq!(b.jmt_height(), BlockHeight(3));
 
     // Both read at version 3 via the state-history log. Must see block-3's
-    // value on both, not A's current (block-5) value. Before the fix, A
-    // would return 5.
+    // value on both, not A's current (block-5) value.
     let snap_a = a.snapshot_at(BlockHeight(3));
     let snap_b = b.snapshot_at(BlockHeight(3));
     let pk = DbPartitionKey {

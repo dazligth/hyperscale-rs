@@ -43,7 +43,8 @@ impl WeightedTimestamp {
     pub const ZERO: Self = Self(0);
 
     /// Wrap a raw ms value. Prefer
-    /// [`QuorumCertificate::weighted_timestamp`] at produce sites.
+    /// [`QuorumCertificate::weighted_timestamp`](crate::QuorumCertificate::weighted_timestamp)
+    /// at produce sites.
     #[must_use]
     pub const fn from_millis(ms: u64) -> Self {
         Self(ms)

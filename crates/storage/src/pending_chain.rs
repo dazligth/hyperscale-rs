@@ -160,7 +160,7 @@ type JmtNodeIndex = HashMap<JmtNodeKey, Arc<JmtNode>>;
 ///
 /// Built once per anchor by [`PendingChain::view_at`] and cached via an
 /// `Arc`. Implements [`SubstateDatabase`], [`SubstateStore`],
-/// [`ChainWriter`], and [`jmt::TreeReader`] so it can substitute
+/// [`ChainWriter`], and `jmt::TreeReader` so it can substitute
 /// for the base storage in delegated action handlers.
 ///
 /// Once built the view is immutable — interior data is never mutated.

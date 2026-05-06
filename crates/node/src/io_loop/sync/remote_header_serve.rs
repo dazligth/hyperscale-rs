@@ -20,11 +20,11 @@ use hyperscale_types::{BlockHeight, ShardGroupId};
 /// missing height so the response is always a contiguous prefix of the
 /// requested range.
 ///
-/// Requests for a shard other than `local_shard` get an empty response —
-/// without that gate a shard A node would happily serve its own committed
-/// headers in response to a request for shard B headers, and the requester
-/// (which used to filter only by height) would buffer them under the wrong
-/// shard scope and stall sync until rotation.
+/// Requests for a shard other than `local_shard` get an empty response.
+/// Without this gate a shard A node would serve its own committed headers
+/// in response to a request for shard B headers; the requester filters
+/// only by height and would buffer them under the wrong shard scope,
+/// stalling sync until rotation.
 pub fn serve_remote_headers_request(
     storage: &impl ChainReader,
     local_shard: ShardGroupId,

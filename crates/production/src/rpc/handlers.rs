@@ -1,4 +1,21 @@
-//! HTTP request handlers for the RPC API.
+//! HTTP request handlers for the validator RPC API.
+//!
+//! Endpoints split into three categories:
+//! - **Liveness/readiness**: `/health`, `/ready` — used by orchestrators
+//!   to decide whether to route traffic.
+//! - **Status**: `/status`, `/sync`, `/mempool`, `/metrics` — read-only
+//!   snapshots maintained by the running node, exposed via `ArcSwap`
+//!   handles so handlers never block on the consensus thread.
+//! - **Submission**: `POST /transactions`, `GET /transactions/:hash` —
+//!   transaction ingress and lookup.
+//!
+//! # Ingress backpressure
+//!
+//! The submission handler rejects with HTTP 503 when the node is syncing
+//! (it cannot validly admit new transactions) or when the mempool's
+//! pending count exceeds [`MempoolConfig::max_pending`]. Both rejection
+//! reasons emit Prometheus counters so operators can distinguish capacity
+//! from sync-state stalls.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;

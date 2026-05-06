@@ -5,11 +5,10 @@
 //!
 //! ## Provision Flow
 //!
-//! The source shard proposer broadcasts `StateProvisions` notifications
+//! The source shard proposer broadcasts `ProvisionsNotification` messages
 //! carrying JMT inclusion proofs. The target shard joins with remote block
-//! headers, then dispatches `VerifyStateProvision` to verify the QC
-//! signature once and merkle proofs per state entry against the committed
-//! state root.
+//! headers, then dispatches `VerifyProvisions` to verify the QC signature
+//! once and merkle proofs per state entry against the committed state root.
 
 use std::sync::Arc;
 use std::time::Duration;

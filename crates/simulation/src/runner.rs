@@ -725,7 +725,7 @@ impl SimulationRunner {
     // Timer Handling
     // ═══════════════════════════════════════════════════════════════════════
 
-    /// Process a timer operation from `SimTimer`.
+    /// Process a [`TimerOp`] emitted by a node's state machine.
     fn process_timer_op(&mut self, node: NodeIndex, op: TimerOp) {
         match op {
             TimerOp::Set { id, duration } => {

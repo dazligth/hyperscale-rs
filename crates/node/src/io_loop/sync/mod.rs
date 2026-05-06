@@ -1201,15 +1201,12 @@ mod tests {
 
     #[test]
     fn admit_past_queued_window_does_not_panic_on_stale_heap_top() {
-        // Regression: `peek_next_height` and `pop_next_height` previously
-        // applied different validity filters. After consensus advanced
-        // `committed` past every queued height (e.g. fast catch-up via gossip
-        // while sync was still draining its window), `handle_admitted` would
-        // prune `heights_queued` / `in_flight` but leave stale entries on the
-        // BinaryHeap. The next `emit_fetches` would peek a stale top, then
-        // `pop_next_height` would skip past it and return None → panic on
-        // `expect("peek matched")`. Reproduces the cluster-halt panic seen
-        // in the V7 cluster (shard-1 validators 5/6).
+        // When consensus admits past every queued height (e.g. fast catch-up
+        // via gossip while sync is still draining its window), the heap can
+        // retain entries whose heights have already been pruned from
+        // `heights_queued` / `in_flight`. `peek_next_height` must self-prune
+        // these stale tops so `emit_fetches` does not panic on the next
+        // dispatch.
         let mut s: Sync<UnitBinding> = Sync::new(SyncConfig {
             max_per_request: 1,
             window_size: 64,
@@ -1234,8 +1231,7 @@ mod tests {
 
         // FetchSucceeded decrements `in_flight_ranges`, freeing a slot —
         // this forces `emit_fetches` to re-enter its inner loop with a
-        // heap full of stale tops. Pre-fix this panics; post-fix peek
-        // self-prunes and returns None cleanly.
+        // heap full of stale tops, exercising the self-pruning peek.
         let _ = s.handle(SyncInput::FetchSucceeded {
             scope: (),
             from: BlockHeight(1),

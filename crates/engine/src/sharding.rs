@@ -43,12 +43,12 @@
 //!
 //! Filtering happens in two stages:
 //!
-//! **Stage 1: Ownership resolution** ([`resolve_owned_nodes`])
+//! **Stage 1: Ownership resolution** (`resolve_owned_nodes`)
 //! Scans declared accounts' substates to discover which vault NodeIds they own.
 //! Uses SBOR byte scanning to find `Own(NodeId)` references (tag `0x90` + 30 bytes).
 //! Builds a map from each internal NodeId to its owning account.
 //!
-//! **Stage 2: Shard filtering** ([`filter_updates_for_shard`])
+//! **Stage 2: Shard filtering** (`filter_updates_for_shard`)
 //! Applies three filters:
 //! - System entities (ConsensusManager, TransactionTracker, Validator) are dropped.
 //! - Nodes not owned by any declared account are dropped (prevents non-deterministic
@@ -277,7 +277,7 @@ pub fn filter_updates_for_shard<S: SubstateDatabase>(
 /// Filters applied:
 /// 1. Drop system entities (`ConsensusManager`, `TransactionTracker`, Validator)
 /// 2. Drop undeclared writes (not in `declared_reads`/`declared_writes` or their owned vaults)
-/// 3. [OMITTED] No shard filtering — keep writes for all shards
+/// 3. (Omitted: no shard filtering — keep writes for all shards.)
 pub fn filter_updates_for_global_receipt<S: SubstateDatabase>(
     updates: &DatabaseUpdates,
     storage: &S,

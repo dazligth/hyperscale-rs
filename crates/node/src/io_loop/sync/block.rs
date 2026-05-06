@@ -5,10 +5,9 @@
 //! payload-private state — [`BlockSyncState`] — tracking heights whose
 //! last response failed rehydration and need a full refetch.
 //!
-//! The `IoLoop` step layer ([`crate::io_loop::step::block_sync`]) owns
-//! request dispatch, response decoding, rehydration, and feeds scheduling
-//! events back into [`Sync`]. The FSM itself doesn't know what a
-//! `CertifiedBlock` looks like.
+//! The `IoLoop` block-sync handlers own request dispatch, response decoding,
+//! rehydration, and feed scheduling events back into [`Sync`]. The FSM itself
+//! doesn't know what a `CertifiedBlock` looks like.
 //!
 //! Public API:
 //! - [`BlockSyncBinding`] — marker type implementing [`SyncBinding`]

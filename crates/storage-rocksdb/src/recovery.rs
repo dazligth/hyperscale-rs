@@ -27,9 +27,8 @@ impl RocksDbStorage {
         let jmt_root_opt = Some(jmt_root);
 
         // Recovery invariant: JMT version (= block height) must match committed_height.
-        // Since consensus metadata is now written atomically in the same WriteBatch
-        // as the JMT commit, a mismatch should never occur. If it does, something
-        // is seriously wrong (e.g., storage corruption).
+        // Consensus metadata and the JMT commit share a single WriteBatch, so a
+        // mismatch indicates storage corruption.
         if committed_height > BlockHeight::GENESIS && jmt_block_height != committed_height {
             tracing::error!(
                 committed_height = committed_height.0,

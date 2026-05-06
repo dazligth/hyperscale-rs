@@ -99,7 +99,7 @@ impl GenesisConfig {
     /// Mix the canonical inputs to genesis bootstrap into the given hasher.
     ///
     /// Stable across runs of the same process; suitable as a cache key for
-    /// memoizing the resulting [`crate::DatabaseUpdates`].
+    /// memoizing the resulting `DatabaseUpdates`.
     ///
     /// # Panics
     ///

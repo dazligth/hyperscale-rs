@@ -120,14 +120,10 @@ where
         // ── provision.request → serve from local store ───────────────
         //
         // Dedup + cache: the proof for (block_height, target_shard) is
-        // deterministic. Multiple validators request the same provisions,
-        // and retries can send the same request many times. Without dedup,
-        // each request regenerates the merkle proof (~30ms), and under load
-        // 40+ redundant proof generations per height cause CPU thrashing.
-        //
-        // The cache stores completed responses. The in-flight map tracks
-        // requests currently being computed — subsequent requests for the
-        // same key wait on a shared condvar instead of computing again.
+        // deterministic, and many validators request the same provisions.
+        // Without dedup each request regenerates the merkle proof (~30ms),
+        // and under load 40+ redundant generations per height cause CPU
+        // thrashing.
 
         let storage = Arc::clone(&self.storage);
         let topology = self.topology_snapshot.clone();

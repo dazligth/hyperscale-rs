@@ -237,9 +237,10 @@ impl SimStorage {
         for (key, node) in &collected.nodes {
             s.tree_store.insert(key.clone(), Arc::clone(node));
         }
-        // NOTE: stale JMT nodes are NOT deleted — see apply_jmt_snapshot comment.
-        // Historical roots must be retained for provision proof generation at
-        // past block heights. RocksDB GC handles pruning in production.
+        // Stale JMT nodes are intentionally NOT deleted here: historical
+        // roots must be retained for provision proof generation at past
+        // block heights. RocksDB GC handles pruning in production. See
+        // also `apply_jmt_snapshot`.
 
         s.current_block_height = block_height;
         s.current_root_hash = new_root;

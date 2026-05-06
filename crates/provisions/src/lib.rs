@@ -5,19 +5,15 @@
 //!
 //! ## Provision Flow
 //!
-//! 1. The source shard proposer broadcasts `StateProvision` notifications
-//!    carrying Jellyfish Merkle Tree (JMT) inclusion proofs.
+//! 1. The source shard proposer broadcasts `ProvisionsNotification`
+//!    messages carrying `StateProvision` entries with JMT inclusion proofs.
 //! 2. The target shard receives them and associates the provisions with
 //!    the corresponding remote block headers.
-//! 3. `VerifyStateProvision` validates the quorum certificate (QC) signature
+//! 3. `VerifyProvisions` validates the quorum certificate (QC) signature
 //!    once per source block and verifies the Merkle inclusion proof per
 //!    state entry.
 //! 4. Verified provisions are persisted and emit completion events for
 //!    downstream transaction execution.
-//!
-//! # Components
-//!
-//! - [`ProvisionCoordinator`] - Main sub-state machine
 
 pub mod action_handlers;
 mod coordinator;

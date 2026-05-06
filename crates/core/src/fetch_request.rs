@@ -125,8 +125,7 @@ pub enum FetchRequest {
         /// Why this fetch was issued; drives the network class override.
         origin: FetchOrigin,
     },
-    /// Cross-shard provisions fetch (`ScopeFetch` keyed by
-    /// `(ShardGroupId, BlockHeight)`).
+    /// Cross-shard provisions fetch keyed by `(ShardGroupId, BlockHeight)`.
     RemoteProvisions {
         /// Source shard whose provisions are missing.
         source_shard: ShardGroupId,

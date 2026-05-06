@@ -1,4 +1,21 @@
-//! Node state machine.
+//! Composite node state machine.
+//!
+//! [`NodeStateMachine`] composes the per-domain coordinators —
+//! [`BftCoordinator`], [`ExecutionCoordinator`], [`MempoolCoordinator`],
+//! [`ProvisionCoordinator`], [`RemoteHeaderCoordinator`], and
+//! [`TopologyCoordinator`] — into a single deterministic
+//! [`StateMachine`] over [`ProtocolEvent`] inputs and [`Action`] outputs.
+//!
+//! All consensus-critical mutation flows through this state machine.
+//! Asynchronous concerns (network I/O, thread-pool dispatch, timer
+//! scheduling) live on [`IoLoop`](crate::io_loop), which feeds events
+//! in and dispatches emitted [`Action`]s.
+//!
+//! Submodules route inputs to the appropriate coordinator: [`bft`] for
+//! BFT events, [`execution`] for wave/EC events, [`mempool`] /
+//! [`transactions`] for tx ingress, [`provisions`] for cross-shard state,
+//! [`proposal`] for proposer-side construction, [`sync`] for catch-up,
+//! and [`timers`] for timeout dispatch.
 
 mod bft;
 mod execution;

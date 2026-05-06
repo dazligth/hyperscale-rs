@@ -26,9 +26,9 @@ pub enum FetchAbandon {
         ids: Vec<TxHash>,
     },
     /// Cross-shard provisions fetch keyed by `(source_shard, block_height)`.
-    /// Emitted when [`provisions::ProvisionCoordinator`]'s expected-set drops
-    /// the key — verification succeeded, the entry orphaned past retention,
-    /// or the source block aged past its deadline.
+    /// Emitted when `ProvisionCoordinator`'s expected-set drops the key —
+    /// verification succeeded, the entry orphaned past retention, or the
+    /// source block aged past its deadline.
     RemoteProvisions {
         /// Source shard whose provisions fetch is being cancelled.
         source_shard: ShardGroupId,

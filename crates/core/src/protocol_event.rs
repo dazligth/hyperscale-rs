@@ -68,11 +68,11 @@ pub enum VerificationKind {
 
 /// Events that the state machine processes.
 ///
-/// These are the typed protocol events that [`NodeStateMachine::handle()`]
+/// These are the typed protocol events that `NodeStateMachine::handle()`
 /// receives. No I/O callbacks, no intercepted events, no dead arms.
 ///
-/// [`IoLoop`] translates [`NodeInput`] into `ProtocolEvent` before passing
-/// to the state machine.
+/// `IoLoop` translates [`NodeInput`](crate::NodeInput) into `ProtocolEvent`
+/// before passing to the state machine.
 #[derive(Debug, Clone, strum::IntoStaticStr)]
 pub enum ProtocolEvent {
     // ═══════════════════════════════════════════════════════════════════════

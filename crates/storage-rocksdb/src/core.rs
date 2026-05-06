@@ -200,19 +200,9 @@ impl RocksDbStorage {
                 // write_version suffix beyond the prefix, so historical
                 // seeks at `storage_key ++ BE8(V+1)` and partition
                 // scans both benefit from partition-granularity SST
-                // pruning via prefix bloom.
-                //
-                // StateCf intentionally has NO prefix extractor — its
-                // dominant op is `get_cf(K)` (both external point reads
-                // and the commit path's `capture_history` multi_get).
-                // Whole-key bloom (rocksdb default, enabled globally
-                // above) is what gates those. A prefix extractor would
-                // add a second bloom per SST, doubling filter-cache
-                // footprint and evicting data blocks from the shared
-                // block cache without improving point-read latency.
-                // `list_at_prefix` on StateCf still works correctly
-                // without a prefix extractor — it just can't short-
-                // circuit SSTs via prefix bloom.
+                // pruning via prefix bloom. StateCf is point-read
+                // dominated and uses whole-key bloom only — see its
+                // type doc.
                 if name == STATE_HISTORY_CF {
                     cf_opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(51));
                 }

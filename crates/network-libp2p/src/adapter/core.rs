@@ -400,11 +400,11 @@ impl Libp2pAdapter {
         self.cached_peer_count.load(Ordering::Relaxed)
     }
 
-    /// Get connected peers (blocking - sends command to swarm task).
+    /// Get connected peers by sending a command to the swarm task and
+    /// awaiting its response.
     ///
-    /// NOTE: This method blocks on a channel response from the swarm task.
     /// For hot paths like metrics collection in the consensus loop, prefer
-    /// `cached_peer_count()` which returns instantly.
+    /// [`Self::cached_peer_count`] which returns instantly.
     pub async fn connected_peers(&self) -> Vec<Libp2pPeerId> {
         let (tx, rx) = oneshot::channel();
         let cmd = SwarmCommand::GetConnectedPeers { response_tx: tx };

@@ -220,8 +220,8 @@ impl ElidedCertifiedBlock {
 /// Hashes whose bodies [`ElidedCertifiedBlock::try_rehydrate`] couldn't
 /// resolve from the provided lookups.
 ///
-/// Used as the payload of a follow-up
-/// [`GetBlockTopUpRequest`](crate::request::GetBlockTopUpRequest).
+/// Drives follow-up fetches for the missing transactions, wave certificates,
+/// and provisions via the per-payload fetch protocols.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RehydrationMiss {
     /// Transaction hashes whose bodies could not be resolved.

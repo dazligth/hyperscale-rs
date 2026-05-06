@@ -36,7 +36,7 @@ pub enum EventPriority {
 
 /// All possible inputs a node can receive.
 ///
-/// `NodeInput` is the top-level input type for [`IoLoop`]. It contains:
+/// `NodeInput` is the top-level input type for `IoLoop`. It contains:
 /// - `Protocol(ProtocolEvent)`: pass-through events that `IoLoop` extracts and
 ///   passes to the state machine's `handle()` method directly.
 /// - `NodeInput`-specific variants: events that `IoLoop` handles internally

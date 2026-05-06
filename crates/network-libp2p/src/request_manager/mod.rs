@@ -221,7 +221,8 @@ impl Default for RequestManagerConfig {
 /// - Per-class admission caps (sheddable / cross-shard subset reservations)
 /// - Exponential backoff between retries
 ///
-/// Actual stream I/O is delegated to a shared [`RequestStreamPool`], which
+/// Actual stream I/O is delegated to a shared
+/// [`RequestStreamPool`](crate::request_pool::RequestStreamPool), which
 /// maintains one persistent stream per peer.
 pub struct RequestManager {
     pool: Arc<dyn RequestPool>,

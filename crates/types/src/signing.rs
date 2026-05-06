@@ -18,9 +18,9 @@
 //!
 //! # Usage
 //!
-//! Types that need signing should implement the `Signable` trait or use the
-//! `signing_message()` method pattern. The signing message is constructed
-//! by prepending the domain tag to the serialized content.
+//! Each signable type pairs with a free `signing_message()` function that
+//! constructs the bytes to sign by prepending its domain tag to the
+//! serialized content.
 
 use blake3::Hasher;
 

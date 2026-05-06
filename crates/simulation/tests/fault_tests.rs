@@ -424,9 +424,9 @@ fn cross_shard_transaction_da_fallback_when_gossip_dropped() {
 /// the fetch fallback. Once the fault lifts, subsequent provision
 /// broadcasts flow normally.
 ///
-/// Exercises the `during(range)` matcher on `FaultInjector` (untested in
-/// integration prior to this) and confirms the system gracefully resumes
-/// normal flow after a transient gossip outage.
+/// Exercises the `during(range)` matcher on `FaultInjector` and confirms
+/// the system gracefully resumes normal flow after a transient gossip
+/// outage.
 #[test]
 fn cross_shard_provisions_recovers_after_transient_broadcast_outage() {
     run_cross_shard_fault_scenario(

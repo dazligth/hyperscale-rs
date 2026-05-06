@@ -1,4 +1,12 @@
-//! Execution handler functions shared between production and simulation runners.
+//! Pure execution functions invoked from the node's delegated-action dispatcher.
+//!
+//! These functions implement the asynchronous side of the execution
+//! state machine: BLS verification, execution-vote aggregation into
+//! [`ExecutionCertificate`]s, transaction execution against a
+//! [`SubstateView`], and cross-shard provisioning requests. They are
+//! kept free of node/runner concerns so the dispatcher only handles
+//! event plumbing — sharing the handlers between production and
+//! simulation keeps execution behavior identical across both backends.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -258,7 +266,7 @@ pub(crate) fn build_dispatch_action(
 /// # Panics
 ///
 /// Panics if the dispatcher routes a variant owned by another crate, or if
-/// the [`Engine`](hyperscale_engine::Engine) breaks its "one result per input
+/// the [`hyperscale_engine::Engine`] breaks its "one result per input
 /// transaction" contract.
 #[allow(clippy::too_many_lines)] // single dispatch over execution-owned Action variants
 pub fn handle_action<S, E, N>(action: Action, ctx: &ActionContext<'_, S, E, N>)

@@ -434,8 +434,8 @@ where
     /// # Caller protocol
     ///
     /// After each call to `step()`, the runner should:
-    /// 1. Flush batches — either [`flush_all_batches()`] (simulation) or
-    ///    [`flush_expired_batches()`] (production, with wall-clock time)
+    /// 1. Flush batches — either [`Self::flush_all_batches`] (simulation) or
+    ///    [`Self::flush_expired_batches`] (production, with wall-clock time)
     /// 2. Process `timer_ops` from the returned [`StepOutput`]
     /// 3. Process `emitted_statuses` from the returned [`StepOutput`]
     /// 4. Drain any events produced through the event channel (simulation only —

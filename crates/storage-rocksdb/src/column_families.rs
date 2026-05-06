@@ -243,16 +243,24 @@ impl TypedCf for StaleStateHistoryCf {
     }
 }
 
-// State — current-value-per-key source of truth.
-//
-// Key: `(partition_key, sort_key)` encoded as `storage_key_bytes`.
-// Value: opaque substate bytes. An absent row means "no value for this
-// key" — deletions do `batch.delete_cf(state_cf, K)`, not a tombstone
-// sentinel.
-//
-// Current reads are direct point lookups. Historical reads at version V
-// go through the companion `StateHistoryCf`: seek the smallest history
-// entry for K with `write_version > V` and return its stored prior value.
+/// State — current-value-per-key source of truth.
+///
+/// Key: `(partition_key, sort_key)` encoded as `storage_key_bytes`.
+/// Value: opaque substate bytes. An absent row means "no value for this
+/// key" — deletions do `batch.delete_cf(state_cf, K)`, not a tombstone
+/// sentinel.
+///
+/// Current reads are direct point lookups. Historical reads at version V
+/// go through the companion `StateHistoryCf`: seek the smallest history
+/// entry for K with `write_version > V` and return its stored prior value.
+///
+/// No prefix extractor: the dominant op is `get_cf(K)` (point reads plus
+/// the commit path's `capture_history` `multi_get`), gated by whole-key
+/// bloom (rocksdb default). A prefix extractor would add a second bloom
+/// per SST, doubling filter-cache footprint and evicting data blocks
+/// without improving point-read latency. `list_at_prefix` still works
+/// without a prefix extractor — it just can't short-circuit SSTs via
+/// prefix bloom.
 pub struct StateCf;
 impl TypedCf for StateCf {
     const NAME: &'static str = STATE_CF;
@@ -265,22 +273,22 @@ impl TypedCf for StateCf {
     }
 }
 
-// State-history log — per-write prior-value entries for historical reads.
-//
-// Key: `((partition_key, sort_key), write_version)` encoded as
-// `storage_key_bytes ++ write_version_BE_8B`. Value:
-// `Option<Vec<u8>>` — the value the key held immediately before the
-// write at `write_version`. `None` means "key was absent before the
-// write."
-//
-// Every write to `StateCf` at version V captures a history entry at
-// `(K, V)` (except during genesis / bootstrap, which skips history
-// writes). GC deletes entries older than the retention window; `StateCf`
-// is always authoritative for the current tip.
-//
-// Read-only: historical reads reconstruct the value-at-V by seeking the
-// smallest entry for K with `v' > V`. Nothing ever mutates `StateCf`
-// from this log.
+/// State-history log — per-write prior-value entries for historical reads.
+///
+/// Key: `((partition_key, sort_key), write_version)` encoded as
+/// `storage_key_bytes ++ write_version_BE_8B`. Value:
+/// `Option<Vec<u8>>` — the value the key held immediately before the
+/// write at `write_version`. `None` means "key was absent before the
+/// write."
+///
+/// Every write to `StateCf` at version V captures a history entry at
+/// `(K, V)` (except during genesis / bootstrap, which skips history
+/// writes). GC deletes entries older than the retention window; `StateCf`
+/// is always authoritative for the current tip.
+///
+/// Read-only: historical reads reconstruct the value-at-V by seeking the
+/// smallest entry for K with `v' > V`. Nothing ever mutates `StateCf`
+/// from this log.
 pub struct StateHistoryCf;
 impl TypedCf for StateHistoryCf {
     const NAME: &'static str = STATE_HISTORY_CF;

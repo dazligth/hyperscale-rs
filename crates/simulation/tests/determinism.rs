@@ -824,19 +824,9 @@ fn test_block_commit_diagnostic() {
         );
     }
 
-    // The two-chain commit rule means:
-    // - Block at height N needs a QC
-    // - When block at height N+1 gets a QC, block at height N can commit
-    //
-    // So we need at least 2 rounds of successful proposal/voting to commit 1 block
-    //
-    // Expected flow:
-    // 1. Proposal timer fires for proposer (validator (1+0)%4 = 1 for height 1)
-    // 2. Proposer broadcasts BlockHeader
-    // 3. Other validators receive header, vote
-    // 4. Votes are collected, QC forms for height 1
-    // 5. Repeat for height 2
-    // 6. When QC for height 2 forms, height 1 can commit
+    // Two-chain commit: a QC at height N+1 commits the block at height N,
+    // so committing one block requires at least two successful proposal/vote
+    // rounds.
 
     // Run longer to give two-chain commit a chance
     runner.run_until(Duration::from_secs(5));

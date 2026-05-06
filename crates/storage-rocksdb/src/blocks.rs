@@ -1,4 +1,18 @@
-//! Denormalized block storage, transaction/certificate CRUD, and chain metadata.
+//! Denormalized block storage in `RocksDB`.
+//!
+//! A committed [`CertifiedBlock`] is sharded across four column families:
+//! [`BlocksCf`] holds per-height [`BlockMetadata`] (header + manifest + qc),
+//! [`TransactionsCf`] holds individual transactions keyed by [`TxHash`],
+//! [`CertificatesCf`] holds wave certificates keyed by [`WaveId`], and
+//! [`ConsensusReceiptsCf`] holds the consensus receipt for each block.
+//!
+//! Reading a block reconstructs it via `get_block_denormalized`, which
+//! reads metadata then `multi_get`s the referenced transactions and
+//! certificates. This layout keeps individual transactions independently
+//! seekable (used by the RPC `/transactions/:hash` endpoint and by
+//! cross-shard fetch protocols) while avoiding write amplification on
+//! commit, since each transaction is only written once even when it
+//! appears in multiple block-level views.
 
 use std::sync::Arc;
 use std::time::Instant;

@@ -4,9 +4,9 @@
 //! scope (`Scope = ShardGroupId`) and no payload-private state
 //! (`State = ()`).
 //!
-//! The `IoLoop` step layer ([`crate::io_loop::step::remote_header_sync`])
-//! owns request dispatch, response decoding, and forwards delivered
-//! headers through the existing `RemoteHeaderReceived` path.
+//! The `IoLoop` remote-header-sync handlers own request dispatch, response
+//! decoding, and forward delivered headers through the existing
+//! `RemoteHeaderReceived` path.
 
 use hyperscale_types::ShardGroupId;
 

@@ -859,22 +859,6 @@ fn build_network_stack(args: NetworkBuildArgs) -> Result<NetworkStack, RunnerErr
     })
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Pinned event loop
-// ═══════════════════════════════════════════════════════════════════════════
-//
-// IoLoop runs on a dedicated `std::thread` pinned to core 0. It receives
-// events from three crossbeam channels with priority via try_recv cascade:
-//
-// ```text
-// timer_rx (priority 1) > callback_rx (priority 2) > consensus_rx (priority 3)
-// ```
-//
-// When nothing is ready, blocks on `crossbeam::select!` with a timeout
-// derived from the nearest batch deadline. Block commit and other I/O work
-// is dispatched directly by IoLoop via `Dispatch::spawn(Io, ..)`; this
-// loop only drives event flow.
-
 /// Concrete `IoLoop` type for the production runner.
 type ProdIoLoop = IoLoop<SharedStorage, Libp2pNetwork, PooledDispatch>;
 
@@ -1007,6 +991,13 @@ fn update_rpc_state(config: &PinnedLoopConfig, snapshot: &NodeStatusSnapshot) {
 }
 
 /// Run the `IoLoop` on a pinned thread. Blocks until shutdown.
+///
+/// Drains the three crossbeam channels via `try_recv` in priority order
+/// (`timer_rx` > `callback_rx` > `consensus_rx`). When all are empty,
+/// blocks on `crossbeam::select!` with a timeout derived from the nearest
+/// batch deadline. Block commit and other I/O work is dispatched by
+/// `IoLoop` via `Dispatch::spawn(Io, ..)`; this loop only drives event
+/// flow.
 fn run_pinned_loop(mut io_loop: ProdIoLoop, mut config: PinnedLoopConfig) {
     info!("Pinned event loop starting");
 

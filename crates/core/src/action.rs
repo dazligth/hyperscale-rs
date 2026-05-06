@@ -123,7 +123,7 @@ pub enum Action {
     /// Only the block proposer emits this (once per block). Delegated to the
     /// execution pool where it fetches entries, generates merkle proofs, builds
     /// `StateProvision`s, groups by target shard, and returns batches via
-    /// `NodeInput::ProvisionsReady` for network broadcast.
+    /// `ProtocolEvent::OutboundProvisionBroadcast` for network broadcast.
     FetchAndBroadcastProvisions {
         /// The committed block whose state is being attested to. Anchors
         /// state reads via `PendingChain::view_at`. Merkle proofs are

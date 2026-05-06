@@ -38,7 +38,7 @@
 //!   has expired its `validity_range` and either terminated or aborted,
 //!   so no local wave can still consume it. The anchor is BFT-attested,
 //!   matching the sender-side deadline used by
-//!   [`OutboundExecCertTracker`](crate::outbound_certs::OutboundExecCertTracker).
+//!   [`OutboundExecutionCertificateTracker`](crate::outbound_certs::OutboundExecutionCertificateTracker).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

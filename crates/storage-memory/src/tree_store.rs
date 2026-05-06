@@ -1,7 +1,8 @@
 //! Simple in-memory JMT tree store for simulation.
 //!
-//! Implements `jmt::TreeReader` directly, replacing the old
-//! `TypedInMemoryTreeStore` wrapper that used stored/serialized node types.
+//! Implements [`TreeReader`] directly over hydrated `Arc<Node>` entries —
+//! no serialization layer. Thread safety is provided by the outer
+//! `RwLock<SharedState>`.
 
 use std::collections::HashMap;
 use std::sync::Arc;

@@ -430,7 +430,7 @@ impl Spammer {
     ///
     /// # Errors
     ///
-    /// Returns [`SpammerError::EndpointNotReady`] if any configured RPC
+    /// Returns [`SpammerError::NodesNotReady`] if any configured RPC
     /// endpoint never reports a non-zero block height before the timeout.
     pub async fn wait_for_ready(&self, timeout: Duration) -> Result<(), SpammerError> {
         let start = Instant::now();

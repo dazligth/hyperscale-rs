@@ -21,29 +21,13 @@
 //!
 //! # Async Transaction Validation
 //!
-//! Transaction submission uses async validation similar to Ethereum's `eth_sendRawTransaction`:
-//! 1. Structural validation (hex decode, SBOR decode) - errors return 400 immediately
-//! 2. Submit to shared `ValidationBatcherHandle` for async crypto validation
-//! 3. Return 202 Accepted with transaction hash
-//! 4. Client polls `GET /api/v1/transactions/{hash}` to check result
-//!
-//! This provides deduplication and batched parallel validation shared with network gossip.
-//!
-//! # Example
-//!
-//! The RPC server is typically created after the `ProductionRunner` so it
-//! can share the same async-validation batcher with network gossip:
-//!
-//! ```ignore
-//! let validation_handle = runner.tx_validation_handle();
-//!
-//! let config = RpcServerConfig {
-//!     listen_addr: "0.0.0.0:8080".parse()?,
-//!     metrics_enabled: true,
-//! };
-//! let server = RpcServer::new(config, validation_handle);
-//! server.serve().await?;
-//! ```
+//! Transaction submission performs structural validation (hex + SBOR decode)
+//! synchronously and returns 400 on failure. Valid submissions are forwarded
+//! into the consensus thread via the same dispatch pool that handles network
+//! gossip, so signature verification and admission run on the configurable
+//! `tx_validation_threads` worker pool. Clients receive 202 Accepted plus
+//! the transaction hash and poll `GET /api/v1/transactions/{hash}` for the
+//! verification outcome.
 
 mod handlers;
 mod routes;

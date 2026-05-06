@@ -461,11 +461,9 @@ impl BftCoordinator {
         // 1. Verification in flight — block roots being checked.
         // 2. A pending block exists at the proposal tip — covers both
         //    followers fetching content and proposers awaiting their own
-        //    QC after broadcasting. The earlier `!is_complete()` filter
-        //    only caught the follower case; proposers' pending blocks are
-        //    fully assembled at emission time, so without dropping the
-        //    filter the timer fires while the proposer waits for vote
-        //    propagation.
+        //    QC after broadcasting. Proposers' pending blocks are fully
+        //    assembled at emission time, so this case must include
+        //    complete blocks too, not just incomplete ones.
         // 3. Block sync has unverified work in flight.
         let next_height = self
             .latest_qc
@@ -1389,8 +1387,8 @@ impl BftCoordinator {
 
     /// Try to vote on a block after it's complete and QC is verified.
     ///
-    /// NOTE: This should only be called after QC verification completes.
-    /// For the main entry point, use `trigger_qc_verification_or_vote`.
+    /// Precondition: caller must have completed QC verification. Use
+    /// `trigger_qc_verification_or_vote` as the main entry point.
     fn try_vote_on_block(
         &mut self,
         topology_snapshot: &TopologySnapshot,
@@ -4300,9 +4298,9 @@ mod tests {
 
         // Byzantine header reuses the honest QC's block_hash + signers + height
         // (so `validate_header`'s quorum-power and structural checks still pass)
-        // but mutates fields the cache previously didn't bind, e.g. the
-        // aggregated signature itself — exactly what the cache hit was meant
-        // to skip re-verifying.
+        // but mutates fields outside the cache key, e.g. the weighted timestamp —
+        // the cache must bind every signed field, otherwise a hit would skip
+        // re-verifying a forged signature.
         let forged_qc = QuorumCertificate {
             weighted_timestamp: WeightedTimestamp(123_456_789),
             ..honest_qc

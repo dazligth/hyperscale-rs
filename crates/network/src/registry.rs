@@ -36,8 +36,7 @@ pub type RawRequestHandler = dyn Fn(&[u8]) -> Vec<u8> + Send + Sync;
 /// the transport layer (which dispatches incoming messages).
 ///
 /// Three maps: `gossip`, `request`, and `notification`. A message type
-/// can be registered in multiple maps simultaneously (e.g. during migration
-/// from gossip to notification).
+/// can be registered in multiple maps simultaneously.
 pub struct HandlerRegistry {
     gossip: RwLock<HashMap<&'static str, Arc<RawGossipHandler>>>,
     request: RwLock<HashMap<&'static str, Arc<RawRequestHandler>>>,

@@ -148,9 +148,9 @@ impl Display for Hash {
     }
 }
 
-/// Domain-specific hash kinds that wrap [`Hash`] for compile-time safety.
+/// Domain-specific hash kinds that wrap [`struct@Hash`] for compile-time safety.
 ///
-/// Implementors are `#[repr(transparent)]` newtypes over [`Hash`] with identical
+/// Implementors are `#[repr(transparent)]` newtypes over [`struct@Hash`] with identical
 /// SBOR encoding (`#[sbor(transparent)]`), so adopting a newtype for an existing
 /// field requires no wire-format or storage migration.
 ///
@@ -162,13 +162,13 @@ pub trait TypedHash: Copy + Eq + Ord + StdHash + Debug + Display + Into<Hash> {
     /// Human-readable name for this hash kind (used in `Debug` output).
     const KIND: &'static str;
 
-    /// Wrap a raw [`Hash`] as this kind.
+    /// Wrap a raw [`struct@Hash`] as this kind.
     fn from_raw(raw: Hash) -> Self;
 
-    /// Unwrap into the underlying raw [`Hash`].
+    /// Unwrap into the underlying raw [`struct@Hash`].
     fn into_raw(self) -> Hash;
 
-    /// Borrow the underlying raw [`Hash`].
+    /// Borrow the underlying raw [`struct@Hash`].
     fn as_raw(&self) -> &Hash;
 }
 
@@ -218,7 +218,7 @@ macro_rules! hash_newtype {
             }
 
             /// Borrow the raw 32-byte representation. Delegates to
-            /// [`Hash::as_bytes`] for ergonomic use in signing/hashing code.
+            /// `Hash::as_bytes` for ergonomic use in signing/hashing code.
             pub const fn as_bytes(&self) -> &[u8; 32] {
                 self.0.as_bytes()
             }

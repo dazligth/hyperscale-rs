@@ -2,7 +2,7 @@
 //!
 //! The tree is stateless — callers plug their own storage in by
 //! implementing [`TreeReader`] (required for reads and proofs) and
-//! [`TreeWriter`] (to persist [`TreeUpdateBatch`] results).
+//! [`TreeWriter`] (to persist [`TreeUpdateBatch`](crate::TreeUpdateBatch) results).
 //!
 //! A `RocksDB` backend should implement these against column families;
 //! the node-key encoding ([`NodeKey::encode`]) is LSM-friendly with
