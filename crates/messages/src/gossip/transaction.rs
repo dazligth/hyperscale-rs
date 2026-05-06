@@ -16,8 +16,6 @@ use sbor::{
     NoCustomTypeKind, NoCustomValueKind, RustTypeId, TypeData, TypeKind, ValueKind,
 };
 
-use crate::trace_context::TraceContext;
-
 /// Cap on transactions accepted in a single gossip batch at decode time.
 ///
 /// Bounds attacker-controlled `tx_count` decoded from the wire so a peer
@@ -30,37 +28,17 @@ const MAX_GOSSIP_TX_BATCH: usize = 1_000;
 ///
 /// Each tx is broadcast on its declared (read ∪ write) shard set; a tx
 /// touching multiple shards appears in multiple batches, one per audience.
-/// `transactions` and `trace_contexts` are parallel vectors of equal length.
 #[derive(Debug, Clone)]
 pub struct TransactionGossip {
     /// The transactions in this batch.
     pub transactions: Vec<Arc<RoutableTransaction>>,
-    /// Trace context per transaction (parallel to `transactions`).
-    pub trace_contexts: Vec<TraceContext>,
 }
 
 impl TransactionGossip {
     /// Build a gossip batch from a vector of `Arc`-wrapped transactions.
-    /// Each entry gets a default trace context.
     #[must_use]
-    pub fn new(transactions: Vec<Arc<RoutableTransaction>>) -> Self {
-        let trace_contexts = std::iter::repeat_with(TraceContext::default)
-            .take(transactions.len())
-            .collect();
-        Self {
-            transactions,
-            trace_contexts,
-        }
-    }
-
-    /// Build a single-transaction batch (convenience for tests / one-off
-    /// publishes). Captures the current span into the trace context.
-    #[must_use]
-    pub fn from_one_with_trace(transaction: RoutableTransaction) -> Self {
-        Self {
-            transactions: vec![Arc::new(transaction)],
-            trace_contexts: vec![TraceContext::from_current()],
-        }
+    pub const fn new(transactions: Vec<Arc<RoutableTransaction>>) -> Self {
+        Self { transactions }
     }
 
     /// Number of transactions in the batch.
@@ -85,15 +63,16 @@ impl PartialEq for TransactionGossip {
                 .iter()
                 .zip(&other.transactions)
                 .all(|(a, b)| a.hash() == b.hash())
-            && self.trace_contexts == other.trace_contexts
     }
 }
 
 impl Eq for TransactionGossip {}
 
 // ============================================================================
-// Manual SBOR implementation (Arc<RoutableTransaction> doesn't derive
-// BasicSbor; we (de)serialize the inner data through parallel vecs).
+// Manual SBOR implementation: `Arc<RoutableTransaction>` doesn't derive
+// BasicSbor, so we (de)serialize the inner data ourselves. Encoded as a
+// 1-tuple to match the layout `BasicSbor` would produce for a single-field
+// struct, leaving room to add fields without re-breaking wire.
 // ============================================================================
 
 impl<E: Encoder<NoCustomValueKind>> Encode<NoCustomValueKind, E> for TransactionGossip {
@@ -102,7 +81,7 @@ impl<E: Encoder<NoCustomValueKind>> Encode<NoCustomValueKind, E> for Transaction
     }
 
     fn encode_body(&self, encoder: &mut E) -> Result<(), EncodeError> {
-        encoder.write_size(2)?; // 2 fields
+        encoder.write_size(1)?;
 
         encoder.write_value_kind(ValueKind::Array)?;
         encoder.write_value_kind(
@@ -111,13 +90,6 @@ impl<E: Encoder<NoCustomValueKind>> Encode<NoCustomValueKind, E> for Transaction
         encoder.write_size(self.transactions.len())?;
         for tx in &self.transactions {
             encoder.encode_deeper_body(tx.as_ref())?;
-        }
-
-        encoder.write_value_kind(ValueKind::Array)?;
-        encoder.write_value_kind(<TraceContext as Categorize<NoCustomValueKind>>::value_kind())?;
-        encoder.write_size(self.trace_contexts.len())?;
-        for trace in &self.trace_contexts {
-            encoder.encode_deeper_body(trace)?;
         }
 
         Ok(())
@@ -131,9 +103,9 @@ impl<D: Decoder<NoCustomValueKind>> Decode<NoCustomValueKind, D> for Transaction
     ) -> Result<Self, DecodeError> {
         decoder.check_preloaded_value_kind(value_kind, ValueKind::Tuple)?;
         let length = decoder.read_size()?;
-        if length != 2 {
+        if length != 1 {
             return Err(DecodeError::UnexpectedSize {
-                expected: 2,
+                expected: 1,
                 actual: length,
             });
         }
@@ -153,26 +125,7 @@ impl<D: Decoder<NoCustomValueKind>> Decode<NoCustomValueKind, D> for Transaction
             transactions.push(Arc::new(tx));
         }
 
-        decoder.read_and_check_value_kind(ValueKind::Array)?;
-        let trace_elem_kind = decoder.read_value_kind()?;
-        let trace_count = decoder.read_size()?;
-        if trace_count != tx_count {
-            return Err(DecodeError::UnexpectedSize {
-                expected: tx_count,
-                actual: trace_count,
-            });
-        }
-        let mut trace_contexts = Vec::with_capacity(trace_count);
-        for _ in 0..trace_count {
-            let trace: TraceContext =
-                decoder.decode_deeper_body_with_value_kind(trace_elem_kind)?;
-            trace_contexts.push(trace);
-        }
-
-        Ok(Self {
-            transactions,
-            trace_contexts,
-        })
+        Ok(Self { transactions })
     }
 }
 
@@ -212,7 +165,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn new_carries_transactions_and_default_traces() {
+    fn new_carries_transactions() {
         let tx1 = Arc::new(test_transaction_with_nodes(
             &[1, 2, 3],
             vec![test_node(1)],
@@ -229,10 +182,6 @@ mod tests {
         assert!(!gossip.is_empty());
         assert_eq!(gossip.transactions[0].hash(), tx1.hash());
         assert_eq!(gossip.transactions[1].hash(), tx2.hash());
-        assert_eq!(gossip.trace_contexts.len(), 2);
-        for trace in &gossip.trace_contexts {
-            assert!(!trace.has_trace());
-        }
     }
 
     #[test]
@@ -284,7 +233,7 @@ mod tests {
             enc.write_payload_prefix(BASIC_SBOR_V1_PAYLOAD_PREFIX)
                 .unwrap();
             enc.write_value_kind(ValueKind::Tuple).unwrap();
-            enc.write_size(2).unwrap();
+            enc.write_size(1).unwrap();
             enc.write_value_kind(ValueKind::Array).unwrap();
             enc.write_value_kind(ValueKind::Tuple).unwrap();
             enc.write_size(MAX_GOSSIP_TX_BATCH + 1).unwrap();

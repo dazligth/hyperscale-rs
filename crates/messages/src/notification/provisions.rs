@@ -6,8 +6,6 @@ use hyperscale_types::{
 };
 use sbor::prelude::BasicSbor;
 
-use crate::trace_context::TraceContext;
-
 /// Cross-shard state provisions for one (`source_block`, `target_shard`) pair.
 ///
 /// Only the block proposer sends these. The sender signature authenticates
@@ -21,14 +19,12 @@ pub struct ProvisionsNotification {
     pub sender: ValidatorId,
     /// BLS signature over the domain-separated signing message, by the sender.
     pub sender_signature: Bls12381G2Signature,
-    /// Trace context for distributed tracing (empty when feature disabled).
-    pub trace_context: TraceContext,
 }
 
 impl ProvisionsNotification {
     /// Create a new signed provisions notification.
     #[must_use]
-    pub fn new(
+    pub const fn new(
         provisions: Provisions,
         sender: ValidatorId,
         sender_signature: Bls12381G2Signature,
@@ -37,7 +33,6 @@ impl ProvisionsNotification {
             provisions,
             sender,
             sender_signature,
-            trace_context: TraceContext::default(),
         }
     }
 
@@ -45,12 +40,6 @@ impl ProvisionsNotification {
     #[must_use]
     pub fn signing_message(&self) -> Vec<u8> {
         state_provisions_message(&self.provisions)
-    }
-
-    /// Get the trace context.
-    #[must_use]
-    pub const fn trace_context(&self) -> &TraceContext {
-        &self.trace_context
     }
 }
 
