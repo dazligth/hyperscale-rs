@@ -13,9 +13,10 @@
 
 use std::sync::Arc;
 
-use hyperscale_bft::{BftConfig, RecoveredState};
+use hyperscale_bft::BftConfig;
 use hyperscale_mempool::MempoolConfig;
 use hyperscale_provisions::{ProvisionConfig, ProvisionStore};
+use hyperscale_storage::RecoveredState;
 use hyperscale_test_helpers::TestCommittee;
 use hyperscale_topology::TopologyCoordinator;
 use hyperscale_types::ValidatorSet;

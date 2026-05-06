@@ -4,7 +4,8 @@
 //! so any regression in the documented API is caught here rather than by
 //! inline tests that can reach into private fields.
 
-use hyperscale_bft::{BftConfig, BftCoordinator, BftMemoryStats, BftStats, RecoveredState};
+use hyperscale_bft::{BftConfig, BftCoordinator, BftMemoryStats, BftStats};
+use hyperscale_storage::RecoveredState;
 use hyperscale_test_helpers::TestCommittee;
 use hyperscale_types::{BlockHeight, LocalTimestamp, Round, TopologySnapshot, VIEW_CHANGE_TIMEOUT};
 

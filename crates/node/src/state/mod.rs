@@ -13,7 +13,7 @@ mod test_support;
 
 use std::sync::Arc;
 
-use hyperscale_bft::{BftConfig, BftCoordinator, RecoveredState};
+use hyperscale_bft::{BftConfig, BftCoordinator};
 use hyperscale_core::{Action, ProtocolEvent, StateMachine};
 use hyperscale_execution::ExecutionCoordinator;
 use hyperscale_mempool::{MempoolConfig, MempoolCoordinator};
@@ -21,6 +21,7 @@ use hyperscale_provisions::{
     OutboundProvisionTracker, ProvisionConfig, ProvisionCoordinator, ProvisionStore,
 };
 use hyperscale_remote_headers::RemoteHeaderCoordinator;
+use hyperscale_storage::RecoveredState;
 use hyperscale_topology::TopologyCoordinator;
 use hyperscale_types::{Block, LocalTimestamp, ShardGroupId, StateRoot, TopologySnapshot};
 use tracing::instrument;

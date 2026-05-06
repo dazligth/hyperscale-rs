@@ -83,6 +83,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hyperscale_core::VerificationKind;
+use hyperscale_storage::RecoveredState;
 use hyperscale_types::{
     Block, BlockHeader, BlockHeight, BlockManifest, BlockVote, CertifiedBlock,
     CommittedBlockHeader, FinalizedWave, Provisions, QuorumCertificate, Round, RoutableTransaction,
@@ -108,30 +109,6 @@ use crate::validation::{qc_has_local_quorum_power, validate_block_for_vote, vali
 use crate::verification::{InFlightCheck, ReadyStateRootVerification, VerificationPipeline};
 use crate::view_change::ViewChangeController;
 use crate::vote_keeper::{LockDecision, VoteKeeper};
-
-/// State recovered from storage on startup.
-///
-/// Passed to `BftCoordinator::new()` to restore consensus state after a crash/restart.
-/// For a fresh start, use `RecoveredState::default()`.
-#[derive(Debug, Clone, Default)]
-pub struct RecoveredState {
-    /// Last committed height; the resume point for proposal/voting after restart.
-    pub committed_height: BlockHeight,
-
-    /// Last committed block hash (None for fresh start).
-    pub committed_hash: Option<BlockHash>,
-
-    /// Latest QC (certifies the highest certified block).
-    pub latest_qc: Option<QuorumCertificate>,
-
-    /// Last committed JMT root hash.
-    ///
-    /// Restored from storage at startup so proposals use the correct parent
-    /// state root instead of the default `StateRoot::ZERO`.
-    ///
-    /// If not provided (None), defaults to `StateRoot::ZERO` for fresh start.
-    pub jmt_root: Option<StateRoot>,
-}
 
 /// BFT consensus state machine.
 ///

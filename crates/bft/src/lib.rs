@@ -74,5 +74,5 @@ mod vote_keeper;
 mod vote_set;
 
 pub use config::BftConfig;
-pub use coordinator::{BftCoordinator, BftMemoryStats, BftStats, RecoveredState};
+pub use coordinator::{BftCoordinator, BftMemoryStats, BftStats};
 pub use verification::ReadyStateRootVerification;

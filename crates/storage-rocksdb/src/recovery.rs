@@ -1,8 +1,7 @@
 //! Crash recovery for `RocksDB` storage.
 
-use hyperscale_bft::RecoveredState;
 use hyperscale_metrics::record_storage_operation;
-use hyperscale_storage::SubstateStore;
+use hyperscale_storage::{RecoveredState, SubstateStore};
 use hyperscale_types::{BlockHash, BlockHeight};
 
 use crate::core::RocksDbStorage;

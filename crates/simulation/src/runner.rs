@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use crossbeam::channel::{Receiver, unbounded};
-use hyperscale_bft::{BftConfig, RecoveredState};
+use hyperscale_bft::BftConfig;
 use hyperscale_core::{NodeInput, ProtocolEvent, TimerId};
 use hyperscale_dispatch_sync::SyncDispatch;
 use hyperscale_engine::{
@@ -23,7 +23,7 @@ use hyperscale_network_memory::{
 use hyperscale_node::io_loop::{IoLoop, StepOutput};
 use hyperscale_node::{NodeConfig, NodeStateMachine, TimerOp};
 use hyperscale_provisions::{ProvisionConfig, ProvisionStore};
-use hyperscale_storage::ChainReader;
+use hyperscale_storage::{ChainReader, RecoveredState};
 use hyperscale_storage_memory::SimStorage;
 use hyperscale_topology::TopologyCoordinator;
 use hyperscale_types::{
