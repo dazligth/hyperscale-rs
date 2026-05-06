@@ -4,11 +4,9 @@
 //! so any regression in the documented API is caught here rather than by
 //! inline tests that can reach into private fields.
 
-use std::time::Duration;
-
 use hyperscale_bft::{BftConfig, BftCoordinator, BftMemoryStats, BftStats, RecoveredState};
 use hyperscale_test_helpers::TestCommittee;
-use hyperscale_types::{BlockHeight, LocalTimestamp, Round, TopologySnapshot};
+use hyperscale_types::{BlockHeight, LocalTimestamp, Round, TopologySnapshot, VIEW_CHANGE_TIMEOUT};
 
 fn fresh_coordinator(config: BftConfig) -> BftCoordinator {
     BftCoordinator::new(0, config, RecoveredState::default())
@@ -30,15 +28,12 @@ fn fresh_coordinator_reports_genesis_chain_state() {
 }
 
 #[test]
-fn current_view_change_timeout_reflects_config() {
-    let config = BftConfig::default()
-        .with_view_change_timeout(Duration::from_secs(7))
-        .with_view_change_timeout_increment(Duration::ZERO);
-    let coordinator = fresh_coordinator(config);
+fn current_view_change_timeout_at_initial_round_is_protocol_base() {
+    let coordinator = fresh_coordinator(BftConfig::default());
 
     assert_eq!(
         coordinator.current_view_change_timeout(),
-        Duration::from_secs(7)
+        VIEW_CHANGE_TIMEOUT
     );
 }
 

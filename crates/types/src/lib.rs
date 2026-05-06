@@ -94,8 +94,12 @@ pub use signing::{
     exec_cert_batch_message, exec_vote_batch_message, exec_vote_message, state_provisions_message,
     validator_bind_message,
 };
+pub use time::limits::{MAX_TIMESTAMP_DELAY, MAX_TIMESTAMP_RUSH};
 pub use time::range::{MAX_VALIDITY_RANGE, TimestampRange};
-pub use time::timeouts::{REMOTE_HEADER_RETENTION, RETENTION_HORIZON, WAVE_TIMEOUT};
+pub use time::timeouts::{
+    MAX_PROGRESS_WAIT, REMOTE_HEADER_RETENTION, RETENTION_HORIZON, VIEW_CHANGE_TIMEOUT,
+    VIEW_CHANGE_TIMEOUT_INCREMENT, VIEW_CHANGE_TIMEOUT_MAX, WAVE_TIMEOUT,
+};
 pub use time::timestamp::{LocalTimestamp, ProposerTimestamp, WeightedTimestamp};
 pub use topology::snapshot::{TopologySnapshot, node_id_hash_u64, shard_for_node};
 pub use topology::validator::{ValidatorInfo, ValidatorSet};

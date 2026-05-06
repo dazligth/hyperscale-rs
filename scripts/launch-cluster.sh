@@ -429,10 +429,6 @@ upnp_enabled = false
 max_message_size = 10485760
 gossipsub_heartbeat_ms = 100
 
-[consensus]
-view_change_timeout_ms = 3000
-rpc_mempool_limit = 16384
-
 [threads]
 consensus_crypto_threads = 0
 crypto_threads = 0

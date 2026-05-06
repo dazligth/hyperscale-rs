@@ -30,9 +30,6 @@
 //! tcp_fallback_port = 30500
 //! bootstrap_peers = []
 //!
-//! [consensus]
-//! view_change_timeout_ms = 3000
-//!
 //! [threads]
 //! crypto_threads = 4
 //! execution_threads = 8
@@ -146,10 +143,6 @@ pub struct ValidatorConfig {
     /// Network configuration
     #[serde(default)]
     pub network: NetworkConfig,
-
-    /// Consensus configuration
-    #[serde(default)]
-    pub consensus: ConsensusConfig,
 
     /// Thread pool configuration
     #[serde(default)]
@@ -279,26 +272,6 @@ const fn default_idle_connection_timeout_ms() -> u64 {
 
 const fn default_keep_alive_interval_ms() -> u64 {
     15_000
-}
-
-/// Consensus configuration.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ConsensusConfig {
-    /// Timeout for view change (milliseconds)
-    #[serde(default = "default_view_change_timeout_ms")]
-    pub view_change_timeout_ms: u64,
-}
-
-impl Default for ConsensusConfig {
-    fn default() -> Self {
-        Self {
-            view_change_timeout_ms: default_view_change_timeout_ms(),
-        }
-    }
-}
-
-const fn default_view_change_timeout_ms() -> u64 {
-    3000
 }
 
 /// Thread pool configuration.
@@ -889,11 +862,6 @@ fn build_thread_pool_config(config: &ThreadsConfig) -> ThreadPoolConfig {
     builder.build_unchecked()
 }
 
-/// Build BFT configuration from TOML config.
-fn build_bft_config(config: &ConsensusConfig) -> BftConfig {
-    BftConfig::new().with_view_change_timeout(Duration::from_millis(config.view_change_timeout_ms))
-}
-
 /// Build network configuration from TOML config.
 fn build_network_config(config: &NetworkConfig) -> Result<Libp2pConfig> {
     let listen_addr: Multiaddr = config
@@ -1248,7 +1216,7 @@ async fn async_main(cli: Cli, config: ValidatorConfig) -> Result<()> {
 
     // Build configurations
     let thread_config = build_thread_pool_config(&config.threads);
-    let bft_config = build_bft_config(&config.consensus);
+    let bft_config = BftConfig::default();
     let network_config = build_network_config(&config.network)?;
     let rocksdb_config = build_rocksdb_config(&config.storage);
 

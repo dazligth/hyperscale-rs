@@ -48,21 +48,6 @@ max_message_size = 65536
 gossipsub_heartbeat_ms = 100
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Consensus Configuration
-# ═══════════════════════════════════════════════════════════════════════════════
-
-[consensus]
-# View change timeout (milliseconds)
-# How long to wait before triggering leader rotation
-view_change_timeout_ms = 3000
-
-# Maximum transactions in mempool before rejecting RPC submissions (backpressure)
-# When the pool reaches this size, new RPC submissions return 503 Service Unavailable.
-# Gossip transactions are still accepted to allow block validation.
-# Default: 16384 (4x block size). Set to 0 for unlimited (not recommended).
-rpc_mempool_limit = 16384
-
-# ═══════════════════════════════════════════════════════════════════════════════
 # Thread Pool Configuration
 # ═══════════════════════════════════════════════════════════════════════════════
 

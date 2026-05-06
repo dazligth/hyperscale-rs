@@ -3,8 +3,12 @@
 //! - [`timestamp`]: typed wall-clocks ([`WeightedTimestamp`], [`ProposerTimestamp`],
 //!   [`LocalTimestamp`]) with distinct trust guarantees.
 //! - [`range`]: half-open [`TimestampRange`] used as a transaction validity window.
-//! - [`timeouts`]: shared `Duration` constants for retention horizons.
+//! - [`timeouts`]: protocol `Duration` constants — retention windows and BFT
+//!   liveness timers that every validator must enforce identically.
+//! - [`limits`]: hard caps applied at admission time on peer-supplied
+//!   timestamps.
 
+pub mod limits;
 pub mod range;
 pub mod timeouts;
 pub mod timestamp;

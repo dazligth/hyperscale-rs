@@ -17,12 +17,12 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use hyperscale_types::{
-    Block, BlockHeader, BlockHeight, LocalTimestamp, ProvisionHash, QuorumCertificate,
-    RoutableTransaction, TopologySnapshot, TxHash, VotePower, WaveId, compute_waves,
+    Block, BlockHeader, BlockHeight, LocalTimestamp, MAX_TIMESTAMP_DELAY, MAX_TIMESTAMP_RUSH,
+    ProvisionHash, QuorumCertificate, RoutableTransaction, TopologySnapshot, TxHash, VotePower,
+    WaveId, compute_waves,
 };
 
 use crate::commit_dedup::CommitDedupIndex;
-use crate::config::BftConfig;
 
 /// True if `qc.signers` represents at least 2f+1 of the local committee's
 /// voting power. The synced-block apply path and consensus pre-vote path
@@ -50,7 +50,6 @@ pub fn validate_header(
     topology: &TopologySnapshot,
     header: &BlockHeader,
     committed_height: BlockHeight,
-    config: &BftConfig,
     now: LocalTimestamp,
 ) -> Result<(), String> {
     let height = header.height;
@@ -96,25 +95,21 @@ pub fn validate_header(
         ));
     }
 
-    validate_timestamp(header, config, now)?;
+    validate_timestamp(header, now)?;
 
     Ok(())
 }
 
 /// Validate that the proposer's timestamp is within acceptable bounds.
 ///
-/// The timestamp must not be more than `config.max_timestamp_delay_ms`
-/// behind our clock nor more than `config.max_timestamp_rush_ms` ahead.
+/// The timestamp must not be more than [`MAX_TIMESTAMP_DELAY`] behind our
+/// clock nor more than [`MAX_TIMESTAMP_RUSH`] ahead.
 ///
 /// Skipped for genesis blocks (fixed zero timestamp) and fallback blocks
 /// (they inherit parent weighted-timestamp, which can be older than the
 /// delay threshold during extended view changes). Fallback blocks are
 /// empty and carry a QC-validated timestamp, so this carve-out is safe.
-pub fn validate_timestamp(
-    header: &BlockHeader,
-    config: &BftConfig,
-    now: LocalTimestamp,
-) -> Result<(), String> {
+pub fn validate_timestamp(header: &BlockHeader, now: LocalTimestamp) -> Result<(), String> {
     if header.is_genesis() {
         return Ok(());
     }
@@ -122,20 +117,21 @@ pub fn validate_timestamp(
         return Ok(());
     }
 
+    let max_delay_ms = u64::try_from(MAX_TIMESTAMP_DELAY.as_millis()).unwrap_or(u64::MAX);
+    let max_rush_ms = u64::try_from(MAX_TIMESTAMP_RUSH.as_millis()).unwrap_or(u64::MAX);
+
     let now_ms = now.as_millis();
     let header_ts_ms = header.timestamp.as_millis();
 
-    if header_ts_ms < now_ms.saturating_sub(config.max_timestamp_delay_ms) {
+    if header_ts_ms < now_ms.saturating_sub(max_delay_ms) {
         return Err(format!(
-            "proposer timestamp {} is too old (now: {}, max delay: {}ms)",
-            header_ts_ms, now_ms, config.max_timestamp_delay_ms
+            "proposer timestamp {header_ts_ms} is too old (now: {now_ms}, max delay: {max_delay_ms}ms)"
         ));
     }
 
-    if header_ts_ms > now_ms + config.max_timestamp_rush_ms {
+    if header_ts_ms > now_ms.saturating_add(max_rush_ms) {
         return Err(format!(
-            "proposer timestamp {} is too far ahead (now: {}, max rush: {}ms)",
-            header_ts_ms, now_ms, config.max_timestamp_rush_ms
+            "proposer timestamp {header_ts_ms} is too far ahead (now: {now_ms}, max rush: {max_rush_ms}ms)"
         ));
     }
 
@@ -405,22 +401,20 @@ mod tests {
 
     #[test]
     fn validate_timestamp_skips_genesis() {
-        let config = BftConfig::default();
         let now = LocalTimestamp::from_millis(100_000);
         let mut header = header_at_height(BlockHeight(0), 0);
         header.parent_block_hash = BlockHash::from_raw(Hash::from_bytes(b"genesis_parent"));
         header.proposer = ValidatorId(0);
-        assert!(validate_timestamp(&header, &config, now).is_ok());
+        assert!(validate_timestamp(&header, now).is_ok());
     }
 
     #[test]
     fn validate_timestamp_accepts_within_bounds() {
-        let config = BftConfig::default();
         let now = LocalTimestamp::from_millis(100_000);
         for ts_ms in [99_000, 100_000, 101_000] {
             let header = header_at_height(BlockHeight(1), ts_ms);
             assert!(
-                validate_timestamp(&header, &config, now).is_ok(),
+                validate_timestamp(&header, now).is_ok(),
                 "ts_ms={ts_ms} should be within bounds"
             );
         }
@@ -428,59 +422,47 @@ mod tests {
 
     #[test]
     fn validate_timestamp_rejects_too_old() {
-        let config = BftConfig::default();
         let now = LocalTimestamp::from_millis(100_000);
         let header = header_at_height(BlockHeight(1), 50_000);
-        let err = validate_timestamp(&header, &config, now).unwrap_err();
+        let err = validate_timestamp(&header, now).unwrap_err();
         assert!(err.contains("too old"));
     }
 
     #[test]
     fn validate_timestamp_rejects_too_far_ahead() {
-        let config = BftConfig::default();
         let now = LocalTimestamp::from_millis(100_000);
         let header = header_at_height(BlockHeight(1), 110_000);
-        let err = validate_timestamp(&header, &config, now).unwrap_err();
+        let err = validate_timestamp(&header, now).unwrap_err();
         assert!(err.contains("too far ahead"));
     }
 
     #[test]
     fn validate_timestamp_at_boundary() {
-        let config = BftConfig::default();
         let now = LocalTimestamp::from_millis(100_000);
 
         // Exactly max delay (now - 30s) — OK.
-        assert!(
-            validate_timestamp(&header_at_height(BlockHeight(1), 70_000), &config, now).is_ok()
-        );
+        assert!(validate_timestamp(&header_at_height(BlockHeight(1), 70_000), now).is_ok());
         // Just past max delay — fail.
-        assert!(
-            validate_timestamp(&header_at_height(BlockHeight(1), 69_999), &config, now).is_err()
-        );
+        assert!(validate_timestamp(&header_at_height(BlockHeight(1), 69_999), now).is_err());
         // Exactly max rush (now + 2s) — OK.
-        assert!(
-            validate_timestamp(&header_at_height(BlockHeight(1), 102_000), &config, now).is_ok()
-        );
+        assert!(validate_timestamp(&header_at_height(BlockHeight(1), 102_000), now).is_ok());
         // Just past max rush — fail.
-        assert!(
-            validate_timestamp(&header_at_height(BlockHeight(1), 102_001), &config, now).is_err()
-        );
+        assert!(validate_timestamp(&header_at_height(BlockHeight(1), 102_001), now).is_err());
     }
 
     #[test]
     fn validate_timestamp_skips_fallback_blocks() {
-        let config = BftConfig::default();
         let now = LocalTimestamp::from_millis(100_000);
 
-        // 50s old would normally fail (max_delay = 30s), but fallback blocks
-        // inherit the parent's weighted timestamp across view changes.
+        // 50s old would normally fail (MAX_TIMESTAMP_DELAY = 30s), but fallback
+        // blocks inherit the parent's weighted timestamp across view changes.
         let mut header = header_at_height(BlockHeight(1), 50_000);
         header.round = Round(5);
         header.is_fallback = true;
-        assert!(validate_timestamp(&header, &config, now).is_ok());
+        assert!(validate_timestamp(&header, now).is_ok());
 
         header.is_fallback = false;
-        assert!(validate_timestamp(&header, &config, now).is_err());
+        assert!(validate_timestamp(&header, now).is_err());
     }
 
     // ═══════════════════════════════════════════════════════════════════════

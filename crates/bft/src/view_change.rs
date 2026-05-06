@@ -17,9 +17,10 @@
 
 use std::time::Duration;
 
-use hyperscale_types::{BlockHeight, LocalTimestamp, Round};
-
-use crate::config::BftConfig;
+use hyperscale_types::{
+    BlockHeight, LocalTimestamp, Round, VIEW_CHANGE_TIMEOUT, VIEW_CHANGE_TIMEOUT_INCREMENT,
+    VIEW_CHANGE_TIMEOUT_MAX,
+};
 
 pub struct ViewChangeController {
     /// Current round.
@@ -89,22 +90,20 @@ impl ViewChangeController {
 
     /// Linear-backoff view change timeout for the current round.
     ///
-    /// `timeout = min(base + increment * rounds_at_height, max_cap)`. All
-    /// validators compute the same timeout because round numbers are QC- and
-    /// header-attested, so the formula is deterministic network-wide.
-    pub fn current_timeout(&self, config: &BftConfig) -> Duration {
+    /// `timeout = min(VIEW_CHANGE_TIMEOUT + VIEW_CHANGE_TIMEOUT_INCREMENT *
+    /// rounds_at_height, VIEW_CHANGE_TIMEOUT_MAX)`. All validators compute
+    /// the same timeout because round numbers are QC- and header-attested,
+    /// so the formula is deterministic network-wide.
+    pub fn current_timeout(&self) -> Duration {
         let rounds_at_height = self.view.0.saturating_sub(self.view_at_height_start.0);
         let rounds_factor = u32::try_from(rounds_at_height).unwrap_or(u32::MAX);
-        let timeout =
-            config.view_change_timeout + config.view_change_timeout_increment * rounds_factor;
-        config
-            .view_change_timeout_max
-            .map_or(timeout, |max| timeout.min(max))
+        let timeout = VIEW_CHANGE_TIMEOUT + VIEW_CHANGE_TIMEOUT_INCREMENT * rounds_factor;
+        timeout.min(VIEW_CHANGE_TIMEOUT_MAX)
     }
 
     /// Time remaining until the view change timer should fire.
-    pub fn remaining_timeout(&self, config: &BftConfig, now: LocalTimestamp) -> Duration {
-        let timeout = self.current_timeout(config);
+    pub fn remaining_timeout(&self, now: LocalTimestamp) -> Duration {
+        let timeout = self.current_timeout();
         let deadline = self
             .last_leader_activity
             .unwrap_or(LocalTimestamp::ZERO)
@@ -118,11 +117,11 @@ impl ViewChangeController {
 
     /// Returns `true` if the leader has been silent longer than the current
     /// timeout and a view change should fire.
-    pub fn timeout_elapsed(&self, config: &BftConfig, now: LocalTimestamp) -> bool {
+    pub fn timeout_elapsed(&self, now: LocalTimestamp) -> bool {
         let Some(last_activity) = self.last_leader_activity else {
             return false;
         };
-        now.saturating_sub(last_activity) >= self.current_timeout(config)
+        now.saturating_sub(last_activity) >= self.current_timeout()
     }
 
     /// Called when committed height advances: rebase linear-backoff tracking
@@ -160,48 +159,44 @@ impl ViewChangeController {
 mod tests {
     use super::*;
 
-    fn cfg(base_ms: u64, inc_ms: u64, cap_ms: Option<u64>) -> BftConfig {
-        BftConfig {
-            view_change_timeout: Duration::from_millis(base_ms),
-            view_change_timeout_increment: Duration::from_millis(inc_ms),
-            view_change_timeout_max: cap_ms.map(Duration::from_millis),
-            ..BftConfig::default()
-        }
-    }
-
     #[test]
     fn current_timeout_grows_linearly_with_rounds_at_height() {
         let mut vc = ViewChangeController::new();
-        let config = cfg(1000, 500, None);
 
-        assert_eq!(vc.current_timeout(&config), Duration::from_secs(1));
+        assert_eq!(vc.current_timeout(), VIEW_CHANGE_TIMEOUT);
 
         vc.view = Round(1);
-        assert_eq!(vc.current_timeout(&config), Duration::from_millis(1500));
+        assert_eq!(
+            vc.current_timeout(),
+            VIEW_CHANGE_TIMEOUT + VIEW_CHANGE_TIMEOUT_INCREMENT
+        );
 
         vc.view = Round(4);
-        assert_eq!(vc.current_timeout(&config), Duration::from_secs(3));
+        assert_eq!(
+            vc.current_timeout(),
+            VIEW_CHANGE_TIMEOUT + VIEW_CHANGE_TIMEOUT_INCREMENT * 4
+        );
     }
 
     #[test]
     fn current_timeout_respects_cap() {
         let mut vc = ViewChangeController::new();
-        let config = cfg(1000, 500, Some(2000));
-
-        vc.view = Round(10);
-        assert_eq!(vc.current_timeout(&config), Duration::from_secs(2));
+        vc.view = Round(10_000);
+        assert_eq!(vc.current_timeout(), VIEW_CHANGE_TIMEOUT_MAX);
     }
 
     #[test]
     fn reset_for_height_advance_rebases_round_counter() {
         let mut vc = ViewChangeController::new();
-        let config = cfg(1000, 500, None);
 
         vc.view = Round(5);
-        assert_eq!(vc.current_timeout(&config), Duration::from_millis(3500));
+        assert_eq!(
+            vc.current_timeout(),
+            VIEW_CHANGE_TIMEOUT + VIEW_CHANGE_TIMEOUT_INCREMENT * 5
+        );
 
         vc.reset_for_height_advance();
-        assert_eq!(vc.current_timeout(&config), Duration::from_secs(1));
+        assert_eq!(vc.current_timeout(), VIEW_CHANGE_TIMEOUT);
     }
 
     #[test]
@@ -253,43 +248,23 @@ mod tests {
     #[test]
     fn timeout_elapsed_requires_recorded_leader_activity() {
         let vc = ViewChangeController::new();
-        let config = cfg(1000, 0, None);
-        assert!(!vc.timeout_elapsed(&config, LocalTimestamp::from_millis(100_000)));
+        assert!(!vc.timeout_elapsed(LocalTimestamp::from_millis(u64::MAX / 2)));
     }
 
     #[test]
     fn timeout_elapsed_true_once_past_deadline() {
         let mut vc = ViewChangeController::new();
-        let config = cfg(1000, 0, None);
-        vc.record_leader_activity(LocalTimestamp::from_millis(10_000));
+        let activity = LocalTimestamp::from_millis(10_000);
+        vc.record_leader_activity(activity);
 
-        assert!(!vc.timeout_elapsed(&config, LocalTimestamp::from_millis(10_500)));
-        assert!(vc.timeout_elapsed(&config, LocalTimestamp::from_millis(11_000)));
-    }
+        let before = activity.plus(
+            VIEW_CHANGE_TIMEOUT
+                .checked_sub(Duration::from_millis(1))
+                .unwrap(),
+        );
+        let after = activity.plus(VIEW_CHANGE_TIMEOUT);
 
-    #[test]
-    fn zero_increment_disables_backoff() {
-        let mut vc = ViewChangeController::new();
-        let config = cfg(5000, 0, None);
-
-        assert_eq!(vc.current_timeout(&config), Duration::from_secs(5));
-
-        vc.view = Round(10);
-        assert_eq!(vc.current_timeout(&config), Duration::from_secs(5));
-
-        vc.view = Round(100);
-        assert_eq!(vc.current_timeout(&config), Duration::from_secs(5));
-    }
-
-    #[test]
-    fn no_cap_allows_unbounded_backoff() {
-        let mut vc = ViewChangeController::new();
-        let config = cfg(5000, 1000, None);
-
-        vc.view = Round(100);
-        assert_eq!(vc.current_timeout(&config), Duration::from_secs(5 + 100));
-
-        vc.view = Round(1000);
-        assert_eq!(vc.current_timeout(&config), Duration::from_secs(5 + 1000));
+        assert!(!vc.timeout_elapsed(before));
+        assert!(vc.timeout_elapsed(after));
     }
 }

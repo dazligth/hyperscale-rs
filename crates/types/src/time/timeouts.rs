@@ -1,10 +1,20 @@
-//! Shared Duration constants used by multiple sub-state machines.
+//! Duration constants that are part of the consensus protocol.
 //!
-//! Sub-state-machine-local timeouts (fallback fetch, etc.) stay in their
-//! owning crate. This module is for policies that are enforced by more than
-//! one crate and must stay in lockstep — most retention windows downstream
-//! derive their invariants from `WAVE_TIMEOUT`, which defines the cross-shard
-//! execution window.
+//! Every constant here must be enforced identically on every validator.
+//! Two flavors live side by side:
+//!
+//! - **Retention / abort windows** (`WAVE_TIMEOUT`, `REMOTE_HEADER_RETENTION`,
+//!   `RETENTION_HORIZON`) — durations after which a wave aborts or a piece
+//!   of derived state becomes safe to drop on every node simultaneously.
+//!   Most downstream invariants derive from `WAVE_TIMEOUT`.
+//! - **BFT liveness timers** (`VIEW_CHANGE_TIMEOUT*`, `MAX_PROGRESS_WAIT`) —
+//!   round-timer cadences and the absolute ceiling on view-change
+//!   suppression while a proposal is in flight. Validators that disagree on
+//!   these values either time out asymmetrically (degraded liveness) or
+//!   weaken the stall-attack bound that `MAX_PROGRESS_WAIT` enforces.
+//!
+//! Sub-state-machine-local timeouts (fallback fetch, IO retry backoff, etc.)
+//! stay in their owning crate.
 
 use std::time::Duration;
 
@@ -44,3 +54,36 @@ pub const REMOTE_HEADER_RETENTION: Duration = Duration::from_secs(30);
 /// every node simultaneously.
 pub const RETENTION_HORIZON: Duration =
     Duration::from_secs(MAX_VALIDITY_RANGE.as_secs() + WAVE_TIMEOUT.as_secs());
+
+/// Base view-change timeout for the first round at any height.
+///
+/// Combined with `VIEW_CHANGE_TIMEOUT_INCREMENT` and capped by
+/// `VIEW_CHANGE_TIMEOUT_MAX` to produce the per-round timeout:
+/// `min(base + increment * rounds_at_height, max)`. Round numbers are
+/// QC- and header-attested, so every validator computes the same
+/// effective timeout for any `(height, round)`.
+pub const VIEW_CHANGE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Linear backoff increment per failed round at the same height.
+///
+/// Prevents thundering-herd view changes when the network is briefly
+/// stressed: each successive round at the same height extends the
+/// timeout by this much before the cap kicks in.
+pub const VIEW_CHANGE_TIMEOUT_INCREMENT: Duration = Duration::from_secs(1);
+
+/// Cap on the effective view-change timeout after linear backoff.
+///
+/// Bounds round latency in extreme network conditions so a stuck height
+/// can't ratchet timeouts upward indefinitely.
+pub const VIEW_CHANGE_TIMEOUT_MAX: Duration = Duration::from_secs(30);
+
+/// Absolute ceiling on view-change suppression while a block is in
+/// progress at the proposal tip.
+///
+/// View changes are normally suppressed while we're fetching block
+/// content, awaiting our own QC, or processing the leader's pending
+/// block. This cap bounds how long a Byzantine proposer can stall the
+/// round timer purely by keeping a header alive without ever advancing
+/// the chain. Once this elapses since the last leader-activity reset,
+/// the timer fires regardless of pending work.
+pub const MAX_PROGRESS_WAIT: Duration = Duration::from_secs(9);

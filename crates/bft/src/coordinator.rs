@@ -14,8 +14,9 @@
 
 use hyperscale_core::{Action, CommitSource, ProtocolEvent, TimerId};
 use hyperscale_types::{
-    BlockHash, LocalTimestamp, MAX_FINALIZED_TX_PER_BLOCK, MAX_TX_HASHES_PER_BLOCK,
-    ProposerTimestamp, ProvisionHash, ShardGroupId, WaveId, WeightedTimestamp,
+    BlockHash, LocalTimestamp, MAX_FINALIZED_TX_PER_BLOCK, MAX_PROGRESS_WAIT,
+    MAX_TX_HASHES_PER_BLOCK, ProposerTimestamp, ProvisionHash, ShardGroupId, WaveId,
+    WeightedTimestamp,
 };
 
 /// BFT statistics for monitoring.
@@ -449,13 +450,13 @@ impl BftCoordinator {
     /// Linear-backoff view change timeout for the current round.
     #[must_use]
     pub fn current_view_change_timeout(&self) -> Duration {
-        self.view_change.current_timeout(&self.config)
+        self.view_change.current_timeout()
     }
 
     /// Time remaining until the view change timer should fire.
     #[must_use]
     pub fn remaining_view_change_timeout(&self) -> Duration {
-        self.view_change.remaining_timeout(&self.config, self.now)
+        self.view_change.remaining_timeout(self.now)
     }
 
     /// Check if we should advance the round due to timeout.
@@ -475,7 +476,7 @@ impl BftCoordinator {
         // the leader's block. The timeout should detect leader *failure*,
         // not slow vote/QC propagation around a healthy proposal.
         //
-        // Three suppression sources, all bounded by `max_progress_wait`
+        // Three suppression sources, all bounded by `MAX_PROGRESS_WAIT`
         // measured from the last leader-activity reset so a Byzantine
         // proposer who only sends a header (and never advances the chain)
         // can't pin us at a stale round forever:
@@ -504,13 +505,13 @@ impl BftCoordinator {
             let within_progress_window = self
                 .view_change
                 .last_leader_activity
-                .is_some_and(|t| self.now.saturating_sub(t) < self.config.max_progress_wait);
+                .is_some_and(|t| self.now.saturating_sub(t) < MAX_PROGRESS_WAIT);
             if within_progress_window {
                 return false;
             }
         }
 
-        self.view_change.timeout_elapsed(&self.config, self.now)
+        self.view_change.timeout_elapsed(self.now)
     }
 
     /// Check for round timeout and advance if needed.
@@ -1183,13 +1184,8 @@ impl BftCoordinator {
         topology_snapshot: &TopologySnapshot,
         header: &BlockHeader,
     ) -> bool {
-        if let Err(e) = validate_header(
-            topology_snapshot,
-            header,
-            self.committed_height,
-            &self.config,
-            self.now,
-        ) {
+        if let Err(e) = validate_header(topology_snapshot, header, self.committed_height, self.now)
+        {
             warn!(
                 validator = ?topology_snapshot.local_validator_id(),
                 error = %e,
@@ -4002,16 +3998,7 @@ mod tests {
         let (state, topology) = make_multi_validator_state();
         let header = make_header_at_height(BlockHeight(1), state.now.as_millis());
 
-        assert!(
-            validate_header(
-                &topology,
-                &header,
-                state.committed_height,
-                &state.config,
-                state.now,
-            )
-            .is_ok()
-        );
+        assert!(validate_header(&topology, &header, state.committed_height, state.now,).is_ok());
     }
 
     #[test]
@@ -4023,13 +4010,7 @@ mod tests {
             ..make_header_at_height(BlockHeight(1), state.now.as_millis())
         };
 
-        let result = validate_header(
-            &topology,
-            &header,
-            state.committed_height,
-            &state.config,
-            state.now,
-        );
+        let result = validate_header(&topology, &header, state.committed_height, state.now);
         assert!(
             result.is_err(),
             "Block with wrong proposer for round should fail validation"
