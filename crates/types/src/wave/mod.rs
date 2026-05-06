@@ -532,6 +532,47 @@ mod tests {
         assert!(matches!(err, DecodeError::InvalidCustomValue));
     }
 
+    /// Decoding a single `FinalizedWave` directly (not through
+    /// `decode_finalized_wave_vec`) must still bound the receipts vec.
+    /// Without the inline cap a peer could ship a basic-decoded
+    /// `FinalizedWave` with billions of claimed receipts.
+    #[test]
+    fn decode_rejects_finalized_wave_with_oversized_receipts_count() {
+        use sbor::{
+            BASIC_SBOR_V1_PAYLOAD_PREFIX, DecodeError, Encoder, NoCustomValueKind, ValueKind,
+            VecEncoder, basic_decode,
+        };
+
+        use crate::MAX_TX_HASHES_PER_BLOCK;
+
+        let wave_id = make_wave_id(0, BlockHeight(42), &[1]);
+        let wc = WaveCertificate {
+            wave_id: wave_id.clone(),
+            execution_certificates: vec![make_local_ec(&wave_id, vec![])],
+        };
+
+        let mut buf = Vec::with_capacity(256);
+        {
+            let mut enc = VecEncoder::<NoCustomValueKind>::new(&mut buf, BASIC_SBOR_V1_MAX_DEPTH);
+            enc.write_payload_prefix(BASIC_SBOR_V1_PAYLOAD_PREFIX)
+                .unwrap();
+            enc.write_value_kind(ValueKind::Tuple).unwrap();
+            enc.write_size(2).unwrap();
+            enc.encode(&wc).unwrap();
+            enc.write_value_kind(ValueKind::Array).unwrap();
+            enc.write_value_kind(StoredReceipt::value_kind()).unwrap();
+            enc.write_size(MAX_TX_HASHES_PER_BLOCK + 1).unwrap();
+        }
+        let err = basic_decode::<FinalizedWave>(&buf).unwrap_err();
+        assert!(matches!(
+            err,
+            DecodeError::UnexpectedSize {
+                expected: MAX_TX_HASHES_PER_BLOCK,
+                actual,
+            } if actual == MAX_TX_HASHES_PER_BLOCK + 1
+        ));
+    }
+
     #[test]
     fn test_wave_leader_is_attempt_zero() {
         let committee = vec![
