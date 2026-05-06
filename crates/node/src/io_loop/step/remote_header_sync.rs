@@ -16,7 +16,9 @@ use hyperscale_metrics::{
 };
 use hyperscale_network::{Network, ResponseVerdict};
 use hyperscale_storage::Storage;
-use hyperscale_types::{BlockHeight, CommittedBlockHeader, ShardGroupId, ValidatorId};
+use hyperscale_types::{
+    BlockHeight, CommittedBlockHeader, HeaderFetchCount, ShardGroupId, ValidatorId,
+};
 
 use crate::io_loop::IoLoop;
 use crate::io_loop::sync::SyncOutput;
@@ -60,7 +62,7 @@ where
         &mut self,
         source_shard: ShardGroupId,
         from_height: BlockHeight,
-        count: u64,
+        count: HeaderFetchCount,
         headers: Vec<CommittedBlockHeader>,
     ) {
         // Filter to in-range, in-shard deliveries; deliver each to the
@@ -71,7 +73,7 @@ where
         // responder served headers from the wrong shard — the responder
         // gates this too, but defending in depth on the receiver lets us
         // surface peer misbehavior even if a future serve change drops it.
-        let upper_bound = from_height.0.saturating_add(count);
+        let upper_bound = from_height.0.saturating_add(count.0);
         let mut delivered_heights = Vec::with_capacity(headers.len());
         for header in headers {
             let h = header.header.height;
@@ -79,7 +81,7 @@ where
                 tracing::warn!(
                     source_shard = source_shard.0,
                     requested_from = from_height.0,
-                    requested_count = count,
+                    requested_count = count.0,
                     height = h.0,
                     "remote-header sync: response contained out-of-range height — discarding"
                 );
@@ -109,7 +111,7 @@ where
             .handle(RemoteHeaderSyncInput::FetchSucceeded {
                 scope: source_shard,
                 from: from_height,
-                count,
+                count: count.0,
                 delivered_heights,
                 now: std::time::Instant::now(),
             });
@@ -122,7 +124,7 @@ where
         &mut self,
         source_shard: ShardGroupId,
         from_height: BlockHeight,
-        count: u64,
+        count: HeaderFetchCount,
     ) {
         let outputs = self
             .syncs
@@ -130,7 +132,7 @@ where
             .handle(RemoteHeaderSyncInput::FetchFailed {
                 scope: source_shard,
                 from: from_height,
-                count,
+                count: count.0,
                 now: std::time::Instant::now(),
             });
         self.process_remote_header_sync_outputs(outputs);
@@ -158,10 +160,11 @@ where
                         .load()
                         .committee_for_shard(source_shard)
                         .to_vec();
+                    let typed_count = HeaderFetchCount(count);
                     let request = GetRemoteHeadersRequest {
                         source_shard,
                         from_height,
-                        count,
+                        count: typed_count,
                     };
                     record_sync_round_started("remote_header");
                     self.network.request(
@@ -175,7 +178,7 @@ where
                                 let _ = es.send(NodeInput::RemoteHeadersResponseReceived {
                                     source_shard,
                                     from_height,
-                                    count,
+                                    count: typed_count,
                                     headers: resp.headers,
                                 });
                             } else {
@@ -183,7 +186,7 @@ where
                                 let _ = es.send(NodeInput::RemoteHeadersFetchFailed {
                                     source_shard,
                                     from_height,
-                                    count,
+                                    count: typed_count,
                                 });
                             }
                             ResponseVerdict::Accept

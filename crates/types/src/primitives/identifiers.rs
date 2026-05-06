@@ -332,6 +332,34 @@ impl Display for InFlightCount {
     }
 }
 
+/// Maximum number of consecutive committed block headers to return in one
+/// `GetRemoteHeadersRequest` round-trip.
+///
+/// Capped on both ends: callers clamp to this value when building requests,
+/// and responders clamp the field again before iterating storage. Lives next
+/// to `BlockHeight` on the wire — typing it prevents an argument-order swap
+/// between the two `u64` fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, BasicSbor)]
+#[sbor(transparent)]
+pub struct HeaderFetchCount(pub u64);
+
+impl HeaderFetchCount {
+    /// Zero headers requested.
+    pub const ZERO: Self = Self(0);
+
+    /// Return the smaller of `self` and `cap`.
+    #[must_use]
+    pub const fn min(self, cap: Self) -> Self {
+        if self.0 < cap.0 { self } else { cap }
+    }
+}
+
+impl Display for HeaderFetchCount {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// Node identifier (30-byte address).
 ///
 /// This is a simplified version that doesn't depend on Radix types.

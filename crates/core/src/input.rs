@@ -5,7 +5,8 @@ use std::sync::Arc;
 use hyperscale_messages::response::ElidedCertifiedBlock;
 use hyperscale_types::{
     BlockHeight, Bls12381G1PublicKey, Bls12381G2Signature, CertifiedBlock, CommittedBlockHeader,
-    ProvisionHash, RoutableTransaction, ShardGroupId, TxHash, ValidatorId, WaveId,
+    HeaderFetchCount, ProvisionHash, RoutableTransaction, ShardGroupId, TxHash, ValidatorId,
+    WaveId,
 };
 
 use crate::ProtocolEvent;
@@ -108,7 +109,7 @@ pub enum NodeInput {
         /// First height of the requested range.
         from_height: BlockHeight,
         /// Number of heights the request covered.
-        count: u64,
+        count: HeaderFetchCount,
         /// Headers the responder returned.
         headers: Vec<CommittedBlockHeader>,
     },
@@ -120,7 +121,7 @@ pub enum NodeInput {
         /// First height of the requested range.
         from_height: BlockHeight,
         /// Number of heights the request covered.
-        count: u64,
+        count: HeaderFetchCount,
     },
 
     /// Periodic tick for the fetch protocol to retry pending operations.

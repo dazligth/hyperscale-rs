@@ -4,14 +4,16 @@
 //! tip with one round-trip per batch instead of one per missing height.
 //! Any validator in the source shard can serve this from local storage.
 
-use hyperscale_types::{BlockHeight, MessageClass, NetworkMessage, Request, ShardGroupId};
+use hyperscale_types::{
+    BlockHeight, HeaderFetchCount, MessageClass, NetworkMessage, Request, ShardGroupId,
+};
 use sbor::prelude::BasicSbor;
 
 use crate::response::GetRemoteHeadersResponse;
 
 /// Server-enforced upper bound on `count`. Sized to match the block-sync
 /// window so the two protocols share batch granularity.
-pub const MAX_REMOTE_HEADERS_PER_REQUEST: u64 = 64;
+pub const MAX_REMOTE_HEADERS_PER_REQUEST: HeaderFetchCount = HeaderFetchCount(64);
 
 /// Request to fetch a contiguous range of committed block headers from a
 /// source shard.
@@ -27,7 +29,7 @@ pub struct GetRemoteHeadersRequest {
     /// First height to fetch (inclusive).
     pub from_height: BlockHeight,
     /// Maximum number of consecutive headers to return.
-    pub count: u64,
+    pub count: HeaderFetchCount,
 }
 
 impl NetworkMessage for GetRemoteHeadersRequest {
@@ -55,7 +57,7 @@ mod tests {
         let request = GetRemoteHeadersRequest {
             source_shard: ShardGroupId(2),
             from_height: BlockHeight(42),
-            count: 16,
+            count: HeaderFetchCount(16),
         };
 
         let encoded = basic_encode(&request).unwrap();
