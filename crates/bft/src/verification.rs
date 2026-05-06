@@ -873,15 +873,26 @@ impl VerificationPipeline {
     ) -> Vec<ReadyStateRootVerification> {
         std::mem::take(&mut self.ready_state_root_verifications)
             .into_iter()
-            .map(|pending| {
-                let parent_state_root = chain.parent_state_root(pending.parent_block_hash);
-                let finalized_waves = chain
+            .filter_map(|pending| {
+                // The pending block can be removed between queue-up and drain
+                // (a sibling verification fails, view change, etc.); the next
+                // `cleanup_old_state` evicts the stale entry but the drain may
+                // run first. Dispatching with empty `finalized_waves` would
+                // recompute the wrong state root against ghost inputs — skip.
+                let block = chain
                     .pending
                     .get(&pending.block_hash)
                     .and_then(PendingBlock::block)
-                    .map(|b| b.certificates().to_vec())
-                    .unwrap_or_default();
-                ReadyStateRootVerification {
+                    .or_else(|| {
+                        debug!(
+                            block_hash = ?pending.block_hash,
+                            "Skipping state root verification — pending block no longer present"
+                        );
+                        None
+                    })?;
+                let parent_state_root = chain.parent_state_root(pending.parent_block_hash);
+                let finalized_waves = block.certificates().to_vec();
+                Some(ReadyStateRootVerification {
                     block_hash: pending.block_hash,
                     parent_block_hash: pending.parent_block_hash,
                     parent_state_root,
@@ -890,7 +901,7 @@ impl VerificationPipeline {
                     expected_local_receipt_root: pending.expected_local_receipt_root,
                     finalized_waves,
                     block_height: pending.block_height,
-                }
+                })
             })
             .collect()
     }
@@ -1302,7 +1313,10 @@ mod tests {
 
         vp.initiate_state_root_verification(block_hash, &block, BlockHeight::GENESIS);
 
-        let pb = PendingBlock::from_complete_block(&block, vec![], vec![], LocalTimestamp::ZERO);
+        let mut pb =
+            PendingBlock::from_complete_block(&block, vec![], vec![], LocalTimestamp::ZERO);
+        pb.construct_block()
+            .expect("complete block constructs cleanly");
         let mut pending_with_block = HashMap::new();
         pending_with_block.insert(block_hash, pb);
         let certified = HashMap::new();
@@ -1330,5 +1344,34 @@ mod tests {
             &empty_pending,
         );
         assert!(vp.drain_ready_state_root_verifications(&chain2).is_empty());
+    }
+
+    #[test]
+    fn drain_skips_entries_whose_pending_block_is_gone() {
+        // A sibling verification can call `remove_pending_block` between
+        // queue-up and drain. Drain must skip the orphaned entry rather than
+        // dispatch with empty `finalized_waves` against the wrong inputs.
+        let mut vp = VerificationPipeline::new(BlockHeight::GENESIS);
+        let parent_block_hash = bh(b"parent");
+        let block = block_with(BlockHeight(1), parent_block_hash, 0, vec![]);
+        let block_hash = block.hash();
+
+        vp.initiate_state_root_verification(block_hash, &block, BlockHeight::GENESIS);
+
+        let empty_pending: HashMap<BlockHash, PendingBlock> = HashMap::new();
+        let certified = HashMap::new();
+        let chain = chain_view(
+            BlockHeight::GENESIS,
+            BlockHash::ZERO,
+            None,
+            &certified,
+            &empty_pending,
+        );
+
+        let out = vp.drain_ready_state_root_verifications(&chain);
+        assert!(
+            out.is_empty(),
+            "entry must be skipped when its pending block was removed"
+        );
     }
 }
