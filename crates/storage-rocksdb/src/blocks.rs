@@ -8,12 +8,12 @@ use hyperscale_types::{
     Block, BlockHeight, BlockMetadata, CertifiedBlock, FinalizedWave, Hash, ProvisionHash,
     QuorumCertificate, RoutableTransaction, TxHash, WaveCertificate, WaveId,
 };
-use rocksdb::WriteBatch;
+use rocksdb::{ColumnFamily, WriteBatch};
 
-use crate::column_families::{BlocksCf, CertificatesCf, TransactionsCf};
+use crate::column_families::{BlocksCf, CertificatesCf, ConsensusReceiptsCf, TransactionsCf};
 use crate::core::RocksDbStorage;
 use crate::metadata::{read_committed_hash, read_committed_height, read_committed_qc};
-use crate::typed_cf::{TypedCf, batch_put, batch_put_raw};
+use crate::typed_cf::{TypedCf, batch_put, batch_put_raw, get, multi_get};
 
 impl RocksDbStorage {
     /// Get a range of committed blocks [from, to).
@@ -141,11 +141,23 @@ impl RocksDbStorage {
     pub(crate) fn get_block_denormalized(&self, height: BlockHeight) -> Option<CertifiedBlock> {
         let start = Instant::now();
 
+        // Resolve column-family handles once for the whole reconstruction.
+        // Per-method `cf_get`/`cf_multi_get`/`get_consensus_receipt` would
+        // each invoke `self.cf()`, re-walking all 12 CFs through `RocksDB`'s
+        // name → handle map per call — and the per-receipt loop below would
+        // pay that cost N times.
+        let cf = self.cf();
+        let blocks_cf = BlocksCf::handle(&cf);
+        let transactions_cf = TransactionsCf::handle(&cf);
+        let certificates_cf = CertificatesCf::handle(&cf);
+        let consensus_cf = ConsensusReceiptsCf::handle(&cf);
+
         // 1. Get block metadata
-        let metadata: BlockMetadata = self.cf_get::<BlocksCf>(&height.0)?;
+        let metadata: BlockMetadata = get::<BlocksCf>(&*self.db, blocks_cf, &height.0)?;
 
         // 2. Batch-fetch transactions (preserving order)
-        let transactions = self.get_transactions_batch_ordered(&metadata.manifest.tx_hashes);
+        let transactions =
+            self.get_transactions_batch_ordered(transactions_cf, &metadata.manifest.tx_hashes);
 
         // Verify we got ALL transactions - return None if any are missing
         let total_expected = metadata.manifest.transaction_count();
@@ -160,7 +172,8 @@ impl RocksDbStorage {
         }
 
         // 3. Batch-fetch certificates (preserving order)
-        let certs = self.get_certificates_batch_ordered(&metadata.manifest.cert_ids);
+        let certs =
+            self.get_certificates_batch_ordered(certificates_cf, &metadata.manifest.cert_ids);
 
         // Verify we got ALL certificates - return None if any are missing
         if certs.len() != metadata.manifest.cert_ids.len() {
@@ -177,7 +190,10 @@ impl RocksDbStorage {
         let certificates: Option<Vec<Arc<FinalizedWave>>> = certs
             .into_iter()
             .map(|cert| {
-                FinalizedWave::reconstruct(cert, |h| self.get_consensus_receipt(h)).map(Arc::new)
+                FinalizedWave::reconstruct(cert, |h| {
+                    get::<ConsensusReceiptsCf>(&*self.db, consensus_cf, h.as_raw()).map(Arc::new)
+                })
+                .map(Arc::new)
             })
             .collect();
         let Some(certificates) = certificates else {
@@ -249,11 +265,19 @@ impl RocksDbStorage {
     ) -> Option<(Block, QuorumCertificate, Vec<ProvisionHash>)> {
         let start = Instant::now();
 
+        // Hoist for the same reason as `get_block_denormalized`.
+        let cf = self.cf();
+        let blocks_cf = BlocksCf::handle(&cf);
+        let transactions_cf = TransactionsCf::handle(&cf);
+        let certificates_cf = CertificatesCf::handle(&cf);
+        let consensus_cf = ConsensusReceiptsCf::handle(&cf);
+
         // 1. Get block metadata
-        let metadata: BlockMetadata = self.cf_get::<BlocksCf>(&height.0)?;
+        let metadata: BlockMetadata = get::<BlocksCf>(&*self.db, blocks_cf, &height.0)?;
 
         // 2. Try to batch-fetch transactions (preserving order)
-        let transactions = self.get_transactions_batch_ordered(&metadata.manifest.tx_hashes);
+        let transactions =
+            self.get_transactions_batch_ordered(transactions_cf, &metadata.manifest.tx_hashes);
 
         // Check if all transactions are present - if not, return None
         let total_expected = metadata.manifest.transaction_count();
@@ -270,7 +294,8 @@ impl RocksDbStorage {
         }
 
         // 3. Try to batch-fetch certificates (preserving order)
-        let certs = self.get_certificates_batch_ordered(&metadata.manifest.cert_ids);
+        let certs =
+            self.get_certificates_batch_ordered(certificates_cf, &metadata.manifest.cert_ids);
 
         // Check if all certificates are present - if not, return None
         if certs.len() != metadata.manifest.cert_ids.len() {
@@ -291,7 +316,10 @@ impl RocksDbStorage {
         let certificates: Option<Vec<Arc<FinalizedWave>>> = certs
             .into_iter()
             .map(|cert| {
-                FinalizedWave::reconstruct(cert, |h| self.get_consensus_receipt(h)).map(Arc::new)
+                FinalizedWave::reconstruct(cert, |h| {
+                    get::<ConsensusReceiptsCf>(&*self.db, consensus_cf, h.as_raw()).map(Arc::new)
+                })
+                .map(Arc::new)
             })
             .collect();
         let Some(certificates) = certificates else {
@@ -327,13 +355,17 @@ impl RocksDbStorage {
     /// Unlike `get_transactions_batch`, this returns results in the same order
     /// as the input hashes, with missing entries causing the result to be shorter.
     /// Callers should check that the result length matches the input length.
-    fn get_transactions_batch_ordered(&self, hashes: &[TxHash]) -> Vec<Arc<RoutableTransaction>> {
+    fn get_transactions_batch_ordered(
+        &self,
+        transactions_cf: &ColumnFamily,
+        hashes: &[TxHash],
+    ) -> Vec<Arc<RoutableTransaction>> {
         if hashes.is_empty() {
             return vec![];
         }
 
         let raw: Vec<Hash> = hashes.iter().map(|h| h.into_raw()).collect();
-        let results = self.cf_multi_get::<TransactionsCf>(&raw);
+        let results = multi_get::<TransactionsCf>(&*self.db, transactions_cf, &raw);
 
         results
             .into_iter()
@@ -353,12 +385,16 @@ impl RocksDbStorage {
     /// Unlike `get_certificates_batch`, this returns results in the same order
     /// as the input ids, with missing entries causing the result to be shorter.
     /// Callers should check that the result length matches the input length.
-    fn get_certificates_batch_ordered(&self, ids: &[WaveId]) -> Vec<Arc<WaveCertificate>> {
+    fn get_certificates_batch_ordered(
+        &self,
+        certificates_cf: &ColumnFamily,
+        ids: &[WaveId],
+    ) -> Vec<Arc<WaveCertificate>> {
         if ids.is_empty() {
             return vec![];
         }
 
-        let results = self.cf_multi_get::<CertificatesCf>(ids);
+        let results = multi_get::<CertificatesCf>(&*self.db, certificates_cf, ids);
 
         results
             .into_iter()
