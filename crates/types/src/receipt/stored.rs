@@ -100,12 +100,15 @@ impl Describe<NoCustomTypeKind> for StoredReceipt {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ApplicationEvent, DatabaseUpdates, FeeSummary, GlobalReceiptHash, Hash};
+    use crate::test_utils::test_event_type_identifier;
+    use crate::{
+        ApplicationEvent, DatabaseUpdates, EventData, FeeSummary, GlobalReceiptHash, Hash,
+    };
 
     fn make_event(seed: u8) -> ApplicationEvent {
         ApplicationEvent {
-            type_id: vec![seed],
-            data: vec![seed, seed + 1],
+            type_id: test_event_type_identifier(seed),
+            data: EventData(vec![seed, seed + 1]),
         }
     }
 

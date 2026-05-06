@@ -236,14 +236,16 @@ mod tests {
     use sbor::{BASIC_SBOR_V1_MAX_DEPTH, BASIC_SBOR_V1_PAYLOAD_PREFIX, VecEncoder};
 
     use super::*;
+    use crate::EventData;
+    use crate::test_utils::test_event_type_identifier;
 
     fn sample_succeeded() -> ConsensusReceipt {
         ConsensusReceipt::Succeeded {
             receipt_hash: GlobalReceiptHash::from_raw(Hash::from_bytes(b"r")),
             database_updates: DatabaseUpdates::default(),
             application_events: vec![ApplicationEvent {
-                type_id: vec![1, 2, 3],
-                data: vec![4, 5, 6],
+                type_id: test_event_type_identifier(1),
+                data: EventData(vec![4, 5, 6]),
             }],
         }
     }

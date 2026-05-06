@@ -18,15 +18,16 @@ pub mod stored;
 
 #[cfg(test)]
 mod tests {
+    use crate::test_utils::test_event_type_identifier;
     use crate::{
-        ApplicationEvent, ConsensusReceipt, DatabaseUpdates, EventRoot, GlobalReceipt,
+        ApplicationEvent, ConsensusReceipt, DatabaseUpdates, EventData, EventRoot, GlobalReceipt,
         GlobalReceiptHash, Hash, WritesRoot,
     };
 
     fn make_event(seed: u8) -> ApplicationEvent {
         ApplicationEvent {
-            type_id: vec![seed],
-            data: vec![seed, seed + 1],
+            type_id: test_event_type_identifier(seed),
+            data: EventData(vec![seed, seed + 1]),
         }
     }
 
@@ -74,8 +75,8 @@ mod tests {
         assert_eq!(event.hash(), event.hash());
 
         let same_event = ApplicationEvent {
-            type_id: vec![42],
-            data: vec![42, 43],
+            type_id: test_event_type_identifier(42),
+            data: EventData(vec![42, 43]),
         };
         assert_eq!(event.hash(), same_event.hash());
     }

@@ -1,6 +1,8 @@
 //! Application events, fee summary, log levels, and node-local execution metadata.
 
+use radix_common::data::scrypto::{scrypto_decode, scrypto_encode};
 use radix_common::math::Decimal;
+use radix_engine_interface::types::EventTypeIdentifier;
 use sbor::{
     Categorize, Decode, DecodeError, Decoder, Describe, Encode, EncodeError, Encoder,
     NoCustomTypeKind, NoCustomValueKind, RustTypeId, TypeData, TypeKind, ValueKind,
@@ -31,23 +33,38 @@ const MAX_DIAGNOSTIC_STRING_LEN: usize = 4 * 1024;
 /// prefix from a peer, no scrypto SBOR round-trip.
 const DECIMAL_BYTE_LEN: usize = Decimal::BITS / 8;
 
+/// SBOR-encoded event payload.
+///
+/// Opaque on the receiving end — the encoder handed us the bytes, we do not
+/// inspect them. Distinct from [`EventTypeIdentifier`] so an argument-order
+/// swap when constructing an [`ApplicationEvent`] fails to compile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventData(pub Vec<u8>);
+
 /// An application-level event emitted by Scrypto component logic.
 ///
 /// Events are identical across shards for the same transaction (they come from
 /// user logic which sees the same merged state on all shards).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplicationEvent {
-    /// SBOR-encoded event type identifier.
-    pub type_id: Vec<u8>,
+    /// Schema identifier for the event (emitter + event name).
+    pub type_id: EventTypeIdentifier,
     /// SBOR-encoded event payload.
-    pub data: Vec<u8>,
+    pub data: EventData,
 }
 
 impl ApplicationEvent {
     /// Compute a deterministic hash of this event.
+    ///
+    /// # Panics
+    ///
+    /// Panics if scrypto-encoding `type_id` fails — the type is a closed
+    /// Radix struct and encoding is infallible in practice.
     #[must_use]
     pub fn hash(&self) -> Hash {
-        Hash::from_parts(&[&self.type_id, &self.data])
+        let type_id_bytes = scrypto_encode(&self.type_id)
+            .expect("scrypto_encode(EventTypeIdentifier) is infallible for a valid struct");
+        Hash::from_parts(&[&type_id_bytes, &self.data.0])
     }
 }
 
@@ -57,9 +74,16 @@ impl<E: Encoder<NoCustomValueKind>> Encode<NoCustomValueKind, E> for Application
     }
 
     fn encode_body(&self, encoder: &mut E) -> Result<(), EncodeError> {
+        // `type_id` is scrypto-encoded to bytes and written as a `Vec<u8>` —
+        // basic-SBOR can't reach into the scrypto custom value kinds, so
+        // bytes is the universal carrier. `EventTypeIdentifier` is a closed
+        // Radix struct (address + strings), so encoding is infallible in
+        // practice; matches the `expect` in `ConsensusReceipt::local_receipt_hash`.
+        let type_id_bytes = scrypto_encode(&self.type_id)
+            .expect("scrypto_encode(EventTypeIdentifier) is infallible for a valid struct");
         encoder.write_size(2)?;
-        encoder.encode(&self.type_id)?;
-        encoder.encode(&self.data)?;
+        encoder.encode(&type_id_bytes)?;
+        encoder.encode(&self.data.0)?;
         Ok(())
     }
 }
@@ -77,8 +101,13 @@ impl<D: Decoder<NoCustomValueKind>> Decode<NoCustomValueKind, D> for Application
                 actual: length,
             });
         }
-        let type_id = decode_bounded_bytes(decoder, MAX_APPLICATION_EVENT_FIELD_LEN)?;
-        let data = decode_bounded_bytes(decoder, MAX_APPLICATION_EVENT_FIELD_LEN)?;
+        let type_id_bytes = decode_bounded_bytes(decoder, MAX_APPLICATION_EVENT_FIELD_LEN)?;
+        let type_id = scrypto_decode::<EventTypeIdentifier>(&type_id_bytes)
+            .map_err(|_| DecodeError::InvalidCustomValue)?;
+        let data = EventData(decode_bounded_bytes(
+            decoder,
+            MAX_APPLICATION_EVENT_FIELD_LEN,
+        )?);
         Ok(Self { type_id, data })
     }
 }
@@ -382,12 +411,13 @@ mod tests {
     };
 
     use super::*;
+    use crate::test_utils::test_event_type_identifier;
 
     #[test]
     fn application_event_roundtrip() {
         let ev = ApplicationEvent {
-            type_id: vec![1, 2, 3],
-            data: vec![4, 5, 6, 7],
+            type_id: test_event_type_identifier(7),
+            data: EventData(vec![4, 5, 6, 7]),
         };
         let bytes = basic_encode(&ev).unwrap();
         let decoded: ApplicationEvent = basic_decode(&bytes).unwrap();

@@ -85,7 +85,7 @@ pub use quorum_certificate::QuorumCertificate;
 pub use radix_substate_store_interface::interface::DatabaseUpdates;
 pub use receipt::consensus::{ConsensusReceipt, FAILED_RECEIPT_HASH};
 pub use receipt::global::GlobalReceipt;
-pub use receipt::metadata::{ApplicationEvent, ExecutionMetadata, FeeSummary, LogLevel};
+pub use receipt::metadata::{ApplicationEvent, EventData, ExecutionMetadata, FeeSummary, LogLevel};
 pub use receipt::stored::StoredReceipt;
 pub use signing::{
     DOMAIN_BLOCK_HEADER, DOMAIN_BLOCK_VOTE, DOMAIN_COMMITTED_BLOCK_HEADER, DOMAIN_EXEC_CERT_BATCH,

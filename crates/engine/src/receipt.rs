@@ -8,10 +8,9 @@
 //! happens here too, via [`crate::sharding`].
 
 use hyperscale_types::{
-    ApplicationEvent, ConsensusReceipt, EventRoot, ExecutionMetadata, FeeSummary, GlobalReceipt,
-    Hash, LogLevel, NodeId, RoutableTransaction, ShardGroupId, compute_merkle_root,
+    ApplicationEvent, ConsensusReceipt, EventData, EventRoot, ExecutionMetadata, FeeSummary,
+    GlobalReceipt, Hash, LogLevel, NodeId, RoutableTransaction, ShardGroupId, compute_merkle_root,
 };
-use radix_common::data::scrypto::scrypto_encode;
 use radix_engine::transaction::{
     CommitResult, TransactionOutcome, TransactionReceipt, TransactionResult,
 };
@@ -145,14 +144,9 @@ fn extract_application_events(commit: &CommitResult) -> Vec<ApplicationEvent> {
     commit
         .application_events
         .iter()
-        .map(|(type_id, data)| {
-            // SBOR-encode the EventTypeIdentifier for type_id bytes.
-            let type_id_bytes =
-                scrypto_encode(type_id).unwrap_or_else(|_| format!("{type_id:?}").into_bytes());
-            ApplicationEvent {
-                type_id: type_id_bytes,
-                data: data.clone(),
-            }
+        .map(|(type_id, data)| ApplicationEvent {
+            type_id: type_id.clone(),
+            data: EventData(data.clone()),
         })
         .collect()
 }

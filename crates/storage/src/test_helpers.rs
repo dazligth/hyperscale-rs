@@ -7,13 +7,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use hyperscale_types::test_utils::test_event_type_identifier;
 use hyperscale_types::{
     ApplicationEvent, Block, BlockHash, BlockHeader, BlockHeight, Bls12381G2Signature,
-    CertificateRoot, ConsensusReceipt, ExecutionCertificate, ExecutionMetadata, ExecutionOutcome,
-    FeeSummary, FinalizedWave, GlobalReceiptHash, GlobalReceiptRoot, Hash, InFlightCount,
-    LocalReceiptRoot, LogLevel, NodeId, ProposerTimestamp, ProvisionsRoot, QuorumCertificate,
-    Round, ShardGroupId, SignerBitfield, StateRoot, StoredReceipt, TransactionRoot, TxHash,
-    TxOutcome, ValidatorId, WaveCertificate, WaveId, WeightedTimestamp,
+    CertificateRoot, ConsensusReceipt, EventData, ExecutionCertificate, ExecutionMetadata,
+    ExecutionOutcome, FeeSummary, FinalizedWave, GlobalReceiptHash, GlobalReceiptRoot, Hash,
+    InFlightCount, LocalReceiptRoot, LogLevel, NodeId, ProposerTimestamp, ProvisionsRoot,
+    QuorumCertificate, Round, ShardGroupId, SignerBitfield, StateRoot, StoredReceipt,
+    TransactionRoot, TxHash, TxOutcome, ValidatorId, WaveCertificate, WaveId, WeightedTimestamp,
     compute_global_receipt_root, zero_bls_signature,
 };
 use indexmap::IndexMap;
@@ -164,8 +165,8 @@ pub fn make_test_receipt(seed: u8) -> StoredReceipt {
         receipt_hash: GlobalReceiptHash::ZERO,
         database_updates: DatabaseUpdates::default(),
         application_events: vec![ApplicationEvent {
-            type_id: vec![seed],
-            data: vec![seed, seed + 1],
+            type_id: test_event_type_identifier(seed),
+            data: EventData(vec![seed, seed + 1]),
         }],
     };
     let metadata = Some(ExecutionMetadata {

@@ -1,7 +1,10 @@
 //! Test utilities.
 
+use radix_common::constants::PACKAGE_PACKAGE;
 use radix_common::crypto::{Ed25519PublicKey, Ed25519Signature, PublicKey as RadixPublicKey};
 use radix_common::prelude::Epoch;
+use radix_common::types::BlueprintId;
+use radix_engine_interface::types::{Emitter, EventTypeIdentifier};
 use radix_transactions::model::{
     BlobsV1, InstructionsV1, IntentSignaturesV1, IntentV1, MessageV1, NotarizedTransactionV1,
     NotarySignatureV1, SignatureV1, SignedIntentV1, TransactionHeaderV1, UserTransaction,
@@ -13,6 +16,23 @@ use crate::{NodeId, RoutableTransaction, TimestampRange, WeightedTimestamp};
 #[must_use]
 pub const fn test_node(seed: u8) -> NodeId {
     NodeId([seed; 30])
+}
+
+/// Create a deterministic [`EventTypeIdentifier`] for tests.
+///
+/// Uses the well-known `PACKAGE_PACKAGE` address so the underlying
+/// `PackageAddress` constructor accepts the bytes; the seed varies the
+/// blueprint and event names so different seeds produce different identifiers
+/// (and therefore different event hashes).
+#[must_use]
+pub fn test_event_type_identifier(seed: u8) -> EventTypeIdentifier {
+    EventTypeIdentifier(
+        Emitter::Function(BlueprintId::new(
+            &PACKAGE_PACKAGE,
+            format!("TestBlueprint{seed}"),
+        )),
+        format!("TestEvent{seed}"),
+    )
 }
 
 /// Create a minimal test `NotarizedTransactionV1` from seed bytes.

@@ -23,7 +23,7 @@ radix-substate-store-interface.workspace = true
 indexmap.workspace = true
 
 [features]
-test-utils = []
+test-utils = ["hyperscale-types/test-utils"]
 
 [dev-dependencies]
 hyperscale-dispatch-sync.workspace = true
