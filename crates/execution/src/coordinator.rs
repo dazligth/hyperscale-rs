@@ -47,8 +47,8 @@ use hyperscale_types::{
     Attempt, Block, BlockHash, BlockHeader, BlockHeight, BloomFilter, CertifiedBlock,
     ExecutionCertificate, ExecutionVote, FinalizedWave, GlobalReceiptRoot, Hash, NodeId,
     Provisions, RoutableTransaction, ShardGroupId, StoredReceipt, TopologySnapshot, TxHash,
-    TxOutcome, ValidatorId, WAVE_TIMEOUT, WaveCertificate, WaveId, WeightedTimestamp, wave_leader,
-    wave_leader_at,
+    TxOutcome, ValidatorId, VotePower, WAVE_TIMEOUT, WaveCertificate, WaveId, WeightedTimestamp,
+    wave_leader, wave_leader_at,
 };
 use tracing::instrument;
 
@@ -859,7 +859,7 @@ impl ExecutionCoordinator {
         topology: &TopologySnapshot,
         wave_id: WaveId,
         block_hash: BlockHash,
-        verified_votes: Vec<(ExecutionVote, u64)>,
+        verified_votes: Vec<(ExecutionVote, VotePower)>,
     ) -> Vec<Action> {
         let Some(tracker) = self.waves.get_tracker_mut(&wave_id) else {
             return vec![];
@@ -883,7 +883,7 @@ impl ExecutionCoordinator {
                 block_hash = ?block_hash,
                 wave = %wave_id,
                 global_receipt_root_split = ?summary,
-                quorum = topology.local_quorum_threshold(),
+                quorum = topology.local_quorum_threshold().0,
                 "Execution vote quorum blocked: global receipt roots are split across validators"
             );
         }
@@ -2051,7 +2051,8 @@ mod tests {
     use hyperscale_types::test_utils::test_transaction;
     use hyperscale_types::{
         Bls12381G1PrivateKey, ConsensusReceipt, ExecutionOutcome, GlobalReceiptHash, Hash,
-        SignerBitfield, ValidatorInfo, ValidatorSet, generate_bls_keypair, zero_bls_signature,
+        SignerBitfield, ValidatorInfo, ValidatorSet, VotePower, generate_bls_keypair,
+        zero_bls_signature,
     };
 
     use super::*;
@@ -2065,7 +2066,7 @@ mod tests {
             .map(|(i, k)| ValidatorInfo {
                 validator_id: ValidatorId(i as u64),
                 public_key: k.public_key(),
-                voting_power: 1,
+                voting_power: VotePower(1),
             })
             .collect();
         let validator_set = ValidatorSet::new(validators);
@@ -2140,7 +2141,7 @@ mod tests {
             .map(|(i, k)| ValidatorInfo {
                 validator_id: ValidatorId(i as u64),
                 public_key: k.public_key(),
-                voting_power: 1,
+                voting_power: VotePower(1),
             })
             .collect();
         let validator_set = ValidatorSet::new(validators);
@@ -2884,7 +2885,7 @@ mod tests {
             .map(|(i, k)| ValidatorInfo {
                 validator_id: ValidatorId(i as u64),
                 public_key: k.public_key(),
-                voting_power: 1,
+                voting_power: VotePower(1),
             })
             .collect();
         TopologySnapshot::new(ValidatorId(0), 2, ValidatorSet::new(validators))

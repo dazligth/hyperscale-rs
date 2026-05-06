@@ -25,8 +25,8 @@ use hyperscale_types::{
     FinalizedWave, GlobalReceiptHash, GlobalReceiptRoot, LocalReceiptRoot, ProposerTimestamp,
     ProvisionsRoot, QuorumCertificate, Round, RoutableTransaction, ShardGroupId, SignerBitfield,
     StateRoot, TopologySnapshot, TransactionDecision, TransactionRoot, TxHash, TxOutcome,
-    ValidatorId, ValidatorInfo, ValidatorSet, WaveCertificate, WaveId, WeightedTimestamp,
-    bls_keypair_from_seed,
+    ValidatorId, ValidatorInfo, ValidatorSet, VotePower, WaveCertificate, WaveId,
+    WeightedTimestamp, bls_keypair_from_seed,
 };
 
 /// A test committee of validators with deterministic BLS keypairs.
@@ -196,7 +196,7 @@ impl TestCommittee {
             .map(|i| ValidatorInfo {
                 validator_id: self.validator_id(i),
                 public_key: *self.public_key(i),
-                voting_power: 1,
+                voting_power: VotePower(1),
             })
             .collect();
         let validator_set = ValidatorSet::new(validators);

@@ -100,7 +100,7 @@ impl TopologyCoordinator {
 
 #[cfg(test)]
 mod tests {
-    use hyperscale_types::{ValidatorInfo, ValidatorSet, generate_bls_keypair};
+    use hyperscale_types::{ValidatorInfo, ValidatorSet, VotePower, generate_bls_keypair};
 
     use super::*;
 
@@ -108,7 +108,7 @@ mod tests {
         ValidatorInfo {
             validator_id: ValidatorId(id),
             public_key: generate_bls_keypair().public_key(),
-            voting_power: power,
+            voting_power: VotePower(power),
         }
     }
 

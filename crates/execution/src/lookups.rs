@@ -34,7 +34,7 @@ pub fn peers_excluding_self(topology: &TopologySnapshot, shard: ShardGroupId) ->
 pub fn ec_has_shard_quorum_power(topology: &TopologySnapshot, ec: &ExecutionCertificate) -> bool {
     let shard = ec.shard_group_id();
     let committee = topology.committee_for_shard(shard);
-    let signers_power: u64 = ec
+    let signers_power: VotePower = ec
         .signers
         .set_indices()
         .filter_map(|i| committee.get(i))
@@ -67,7 +67,7 @@ pub fn committee_public_keys_for_shard(
 #[cfg(test)]
 mod tests {
     use hyperscale_test_helpers::TestCommittee;
-    use hyperscale_types::{ValidatorInfo, ValidatorSet};
+    use hyperscale_types::{ValidatorInfo, ValidatorSet, VotePower};
 
     use super::*;
 
@@ -76,7 +76,7 @@ mod tests {
             .map(|i| ValidatorInfo {
                 validator_id: committee.validator_id(i),
                 public_key: *committee.public_key(i),
-                voting_power: 1,
+                voting_power: VotePower(1),
             })
             .collect();
         let validator_set = ValidatorSet::new(validators);

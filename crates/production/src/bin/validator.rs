@@ -67,7 +67,7 @@ use hyperscale_storage_rocksdb::{
 use hyperscale_topology::TopologyCoordinator;
 use hyperscale_types::{
     Bls12381G1PrivateKey, Bls12381G1PublicKey, ShardGroupId, ValidatorId, ValidatorInfo,
-    ValidatorSet, bls_keypair_from_seed, generate_bls_keypair,
+    ValidatorSet, VotePower, bls_keypair_from_seed, generate_bls_keypair,
 };
 use igd_next::aio::tokio::search_gateway;
 use igd_next::{PortMappingProtocol, SearchOptions};
@@ -652,7 +652,7 @@ fn build_topology(
         vec![ValidatorInfo {
             validator_id: local_validator_id,
             public_key: local_keypair.public_key(),
-            voting_power: 1,
+            voting_power: VotePower(1),
         }]
     } else {
         config
@@ -685,7 +685,7 @@ fn build_topology(
                 Ok(ValidatorInfo {
                     validator_id: ValidatorId(v.id),
                     public_key,
-                    voting_power: v.voting_power,
+                    voting_power: VotePower(v.voting_power),
                 })
             })
             .collect::<Result<Vec<_>>>()?
@@ -1210,7 +1210,7 @@ async fn async_main(cli: Cli, config: ValidatorConfig) -> Result<()> {
     let topology = build_topology(&config, &signing_keypair)?;
     info!(
         committee_size = topology.snapshot().local_committee_size(),
-        quorum_threshold = topology.snapshot().local_quorum_threshold(),
+        quorum_threshold = topology.snapshot().local_quorum_threshold().0,
         "Topology initialized"
     );
 

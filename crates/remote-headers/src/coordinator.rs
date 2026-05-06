@@ -17,7 +17,8 @@ use std::time::Duration;
 use hyperscale_core::{Action, ProtocolEvent};
 use hyperscale_types::{
     BlockHeight, Bls12381G1PublicKey, CertifiedBlock, CommittedBlockHeader,
-    REMOTE_HEADER_RETENTION, ShardGroupId, TopologySnapshot, ValidatorId, WeightedTimestamp,
+    REMOTE_HEADER_RETENTION, ShardGroupId, TopologySnapshot, ValidatorId, VotePower,
+    WeightedTimestamp,
 };
 use tracing::{debug, info, trace, warn};
 
@@ -556,7 +557,7 @@ impl RemoteHeaderCoordinator {
                     .expect("committee member must have public key")
             })
             .collect();
-        let committee_voting_power: Vec<u64> = committee
+        let committee_voting_power: Vec<VotePower> = committee
             .iter()
             .map(|v| {
                 topology

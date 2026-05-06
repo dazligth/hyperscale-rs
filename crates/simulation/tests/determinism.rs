@@ -1503,7 +1503,7 @@ fn test_cross_shard_transaction_detection() {
     use hyperscale_topology::TopologyCoordinator;
     use hyperscale_types::test_utils::{test_node, test_transaction_with_nodes};
     use hyperscale_types::{
-        Bls12381G1PrivateKey, ShardGroupId, ValidatorId, ValidatorInfo, ValidatorSet,
+        Bls12381G1PrivateKey, ShardGroupId, ValidatorId, ValidatorInfo, ValidatorSet, VotePower,
         generate_bls_keypair,
     };
 
@@ -1515,7 +1515,7 @@ fn test_cross_shard_transaction_detection() {
         .map(|(i, k)| ValidatorInfo {
             validator_id: ValidatorId(i as u64),
             public_key: k.public_key(),
-            voting_power: 1,
+            voting_power: VotePower(1),
         })
         .collect();
     let validator_set = ValidatorSet::new(validators);

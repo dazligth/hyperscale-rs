@@ -11,7 +11,7 @@ use hyperscale_types::{
     Block, BlockHash, BlockHeader, BlockHeight, BlockManifest, BlockVote, CertifiedBlock,
     CommittedBlockHeader, ExecutionCertificate, ExecutionVote, FinalizedWave, Provisions,
     QuorumCertificate, Round, RoutableTransaction, ShardGroupId, StoredReceipt, TxOutcome,
-    ValidatorId, WaveId, WeightedTimestamp,
+    ValidatorId, VotePower, WaveId, WeightedTimestamp,
 };
 
 /// How a node learned about the certifying QC that commits a given block.
@@ -161,7 +161,7 @@ pub enum ProtocolEvent {
         /// The QC if quorum was reached, or `None` if not.
         qc: Option<QuorumCertificate>,
         /// Verified votes, returned for accumulation when no QC was built.
-        verified_votes: Vec<(usize, BlockVote, u64)>,
+        verified_votes: Vec<(usize, BlockVote, VotePower)>,
     },
 
     /// QC signature verification completed.
@@ -323,7 +323,7 @@ pub enum ProtocolEvent {
         /// Source block hash for correlation.
         block_hash: BlockHash,
         /// Verified votes paired with their voting power.
-        verified_votes: Vec<(ExecutionVote, u64)>,
+        verified_votes: Vec<(ExecutionVote, VotePower)>,
     },
 
     /// Execution certificate aggregation completed.

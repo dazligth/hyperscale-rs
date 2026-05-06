@@ -1,7 +1,8 @@
 //! Domain-specific identifier types.
 
 use std::fmt::{self, Display};
-use std::ops::{Add, AddAssign, Sub};
+use std::iter::Sum;
+use std::ops::{Add, AddAssign, Sub, SubAssign};
 
 use hex::encode as hex_encode;
 use sbor::prelude::*;
@@ -214,7 +215,10 @@ impl Display for Attempt {
 pub struct VotePower(pub u64);
 
 impl VotePower {
-    /// Minimum vote power.
+    /// Zero vote power — used as an accumulator initial value.
+    pub const ZERO: Self = Self(0);
+
+    /// Minimum positive vote power.
     pub const MIN: Self = Self(1);
 
     /// Create from u64, ensuring it's at least 1.
@@ -225,20 +229,67 @@ impl VotePower {
 
     /// Get the raw value.
     #[must_use]
-    pub const fn get(&self) -> u64 {
+    pub const fn get(self) -> u64 {
         self.0
     }
 
-    /// Calculate total vote power from a list.
+    /// Saturating addition.
     #[must_use]
-    pub fn sum(powers: &[Self]) -> u64 {
-        powers.iter().map(|p| p.0).sum()
+    pub const fn saturating_add(self, rhs: Self) -> Self {
+        Self(self.0.saturating_add(rhs.0))
     }
 
-    /// Calculate if we have 2f+1 quorum (>2/3 of total).
+    /// Calculate if `voted` constitutes 2f+1 quorum (>2/3 of `total`).
     #[must_use]
-    pub const fn has_quorum(voted: u64, total: u64) -> bool {
-        (voted as u128) * 3 > (total as u128) * 2
+    pub const fn has_quorum(voted: Self, total: Self) -> bool {
+        (voted.0 as u128) * 3 > (total.0 as u128) * 2
+    }
+
+    /// Minimum voting power required for 2f+1 quorum out of `total`.
+    ///
+    /// Equivalent to `total * 2 / 3 + 1` but divides first so the multiply
+    /// cannot overflow when `total` is near `u64::MAX`.
+    #[must_use]
+    pub const fn quorum_threshold(total: Self) -> Self {
+        Self(total.0 / 3 * 2 + (total.0 % 3) * 2 / 3 + 1)
+    }
+}
+
+impl Add for VotePower {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self {
+        Self(self.0 + rhs.0)
+    }
+}
+
+impl AddAssign for VotePower {
+    fn add_assign(&mut self, rhs: Self) {
+        self.0 += rhs.0;
+    }
+}
+
+impl Sub for VotePower {
+    type Output = Self;
+    fn sub(self, rhs: Self) -> Self {
+        Self(self.0 - rhs.0)
+    }
+}
+
+impl SubAssign for VotePower {
+    fn sub_assign(&mut self, rhs: Self) {
+        self.0 -= rhs.0;
+    }
+}
+
+impl Sum for VotePower {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(Self::ZERO, Add::add)
+    }
+}
+
+impl<'a> Sum<&'a Self> for VotePower {
+    fn sum<I: Iterator<Item = &'a Self>>(iter: I) -> Self {
+        iter.copied().fold(Self::ZERO, Add::add)
     }
 }
 
@@ -317,64 +368,59 @@ mod tests {
 
     #[test]
     fn test_vote_power_quorum() {
-        let total = 4;
+        let total = VotePower(4);
 
-        assert!(!VotePower::has_quorum(2, total)); // 2/4 = 50% (not enough)
-        assert!(VotePower::has_quorum(3, total)); // 3/4 = 75% (quorum!)
-        assert!(VotePower::has_quorum(4, total)); // 4/4 = 100% (quorum!)
+        assert!(!VotePower::has_quorum(VotePower(2), total)); // 2/4 = 50% (not enough)
+        assert!(VotePower::has_quorum(VotePower(3), total)); // 3/4 = 75% (quorum!)
+        assert!(VotePower::has_quorum(VotePower(4), total)); // 4/4 = 100% (quorum!)
     }
 
     #[test]
     fn test_vote_power_quorum_boundary_conditions() {
         // BFT safety requires STRICTLY GREATER than 2/3
         // Formula: voted * 3 > total * 2
+        let q = |v, t| VotePower::has_quorum(VotePower(v), VotePower(t));
 
         // Exact 2/3 should NOT be quorum (need > 2/3)
         // 6/9 = 2/3 exactly: 6*3 = 18, 9*2 = 18, 18 > 18 is false
-        assert!(
-            !VotePower::has_quorum(6, 9),
-            "Exactly 2/3 should not be quorum"
-        );
+        assert!(!q(6, 9), "Exactly 2/3 should not be quorum");
 
         // Just over 2/3 should be quorum
         // 7/10 = 70%: 7*3 = 21, 10*2 = 20, 21 > 20 is true
-        assert!(
-            VotePower::has_quorum(7, 10),
-            "Just over 2/3 should be quorum"
-        );
+        assert!(q(7, 10), "Just over 2/3 should be quorum");
 
         // Just under 2/3 should NOT be quorum
         // 6/10 = 60%: 6*3 = 18, 10*2 = 20, 18 > 20 is false
-        assert!(!VotePower::has_quorum(6, 10), "60% should not be quorum");
+        assert!(!q(6, 10), "60% should not be quorum");
 
         // Edge case: total of 3 (smallest BFT)
         // Need > 2/3, so need > 2 votes = 3 votes
-        assert!(!VotePower::has_quorum(2, 3), "2/3 should not be quorum");
-        assert!(VotePower::has_quorum(3, 3), "3/3 should be quorum");
+        assert!(!q(2, 3), "2/3 should not be quorum");
+        assert!(q(3, 3), "3/3 should be quorum");
 
         // Edge case: total of 1
-        assert!(VotePower::has_quorum(1, 1), "1/1 should be quorum");
-        assert!(!VotePower::has_quorum(0, 1), "0/1 should not be quorum");
+        assert!(q(1, 1), "1/1 should be quorum");
+        assert!(!q(0, 1), "0/1 should not be quorum");
 
         // Edge case: zero total (degenerate)
-        assert!(!VotePower::has_quorum(0, 0), "0/0 should not be quorum");
+        assert!(!q(0, 0), "0/0 should not be quorum");
 
         // Common committee sizes
         // n=4: need > 8/3 = 2.67, so need 3
-        assert!(!VotePower::has_quorum(2, 4));
-        assert!(VotePower::has_quorum(3, 4));
+        assert!(!q(2, 4));
+        assert!(q(3, 4));
 
         // n=7: need > 14/3 = 4.67, so need 5
-        assert!(!VotePower::has_quorum(4, 7));
-        assert!(VotePower::has_quorum(5, 7));
+        assert!(!q(4, 7));
+        assert!(q(5, 7));
 
         // n=10: need > 20/3 = 6.67, so need 7
-        assert!(!VotePower::has_quorum(6, 10));
-        assert!(VotePower::has_quorum(7, 10));
+        assert!(!q(6, 10));
+        assert!(q(7, 10));
 
         // n=100: need > 200/3 = 66.67, so need 67
-        assert!(!VotePower::has_quorum(66, 100));
-        assert!(VotePower::has_quorum(67, 100));
+        assert!(!q(66, 100));
+        assert!(q(67, 100));
     }
 
     #[test]
@@ -391,7 +437,7 @@ mod tests {
         // total * 2 = (max/3 + 1) * 2 = 2*max/3 + 2
         // max > 2*max/3 + 2 is true
         assert!(
-            VotePower::has_quorum(max_safe_voted, max_safe_voted + 1),
+            VotePower::has_quorum(VotePower(max_safe_voted), VotePower(max_safe_voted + 1)),
             "Large values near u64::MAX/3 should work"
         );
 
@@ -399,31 +445,33 @@ mod tests {
         // voting powers near u64::MAX cannot overflow. This guard pins the
         // edge case so a future regression to plain u64 multiplication
         // would surface here.
-        assert!(VotePower::has_quorum(u64::MAX, u64::MAX));
-        assert!(!VotePower::has_quorum(0, u64::MAX));
+        assert!(VotePower::has_quorum(
+            VotePower(u64::MAX),
+            VotePower(u64::MAX)
+        ));
+        assert!(!VotePower::has_quorum(VotePower::ZERO, VotePower(u64::MAX)));
     }
 
     #[test]
     fn test_vote_power_quorum_unequal_distribution() {
         // Test quorum with realistic unequal voting power distributions
         // In practice, validators may have different stakes
+        let q = |v, t| VotePower::has_quorum(VotePower(v), VotePower(t));
 
         // Scenario: 4 validators with powers [3, 2, 2, 1] = 8 total
         // Need > 16/3 = 5.33, so need 6 power for quorum
-        let total = 8;
-        assert!(!VotePower::has_quorum(5, total), "5/8 should not be quorum");
-        assert!(VotePower::has_quorum(6, total), "6/8 should be quorum");
+        assert!(!q(5, 8), "5/8 should not be quorum");
+        assert!(q(6, 8), "6/8 should be quorum");
 
         // Byzantine scenario: One validator has 40% power
         // 4 validators: [4, 2, 2, 2] = 10 total
         // Need > 20/3 = 6.67, so need 7 power
         // If Byzantine (power 4) colludes with one honest (power 2), they have 6 (not enough)
-        let total = 10;
         assert!(
-            !VotePower::has_quorum(6, total),
+            !q(6, 10),
             "Byzantine + 1 honest (6/10) should not be quorum"
         );
-        assert!(VotePower::has_quorum(7, total), "7/10 should be quorum");
+        assert!(q(7, 10), "7/10 should be quorum");
     }
 
     #[test]

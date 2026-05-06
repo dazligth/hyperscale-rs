@@ -36,7 +36,7 @@ pub struct QcVerificationResult {
     pub qc: Option<QuorumCertificate>,
     /// Verified votes returned when no QC was formed (for accumulation across rounds).
     /// Empty when a QC is successfully built.
-    pub verified_votes: Vec<(usize, BlockVote, u64)>,
+    pub verified_votes: Vec<(usize, BlockVote, VotePower)>,
 }
 
 /// Verify block votes and build a quorum certificate if quorum is reached.
@@ -58,9 +58,9 @@ pub fn verify_and_build_qc(
     round: Round,
     parent_block_hash: BlockHash,
     parent_weighted_timestamp: WeightedTimestamp,
-    votes_to_verify: Vec<(usize, BlockVote, Bls12381G1PublicKey, u64)>,
-    already_verified: Vec<(usize, BlockVote, u64)>,
-    total_voting_power: u64,
+    votes_to_verify: Vec<(usize, BlockVote, Bls12381G1PublicKey, VotePower)>,
+    already_verified: Vec<(usize, BlockVote, VotePower)>,
+    total_voting_power: VotePower,
 ) -> QcVerificationResult {
     let signing_message = block_vote_message(shard_group_id, height, round, &block_hash);
 
@@ -71,7 +71,7 @@ pub fn verify_and_build_qc(
         already_verified,
     );
 
-    let verified_power: u64 = all_verified.iter().map(|(_, _, power)| power).sum();
+    let verified_power: VotePower = all_verified.iter().map(|(_, _, power)| *power).sum();
     if all_verified.is_empty() || !VotePower::has_quorum(verified_power, total_voting_power) {
         return QcVerificationResult {
             block_hash,
@@ -107,9 +107,9 @@ pub fn verify_and_build_qc(
 pub fn verify_vote_batch(
     block_hash: BlockHash,
     signing_message: &[u8],
-    votes_to_verify: Vec<(usize, BlockVote, Bls12381G1PublicKey, u64)>,
-    already_verified: Vec<(usize, BlockVote, u64)>,
-) -> Vec<(usize, BlockVote, u64)> {
+    votes_to_verify: Vec<(usize, BlockVote, Bls12381G1PublicKey, VotePower)>,
+    already_verified: Vec<(usize, BlockVote, VotePower)>,
+) -> Vec<(usize, BlockVote, VotePower)> {
     let mut all_verified = already_verified;
 
     if votes_to_verify.is_empty() {
@@ -166,7 +166,7 @@ pub fn build_qc_from_verified(
     round: Round,
     parent_block_hash: BlockHash,
     parent_weighted_timestamp: WeightedTimestamp,
-    verified_votes: &[(usize, BlockVote, u64)],
+    verified_votes: &[(usize, BlockVote, VotePower)],
 ) -> Option<QuorumCertificate> {
     let mut sorted: Vec<_> = verified_votes.to_vec();
     sorted.sort_by_key(|(idx, _, _)| *idx);
@@ -184,7 +184,7 @@ pub fn build_qc_from_verified(
     let max_idx = sorted.iter().map(|(idx, _, _)| *idx).max().unwrap_or(0);
     let mut signers = SignerBitfield::new(max_idx + 1);
     let mut timestamp_weight_sum: u128 = 0;
-    let mut verified_power: u64 = 0;
+    let mut verified_power = VotePower::ZERO;
     for (idx, vote, power) in &sorted {
         signers.set(*idx);
         // Per-vote monotonicity clamp: a vote timestamp below parent's
@@ -192,15 +192,15 @@ pub fn build_qc_from_verified(
         // raised to the floor before aggregation, so the resulting QC's
         // `weighted_timestamp` is guaranteed >= parent's.
         let clamped_ms = vote.timestamp.as_millis().max(floor_ms);
-        timestamp_weight_sum += u128::from(clamped_ms) * u128::from(*power);
+        timestamp_weight_sum += u128::from(clamped_ms) * u128::from(power.0);
         verified_power += *power;
     }
 
-    let weighted_timestamp_ms = if verified_power == 0 {
+    let weighted_timestamp_ms = if verified_power == VotePower::ZERO {
         0
     } else {
         // Mean of u64 timestamps weighted by u64 powers always fits in u64.
-        u64::try_from(timestamp_weight_sum / u128::from(verified_power)).unwrap_or(u64::MAX)
+        u64::try_from(timestamp_weight_sum / u128::from(verified_power.0)).unwrap_or(u64::MAX)
     };
 
     Some(QuorumCertificate {
@@ -622,7 +622,7 @@ where
             let start = std::time::Instant::now();
             let qc_valid = verify_qc_signature(&committed_header.qc, &committee_public_keys);
             let valid = if qc_valid {
-                let total_power: u64 = committed_header
+                let total_power: VotePower = committed_header
                     .qc
                     .signers
                     .set_indices()
@@ -975,7 +975,7 @@ mod tests {
         let keys = keypairs(2);
         let block_hash = BlockHash::from_raw(Hash::from_bytes(b"block"));
         let v = make_vote(&keys, 0, block_hash, BlockHeight(1), Round::INITIAL, 1000);
-        let already = vec![(0usize, v, 1u64)];
+        let already = vec![(0usize, v, VotePower(1))];
         let out = verify_vote_batch(block_hash, b"msg", Vec::new(), already.clone());
         assert_eq!(out.len(), already.len());
     }
@@ -991,7 +991,7 @@ mod tests {
         let to_verify: Vec<_> = (0..3)
             .map(|i| {
                 let vote = make_vote(&keys, i, block_hash, height, round, 1000);
-                (i, vote, keys[i].public_key(), 1u64)
+                (i, vote, keys[i].public_key(), VotePower(1))
             })
             .collect();
 
@@ -1018,14 +1018,14 @@ mod tests {
                 0usize,
                 make_vote(&keys, 0, block_hash, height, round, 1000),
                 keys[0].public_key(),
-                1u64,
+                VotePower(1),
             ),
-            (1usize, bad_vote, keys[1].public_key(), 1u64),
+            (1usize, bad_vote, keys[1].public_key(), VotePower(1)),
             (
                 2usize,
                 make_vote(&keys, 2, block_hash, height, round, 1000),
                 keys[2].public_key(),
-                1u64,
+                VotePower(1),
             ),
         ];
 
@@ -1042,7 +1042,7 @@ mod tests {
         let to_verify: Vec<_> = (0..2)
             .map(|i| {
                 let vote = make_vote(&keys, i, block_hash, BlockHeight(1), Round::INITIAL, 1000);
-                (i, vote, keys[i].public_key(), 1u64)
+                (i, vote, keys[i].public_key(), VotePower(1))
             })
             .collect();
         let out = verify_vote_batch(block_hash, wrong_msg, to_verify, Vec::new());
@@ -1062,7 +1062,7 @@ mod tests {
         let verified: Vec<_> = (0..3)
             .map(|i| {
                 let vote = make_vote(&keys, i, block_hash, height, round, 1000);
-                (i, vote, 1u64)
+                (i, vote, VotePower(1))
             })
             .collect();
 
@@ -1093,7 +1093,7 @@ mod tests {
             .into_iter()
             .map(|i: usize| {
                 let vote = make_vote(&keys, i, block_hash, BlockHeight(1), Round::INITIAL, 1000);
-                (i, vote, 1u64)
+                (i, vote, VotePower(1))
             })
             .collect();
 
@@ -1121,17 +1121,17 @@ mod tests {
             (
                 0,
                 make_vote(&keys, 0, block_hash, BlockHeight(1), Round::INITIAL, 1000),
-                1u64,
+                VotePower(1),
             ),
             (
                 1,
                 make_vote(&keys, 1, block_hash, BlockHeight(1), Round::INITIAL, 2000),
-                2u64,
+                VotePower(2),
             ),
             (
                 2,
                 make_vote(&keys, 2, block_hash, BlockHeight(1), Round::INITIAL, 3000),
-                3u64,
+                VotePower(3),
             ),
         ];
 
@@ -1161,17 +1161,17 @@ mod tests {
             (
                 0,
                 make_vote(&keys, 0, block_hash, BlockHeight(1), Round::INITIAL, 500),
-                1u64,
+                VotePower(1),
             ),
             (
                 1,
                 make_vote(&keys, 1, block_hash, BlockHeight(1), Round::INITIAL, 800),
-                1u64,
+                VotePower(1),
             ),
             (
                 2,
                 make_vote(&keys, 2, block_hash, BlockHeight(1), Round::INITIAL, 3000),
-                1u64,
+                VotePower(1),
             ),
         ];
 
@@ -1204,7 +1204,7 @@ mod tests {
         let to_verify: Vec<_> = (0..3)
             .map(|i| {
                 let vote = make_vote(&keys, i, block_hash, height, round, 1000);
-                (i, vote, keys[i].public_key(), 1u64)
+                (i, vote, keys[i].public_key(), VotePower(1))
             })
             .collect();
 
@@ -1217,7 +1217,7 @@ mod tests {
             WeightedTimestamp::ZERO,
             to_verify,
             Vec::new(),
-            10,
+            VotePower(10),
         );
 
         assert!(result.qc.is_none());
@@ -1233,7 +1233,7 @@ mod tests {
         let to_verify: Vec<_> = (0..3)
             .map(|i| {
                 let vote = make_vote(&keys, i, block_hash, height, round, 1000);
-                (i, vote, keys[i].public_key(), 1u64)
+                (i, vote, keys[i].public_key(), VotePower(1))
             })
             .collect();
 
@@ -1246,7 +1246,7 @@ mod tests {
             WeightedTimestamp::ZERO,
             to_verify,
             Vec::new(),
-            4,
+            VotePower(4),
         );
 
         let qc = result.qc.expect("quorum reached, QC expected");
@@ -1263,7 +1263,7 @@ mod tests {
         let verified: Vec<_> = (0..3)
             .map(|i| {
                 let vote = make_vote(&keys, i, block_hash, BlockHeight(1), Round::INITIAL, 1000);
-                (i, vote, 1u64)
+                (i, vote, VotePower(1))
             })
             .collect();
         let mut qc = build_qc_from_verified(
@@ -1289,7 +1289,7 @@ mod tests {
         let verified: Vec<_> = (0..3)
             .map(|i| {
                 let vote = make_vote(&keys, i, block_hash, BlockHeight(1), Round::INITIAL, 1000);
-                (i, vote, 1u64)
+                (i, vote, VotePower(1))
             })
             .collect();
         let qc = build_qc_from_verified(

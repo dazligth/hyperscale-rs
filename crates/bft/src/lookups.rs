@@ -80,7 +80,7 @@ pub fn committee_public_keys(topology: &TopologySnapshot) -> Option<Vec<Bls12381
 #[cfg(test)]
 mod tests {
     use hyperscale_test_helpers::TestCommittee;
-    use hyperscale_types::{ValidatorInfo, ValidatorSet};
+    use hyperscale_types::{ValidatorInfo, ValidatorSet, VotePower};
 
     use super::*;
 
@@ -89,7 +89,7 @@ mod tests {
             .map(|i| ValidatorInfo {
                 validator_id: committee.validator_id(i),
                 public_key: *committee.public_key(i),
-                voting_power: 1,
+                voting_power: VotePower(1),
             })
             .collect();
         let validator_set = ValidatorSet::new(validators);

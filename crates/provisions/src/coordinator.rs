@@ -682,7 +682,8 @@ mod tests {
         Block, BlockHash, BlockHeader, Bls12381G1PrivateKey, CertificateRoot, Hash,
         LocalReceiptRoot, MerkleInclusionProof, ProposerTimestamp, ProvisionsRoot,
         QuorumCertificate, Round, StateRoot, TopologySnapshot, TransactionRoot, TxEntries, TxHash,
-        ValidatorId, ValidatorInfo, ValidatorSet, WaveId, WeightedTimestamp, bls_keypair_from_seed,
+        ValidatorId, ValidatorInfo, ValidatorSet, VotePower, WaveId, WeightedTimestamp,
+        bls_keypair_from_seed,
     };
     use proptest::bool::ANY as ANY_BOOL;
     use proptest::collection::vec as prop_vec;
@@ -706,7 +707,7 @@ mod tests {
             .map(|(i, kp)| ValidatorInfo {
                 validator_id: ValidatorId(i as u64),
                 public_key: kp.public_key(),
-                voting_power: 1,
+                voting_power: VotePower(1),
             })
             .collect();
 

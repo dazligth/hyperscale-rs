@@ -734,7 +734,7 @@ mod tests {
     use hyperscale_types::{
         Block, BlockHeader, CertificateRoot, Hash, LocalReceiptRoot, ProposerTimestamp,
         ProvisionsRoot, Round, ShardGroupId, StateRoot, TransactionRoot, ValidatorId,
-        ValidatorInfo, ValidatorSet,
+        ValidatorInfo, ValidatorSet, VotePower,
     };
 
     use super::*;
@@ -745,7 +745,7 @@ mod tests {
             .map(|i| ValidatorInfo {
                 validator_id: committee.validator_id(i),
                 public_key: *committee.public_key(i),
-                voting_power: 1,
+                voting_power: VotePower(1),
             })
             .collect();
         TopologySnapshot::new(ValidatorId(0), 1, ValidatorSet::new(validators))

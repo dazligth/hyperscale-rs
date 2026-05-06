@@ -288,7 +288,7 @@ impl ConflictDetector {
 mod tests {
     use hyperscale_types::{
         BlockHeight, Hash, MerkleInclusionProof, NodeId, ShardGroupId, StateEntry,
-        TopologySnapshot, TxEntries, ValidatorId, ValidatorInfo, ValidatorSet,
+        TopologySnapshot, TxEntries, ValidatorId, ValidatorInfo, ValidatorSet, VotePower,
         bls_keypair_from_seed, shard_for_node,
     };
 
@@ -331,7 +331,7 @@ mod tests {
         let vs = ValidatorSet::new(vec![ValidatorInfo {
             validator_id: ValidatorId(0),
             public_key: kp.public_key(),
-            voting_power: 1,
+            voting_power: VotePower(1),
         }]);
         // Local shard = 0, 2 shards total
         TopologySnapshot::with_local_shard(ValidatorId(0), ShardGroupId(0), 2, vs)

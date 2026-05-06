@@ -29,7 +29,7 @@ use hyperscale_topology::TopologyCoordinator;
 use hyperscale_types::{
     BlockHeight, Bls12381G1PrivateKey, Bls12381G1PublicKey, CertifiedBlock, LocalTimestamp, NodeId,
     QuorumCertificate, ShardGroupId, TransactionStatus, TxHash, ValidatorId, ValidatorInfo,
-    ValidatorSet, bls_keypair_from_seed, shard_for_node,
+    ValidatorSet, VotePower, bls_keypair_from_seed, shard_for_node,
 };
 use radix_common::math::Decimal;
 use radix_common::network::NetworkDefinition;
@@ -171,7 +171,7 @@ impl SimulationRunner {
             .map(|i| ValidatorInfo {
                 validator_id: ValidatorId(u64::from(i)),
                 public_key: public_keys[i as usize],
-                voting_power: 1,
+                voting_power: VotePower(1),
             })
             .collect();
         let global_validator_set = ValidatorSet::new(global_validators);

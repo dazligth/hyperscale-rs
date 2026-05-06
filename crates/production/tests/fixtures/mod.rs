@@ -9,7 +9,7 @@ use hyperscale_network::ValidatorKeyMap;
 use hyperscale_topology::TopologyCoordinator;
 use hyperscale_types::{
     Bls12381G1PrivateKey, Bls12381G1PublicKey, Bls12381G2Signature, ShardGroupId, ValidatorId,
-    ValidatorInfo, ValidatorSet, bls_keypair_from_seed, validator_bind_message,
+    ValidatorInfo, ValidatorSet, VotePower, bls_keypair_from_seed, validator_bind_message,
 };
 use libp2p::identity::Keypair;
 use libp2p::identity::ed25519::{Keypair as Ed25519Keypair, SecretKey};
@@ -94,7 +94,7 @@ impl TestFixtures {
             .map(|i| ValidatorInfo {
                 validator_id: ValidatorId(u64::from(i)),
                 public_key: public_keys[i as usize],
-                voting_power: 1,
+                voting_power: VotePower(1),
             })
             .collect();
         let global_validator_set = ValidatorSet::new(global_validators);

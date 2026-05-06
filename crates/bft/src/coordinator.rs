@@ -86,7 +86,7 @@ use hyperscale_storage::RecoveredState;
 use hyperscale_types::{
     Block, BlockHeader, BlockHeight, BlockManifest, BlockVote, CertifiedBlock,
     CommittedBlockHeader, FinalizedWave, Provisions, QuorumCertificate, Round, RoutableTransaction,
-    StateRoot, TopologySnapshot, TxHash,
+    StateRoot, TopologySnapshot, TxHash, VotePower,
 };
 use tracing::field::Empty;
 use tracing::{debug, info, instrument, trace, warn};
@@ -1643,7 +1643,7 @@ impl BftCoordinator {
         topology_snapshot: &TopologySnapshot,
         block_hash: BlockHash,
         qc: Option<QuorumCertificate>,
-        verified_votes: Vec<(usize, BlockVote, u64)>,
+        verified_votes: Vec<(usize, BlockVote, VotePower)>,
     ) -> Vec<Action> {
         if let Some(qc) = qc {
             info!(
@@ -3345,8 +3345,8 @@ mod tests {
     use hyperscale_types::{
         Bls12381G1PrivateKey, CertificateRoot, Hash, LocalReceiptRoot, ProvisionsRoot,
         RoutableTransaction, ShardGroupId, SignerBitfield, TopologySnapshot, TransactionRoot,
-        ValidatorId, ValidatorInfo, ValidatorSet, WeightedTimestamp, generate_bls_keypair,
-        test_utils, zero_bls_signature,
+        ValidatorId, ValidatorInfo, ValidatorSet, VotePower, WeightedTimestamp,
+        generate_bls_keypair, test_utils, zero_bls_signature,
     };
 
     use super::*;
@@ -3372,7 +3372,7 @@ mod tests {
             .map(|(i, k)| ValidatorInfo {
                 validator_id: ValidatorId(i as u64),
                 public_key: k.public_key(),
-                voting_power: 1,
+                voting_power: VotePower(1),
             })
             .collect();
         let validator_set = ValidatorSet::new(validators);
@@ -3820,7 +3820,7 @@ mod tests {
             .map(|(i, k)| ValidatorInfo {
                 validator_id: ValidatorId(i as u64),
                 public_key: k.public_key(),
-                voting_power: 1,
+                voting_power: VotePower(1),
             })
             .collect();
         let validator_set = ValidatorSet::new(validators);
@@ -3909,7 +3909,7 @@ mod tests {
             timestamp: ProposerTimestamp(100_000),
         };
 
-        let _ = state.on_qc_result(&topology, block_b, None, vec![(0, vote, 1)]);
+        let _ = state.on_qc_result(&topology, block_b, None, vec![(0, vote, VotePower(1))]);
 
         let (recorded_hash, _) = state
             .votes

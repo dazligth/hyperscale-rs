@@ -11,7 +11,8 @@ use hyperscale_types::{
     GlobalReceiptRoot, LocalReceiptRoot, NodeId, ProposerTimestamp, ProvisionHash, ProvisionTxRoot,
     Provisions, ProvisionsRoot, QuorumCertificate, Round, RoutableTransaction, ShardGroupId,
     SharedCertificates, SharedTransactions, StateProvision, StateRoot, TopologySnapshot,
-    TransactionRoot, TransactionStatus, TxHash, TxOutcome, ValidatorId, WaveId, WeightedTimestamp,
+    TransactionRoot, TransactionStatus, TxHash, TxOutcome, ValidatorId, VotePower, WaveId,
+    WeightedTimestamp,
 };
 
 use crate::{CommitSource, FetchAbandon, FetchRequest, ProtocolEvent, TimerId};
@@ -211,12 +212,12 @@ pub enum Action {
         parent_weighted_timestamp: WeightedTimestamp,
         /// Votes to verify and potentially aggregate.
         /// Each tuple is (`committee_index`, vote, `public_key`, `voting_power`).
-        votes_to_verify: Vec<(usize, BlockVote, Bls12381G1PublicKey, u64)>,
+        votes_to_verify: Vec<(usize, BlockVote, Bls12381G1PublicKey, VotePower)>,
         /// Already-verified votes (e.g., our own vote).
         /// Each tuple is (`committee_index`, vote, `voting_power`).
-        verified_votes: Vec<(usize, BlockVote, u64)>,
+        verified_votes: Vec<(usize, BlockVote, VotePower)>,
         /// Total voting power in the committee (for quorum calculation).
-        total_voting_power: u64,
+        total_voting_power: VotePower,
     },
 
     /// Verify provisions' merkle inclusion proofs.
@@ -260,7 +261,7 @@ pub enum Action {
         /// Block hash for correlation.
         block_hash: BlockHash,
         /// Votes to verify with their public keys and voting power.
-        votes: Vec<(ExecutionVote, Bls12381G1PublicKey, u64)>,
+        votes: Vec<(ExecutionVote, Bls12381G1PublicKey, VotePower)>,
     },
 
     /// Verify an execution certificate's aggregated signature.
@@ -319,9 +320,9 @@ pub enum Action {
         /// Public keys for the remote shard's committee (from topology).
         committee_public_keys: Vec<Bls12381G1PublicKey>,
         /// Voting power for each committee member (parallel to `committee_public_keys`).
-        committee_voting_power: Vec<u64>,
+        committee_voting_power: Vec<VotePower>,
         /// Quorum threshold for the remote shard.
-        quorum_threshold: u64,
+        quorum_threshold: VotePower,
         /// Remote shard ID (for correlation in callback).
         shard: ShardGroupId,
         /// Remote block height (for correlation in callback).

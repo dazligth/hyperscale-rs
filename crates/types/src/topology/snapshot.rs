@@ -19,7 +19,7 @@ use crate::{
 #[derive(Debug, Clone)]
 struct ShardCommittee {
     active_validators: Vec<ValidatorId>,
-    total_voting_power: u64,
+    total_voting_power: VotePower,
 }
 
 /// Hash a `NodeId` to a u64 using blake3 (first 8 bytes, little-endian).
@@ -41,7 +41,7 @@ pub fn shard_for_node(node_id: &NodeId, num_shards: u64) -> ShardGroupId {
 /// Per-validator info (voting power + public key).
 #[derive(Debug, Clone)]
 struct ValidatorInfoEntry {
-    voting_power: u64,
+    voting_power: VotePower,
     public_key: Bls12381G1PublicKey,
 }
 
@@ -235,15 +235,15 @@ impl TopologySnapshot {
 
     /// Get total voting power for a shard's committee.
     #[must_use]
-    pub fn voting_power_for_shard(&self, shard: ShardGroupId) -> u64 {
+    pub fn voting_power_for_shard(&self, shard: ShardGroupId) -> VotePower {
         self.shard_committees
             .get(&shard)
-            .map_or(0, |c| c.total_voting_power)
+            .map_or(VotePower::ZERO, |c| c.total_voting_power)
     }
 
     /// Get voting power for a specific validator.
     #[must_use]
-    pub fn voting_power(&self, validator_id: ValidatorId) -> Option<u64> {
+    pub fn voting_power(&self, validator_id: ValidatorId) -> Option<VotePower> {
         self.validator_info
             .get(&validator_id)
             .map(|v| v.voting_power)
@@ -289,18 +289,14 @@ impl TopologySnapshot {
 
     /// Check if the given voting power meets quorum for a shard (> 2/3).
     #[must_use]
-    pub fn has_quorum_for_shard(&self, shard: ShardGroupId, voting_power: u64) -> bool {
+    pub fn has_quorum_for_shard(&self, shard: ShardGroupId, voting_power: VotePower) -> bool {
         VotePower::has_quorum(voting_power, self.voting_power_for_shard(shard))
     }
 
     /// Get the minimum voting power required for quorum in a shard.
-    ///
-    /// Equivalent to `total * 2 / 3 + 1` but divides first so the multiply
-    /// cannot overflow when total is near `u64::MAX`.
     #[must_use]
-    pub fn quorum_threshold_for_shard(&self, shard: ShardGroupId) -> u64 {
-        let total = self.voting_power_for_shard(shard);
-        total / 3 * 2 + (total % 3) * 2 / 3 + 1
+    pub fn quorum_threshold_for_shard(&self, shard: ShardGroupId) -> VotePower {
+        VotePower::quorum_threshold(self.voting_power_for_shard(shard))
     }
 
     // ── Local shard shortcuts ────────────────────────────────────────────
@@ -313,7 +309,7 @@ impl TopologySnapshot {
 
     /// Get total voting power for the local shard.
     #[must_use]
-    pub fn local_voting_power(&self) -> u64 {
+    pub fn local_voting_power(&self) -> VotePower {
         self.voting_power_for_shard(self.local_shard)
     }
 
@@ -331,13 +327,13 @@ impl TopologySnapshot {
 
     /// Check if the given voting power meets quorum for the local shard.
     #[must_use]
-    pub fn local_has_quorum(&self, voting_power: u64) -> bool {
+    pub fn local_has_quorum(&self, voting_power: VotePower) -> bool {
         self.has_quorum_for_shard(self.local_shard, voting_power)
     }
 
     /// Get the minimum voting power required for quorum in the local shard.
     #[must_use]
-    pub fn local_quorum_threshold(&self) -> u64 {
+    pub fn local_quorum_threshold(&self) -> VotePower {
         self.quorum_threshold_for_shard(self.local_shard)
     }
 
@@ -462,7 +458,7 @@ fn empty_committees(num_shards: u64) -> HashMap<ShardGroupId, ShardCommittee> {
                 ShardGroupId(id),
                 ShardCommittee {
                     active_validators: Vec::new(),
-                    total_voting_power: 0,
+                    total_voting_power: VotePower::ZERO,
                 },
             )
         })
@@ -482,7 +478,7 @@ mod tests {
         ValidatorInfo {
             validator_id: ValidatorId(id),
             public_key: generate_bls_keypair().public_key(),
-            voting_power: power,
+            voting_power: VotePower(power),
         }
     }
 
@@ -506,12 +502,12 @@ mod tests {
     fn test_quorum() {
         let snapshot = make_snapshot(4, 0);
 
-        assert_eq!(snapshot.local_voting_power(), 4);
-        assert_eq!(snapshot.local_quorum_threshold(), 3);
+        assert_eq!(snapshot.local_voting_power(), VotePower(4));
+        assert_eq!(snapshot.local_quorum_threshold(), VotePower(3));
 
-        assert!(!snapshot.local_has_quorum(2));
-        assert!(snapshot.local_has_quorum(3));
-        assert!(snapshot.local_has_quorum(4));
+        assert!(!snapshot.local_has_quorum(VotePower(2)));
+        assert!(snapshot.local_has_quorum(VotePower(3)));
+        assert!(snapshot.local_has_quorum(VotePower(4)));
     }
 
     #[test]
@@ -613,7 +609,10 @@ mod tests {
             &vs,
             committees,
         );
-        assert_eq!(snapshot.voting_power_for_shard(ShardGroupId(0)), 21);
+        assert_eq!(
+            snapshot.voting_power_for_shard(ShardGroupId(0)),
+            VotePower(21)
+        );
     }
 
     #[test]

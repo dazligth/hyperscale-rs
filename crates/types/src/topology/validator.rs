@@ -2,7 +2,7 @@
 
 use sbor::prelude::*;
 
-use crate::{Bls12381G1PublicKey, ValidatorId};
+use crate::{Bls12381G1PublicKey, ValidatorId, VotePower};
 
 /// Information about a validator.
 #[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
@@ -14,7 +14,7 @@ pub struct ValidatorInfo {
     pub public_key: Bls12381G1PublicKey,
 
     /// Voting power (stake weight).
-    pub voting_power: u64,
+    pub voting_power: VotePower,
 }
 
 /// A set of validators.
@@ -46,7 +46,7 @@ impl ValidatorSet {
 
     /// Get total voting power.
     #[must_use]
-    pub fn total_voting_power(&self) -> u64 {
+    pub fn total_voting_power(&self) -> VotePower {
         self.validators.iter().map(|v| v.voting_power).sum()
     }
 
@@ -88,7 +88,7 @@ mod tests {
         ValidatorInfo {
             validator_id: ValidatorId(id),
             public_key: generate_bls_keypair().public_key(),
-            voting_power: power,
+            voting_power: VotePower(power),
         }
     }
 
@@ -118,10 +118,10 @@ mod tests {
         let set = ValidatorSet::new(validators);
 
         assert_eq!(set.len(), 3);
-        assert_eq!(set.total_voting_power(), 60);
+        assert_eq!(set.total_voting_power(), VotePower(60));
 
         let v1 = set.get(ValidatorId(1)).unwrap();
-        assert_eq!(v1.voting_power, 20);
+        assert_eq!(v1.voting_power, VotePower(20));
 
         assert_eq!(set.index_of(ValidatorId(2)), Some(2));
         assert_eq!(set.index_of(ValidatorId(99)), None);

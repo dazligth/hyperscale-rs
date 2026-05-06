@@ -31,7 +31,7 @@ use crate::commit_dedup::CommitDedupIndex;
 #[must_use]
 pub fn qc_has_local_quorum_power(topology: &TopologySnapshot, qc: &QuorumCertificate) -> bool {
     let committee = topology.local_committee();
-    let qc_power: u64 = qc
+    let qc_power: VotePower = qc
         .signers
         .set_indices()
         .filter_map(|i| committee.get(i))
@@ -318,7 +318,7 @@ mod tests {
             .map(|i| ValidatorInfo {
                 validator_id: committee.validator_id(i),
                 public_key: *committee.public_key(i),
-                voting_power: 1,
+                voting_power: VotePower(1),
             })
             .collect();
         TopologySnapshot::new(ValidatorId(0), 1, ValidatorSet::new(validators))

@@ -22,9 +22,9 @@ use hyperscale_storage::{Storage, SubstateStore, SubstateView};
 use hyperscale_types::{
     BlockHash, Bls12381G1PublicKey, Bls12381G2Signature, ExecutionCertificate, ExecutionVote,
     GlobalReceiptRoot, RoutableTransaction, SignerBitfield, StateProvision, StateRoot,
-    StoredReceipt, TxHash, ValidatorId, WaveId, WeightedTimestamp, batch_verify_bls_same_message,
-    compute_global_receipt_root, exec_cert_batch_message, exec_vote_batch_message,
-    exec_vote_message, verify_bls12381_v1, zero_bls_signature,
+    StoredReceipt, TxHash, ValidatorId, VotePower, WaveId, WeightedTimestamp,
+    batch_verify_bls_same_message, compute_global_receipt_root, exec_cert_batch_message,
+    exec_vote_batch_message, exec_vote_message, verify_bls12381_v1, zero_bls_signature,
 };
 
 use crate::wave_state::WaveState;
@@ -111,14 +111,14 @@ pub fn aggregate_execution_certificate(
 ///
 /// Returns an iterator of `(vote, voting_power)` for verified votes.
 pub fn batch_verify_execution_votes(
-    votes: Vec<(ExecutionVote, Bls12381G1PublicKey, u64)>,
-) -> impl Iterator<Item = (ExecutionVote, u64)> {
+    votes: Vec<(ExecutionVote, Bls12381G1PublicKey, VotePower)>,
+) -> impl Iterator<Item = (ExecutionVote, VotePower)> {
     if votes.is_empty() {
         return Vec::new().into_iter();
     }
 
     // Group by signing message (all votes for same wave should share one)
-    let mut by_message: HashMap<Vec<u8>, Vec<(ExecutionVote, Bls12381G1PublicKey, u64)>> =
+    let mut by_message: HashMap<Vec<u8>, Vec<(ExecutionVote, Bls12381G1PublicKey, VotePower)>> =
         HashMap::new();
     for (vote, pk, power) in votes {
         let msg = exec_vote_message(
@@ -131,7 +131,7 @@ pub fn batch_verify_execution_votes(
         by_message.entry(msg).or_default().push((vote, pk, power));
     }
 
-    let mut verified: Vec<(ExecutionVote, u64)> = Vec::new();
+    let mut verified: Vec<(ExecutionVote, VotePower)> = Vec::new();
 
     for (message, group) in by_message {
         if group.len() >= 2 {
@@ -703,7 +703,7 @@ mod tests {
                     outcomes.clone(),
                 ),
                 sk0.public_key(),
-                1u64,
+                VotePower(1),
             ),
             (
                 signed_vote(
@@ -715,7 +715,7 @@ mod tests {
                     outcomes,
                 ),
                 sk1.public_key(),
-                1u64,
+                VotePower(1),
             ),
         ];
 
@@ -758,9 +758,9 @@ mod tests {
                     outcomes.clone(),
                 ),
                 sk0.public_key(),
-                1u64,
+                VotePower(1),
             ),
-            (bad_vote, sk1.public_key(), 1u64),
+            (bad_vote, sk1.public_key(), VotePower(1)),
             (
                 signed_vote(
                     ValidatorId(2),
@@ -771,7 +771,7 @@ mod tests {
                     outcomes,
                 ),
                 sk2.public_key(),
-                1u64,
+                VotePower(1),
             ),
         ];
 
