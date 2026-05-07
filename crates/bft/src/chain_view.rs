@@ -71,8 +71,8 @@ impl<'a> ChainView<'a> {
     }
 
     /// State root of the parent block. Returns the committed-tip state root
-    /// when `parent_block_hash` IS the committed tip (may have been pruned from
-    /// the in-memory caches by cleanup) or when lookup otherwise fails.
+    /// when `parent_block_hash` IS the committed tip (may have been pruned
+    /// from `pending` by cleanup) or when lookup otherwise fails.
     pub fn parent_state_root(&self, parent_block_hash: BlockHash) -> StateRoot {
         if parent_block_hash == self.committed_hash {
             return self.committed_state_root;
@@ -91,7 +91,7 @@ impl<'a> ChainView<'a> {
     }
 
     /// In-flight count on the parent header. Returns zero if the header is
-    /// missing (parent pruned from in-memory caches).
+    /// missing (parent pruned from `pending`).
     pub fn parent_in_flight(&self, parent_block_hash: BlockHash) -> InFlightCount {
         self.get_header(parent_block_hash)
             .map_or(InFlightCount::ZERO, |h| h.in_flight)

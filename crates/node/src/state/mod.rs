@@ -122,7 +122,7 @@ impl NodeStateMachine {
     ) -> Self {
         Self {
             node_index,
-            bft: BftCoordinator::new(node_index, bft_config.clone(), recovered),
+            bft: BftCoordinator::new(bft_config.clone(), recovered),
             execution: ExecutionCoordinator::new(),
             mempool: MempoolCoordinator::with_config(mempool_config),
             provisions: ProvisionCoordinator::with_config_and_store(

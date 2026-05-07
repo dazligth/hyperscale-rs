@@ -72,9 +72,6 @@ pub struct BftMemoryStats {
     pub pending_synced_block_verifications: usize,
 }
 
-/// Index type for simulation-only node routing.
-/// Production uses `ValidatorId` (from message signatures) and `PeerId` (libp2p).
-pub type NodeIndex = u32;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -120,12 +117,6 @@ use crate::vote_keeper::{LockDecision, VoteKeeper};
 /// 4. **QC Formed** → Update chain state, commit if ready (two-chain rule)
 /// 5. **View Change Timer** → Initiate view change if no progress
 pub struct BftCoordinator {
-    // ═══════════════════════════════════════════════════════════════════════════
-    // Identity
-    // ═══════════════════════════════════════════════════════════════════════════
-    /// This node's index (deterministic ordering).
-    node_index: NodeIndex,
-
     // ═══════════════════════════════════════════════════════════════════════════
     // Chain State
     // ═══════════════════════════════════════════════════════════════════════════
@@ -200,7 +191,6 @@ pub struct BftCoordinator {
 impl std::fmt::Debug for BftCoordinator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BftCoordinator")
-            .field("node_index", &self.node_index)
             .field("view", &self.view_change.view)
             .field("committed_height", &self.committed_height)
             .field("pending_blocks", &self.pending_blocks.len())
@@ -214,13 +204,11 @@ impl BftCoordinator {
     ///
     /// # Arguments
     ///
-    /// * `node_index` - Deterministic node index for ordering
     /// * `config` - BFT configuration
     /// * `recovered` - State recovered from storage. Use `RecoveredState::default()` for fresh start.
     #[must_use]
-    pub fn new(node_index: NodeIndex, config: BftConfig, recovered: RecoveredState) -> Self {
+    pub fn new(config: BftConfig, recovered: RecoveredState) -> Self {
         Self {
-            node_index,
             view_change: ViewChangeController::new(),
             committed_height: recovered.committed_height,
             committed_hash: recovered.committed_hash.unwrap_or(BlockHash::ZERO),
@@ -3342,7 +3330,7 @@ mod tests {
         let validator_set = ValidatorSet::new(validators);
         let topology = TopologySnapshot::new(ValidatorId::new(0), 1, validator_set);
 
-        let state = BftCoordinator::new(0, config, RecoveredState::default());
+        let state = BftCoordinator::new(config, RecoveredState::default());
         (state, topology)
     }
 
@@ -3776,7 +3764,7 @@ mod tests {
         let validator_set = ValidatorSet::new(validators);
         let topology =
             TopologySnapshot::new(ValidatorId::new(u64::from(local_idx)), 1, validator_set);
-        let state = BftCoordinator::new(local_idx, BftConfig::default(), RecoveredState::default());
+        let state = BftCoordinator::new(BftConfig::default(), RecoveredState::default());
         (state, topology, keys)
     }
 

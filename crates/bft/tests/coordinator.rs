@@ -10,7 +10,7 @@ use hyperscale_test_helpers::TestCommittee;
 use hyperscale_types::{BlockHeight, LocalTimestamp, Round, TopologySnapshot, VIEW_CHANGE_TIMEOUT};
 
 fn fresh_coordinator(config: BftConfig) -> BftCoordinator {
-    BftCoordinator::new(0, config, RecoveredState::default())
+    BftCoordinator::new(config, RecoveredState::default())
 }
 
 fn fresh_coordinator_with_topology(config: BftConfig) -> (BftCoordinator, TopologySnapshot) {
@@ -99,8 +99,7 @@ fn is_current_proposer_matches_topology() {
     // with `topology.should_propose(height, round)` for that validator.
     for local_idx in 0_u32..4 {
         let topology = committee.topology_snapshot(local_idx as usize, 1);
-        let coordinator =
-            BftCoordinator::new(local_idx, BftConfig::default(), RecoveredState::default());
+        let coordinator = BftCoordinator::new(BftConfig::default(), RecoveredState::default());
         // Fresh coordinator: latest_qc is None → next height = committed_height + 1 = 1.
         // view = Round::INITIAL = Round::new(0).
         let expected = topology.should_propose(BlockHeight::new(1), Round::INITIAL);
@@ -121,8 +120,7 @@ fn will_propose_next_is_true_for_exactly_one_validator_in_fresh_committee() {
     let mut proposers = 0usize;
     for local_idx in 0_u32..4 {
         let topology = committee.topology_snapshot(local_idx as usize, 1);
-        let coordinator =
-            BftCoordinator::new(local_idx, BftConfig::default(), RecoveredState::default());
+        let coordinator = BftCoordinator::new(BftConfig::default(), RecoveredState::default());
         if coordinator.will_propose_next(&topology) {
             proposers += 1;
         }
