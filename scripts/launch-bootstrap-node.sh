@@ -16,13 +16,11 @@ set -e
 
 # Default configuration
 BASE_PORT=9000
-TCP_BASE_PORT=30500
 RPC_PORT=8080
 DATA_DIR="./bootstrap-data"
 CLEAN=false
 LOG_LEVEL="info"
 SKIP_BUILD="${SKIP_BUILD:-false}"
-TCP_FALLBACK_ENABLED="false"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -39,18 +37,13 @@ while [[ $# -gt 0 ]]; do
             SKIP_BUILD=true
             shift
             ;;
-        --no-tcp-fallback)
-            TCP_FALLBACK_ENABLED="false"
-            shift
-            ;;
         --help|-h)
-            echo "Usage: $0 [--clean] [--log-level LEVEL] [--no-tcp-fallback]"
+            echo "Usage: $0 [--clean] [--log-level LEVEL]"
             echo ""
             echo "Options:"
             echo "  --clean                  Remove existing data directory"
             echo "  --log-level LEVEL        Log level: trace, debug, info, warn, error (default: info)"
             echo "  --skip-build             Skip building binaries (default: false)"
-            echo "  --no-tcp-fallback        Disable TCP fallback transport"
             exit 0
             ;;
         *)
@@ -63,7 +56,6 @@ done
 echo "=== Hyperscale Bootstrap Node ==="
 echo "Log level: $LOG_LEVEL"
 echo "Clean data dir: $CLEAN"
-echo "TCP fallback: $TCP_FALLBACK_ENABLED"
 echo "UPnP Enabled: true"
 echo ""
 
@@ -121,8 +113,6 @@ data_dir = "$NODE_DATA_DIR"
 
 [network]
 listen_addr = "/ip4/0.0.0.0/udp/$BASE_PORT/quic-v1"
-tcp_fallback_enabled = $TCP_FALLBACK_ENABLED
-tcp_fallback_port = $TCP_BASE_PORT
 version_interop_mode = "relaxed"
 bootstrap_peers = []
 upnp_enabled = true
@@ -162,7 +152,7 @@ echo "Created config at $CONFIG_FILE"
 echo ""
 echo "Launching bootstrap node..."
 echo "  RPC: http://localhost:$RPC_PORT"
-echo "  P2P: UDP/$BASE_PORT (QUIC), TCP/$TCP_BASE_PORT"
+echo "  P2P: UDP/$BASE_PORT (QUIC)"
 
 # Run validator
 # libp2p_gossipsub=error to suppress noise

@@ -280,7 +280,7 @@ mod tests {
 
         channels
             .send(SwarmCommand::Dial {
-                address: "/ip4/127.0.0.1/tcp/1234".parse().unwrap(),
+                address: "/ip4/127.0.0.1/udp/1234/quic-v1".parse().unwrap(),
             })
             .unwrap();
         assert!(matches!(con.try_recv().unwrap(), SwarmCommand::Dial { .. }));

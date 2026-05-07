@@ -119,7 +119,7 @@ for shard in $(seq 0 $((NUM_SHARDS - 1))); do
     IP="172.99.0.$((10 + first_v))"
     PEER_ID="${PEER_IDS[$first_v]}"
     if [ -n "$BOOTSTRAP_PEERS" ]; then BOOTSTRAP_PEERS="$BOOTSTRAP_PEERS,"; fi
-    BOOTSTRAP_PEERS="$BOOTSTRAP_PEERS\"/ip4/$IP/udp/9000/quic-v1/p2p/$PEER_ID\",\"/ip4/$IP/tcp/9000\""
+    BOOTSTRAP_PEERS="$BOOTSTRAP_PEERS\"/ip4/$IP/udp/9000/quic-v1/p2p/$PEER_ID\""
 done
 
 GENESIS_VALIDATORS="[genesis]"
@@ -165,7 +165,6 @@ external_addr = "/ip4/$IP/udp/9000/quic-v1"
 upnp_enabled = false
 bootstrap_peers = [$BOOTSTRAP_PEERS]
 version_interop_mode = "relaxed"
-tcp_fallback_port_range = "9000-9000"
 [metrics]
 enabled = true
 listen_addr = "0.0.0.0:8080"

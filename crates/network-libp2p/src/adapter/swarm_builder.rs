@@ -1,18 +1,9 @@
-//! Swarm construction with QUIC/TCP transport configuration.
+//! Swarm construction with QUIC transport configuration.
 
 use std::time::Duration;
 
-use futures::future::Either;
-use libp2p::core::muxing::StreamMuxerBox;
-use libp2p::core::transport::{OrTransport, Transport};
-use libp2p::core::upgrade::Version;
 use libp2p::identity::Keypair;
-use libp2p::noise::Config as NoiseConfig;
 use libp2p::quic::Config as QuicConfig;
-use libp2p::quic::tokio::Transport as QuicTokioTransport;
-use libp2p::tcp::Config as TcpConfig;
-use libp2p::tcp::tokio::Transport as TcpTokioTransport;
-use libp2p::yamux::Config as YamuxConfig;
 use libp2p::{Swarm, SwarmBuilder};
 use tracing::info;
 
@@ -21,9 +12,6 @@ use super::error::NetworkError;
 use crate::config::Libp2pConfig;
 
 /// Apply consensus-optimized QUIC settings to a config.
-///
-/// Used by both the TCP fallback path (which creates `Config::new`) and
-/// the QUIC-only path (which receives a mutable Config from `SwarmBuilder`).
 fn apply_quic_tuning(quic_config: &mut QuicConfig, app_config: &Libp2pConfig) {
     // QUIC configuration optimized for BFT consensus workloads:
     // - High stream concurrency for parallel sync and cross-shard coordination
@@ -51,68 +39,26 @@ fn apply_quic_tuning(quic_config: &mut QuicConfig, app_config: &Libp2pConfig) {
         u32::try_from(app_config.idle_connection_timeout.as_millis()).unwrap_or(u32::MAX);
 }
 
-/// Build a configured libp2p Swarm with QUIC transport and optional TCP fallback.
+/// Build a configured libp2p Swarm with QUIC transport.
 pub(super) fn build_swarm(
     config: &Libp2pConfig,
     keypair: Keypair,
     behaviour: Behaviour,
 ) -> Result<Swarm<Behaviour>, NetworkError> {
-    if config.tcp_fallback_enabled {
-        info!("Building swarm with QUIC (primary) + TCP (fallback)");
-
-        let mut quic_config = QuicConfig::new(&keypair);
-        apply_quic_tuning(&mut quic_config, config);
-
-        let quic_transport =
-            QuicTokioTransport::new(quic_config).map(|(p, c), _| (p, StreamMuxerBox::new(c)));
-
-        // TCP configuration with Noise + Yamux
-        let tcp_transport = TcpTokioTransport::new(TcpConfig::default().nodelay(true))
-            .upgrade(Version::V1)
-            .authenticate(
-                NoiseConfig::new(&keypair)
-                    .map_err(|e| NetworkError::NetworkError(e.to_string()))?,
-            )
-            .multiplex(YamuxConfig::default())
-            .map(|(p, c), _| (p, StreamMuxerBox::new(c)));
-
-        // Prioritize QUIC by putting it first (Left side of OrTransport)
-        let transport =
-            OrTransport::new(quic_transport, tcp_transport).map(|either, _| match either {
-                Either::Left((peer_id, muxer)) | Either::Right((peer_id, muxer)) => {
-                    (peer_id, muxer)
-                }
-            });
-
-        Ok(SwarmBuilder::with_existing_identity(keypair)
-            .with_tokio()
-            .with_other_transport(|_| transport)
-            .unwrap() // Unwrap Infallible error from transport add
-            .with_behaviour(|_| behaviour)
-            .map_err(|e| {
-                NetworkError::NetworkError(format!("Failed to configure swarm behaviour: {e:?}"))
-            })?
-            .with_swarm_config(|c| {
-                c.with_idle_connection_timeout(config.idle_connection_timeout)
-                    .with_max_negotiating_inbound_streams(100)
-            })
-            .build())
-    } else {
-        info!("Building swarm with QUIC only (TCP fallback disabled)");
-        Ok(SwarmBuilder::with_existing_identity(keypair)
-            .with_tokio()
-            .with_quic_config(|mut quic_config| {
-                apply_quic_tuning(&mut quic_config, config);
-                quic_config
-            })
-            .with_behaviour(|_| behaviour)
-            .map_err(|e| {
-                NetworkError::NetworkError(format!("Failed to configure swarm behaviour: {e:?}"))
-            })?
-            .with_swarm_config(|c| {
-                c.with_idle_connection_timeout(config.idle_connection_timeout)
-                    .with_max_negotiating_inbound_streams(100)
-            })
-            .build())
-    }
+    info!("Building swarm with QUIC transport");
+    Ok(SwarmBuilder::with_existing_identity(keypair)
+        .with_tokio()
+        .with_quic_config(|mut quic_config| {
+            apply_quic_tuning(&mut quic_config, config);
+            quic_config
+        })
+        .with_behaviour(|_| behaviour)
+        .map_err(|e| {
+            NetworkError::NetworkError(format!("Failed to configure swarm behaviour: {e:?}"))
+        })?
+        .with_swarm_config(|c| {
+            c.with_idle_connection_timeout(config.idle_connection_timeout)
+                .with_max_negotiating_inbound_streams(100)
+        })
+        .build())
 }

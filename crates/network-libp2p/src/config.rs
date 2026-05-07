@@ -54,19 +54,6 @@ pub struct Libp2pConfig {
     /// Default: 15 seconds
     pub keep_alive_interval: Duration,
 
-    /// Whether to enable TCP fallback transport alongside QUIC.
-    ///
-    /// When enabled, the node will listen on TCP as well as QUIC,
-    /// providing fallback connectivity when UDP is blocked.
-    ///
-    /// Default: true
-    pub tcp_fallback_enabled: bool,
-
-    /// TCP fallback port (only used when `tcp_fallback_enabled` is true).
-    ///
-    /// Default: None (uses QUIC port + 21500 offset)
-    pub tcp_fallback_port: Option<u16>,
-
     /// Version interoperability mode.
     ///
     /// Default: Strict
@@ -129,8 +116,6 @@ impl Default for Libp2pConfig {
             gossipsub_heartbeat: Duration::from_millis(100),
             idle_connection_timeout: Duration::from_secs(30),
             keep_alive_interval: Duration::from_secs(15),
-            tcp_fallback_enabled: true,
-            tcp_fallback_port: None,
             version_interop_mode: VersionInteroperabilityMode::Relaxed,
         }
     }
@@ -179,14 +164,6 @@ impl Libp2pConfig {
         self
     }
 
-    /// Enable or disable TCP fallback transport.
-    #[must_use]
-    pub const fn with_tcp_fallback(mut self, enabled: bool, port: Option<u16>) -> Self {
-        self.tcp_fallback_enabled = enabled;
-        self.tcp_fallback_port = port;
-        self
-    }
-
     /// Create config for local testing with specified port.
     ///
     /// # Panics
@@ -206,8 +183,6 @@ impl Libp2pConfig {
             gossipsub_heartbeat: Duration::from_millis(500),
             idle_connection_timeout: Duration::from_secs(30),
             keep_alive_interval: Duration::from_secs(10),
-            tcp_fallback_enabled: true,
-            tcp_fallback_port: None,
             version_interop_mode: VersionInteroperabilityMode::Relaxed,
         }
     }

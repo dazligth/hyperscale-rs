@@ -24,7 +24,6 @@ set -e
 NUM_SHARDS=2                                    # Number of shards
 VALIDATORS_PER_SHARD=4                          # Minimum 4 required for BFT (3 validators can't tolerate any delays)
 BASE_PORT=9000                                  # libp2p port
-TCP_BASE_PORT=30500                             # Base TCP fallback port
 BASE_RPC_PORT=8080                              # HTTP RPC port
 DATA_DIR="./cluster-data"                       # Data directory
 CLEAN=false                                     # Clean data directories first
@@ -36,7 +35,6 @@ LOG_LEVEL="info"                                # Default log level (trace, debu
 SMOKE_TEST_TIMEOUT="${SMOKE_TEST_TIMEOUT:-60s}" # Smoke test timeout
 SKIP_BUILD="${SKIP_BUILD:-false}"               # Skip building binaries
 NODE_HOSTNAME="${NODE_HOSTNAME:-localhost}"     # Hostname for spammer endpoints
-TCP_FALLBACK_ENABLED="${TCP_FALLBACK_ENABLED:-false}" # Enable TCP fallback transport (default: false)
 NETWORK_LATENCY_MS="100"                        # Network latency in milliseconds (empty = disabled)
 PACKET_LOSS_PERCENT=""                          # Packet loss percentage (empty = disabled)
 JMT_HISTORY_LENGTH=256                          # Number of block heights of JMT history to retain (default: 256)
@@ -47,7 +45,6 @@ MEMPOOL_MAX_PENDING=8192                        # Max pending before RPC backpre
 # Define explicit port ranges for Docker and firewall whitelisting
 # let's give a range of 500 ports which should be ok for local testing
 QUIC_PORT_RANGE="${BASE_PORT}-$((BASE_PORT + 500))"
-TCP_PORT_RANGE="${TCP_BASE_PORT}-$((TCP_BASE_PORT + 500))"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -96,10 +93,6 @@ while [[ $# -gt 0 ]]; do
             MONITORING=true
             shift
             ;;
-        --tcp-fallback)
-            TCP_FALLBACK_ENABLED="true"
-            shift
-            ;;
         --tracing)
             TRACING=true
             shift
@@ -121,7 +114,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --help|-h)
-            echo "Usage: $0 [--shards N] [--validators-per-shard M] [--clean] [--monitoring] [--log-level LEVEL] [--smoke-timeout DURATION] [--node-hostname HOST] [--no-tcp-fallback]"
+            echo "Usage: $0 [--shards N] [--validators-per-shard M] [--clean] [--monitoring] [--log-level LEVEL] [--smoke-timeout DURATION] [--node-hostname HOST]"
             echo ""
             echo "Options:"
             echo "  --shards N               Number of shards (default: 2)"
@@ -136,7 +129,6 @@ while [[ $# -gt 0 ]]; do
             echo "  --log-level LEVEL        Log level: trace, debug, info, warn, error (default: info)"
             echo "  --skip-build             Skip building binaries (default: false)"
             echo "  --start-monitoring       Start Prometheus + Grafana monitoring stack (default: false)"
-            echo "  --tcp-fallback           Enable TCP fallback transport (QUIC only)"
             echo "  --latency MS             Add network latency between validators (requires sudo)"
             echo "  --packet-loss PERCENT    Add packet loss between validators (requires sudo)"
             echo "  --mempool-max-pending N  Max pending transactions before RPC backpressure (default: 8192)"
@@ -177,11 +169,9 @@ apply_network_conditions() {
     # Calculate port ranges for validators (P2P only, not RPC)
     local quic_port_start=$BASE_PORT
     local quic_port_end=$((BASE_PORT + TOTAL_VALIDATORS - 1))
-    local tcp_port_start=$TCP_BASE_PORT
-    local tcp_port_end=$((TCP_BASE_PORT + TOTAL_VALIDATORS - 1))
 
     echo "Applying network conditions (latency: ${latency}ms, packet loss: ${loss}%)..."
-    echo "  Affecting P2P ports: QUIC ${quic_port_start}-${quic_port_end}, TCP ${tcp_port_start}-${tcp_port_end}"
+    echo "  Affecting P2P ports: QUIC ${quic_port_start}-${quic_port_end}"
 
     case "$(uname -s)" in
         Linux)
@@ -192,7 +182,6 @@ apply_network_conditions() {
 
             # Mark packets for validator P2P ports (not RPC)
             sudo iptables -t mangle -A OUTPUT -p udp --dport ${quic_port_start}:${quic_port_end} -j MARK --set-mark 1
-            sudo iptables -t mangle -A OUTPUT -p tcp --dport ${tcp_port_start}:${tcp_port_end} -j MARK --set-mark 1
 
             # Create prio qdisc with netem for marked packets
             sudo tc qdisc add dev lo root handle 1: prio
@@ -218,8 +207,6 @@ apply_network_conditions() {
 # Hyperscale network simulation rules (P2P only)
 dummynet in proto udp from any to any port ${quic_port_start}:${quic_port_end} pipe 1
 dummynet out proto udp from any port ${quic_port_start}:${quic_port_end} to any pipe 1
-dummynet in proto tcp from any to any port ${tcp_port_start}:${tcp_port_end} pipe 1
-dummynet out proto tcp from any port ${tcp_port_start}:${tcp_port_end} to any pipe 1
 EOF
             sudo pfctl -e 2>/dev/null || true
 
@@ -269,14 +256,12 @@ echo "Log level: $LOG_LEVEL"
 echo "Smoke test timeout: $SMOKE_TEST_TIMEOUT"
 echo "Skip build: $SKIP_BUILD"
 echo "Clean data dir: $CLEAN"
-echo "TCP fallback: $TCP_FALLBACK_ENABLED"
 echo "Tracing: $TRACING"
 if [ -n "$NETWORK_LATENCY_MS" ] || [ -n "$PACKET_LOSS_PERCENT" ]; then
     echo "Network simulation: latency=${NETWORK_LATENCY_MS:-0}ms, loss=${PACKET_LOSS_PERCENT:-0}%"
 fi
 echo "Network Ports:"
 echo "  QUIC Range: $QUIC_PORT_RANGE"
-echo "  TCP Range:  $TCP_PORT_RANGE"
 echo ""
 
 # Clean up if requested
@@ -353,12 +338,11 @@ BOOTSTRAP_PEERS=""
 for shard in $(seq 0 $((NUM_SHARDS - 1))); do
     first_validator=$((shard * VALIDATORS_PER_SHARD))
     quic_port=$((BASE_PORT + first_validator))
-    tcp_port=$((TCP_BASE_PORT + first_validator))
     if [ -n "$BOOTSTRAP_PEERS" ]; then
         BOOTSTRAP_PEERS="$BOOTSTRAP_PEERS,"
     fi
     # We'll use localhost multiaddr format
-    BOOTSTRAP_PEERS="$BOOTSTRAP_PEERS\"/ip4/127.0.0.1/udp/$quic_port/quic-v1\",\"/ip4/127.0.0.1/tcp/$tcp_port\""
+    BOOTSTRAP_PEERS="$BOOTSTRAP_PEERS\"/ip4/127.0.0.1/udp/$quic_port/quic-v1\""
 done
 
 # Generate TOML configs for each validator
@@ -391,9 +375,8 @@ public_key = \"${PUBLIC_KEYS[$j]}\"
 voting_power = 1"
     done
 
-    # Calculate per-validator ports to avoid race conditions during startup
+    # Calculate per-validator port to avoid race conditions during startup
     validator_quic_port=$((BASE_PORT + i))
-    validator_tcp_port=$((TCP_BASE_PORT + i))
 
     cat > "$CONFIG_FILE" << EOF
 # Hyperscale Validator Configuration
@@ -409,8 +392,6 @@ data_dir = "$NODE_DATA_DIR"
 [network]
 # Use specific ports per validator to avoid race conditions during parallel startup
 listen_addr = "/ip4/0.0.0.0/udp/$validator_quic_port/quic-v1"
-tcp_fallback_enabled = $TCP_FALLBACK_ENABLED
-tcp_fallback_port = $validator_tcp_port
 version_interop_mode = "relaxed"
 bootstrap_peers = [$BOOTSTRAP_PEERS]
 upnp_enabled = false

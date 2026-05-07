@@ -18,7 +18,6 @@ HOSTS=""
 NODE_NAMES=""
 OUT_DIR="./distributed-cluster-data"
 BASE_PORT=9000
-TCP_BASE_PORT=30500
 RPC_BASE_PORT=8080
 NUM_SHARDS=1 # Simplification for now: 1 shard for N nodes
 CLEAN=false
@@ -277,8 +276,7 @@ for id in $(seq 0 $((TOTAL_NODES - 1))); do
     PORT="${NODE_P2P_PORTS[$id]}"
     
     if [ -n "$BOOTSTRAP_PEERS" ]; then BOOTSTRAP_PEERS="$BOOTSTRAP_PEERS,"; fi
-    
-    # TCP fallback is disabled in this config, so only provide QUIC address
+
     BOOTSTRAP_PEERS="$BOOTSTRAP_PEERS\"/ip4/$IP/udp/$PORT/quic-v1/p2p/$PID\""
 done
 
@@ -297,7 +295,6 @@ for i in "${!HOST_IPS[@]}"; do
         CONFIG_FILE="$NODE_DIR/config.toml"
         
         P2P_PORT=$((BASE_PORT + v))
-        TCP_PORT=$((TCP_BASE_PORT + v))
         RPC_PORT=$((RPC_BASE_PORT + v))
         
         # Add to prometheus targets
@@ -321,8 +318,6 @@ data_dir = "./distributed-cluster-data/host-$i/node-$v/data"
 [network]
 # bind to all interfaces
 listen_addr = "/ip4/0.0.0.0/udp/$P2P_PORT/quic-v1"
-tcp_fallback_enabled = false
-tcp_fallback_port = $TCP_PORT
 version_interop_mode = "relaxed"
 bootstrap_peers = [$BOOTSTRAP_PEERS]
 upnp_enabled = false

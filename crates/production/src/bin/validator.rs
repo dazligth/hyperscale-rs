@@ -27,7 +27,6 @@
 //!
 //! [network]
 //! listen_addr = "/ip4/0.0.0.0/udp/9000/quic-v1"
-//! tcp_fallback_port = 30500
 //! bootstrap_peers = []
 //!
 //! [threads]
@@ -80,7 +79,7 @@ use tokio::runtime::{Builder as RuntimeBuilder, Handle as TokioHandle};
 use tokio::signal;
 use tokio::task::spawn;
 use toml::from_str as toml_from_str;
-use tracing::{info, trace, warn};
+use tracing::{info, warn};
 use tracing_appender::non_blocking as wrap_non_blocking;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::never;
@@ -211,13 +210,6 @@ pub struct NetworkConfig {
     #[serde(default = "default_listen_addr")]
     pub listen_addr: String,
 
-    /// TCP fallback port (optional, enables TCP transport alongside QUIC)
-    pub tcp_fallback_port: Option<u16>,
-
-    /// Whether TCP fallback is enabled (default: true)
-    #[serde(default = "default_tcp_fallback_enabled")]
-    pub tcp_fallback_enabled: bool,
-
     /// Bootstrap peer addresses
     #[serde(default)]
     pub bootstrap_peers: Vec<String>,
@@ -248,10 +240,6 @@ pub struct NetworkConfig {
 
 fn default_listen_addr() -> String {
     "/ip4/0.0.0.0/udp/9000/quic-v1".to_string()
-}
-
-const fn default_tcp_fallback_enabled() -> bool {
-    true
 }
 
 const fn default_max_message_size() -> usize {
@@ -869,30 +857,13 @@ fn build_network_config(config: &NetworkConfig) -> Result<Libp2pConfig> {
         .parse()
         .with_context(|| format!("Invalid listen address: {}", config.listen_addr))?;
 
-    let listen_addresses = vec![listen_addr.clone()];
+    let listen_addresses = vec![listen_addr];
 
-    // Calculate default TCP fallback port if enabled but not specified (UDP port + 21500)
-    let tcp_fallback_port = if config.tcp_fallback_enabled && config.tcp_fallback_port.is_none() {
-        listen_addr.iter().find_map(|p| match p {
-            Protocol::Udp(port) => Some(port + 21500),
-            _ => None,
-        })
-    } else {
-        config.tcp_fallback_port
-    };
-
-    // Filter out our own listen addresses from bootstrap peers
-    // Also filter TCP addresses if TCP fallback is disabled
+    // Filter out our own listen addresses from bootstrap peers.
     let bootstrap_peers: Vec<_> = config
         .bootstrap_peers
         .iter()
         .filter_map(|addr| {
-            // Skip TCP addresses if TCP transport is disabled
-            if !config.tcp_fallback_enabled && addr.contains("/tcp/") {
-                trace!("Skipping TCP bootstrap peer (TCP disabled): {}", addr);
-                return None;
-            }
-
             let parsed = addr.parse::<Multiaddr>().ok().or_else(|| {
                 warn!("Invalid bootstrap peer address: {}", addr);
                 None
@@ -922,7 +893,6 @@ fn build_network_config(config: &NetworkConfig) -> Result<Libp2pConfig> {
         .with_gossipsub_heartbeat(Duration::from_millis(config.gossipsub_heartbeat_ms))
         .with_idle_connection_timeout(Duration::from_millis(config.idle_connection_timeout_ms))
         .with_keep_alive_interval(Duration::from_millis(config.keep_alive_interval_ms))
-        .with_tcp_fallback(config.tcp_fallback_enabled, tcp_fallback_port)
         .with_version_interop_mode(
             config
                 .version_interop_mode
@@ -1038,26 +1008,6 @@ async fn setup_upnp(config: &NetworkConfig) {
                 }
             } else {
                 warn!("Could not determine QUIC port from listen address for UPnP");
-            }
-
-            // Map TCP fallback port
-            if config.tcp_fallback_enabled
-                && let Some(port) = config.tcp_fallback_port
-            {
-                let local_addr = SocketAddr::new(local_ip, port);
-                match gateway
-                    .add_port(
-                        PortMappingProtocol::TCP,
-                        port,
-                        local_addr,
-                        60 * 60, // 1 hour lease
-                        "Hyperscale Validator TCP",
-                    )
-                    .await
-                {
-                    Ok(()) => info!("Successfully mapped TCP fallback port {} via UPnP", port),
-                    Err(e) => warn!("Failed to map TCP fallback port {} via UPnP: {}", port, e),
-                }
             }
         }
         Err(e) => {

@@ -174,10 +174,8 @@ impl Libp2pAdapter {
             limits,
         };
 
-        // Build swarm with QUIC transport, optionally with TCP fallback
         let mut swarm = super::swarm_builder::build_swarm(&config, keypair, behaviour)?;
 
-        // Listen on configured addresses (QUIC)
         for addr in &config.listen_addresses {
             swarm.listen_on(addr.clone()).map_err(|e| {
                 NetworkError::NetworkError(format!(
@@ -185,21 +183,6 @@ impl Libp2pAdapter {
                 ))
             })?;
             info!("Listening on: {}", addr);
-        }
-
-        // Listen on TCP fallback if enabled
-        if config.tcp_fallback_enabled
-            && let Some(tcp_port) = config.tcp_fallback_port
-        {
-            let tcp_addr: Multiaddr = format!("/ip4/0.0.0.0/tcp/{tcp_port}")
-                .parse()
-                .map_err(|e| NetworkError::NetworkError(format!("Invalid TCP address: {e}")))?;
-            swarm.listen_on(tcp_addr.clone()).map_err(|e| {
-                NetworkError::NetworkError(format!(
-                    "Failed to bind TCP transport on {tcp_addr}: {e:?}"
-                ))
-            })?;
-            info!("Listening on TCP fallback: {}", tcp_addr);
         }
 
         // Connect to bootstrap peers
