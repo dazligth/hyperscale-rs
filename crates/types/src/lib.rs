@@ -68,8 +68,7 @@ pub use primitives::identifiers::{
     ShardGroupId, ValidatorId, VotePower,
 };
 pub use primitives::merkle::{
-    compute_merkle_root, compute_merkle_root_with_proof, compute_padded_merkle_root,
-    verify_merkle_inclusion,
+    compute_merkle_root, compute_merkle_root_with_proof, verify_merkle_inclusion,
 };
 pub use primitives::signer_bitfield::SignerBitfield;
 pub use provisioning::batch::Provisions;

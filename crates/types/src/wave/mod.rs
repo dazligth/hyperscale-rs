@@ -47,10 +47,9 @@ mod tests {
         ReceiptValidationError, ShardGroupId, SignerBitfield, StoredReceipt, TopologySnapshot,
         TxHash, TxOutcome, ValidatorId, ValidatorInfo, ValidatorSet, VotePower, WaveCertificate,
         WaveId, WaveReceiptHash, WeightedTimestamp, compute_global_receipt_root,
-        compute_global_receipt_root_with_proof, compute_padded_merkle_root,
-        compute_provision_tx_roots, decode_wave_cert_vec, encode_wave_cert_vec,
-        generate_bls_keypair, tx_outcome_leaf, verify_merkle_inclusion, wave_leader,
-        wave_leader_at,
+        compute_global_receipt_root_with_proof, compute_merkle_root, compute_provision_tx_roots,
+        decode_wave_cert_vec, encode_wave_cert_vec, generate_bls_keypair, tx_outcome_leaf,
+        verify_merkle_inclusion, wave_leader, wave_leader_at,
     };
 
     /// Build a 2-shard topology with validator 0 on shard 0.
@@ -172,7 +171,7 @@ mod tests {
         assert_eq!(roots.len(), 1);
         assert!(roots.contains_key(&ShardGroupId(1)));
 
-        let expected = ProvisionTxRoot::from_raw(compute_padded_merkle_root(&[
+        let expected = ProvisionTxRoot::from_raw(compute_merkle_root(&[
             tx_a.hash().into_raw(),
             tx_b.hash().into_raw(),
         ]));

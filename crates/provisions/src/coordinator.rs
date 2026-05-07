@@ -17,7 +17,7 @@ use hyperscale_core::{Action, FetchAbandon, FetchOrigin, FetchPeers, FetchReques
 use hyperscale_types::{
     BlockHeight, CertifiedBlock, CommittedBlockHeader, Hash, LocalTimestamp, ProvisionHash,
     ProvisionTxRoot, Provisions, RETENTION_HORIZON, ShardGroupId, TopologySnapshot,
-    compute_padded_merkle_root,
+    compute_merkle_root,
 };
 use serde::Deserialize;
 use tracing::{debug, info, warn};
@@ -534,7 +534,7 @@ impl ProvisionCoordinator {
             .iter()
             .map(|t| t.tx_hash.into_raw())
             .collect();
-        let computed_root = ProvisionTxRoot::from_raw(compute_padded_merkle_root(&leaves));
+        let computed_root = ProvisionTxRoot::from_raw(compute_merkle_root(&leaves));
 
         if computed_root != expected_root {
             warn!(
@@ -744,7 +744,7 @@ mod tests {
         let mut header_arc = make_committed_header_with_targets(shard, height, vec![local_shard]);
         let header = Arc::get_mut(&mut header_arc).unwrap();
         let raw: Vec<Hash> = tx_hashes.iter().map(|h| h.into_raw()).collect();
-        let root = ProvisionTxRoot::from_raw(compute_padded_merkle_root(&raw));
+        let root = ProvisionTxRoot::from_raw(compute_merkle_root(&raw));
         header.header.provision_tx_roots.insert(local_shard, root);
         header_arc
     }

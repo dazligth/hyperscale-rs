@@ -107,7 +107,7 @@ pub struct BlockHeader {
     /// Per-target-shard merkle commitment over the tx hashes a target shard
     /// should receive provisions for from this block.
     ///
-    /// Key = target shard; value = `compute_padded_merkle_root` over the
+    /// Key = target shard; value = `compute_merkle_root` over the
     /// ordered tx hashes destined for that target (block order, already
     /// hash-ascending). Lets the target verify a received `Provisions`
     /// contains the full set it was meant to receive — catches silently

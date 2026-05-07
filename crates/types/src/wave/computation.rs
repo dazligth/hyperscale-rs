@@ -8,7 +8,7 @@ use sbor::prelude::*;
 
 use crate::{
     Attempt, BlockHeight, Hash, ProvisionTxRoot, RoutableTransaction, ShardGroupId,
-    TopologySnapshot, ValidatorId, WaveId, compute_padded_merkle_root,
+    TopologySnapshot, ValidatorId, WaveId, compute_merkle_root,
 };
 
 /// Compute the set of cross-shard waves for a block's transactions.
@@ -90,7 +90,7 @@ pub fn compute_provision_tx_roots(
         .map(|(shard, hashes)| {
             (
                 shard,
-                ProvisionTxRoot::from_raw(compute_padded_merkle_root(&hashes)),
+                ProvisionTxRoot::from_raw(compute_merkle_root(&hashes)),
             )
         })
         .collect()

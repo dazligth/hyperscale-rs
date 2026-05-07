@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::{
     CertificateRoot, FinalizedWave, Hash, LocalReceiptRoot, ProvisionsRoot, RoutableTransaction,
-    StoredReceipt, TransactionRoot, compute_merkle_root, compute_padded_merkle_root,
+    StoredReceipt, TransactionRoot, compute_merkle_root,
 };
 
 /// Compute the receipt merkle root for a block's finalized waves.
@@ -54,7 +54,7 @@ pub fn compute_provision_root(batch_hashes: &[Hash]) -> ProvisionsRoot {
     if batch_hashes.is_empty() {
         return ProvisionsRoot::ZERO;
     }
-    ProvisionsRoot::from_raw(compute_padded_merkle_root(batch_hashes))
+    ProvisionsRoot::from_raw(compute_merkle_root(batch_hashes))
 }
 
 /// Compute the transaction merkle root for a block.
@@ -69,5 +69,5 @@ pub fn compute_transaction_root(transactions: &[Arc<RoutableTransaction>]) -> Tr
 
     // Use padded merkle root (power-of-2 padding with Hash::ZERO) so that
     // merkle inclusion proofs can be generated and verified for any leaf.
-    TransactionRoot::from_raw(compute_padded_merkle_root(&leaves))
+    TransactionRoot::from_raw(compute_merkle_root(&leaves))
 }
