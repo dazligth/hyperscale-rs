@@ -317,7 +317,7 @@ mod tests {
     }
 
     fn ms(value: u64) -> WeightedTimestamp {
-        WeightedTimestamp(value)
+        WeightedTimestamp::from_millis(value)
     }
 
     #[test]

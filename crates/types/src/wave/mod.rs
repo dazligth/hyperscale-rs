@@ -275,7 +275,7 @@ mod tests {
     ) -> ExecutionCertificate {
         ExecutionCertificate::new(
             make_wave_id(0, BlockHeight::new(10), &[1]),
-            WeightedTimestamp(11),
+            WeightedTimestamp::from_millis(11),
             GlobalReceiptRoot::from_raw(Hash::from_bytes(b"global_receipt_root")),
             vec![make_outcome(1), make_outcome(2)],
             signature,
@@ -323,7 +323,7 @@ mod tests {
         let global_receipt_root = compute_global_receipt_root(&outcomes);
         Arc::new(ExecutionCertificate::new(
             make_wave_id(shard, BlockHeight::new(42), &[1]),
-            WeightedTimestamp(43),
+            WeightedTimestamp::from_millis(43),
             global_receipt_root,
             outcomes,
             Bls12381G2Signature([0u8; 96]),
@@ -376,7 +376,7 @@ mod tests {
         let root_wid1 = compute_global_receipt_root(&outcomes_wid1);
         let local_ec_for_wid1 = Arc::new(ExecutionCertificate::new(
             wid1.clone(),
-            WeightedTimestamp(43),
+            WeightedTimestamp::from_millis(43),
             root_wid1,
             outcomes_wid1,
             Bls12381G2Signature([0u8; 96]),
@@ -538,7 +538,7 @@ mod tests {
             enc.write_value_kind(ValueKind::Tuple).unwrap();
             enc.write_size(6).unwrap();
             enc.encode(&wave_id).unwrap();
-            enc.encode(&WeightedTimestamp(1)).unwrap();
+            enc.encode(&WeightedTimestamp::from_millis(1)).unwrap();
             enc.encode(&GlobalReceiptRoot::ZERO).unwrap();
             enc.write_value_kind(ValueKind::Array).unwrap();
             enc.write_value_kind(TxOutcome::value_kind()).unwrap();
@@ -655,7 +655,7 @@ mod tests {
     fn make_local_ec(wave_id: &WaveId, outcomes: Vec<TxOutcome>) -> Arc<ExecutionCertificate> {
         Arc::new(ExecutionCertificate::new(
             wave_id.clone(),
-            WeightedTimestamp(wave_id.block_height.inner() + 1),
+            WeightedTimestamp::from_millis(wave_id.block_height.inner() + 1),
             compute_global_receipt_root(&outcomes),
             outcomes,
             Bls12381G2Signature([0u8; 96]),

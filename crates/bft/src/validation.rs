@@ -333,7 +333,7 @@ mod tests {
             parent_block_hash: BlockHash::from_raw(Hash::from_bytes(b"parent")),
             parent_qc: QuorumCertificate::genesis(ShardGroupId(0)),
             proposer: ValidatorId(height.inner() % 4),
-            timestamp: ProposerTimestamp(timestamp_ms),
+            timestamp: ProposerTimestamp::from_millis(timestamp_ms),
             round: Round::new(0),
             is_fallback: false,
             state_root: StateRoot::ZERO,
@@ -354,7 +354,7 @@ mod tests {
             parent_block_hash: BlockHash::ZERO,
             parent_qc: QuorumCertificate::genesis(ShardGroupId(0)),
             proposer: ValidatorId(0),
-            timestamp: ProposerTimestamp(0),
+            timestamp: ProposerTimestamp::from_millis(0),
             round: Round::INITIAL,
             is_fallback: false,
             state_root: StateRoot::ZERO,
@@ -688,7 +688,7 @@ mod tests {
         let block = block_with_provisions(BlockHeight::new(6), vec![Arc::clone(&p)]);
         let qc_chain = HashSet::new();
         let mut dedup_index = CommitDedupIndex::new();
-        dedup_index.register_committed_provisions(&[p], WeightedTimestamp(1_000));
+        dedup_index.register_committed_provisions(&[p], WeightedTimestamp::from_millis(1_000));
         let err = validate_no_duplicate_provisions(&block, &qc_chain, &dedup_index).unwrap_err();
         assert!(err.contains("already committed"));
     }

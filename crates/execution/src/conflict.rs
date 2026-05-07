@@ -396,7 +396,8 @@ mod tests {
             BlockHeight::new(10),
             vec![(remote_tx, vec![node_b], vec![local_node])],
         );
-        let conflicts = detector.detect_conflicts(&provisions, WeightedTimestamp(10 * 500));
+        let conflicts =
+            detector.detect_conflicts(&provisions, WeightedTimestamp::from_millis(10 * 500));
         assert!(conflicts.is_empty());
     }
 
@@ -419,7 +420,8 @@ mod tests {
             BlockHeight::new(10),
             vec![(remote_tx, vec![remote_node], vec![local_b])],
         );
-        let conflicts = detector.detect_conflicts(&provisions, WeightedTimestamp(10 * 500));
+        let conflicts =
+            detector.detect_conflicts(&provisions, WeightedTimestamp::from_millis(10 * 500));
         assert!(conflicts.is_empty());
     }
 
@@ -441,11 +443,15 @@ mod tests {
             BlockHeight::new(10),
             vec![(lower, vec![remote_node], vec![local_node])],
         );
-        let conflicts = detector.detect_conflicts(&provisions, WeightedTimestamp(10 * 500));
+        let conflicts =
+            detector.detect_conflicts(&provisions, WeightedTimestamp::from_millis(10 * 500));
 
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].loser_tx, higher);
-        assert_eq!(conflicts[0].committed_at, WeightedTimestamp(10 * 500));
+        assert_eq!(
+            conflicts[0].committed_at,
+            WeightedTimestamp::from_millis(10 * 500)
+        );
     }
 
     #[test]
@@ -465,7 +471,8 @@ mod tests {
             BlockHeight::new(10),
             vec![(higher, vec![remote_node], vec![local_node])],
         );
-        let conflicts = detector.detect_conflicts(&provisions, WeightedTimestamp(10 * 500));
+        let conflicts =
+            detector.detect_conflicts(&provisions, WeightedTimestamp::from_millis(10 * 500));
         assert!(conflicts.is_empty());
     }
 
@@ -484,14 +491,18 @@ mod tests {
             BlockHeight::new(5),
             vec![(lower, vec![remote_node], vec![local_node])],
         );
-        let fwd_conflicts = detector.detect_conflicts(&provisions, WeightedTimestamp(5 * 500));
+        let fwd_conflicts =
+            detector.detect_conflicts(&provisions, WeightedTimestamp::from_millis(5 * 500));
         assert!(fwd_conflicts.is_empty());
 
         // Local tx registers AFTER — reverse detection catches bidirectional overlap
         let rev_conflicts = detector.register_tx(higher, &topo, &[remote_node, local_node], &[]);
         assert_eq!(rev_conflicts.len(), 1);
         assert_eq!(rev_conflicts[0].loser_tx, higher);
-        assert_eq!(rev_conflicts[0].committed_at, WeightedTimestamp(5 * 500));
+        assert_eq!(
+            rev_conflicts[0].committed_at,
+            WeightedTimestamp::from_millis(5 * 500)
+        );
     }
 
     #[test]
@@ -509,7 +520,7 @@ mod tests {
             BlockHeight::new(5),
             vec![(higher, vec![remote_node], vec![local_node])],
         );
-        detector.detect_conflicts(&provisions, WeightedTimestamp(5 * 500));
+        detector.detect_conflicts(&provisions, WeightedTimestamp::from_millis(5 * 500));
 
         // Local tx registers with lower hash — wins, no conflict
         let rev_conflicts = detector.register_tx(lower, &topo, &[remote_node, local_node], &[]);
@@ -534,7 +545,8 @@ mod tests {
             BlockHeight::new(10),
             vec![(remote_tx, vec![remote_node], vec![local_node])],
         );
-        let conflicts = detector.detect_conflicts(&provisions, WeightedTimestamp(10 * 500));
+        let conflicts =
+            detector.detect_conflicts(&provisions, WeightedTimestamp::from_millis(10 * 500));
         assert!(conflicts.is_empty());
     }
 
@@ -555,7 +567,8 @@ mod tests {
             BlockHeight::new(10),
             vec![(remote_tx, vec![remote_node], vec![local_node])],
         );
-        let conflicts = detector.detect_conflicts(&provisions, WeightedTimestamp(10 * 500));
+        let conflicts =
+            detector.detect_conflicts(&provisions, WeightedTimestamp::from_millis(10 * 500));
         assert!(conflicts.is_empty());
     }
 
@@ -573,7 +586,7 @@ mod tests {
             BlockHeight::new(5),
             vec![(lower, vec![remote_node], vec![local_node])],
         );
-        detector.detect_conflicts(&provisions, WeightedTimestamp(5 * 500));
+        detector.detect_conflicts(&provisions, WeightedTimestamp::from_millis(5 * 500));
         assert_eq!(detector.stored_provision_count(), 1);
 
         detector.remove_provision(&lower, ShardGroupId(1));

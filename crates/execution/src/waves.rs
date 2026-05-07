@@ -416,7 +416,7 @@ mod tests {
     }
 
     fn ms(value: u64) -> WeightedTimestamp {
-        WeightedTimestamp(value)
+        WeightedTimestamp::from_millis(value)
     }
 
     fn make_wave_state(wave_id: WaveId, block_hash: BlockHash, tx_seed: u8) -> WaveState {

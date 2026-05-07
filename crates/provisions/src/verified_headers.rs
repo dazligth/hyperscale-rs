@@ -75,7 +75,7 @@ mod tests {
             parent_block_hash: BlockHash::ZERO,
             parent_qc: QuorumCertificate::genesis(ShardGroupId(0)),
             proposer: ValidatorId(0),
-            timestamp: ProposerTimestamp(0),
+            timestamp: ProposerTimestamp::from_millis(0),
             round: Round::INITIAL,
             is_fallback: false,
             state_root: StateRoot::ZERO,

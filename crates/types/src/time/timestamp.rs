@@ -36,7 +36,7 @@ use sbor::prelude::*;
 /// This is the only timestamp type safe to anchor consensus deadlines on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, BasicSbor, Default)]
 #[sbor(transparent)]
-pub struct WeightedTimestamp(pub u64);
+pub struct WeightedTimestamp(u64);
 
 impl WeightedTimestamp {
     /// Genesis / zero timestamp.
@@ -109,7 +109,7 @@ impl Display for WeightedTimestamp {
 /// - Input to stake-weighted aggregation when forming a QC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, BasicSbor, Default)]
 #[sbor(transparent)]
-pub struct ProposerTimestamp(pub u64);
+pub struct ProposerTimestamp(u64);
 
 impl ProposerTimestamp {
     /// Genesis / zero timestamp.
@@ -166,7 +166,7 @@ impl Display for ProposerTimestamp {
 /// an explicit method, so the question "which clock am I anchoring on?"
 /// surfaces at every boundary instead of being lost to coercion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
-pub struct LocalTimestamp(pub u64);
+pub struct LocalTimestamp(u64);
 
 impl LocalTimestamp {
     /// Process-start / zero timestamp.
@@ -233,66 +233,87 @@ mod tests {
 
     #[test]
     fn elapsed_since_saturates_at_zero() {
-        let a = WeightedTimestamp(1_000);
-        let b = WeightedTimestamp(3_000);
+        let a = WeightedTimestamp::from_millis(1_000);
+        let b = WeightedTimestamp::from_millis(3_000);
         assert_eq!(b.elapsed_since(a), Duration::from_secs(2));
         assert_eq!(a.elapsed_since(b), Duration::ZERO);
     }
 
     #[test]
     fn plus_adds_duration() {
-        let a = WeightedTimestamp(1_000);
-        assert_eq!(a.plus(Duration::from_millis(500)), WeightedTimestamp(1_500));
+        let a = WeightedTimestamp::from_millis(1_000);
+        assert_eq!(
+            a.plus(Duration::from_millis(500)),
+            WeightedTimestamp::from_millis(1_500)
+        );
     }
 
     #[test]
     fn minus_saturates_at_zero() {
-        let a = WeightedTimestamp(1_000);
-        assert_eq!(a.minus(Duration::from_millis(300)), WeightedTimestamp(700));
-        assert_eq!(a.minus(Duration::from_secs(100)), WeightedTimestamp(0));
+        let a = WeightedTimestamp::from_millis(1_000);
+        assert_eq!(
+            a.minus(Duration::from_millis(300)),
+            WeightedTimestamp::from_millis(700)
+        );
+        assert_eq!(
+            a.minus(Duration::from_secs(100)),
+            WeightedTimestamp::from_millis(0)
+        );
     }
 
     #[test]
     fn local_elapsed_since_saturates_at_zero() {
-        let a = LocalTimestamp(1_000);
-        let b = LocalTimestamp(3_000);
+        let a = LocalTimestamp::from_millis(1_000);
+        let b = LocalTimestamp::from_millis(3_000);
         assert_eq!(b.elapsed_since(a), Duration::from_secs(2));
         assert_eq!(a.elapsed_since(b), Duration::ZERO);
     }
 
     #[test]
     fn local_saturating_sub_matches_elapsed_since() {
-        let a = LocalTimestamp(500);
-        let b = LocalTimestamp(2_500);
+        let a = LocalTimestamp::from_millis(500);
+        let b = LocalTimestamp::from_millis(2_500);
         assert_eq!(b.saturating_sub(a), b.elapsed_since(a));
         assert_eq!(a.saturating_sub(b), Duration::ZERO);
     }
 
     #[test]
     fn local_plus_adds_duration() {
-        let a = LocalTimestamp(1_000);
-        assert_eq!(a.plus(Duration::from_millis(500)), LocalTimestamp(1_500));
+        let a = LocalTimestamp::from_millis(1_000);
+        assert_eq!(
+            a.plus(Duration::from_millis(500)),
+            LocalTimestamp::from_millis(1_500)
+        );
     }
 
     #[test]
     fn local_minus_saturates_at_zero() {
-        let a = LocalTimestamp(1_000);
-        assert_eq!(a.minus(Duration::from_millis(300)), LocalTimestamp(700));
-        assert_eq!(a.minus(Duration::from_secs(100)), LocalTimestamp(0));
+        let a = LocalTimestamp::from_millis(1_000);
+        assert_eq!(
+            a.minus(Duration::from_millis(300)),
+            LocalTimestamp::from_millis(700)
+        );
+        assert_eq!(
+            a.minus(Duration::from_secs(100)),
+            LocalTimestamp::from_millis(0)
+        );
     }
 
     #[test]
     fn local_orders_by_ms() {
-        assert!(LocalTimestamp(1_000) < LocalTimestamp(2_000));
-        assert_eq!(LocalTimestamp(1_000), LocalTimestamp(1_000));
+        assert!(LocalTimestamp::from_millis(1_000) < LocalTimestamp::from_millis(2_000));
+        assert_eq!(
+            LocalTimestamp::from_millis(1_000),
+            LocalTimestamp::from_millis(1_000)
+        );
     }
 
     #[test]
     fn local_plus_saturates_on_overflow() {
-        let near_max = LocalTimestamp(u64::MAX - 10);
+        let near_max = LocalTimestamp::from_millis(u64::MAX - 10);
         assert_eq!(
             near_max.plus(Duration::from_secs(1)),
-            LocalTimestamp(u64::MAX)
+            LocalTimestamp::from_millis(u64::MAX)
         );
     }
 

@@ -2009,7 +2009,10 @@ mod tests {
         use hyperscale_types::test_utils::test_notarized_transaction_v1;
         use hyperscale_types::{TimestampRange, routable_from_notarized_v1};
         let notarized = test_notarized_transaction_v1(&[seed]);
-        let range = TimestampRange::new(WeightedTimestamp::ZERO, WeightedTimestamp(end_ms));
+        let range = TimestampRange::new(
+            WeightedTimestamp::ZERO,
+            WeightedTimestamp::from_millis(end_ms),
+        );
         Arc::new(routable_from_notarized_v1(notarized, range).expect("valid notarized fixture"))
     }
 
@@ -2023,7 +2026,7 @@ mod tests {
     fn rpc_submit_rejects_expired_transaction() {
         let topology = make_test_topology();
         let mut mempool = MempoolCoordinator::new();
-        set_current_ts(&mut mempool, WeightedTimestamp(2_000));
+        set_current_ts(&mut mempool, WeightedTimestamp::from_millis(2_000));
 
         let tx = tx_with_end(1, 1_000); // expired well before now
         let actions =
@@ -2039,7 +2042,7 @@ mod tests {
     fn gossip_drops_expired_transaction() {
         let topology = make_test_topology();
         let mut mempool = MempoolCoordinator::new();
-        set_current_ts(&mut mempool, WeightedTimestamp(2_000));
+        set_current_ts(&mut mempool, WeightedTimestamp::from_millis(2_000));
 
         let tx = tx_with_end(1, 1_000);
         let actions =
@@ -2052,7 +2055,7 @@ mod tests {
     fn rpc_submit_admits_in_window_transaction() {
         let topology = make_test_topology();
         let mut mempool = MempoolCoordinator::new();
-        set_current_ts(&mut mempool, WeightedTimestamp(500));
+        set_current_ts(&mut mempool, WeightedTimestamp::from_millis(500));
 
         let tx = tx_with_end(1, 1_000); // end_exclusive > now
         mempool.on_submit_transaction(&topology, Arc::clone(&tx), LocalTimestamp::ZERO);
@@ -2066,7 +2069,7 @@ mod tests {
     fn cleanup_expired_pending_drops_only_past_expiry_entries() {
         let topology = make_test_topology();
         let mut mempool = MempoolCoordinator::new();
-        set_current_ts(&mut mempool, WeightedTimestamp(500));
+        set_current_ts(&mut mempool, WeightedTimestamp::from_millis(500));
 
         let early = tx_with_end(1, 1_000); // alive
         let later = tx_with_end(2, 60_000); // alive
@@ -2075,7 +2078,7 @@ mod tests {
         assert_eq!(mempool.len(), 2);
 
         // Advance past `early`'s end_exclusive but not `later`'s.
-        set_current_ts(&mut mempool, WeightedTimestamp(1_500));
+        set_current_ts(&mut mempool, WeightedTimestamp::from_millis(1_500));
         let dropped = mempool.cleanup_expired_pending();
         assert_eq!(dropped, 1);
         assert!(mempool.status(&early.hash()).is_none());
@@ -2089,13 +2092,13 @@ mod tests {
     fn cleanup_expired_pending_does_not_tombstone_dropped_entries() {
         let topology = make_test_topology();
         let mut mempool = MempoolCoordinator::new();
-        set_current_ts(&mut mempool, WeightedTimestamp(500));
+        set_current_ts(&mut mempool, WeightedTimestamp::from_millis(500));
 
         let tx = tx_with_end(1, 1_000);
         let tx_hash = tx.hash();
         mempool.on_submit_transaction(&topology, Arc::clone(&tx), LocalTimestamp::ZERO);
 
-        set_current_ts(&mut mempool, WeightedTimestamp(1_500));
+        set_current_ts(&mut mempool, WeightedTimestamp::from_millis(1_500));
         let dropped = mempool.cleanup_expired_pending();
         assert_eq!(dropped, 1);
 

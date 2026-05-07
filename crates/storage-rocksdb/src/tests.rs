@@ -25,7 +25,7 @@ use hyperscale_types::{
 fn placeholder_local_ec(shard: ShardGroupId, height: BlockHeight) -> Arc<ExecutionCertificate> {
     Arc::new(ExecutionCertificate::new(
         WaveId::new(shard, height, std::collections::BTreeSet::new()),
-        WeightedTimestamp(0),
+        WeightedTimestamp::from_millis(0),
         GlobalReceiptRoot::ZERO,
         Vec::new(),
         Bls12381G2Signature([0u8; 96]),
@@ -219,7 +219,10 @@ fn test_block_storage_and_retrieval() {
 
     let stored = storage.get_block(BlockHeight::new(1)).unwrap();
     assert_eq!(stored.block.height(), BlockHeight::new(1));
-    assert_eq!(stored.block.header().timestamp, ProposerTimestamp(1_000));
+    assert_eq!(
+        stored.block.header().timestamp,
+        ProposerTimestamp::from_millis(1_000)
+    );
     assert_eq!(stored.qc.block_hash, block.hash());
 }
 
@@ -259,7 +262,7 @@ fn test_recovery_with_qc() {
             round: Round::new(5),
             aggregated_signature: zero_bls_signature(),
             signers: SignerBitfield::new(4),
-            weighted_timestamp: WeightedTimestamp(100_000),
+            weighted_timestamp: WeightedTimestamp::from_millis(100_000),
         };
         storage.set_chain_metadata(BlockHeight::new(100), Some(expected_raw), Some(&qc));
     }

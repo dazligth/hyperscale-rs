@@ -3420,7 +3420,7 @@ mod tests {
             parent_block_hash: BlockHash::from_raw(Hash::from_bytes(b"parent")),
             parent_qc: QuorumCertificate::genesis(ShardGroupId(0)),
             proposer: ValidatorId(height.inner() % 4), // Round-robin
-            timestamp: ProposerTimestamp(timestamp_ms),
+            timestamp: ProposerTimestamp::from_millis(timestamp_ms),
             round: Round::new(0),
             is_fallback: false,
             state_root: StateRoot::ZERO,
@@ -3452,7 +3452,7 @@ mod tests {
             round: Round::new(0),
             signers: SignerBitfield::empty(),
             aggregated_signature: zero_bls_signature(),
-            weighted_timestamp: WeightedTimestamp(100_000),
+            weighted_timestamp: WeightedTimestamp::from_millis(100_000),
         }
     }
 
@@ -3476,7 +3476,7 @@ mod tests {
         signers.set(2);
         let parent_qc = QuorumCertificate {
             signers,
-            weighted_timestamp: WeightedTimestamp(99_000),
+            weighted_timestamp: WeightedTimestamp::from_millis(99_000),
             ..make_test_qc(parent_block_hash, BlockHeight::new(1))
         };
         let header = BlockHeader {
@@ -3525,7 +3525,7 @@ mod tests {
         signers.set(2);
         let parent_qc = QuorumCertificate {
             signers,
-            weighted_timestamp: WeightedTimestamp(99_000),
+            weighted_timestamp: WeightedTimestamp::from_millis(99_000),
             ..make_test_qc(parent_block_hash, BlockHeight::new(1))
         };
         let header = BlockHeader {
@@ -3574,7 +3574,7 @@ mod tests {
         signers.set(2);
         let parent_qc = QuorumCertificate {
             signers,
-            weighted_timestamp: WeightedTimestamp(99_000),
+            weighted_timestamp: WeightedTimestamp::from_millis(99_000),
             ..make_test_qc(parent_block_hash, BlockHeight::new(1))
         };
         let header = BlockHeader {
@@ -3625,7 +3625,7 @@ mod tests {
         signers.set(2);
         let parent_qc = QuorumCertificate {
             signers,
-            weighted_timestamp: WeightedTimestamp(99_000),
+            weighted_timestamp: WeightedTimestamp::from_millis(99_000),
             ..make_test_qc(parent_block_hash, BlockHeight::new(1))
         };
         let header = BlockHeader {
@@ -3677,7 +3677,7 @@ mod tests {
         signers.set(2);
         let parent_qc = QuorumCertificate {
             signers,
-            weighted_timestamp: WeightedTimestamp(99_000),
+            weighted_timestamp: WeightedTimestamp::from_millis(99_000),
             ..make_test_qc(parent_block_hash, BlockHeight::new(1))
         };
         let header = BlockHeader {
@@ -3906,7 +3906,7 @@ mod tests {
             round: Round::new(0),
             voter,
             signature: zero_bls_signature(),
-            timestamp: ProposerTimestamp(100_000),
+            timestamp: ProposerTimestamp::from_millis(100_000),
         };
 
         let _ = state.on_qc_result(&topology, block_b, None, vec![(0, vote, VotePower::new(1))]);
@@ -4210,7 +4210,7 @@ mod tests {
         signers.set(2);
         let parent_qc = QuorumCertificate {
             signers,
-            weighted_timestamp: WeightedTimestamp(99_000),
+            weighted_timestamp: WeightedTimestamp::from_millis(99_000),
             ..make_test_qc(parent_block_hash, BlockHeight::new(1))
         };
 
@@ -4285,7 +4285,7 @@ mod tests {
         signers.set(2);
         let honest_qc = QuorumCertificate {
             signers: signers.clone(),
-            weighted_timestamp: WeightedTimestamp(99_000),
+            weighted_timestamp: WeightedTimestamp::from_millis(99_000),
             ..make_test_qc(parent_block_hash, BlockHeight::new(1))
         };
 
@@ -4298,7 +4298,7 @@ mod tests {
         // the cache must bind every signed field, otherwise a hit would skip
         // re-verifying a forged signature.
         let forged_qc = QuorumCertificate {
-            weighted_timestamp: WeightedTimestamp(123_456_789),
+            weighted_timestamp: WeightedTimestamp::from_millis(123_456_789),
             ..honest_qc
         };
         let forged_header = BlockHeader {
@@ -4406,7 +4406,7 @@ mod tests {
         let old_timestamp = 1000u64;
         state.latest_qc = Some(QuorumCertificate {
             parent_block_hash: BlockHash::from_raw(Hash::from_bytes(b"block_2")),
-            weighted_timestamp: WeightedTimestamp(old_timestamp),
+            weighted_timestamp: WeightedTimestamp::from_millis(old_timestamp),
             ..make_test_qc(
                 BlockHash::from_raw(Hash::from_bytes(b"block_3")),
                 BlockHeight::new(3),
@@ -4531,7 +4531,7 @@ mod tests {
 
         state.latest_qc = Some(QuorumCertificate {
             parent_block_hash: BlockHash::from_raw(Hash::from_bytes(b"block_4")),
-            weighted_timestamp: WeightedTimestamp(1000),
+            weighted_timestamp: WeightedTimestamp::from_millis(1000),
             ..make_test_qc(
                 BlockHash::from_raw(Hash::from_bytes(b"block_5")),
                 BlockHeight::new(5),
@@ -4559,7 +4559,7 @@ mod tests {
         let block = Block::Live {
             header: BlockHeader {
                 parent_block_hash: BlockHash::ZERO,
-                timestamp: ProposerTimestamp(1000),
+                timestamp: ProposerTimestamp::from_millis(1000),
                 ..make_header_at_height(BlockHeight::new(1), 1000)
             },
             transactions: Arc::new(vec![]),
@@ -4570,7 +4570,7 @@ mod tests {
         sub_quorum_signers.set(0); // single signer — far below 2f+1 = 3
         let qc = QuorumCertificate {
             signers: sub_quorum_signers,
-            weighted_timestamp: WeightedTimestamp(1000),
+            weighted_timestamp: WeightedTimestamp::from_millis(1000),
             ..make_test_qc(block.hash(), BlockHeight::new(1))
         };
         let certified = CertifiedBlock::new_unchecked(block, qc);
@@ -4599,7 +4599,7 @@ mod tests {
         let block = Block::Live {
             header: BlockHeader {
                 parent_block_hash: BlockHash::ZERO,
-                timestamp: ProposerTimestamp(1000),
+                timestamp: ProposerTimestamp::from_millis(1000),
                 ..make_header_at_height(BlockHeight::new(1), 1000)
             },
             transactions: Arc::new(vec![]),
@@ -4607,7 +4607,7 @@ mod tests {
             provisions: Arc::new(vec![]),
         };
         let qc = QuorumCertificate {
-            weighted_timestamp: WeightedTimestamp(1000),
+            weighted_timestamp: WeightedTimestamp::from_millis(1000),
             ..make_test_qc(block.hash(), BlockHeight::new(1))
         };
         let certified = CertifiedBlock::new_unchecked(block, qc);
@@ -4653,7 +4653,7 @@ mod tests {
         let parent_timestamp = 50_000u64;
         state.latest_qc = Some(QuorumCertificate {
             parent_block_hash: BlockHash::from_raw(Hash::from_bytes(b"block_2")),
-            weighted_timestamp: WeightedTimestamp(parent_timestamp),
+            weighted_timestamp: WeightedTimestamp::from_millis(parent_timestamp),
             ..make_test_qc(
                 BlockHash::from_raw(Hash::from_bytes(b"block_3")),
                 BlockHeight::new(3),
@@ -4693,9 +4693,9 @@ mod tests {
         let (fb_fb, fb_ts) = find_proposal(&fallback_actions);
 
         assert!(!sync_fb);
-        assert_eq!(sync_ts, ProposerTimestamp(100_000));
+        assert_eq!(sync_ts, ProposerTimestamp::from_millis(100_000));
         assert!(fb_fb);
-        assert_eq!(fb_ts, ProposerTimestamp(parent_timestamp));
+        assert_eq!(fb_ts, ProposerTimestamp::from_millis(parent_timestamp));
     }
 
     #[test]

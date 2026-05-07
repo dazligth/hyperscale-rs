@@ -148,7 +148,10 @@ mod tests {
     /// Build a test tx whose `validity_range.end_timestamp_exclusive == end_ms`.
     fn tx_with_end(seed: u8, end_ms: u64) -> Arc<RoutableTransaction> {
         let notarized = test_notarized_transaction_v1(&[seed]);
-        let range = TimestampRange::new(WeightedTimestamp::ZERO, WeightedTimestamp(end_ms));
+        let range = TimestampRange::new(
+            WeightedTimestamp::ZERO,
+            WeightedTimestamp::from_millis(end_ms),
+        );
         Arc::new(routable_from_notarized_v1(notarized, range).expect("valid notarized fixture"))
     }
 
@@ -198,7 +201,7 @@ mod tests {
         let later_hash = later.hash();
         idx.register_committed_txs(&[early, later]);
 
-        idx.prune(WeightedTimestamp(500));
+        idx.prune(WeightedTimestamp::from_millis(500));
 
         assert!(!idx.contains_tx(&early_hash));
         assert!(idx.contains_tx(&later_hash));
@@ -240,7 +243,10 @@ mod tests {
     fn register_provisions_populates_retention() {
         let mut idx = CommitDedupIndex::new();
         let p = make_provisions(1);
-        idx.register_committed_provisions(std::slice::from_ref(&p), WeightedTimestamp(1_000));
+        idx.register_committed_provisions(
+            std::slice::from_ref(&p),
+            WeightedTimestamp::from_millis(1_000),
+        );
         assert!(idx.contains_provision(&p.hash()));
         assert_eq!(idx.provision_retention_len(), 1);
     }
@@ -249,7 +255,7 @@ mod tests {
     fn prune_drops_provisions_past_their_deadline() {
         let mut idx = CommitDedupIndex::new();
         let p = make_provisions(1);
-        let now = WeightedTimestamp(1_000);
+        let now = WeightedTimestamp::from_millis(1_000);
         idx.register_committed_provisions(std::slice::from_ref(&p), now);
 
         idx.prune(now);

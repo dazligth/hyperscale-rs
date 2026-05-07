@@ -87,7 +87,7 @@ mod tests {
     fn tombstone_is_observable_via_is_tombstoned() {
         let mut store = TombstoneStore::new();
         let hash = TxHash::from_raw(Hash::from_bytes(b"tx1"));
-        store.tombstone(hash, WeightedTimestamp(1_000));
+        store.tombstone(hash, WeightedTimestamp::from_millis(1_000));
         assert!(store.is_tombstoned(&hash));
         assert!(!store.is_tombstoned(&TxHash::from_raw(Hash::from_bytes(b"other"))));
     }
@@ -97,11 +97,11 @@ mod tests {
         let mut store = TombstoneStore::new();
         let old = TxHash::from_raw(Hash::from_bytes(b"old"));
         let future = TxHash::from_raw(Hash::from_bytes(b"future"));
-        store.tombstone(old, WeightedTimestamp(100));
-        store.tombstone(future, WeightedTimestamp(900));
+        store.tombstone(old, WeightedTimestamp::from_millis(100));
+        store.tombstone(future, WeightedTimestamp::from_millis(900));
 
         // At now=500: "old" (end=100) is past expiry, "future" (end=900) survives.
-        let removed = store.prune_tombstones(WeightedTimestamp(500));
+        let removed = store.prune_tombstones(WeightedTimestamp::from_millis(500));
         assert_eq!(removed, vec![old]);
         assert!(!store.is_tombstoned(&old));
         assert!(store.is_tombstoned(&future));
@@ -112,14 +112,14 @@ mod tests {
         let mut store = TombstoneStore::new();
         store.tombstone(
             TxHash::from_raw(Hash::from_bytes(b"a")),
-            WeightedTimestamp(100),
+            WeightedTimestamp::from_millis(100),
         );
         store.tombstone(
             TxHash::from_raw(Hash::from_bytes(b"b")),
-            WeightedTimestamp(200),
+            WeightedTimestamp::from_millis(200),
         );
 
-        let removed = store.prune_tombstones(WeightedTimestamp(1_000));
+        let removed = store.prune_tombstones(WeightedTimestamp::from_millis(1_000));
         assert_eq!(removed.len(), 2);
         assert_eq!(store.len_tombstones(), 0);
     }
@@ -130,8 +130,8 @@ mod tests {
         // expiry. retain keeps `end > now`.
         let mut store = TombstoneStore::new();
         let at_end = TxHash::from_raw(Hash::from_bytes(b"at_end"));
-        store.tombstone(at_end, WeightedTimestamp(500));
-        let removed = store.prune_tombstones(WeightedTimestamp(500));
+        store.tombstone(at_end, WeightedTimestamp::from_millis(500));
+        let removed = store.prune_tombstones(WeightedTimestamp::from_millis(500));
         assert_eq!(removed, vec![at_end]);
     }
 }

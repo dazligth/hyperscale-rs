@@ -791,7 +791,7 @@ mod tests {
     const TEST_BLOCK_INTERVAL_MS: u64 = 500;
 
     fn ts_for(height: BlockHeight) -> WeightedTimestamp {
-        WeightedTimestamp(height.inner() * TEST_BLOCK_INTERVAL_MS)
+        WeightedTimestamp::from_millis(height.inner() * TEST_BLOCK_INTERVAL_MS)
     }
 
     fn make_single_shard_wave(n: usize) -> WaveState {
@@ -886,7 +886,7 @@ mod tests {
         );
         Arc::new(ExecutionCertificate::new(
             ec_wave_id,
-            WeightedTimestamp(wave_id.block_height.inner() + 1),
+            WeightedTimestamp::from_millis(wave_id.block_height.inner() + 1),
             GlobalReceiptRoot::from_raw(Hash::from_bytes(b"global_receipt_root")),
             outcomes,
             Bls12381G2Signature([0u8; 96]),
@@ -945,7 +945,7 @@ mod tests {
         let mut w = make_cross_shard_wave(2);
         let wave_start_ts = ts_for(WAVE_START);
         let at_timeout = wave_start_ts.plus(WAVE_TIMEOUT);
-        let just_before = WeightedTimestamp(at_timeout.as_millis() - 1);
+        let just_before = WeightedTimestamp::from_millis(at_timeout.as_millis() - 1);
 
         // Not yet at timeout.
         assert!(!w.can_emit_vote(just_before));
@@ -1143,7 +1143,7 @@ mod tests {
         assert_ne!(local_root, divergent_root);
         let ec_local = Arc::new(ExecutionCertificate::new(
             w.wave_id().clone(),
-            WeightedTimestamp(WAVE_START.inner() + 1),
+            WeightedTimestamp::from_millis(WAVE_START.inner() + 1),
             divergent_root,
             outcomes,
             Bls12381G2Signature([0u8; 96]),
@@ -1168,7 +1168,7 @@ mod tests {
 
         let ec_local = Arc::new(ExecutionCertificate::new(
             w.wave_id().clone(),
-            WeightedTimestamp(WAVE_START.inner() + 1),
+            WeightedTimestamp::from_millis(WAVE_START.inner() + 1),
             local_root,
             outcomes,
             Bls12381G2Signature([0u8; 96]),
@@ -1194,7 +1194,7 @@ mod tests {
         let ec_root = GlobalReceiptRoot::from_raw(Hash::from_bytes(b"ec"));
         let ec_local = Arc::new(ExecutionCertificate::new(
             w.wave_id().clone(),
-            WeightedTimestamp(WAVE_START.inner() + 1),
+            WeightedTimestamp::from_millis(WAVE_START.inner() + 1),
             ec_root,
             vec![TxOutcome {
                 tx_hash: h0,
@@ -1324,7 +1324,7 @@ mod tests {
         );
         let ec_remote = Arc::new(ExecutionCertificate::new(
             ec_wave_id,
-            WeightedTimestamp(w.wave_id().block_height.inner() + 1),
+            WeightedTimestamp::from_millis(w.wave_id().block_height.inner() + 1),
             GlobalReceiptRoot::from_raw(Hash::from_bytes(b"gr")),
             std::mem::take(&mut outcomes),
             Bls12381G2Signature([0u8; 96]),

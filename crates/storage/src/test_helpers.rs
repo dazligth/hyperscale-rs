@@ -97,7 +97,7 @@ pub fn make_test_wave_certificate(height: BlockHeight, shard: ShardGroupId) -> W
     let wave_id = WaveId::new(shard, height, BTreeSet::new());
     let local_ec = Arc::new(ExecutionCertificate::new(
         wave_id.clone(),
-        WeightedTimestamp(0),
+        WeightedTimestamp::from_millis(0),
         GlobalReceiptRoot::ZERO,
         Vec::new(),
         Bls12381G2Signature([0u8; 96]),
@@ -122,7 +122,7 @@ pub fn make_test_block(height: BlockHeight) -> Block {
             parent_block_hash: BlockHash::from_raw(Hash::from_bytes(&parent_bytes)),
             parent_qc: QuorumCertificate::genesis(ShardGroupId(0)),
             proposer: ValidatorId(0),
-            timestamp: ProposerTimestamp(height.inner() * 1000),
+            timestamp: ProposerTimestamp::from_millis(height.inner() * 1000),
             round: Round::INITIAL,
             is_fallback: false,
             state_root: StateRoot::ZERO,
@@ -151,7 +151,7 @@ pub fn make_test_qc(block: &Block) -> QuorumCertificate {
         round: Round::INITIAL,
         aggregated_signature: zero_bls_signature(),
         signers: SignerBitfield::new(4),
-        weighted_timestamp: WeightedTimestamp(block.header().timestamp.as_millis()),
+        weighted_timestamp: WeightedTimestamp::from_millis(block.header().timestamp.as_millis()),
     }
 }
 
@@ -206,7 +206,7 @@ pub fn make_test_execution_certificate(
     let global_receipt_root = compute_global_receipt_root(&outcomes);
     ExecutionCertificate::new(
         WaveId::new(ShardGroupId(0), block_height, BTreeSet::new()),
-        WeightedTimestamp(block_height.inner() + 1),
+        WeightedTimestamp::from_millis(block_height.inner() + 1),
         global_receipt_root,
         outcomes,
         Bls12381G2Signature([0u8; 96]),

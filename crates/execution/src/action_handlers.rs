@@ -587,7 +587,7 @@ mod tests {
                 &sk1,
                 &wid,
                 root,
-                WeightedTimestamp(100),
+                WeightedTimestamp::from_millis(100),
                 outcomes.clone(),
             ),
             signed_vote(
@@ -595,7 +595,7 @@ mod tests {
                 &sk3,
                 &wid,
                 root,
-                WeightedTimestamp(100),
+                WeightedTimestamp::from_millis(100),
                 outcomes.clone(),
             ),
         ];
@@ -623,7 +623,7 @@ mod tests {
                 &sk0,
                 &wid,
                 root,
-                WeightedTimestamp(100),
+                WeightedTimestamp::from_millis(100),
                 outcomes.clone(),
             ),
             signed_vote(
@@ -631,7 +631,7 @@ mod tests {
                 &sk0,
                 &wid,
                 root,
-                WeightedTimestamp(100),
+                WeightedTimestamp::from_millis(100),
                 outcomes,
             ),
         ];
@@ -659,7 +659,7 @@ mod tests {
                     &sk0,
                     &wid,
                     root,
-                    WeightedTimestamp(100),
+                    WeightedTimestamp::from_millis(100),
                     outcomes.clone(),
                 ),
                 sk0.public_key(),
@@ -671,7 +671,7 @@ mod tests {
                     &sk1,
                     &wid,
                     root,
-                    WeightedTimestamp(100),
+                    WeightedTimestamp::from_millis(100),
                     outcomes,
                 ),
                 sk1.public_key(),
@@ -699,7 +699,7 @@ mod tests {
             &sk1,
             &wid,
             GlobalReceiptRoot::from_raw(Hash::from_bytes(b"other")),
-            WeightedTimestamp(100),
+            WeightedTimestamp::from_millis(100),
             outcomes.clone(),
         );
         // Re-stamp the vote's visible receipt_root back to the correct one so
@@ -714,7 +714,7 @@ mod tests {
                     &sk0,
                     &wid,
                     root,
-                    WeightedTimestamp(100),
+                    WeightedTimestamp::from_millis(100),
                     outcomes.clone(),
                 ),
                 sk0.public_key(),
@@ -727,7 +727,7 @@ mod tests {
                     &sk2,
                     &wid,
                     root,
-                    WeightedTimestamp(100),
+                    WeightedTimestamp::from_millis(100),
                     outcomes,
                 ),
                 sk2.public_key(),
@@ -764,7 +764,7 @@ mod tests {
             &sk0,
             &wid,
             root,
-            WeightedTimestamp(100),
+            WeightedTimestamp::from_millis(100),
             honest_outcomes.clone(),
         );
         byzantine.tx_outcomes = tampered_outcomes;
@@ -774,7 +774,7 @@ mod tests {
             &sk1,
             &wid,
             root,
-            WeightedTimestamp(100),
+            WeightedTimestamp::from_millis(100),
             honest_outcomes,
         );
 
@@ -814,7 +814,7 @@ mod tests {
                     &sks[i],
                     &wid,
                     root,
-                    WeightedTimestamp(100),
+                    WeightedTimestamp::from_millis(100),
                     outcomes.clone(),
                 )
             })
@@ -840,7 +840,7 @@ mod tests {
                 &sk0,
                 &wid,
                 root,
-                WeightedTimestamp(100),
+                WeightedTimestamp::from_millis(100),
                 outcomes.clone(),
             ),
             signed_vote(
@@ -848,7 +848,7 @@ mod tests {
                 &sk1,
                 &wid,
                 root,
-                WeightedTimestamp(100),
+                WeightedTimestamp::from_millis(100),
                 outcomes,
             ),
         ];
@@ -870,7 +870,13 @@ mod tests {
                 (Arc::new(test_transaction(*s)), participating)
             })
             .collect();
-        WaveState::new(wave_id(0), BlockHash::ZERO, WeightedTimestamp(0), txs, true)
+        WaveState::new(
+            wave_id(0),
+            BlockHash::ZERO,
+            WeightedTimestamp::from_millis(0),
+            txs,
+            true,
+        )
     }
 
     fn cross_shard_wave_with(tx_seeds: &[u8], remote: ShardGroupId) -> WaveState {
@@ -886,7 +892,7 @@ mod tests {
         WaveState::new(
             cross_shard_wave_id(1, &[remote]),
             BlockHash::ZERO,
-            WeightedTimestamp(0),
+            WeightedTimestamp::from_millis(0),
             txs,
             false,
         )
@@ -944,7 +950,7 @@ mod tests {
     fn build_dispatch_skips_pre_aborted_txs() {
         let mut wave = single_shard_wave_with(&[1, 2]);
         let aborted = wave.tx_hashes()[0];
-        wave.record_abort(aborted, WeightedTimestamp(0));
+        wave.record_abort(aborted, WeightedTimestamp::from_millis(0));
 
         let action = build_dispatch_action(&wave, &HashMap::new(), BlockHash::ZERO);
         match action {
@@ -960,7 +966,7 @@ mod tests {
     fn build_dispatch_returns_none_when_all_txs_aborted() {
         let mut wave = single_shard_wave_with(&[1]);
         let aborted = wave.tx_hashes()[0];
-        wave.record_abort(aborted, WeightedTimestamp(0));
+        wave.record_abort(aborted, WeightedTimestamp::from_millis(0));
 
         assert!(build_dispatch_action(&wave, &HashMap::new(), BlockHash::ZERO).is_none());
     }

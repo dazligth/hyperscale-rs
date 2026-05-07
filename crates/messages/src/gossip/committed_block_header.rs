@@ -78,7 +78,7 @@ mod tests {
             parent_block_hash: BlockHash::from_raw(Hash::from_bytes(b"parent")),
             parent_qc: QuorumCertificate::genesis(ShardGroupId(0)),
             proposer: ValidatorId(0),
-            timestamp: ProposerTimestamp(1_234_567_890),
+            timestamp: ProposerTimestamp::from_millis(1_234_567_890),
             round: Round::INITIAL,
             is_fallback: false,
             state_root: StateRoot::ZERO,

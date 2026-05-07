@@ -62,7 +62,7 @@ mod tests {
             round: Round::INITIAL,
             voter: ValidatorId(2),
             signature: zero_bls_signature(),
-            timestamp: ProposerTimestamp(1_000_000_000_000),
+            timestamp: ProposerTimestamp::from_millis(1_000_000_000_000),
         };
 
         let gossip = BlockVoteNotification::new(vote.clone());
@@ -78,7 +78,7 @@ mod tests {
             round: Round::INITIAL,
             voter: ValidatorId(1),
             signature: zero_bls_signature(),
-            timestamp: ProposerTimestamp(1_000_000_000_000),
+            timestamp: ProposerTimestamp::from_millis(1_000_000_000_000),
         };
 
         let gossip = BlockVoteNotification::new(vote.clone());

@@ -267,7 +267,7 @@ mod tests {
     }
 
     fn ms(value: u64) -> WeightedTimestamp {
-        WeightedTimestamp(value)
+        WeightedTimestamp::from_millis(value)
     }
 
     fn make_tx_outcome(tx: TxHash) -> TxOutcome {

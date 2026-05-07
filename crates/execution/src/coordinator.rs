@@ -2325,13 +2325,13 @@ mod tests {
         let mut state = make_test_state();
         state.committed_height = BlockHeight::new(20);
         // "Now" timestamp exactly VOTE_RETRY_TIMEOUT past the original send.
-        state.committed_ts = WeightedTimestamp(10_000).plus(VOTE_RETRY_TIMEOUT);
+        state.committed_ts = WeightedTimestamp::from_millis(10_000).plus(VOTE_RETRY_TIMEOUT);
 
         // Manually insert a pending retry as if we'd sent a vote at t=10_000ms.
         state.waves.record_vote_retry(
             wave_id.clone(),
             PendingVoteRetry {
-                sent_at: WeightedTimestamp(10_000),
+                sent_at: WeightedTimestamp::from_millis(10_000),
                 attempt: Attempt::INITIAL,
                 block_hash: BlockHash::from_raw(Hash::from_bytes(b"block1")),
                 block_height: BlockHeight::new(1),
@@ -2386,7 +2386,7 @@ mod tests {
         state.waves.record_vote_retry(
             wave_id.clone(),
             PendingVoteRetry {
-                sent_at: WeightedTimestamp(5_000),
+                sent_at: WeightedTimestamp::from_millis(5_000),
                 attempt: Attempt::INITIAL,
                 block_hash: BlockHash::from_raw(Hash::from_bytes(b"block1")),
                 block_height: BlockHeight::new(1),
@@ -2413,7 +2413,7 @@ mod tests {
 
         // Advance time past the retry deadline; if the retry had survived,
         // this would fire a SignAndSendExecutionVote action.
-        state.committed_ts = WeightedTimestamp(5_000).plus(VOTE_RETRY_TIMEOUT);
+        state.committed_ts = WeightedTimestamp::from_millis(5_000).plus(VOTE_RETRY_TIMEOUT);
         let actions = state.check_vote_retry_timeouts(&topo);
         assert!(
             actions.is_empty(),
@@ -2756,7 +2756,7 @@ mod tests {
         let wave_id = WaveId::new(ShardGroupId(0), BlockHeight::new(1), BTreeSet::new());
         let bogus_ec = Arc::new(ExecutionCertificate::new(
             wave_id.clone(),
-            WeightedTimestamp(1_000_000),
+            WeightedTimestamp::from_millis(1_000_000),
             GlobalReceiptRoot::ZERO,
             vec![],
             zero_bls_signature(),
@@ -2805,7 +2805,7 @@ mod tests {
 
         let cert = ExecutionCertificate::new(
             wave_id.clone(),
-            WeightedTimestamp(1_000_000),
+            WeightedTimestamp::from_millis(1_000_000),
             GlobalReceiptRoot::ZERO,
             vec![],
             zero_bls_signature(),
@@ -2939,7 +2939,7 @@ mod tests {
             WaveState::new(
                 local_wave.clone(),
                 BlockHash::from_raw(Hash::from_bytes(b"block")),
-                WeightedTimestamp(5_000),
+                WeightedTimestamp::from_millis(5_000),
                 vec![(tx, participating)],
                 false,
             ),
@@ -2950,7 +2950,7 @@ mod tests {
         // age-based gate would fire. The expectation must survive regardless
         // because a local wave still needs shard 1's EC.
         state.committed_height = BlockHeight::new(500);
-        state.committed_ts = WeightedTimestamp(60_000);
+        state.committed_ts = WeightedTimestamp::from_millis(60_000);
         let actions = state.check_exec_cert_timeouts(&topo);
 
         assert_eq!(
@@ -2970,7 +2970,7 @@ mod tests {
         state.waves.remove_wave(&local_wave);
         state.waves.remove_assignment(&tx_hash);
         state.committed_height = BlockHeight::new(600);
-        state.committed_ts = WeightedTimestamp(120_000);
+        state.committed_ts = WeightedTimestamp::from_millis(120_000);
         let _ = state.check_exec_cert_timeouts(&topo);
         assert_eq!(
             state.expected_certs.expected_len(),
@@ -3000,7 +3000,7 @@ mod tests {
         let mut wave = WaveState::new(
             wave_id.clone(),
             BlockHash::from_raw(Hash::from_bytes(b"block")),
-            WeightedTimestamp(1_000),
+            WeightedTimestamp::from_millis(1_000),
             txs,
             true,
         );
@@ -3038,7 +3038,7 @@ mod tests {
         // Add the local EC; same wave_id flips `local_ec_emitted` to true.
         let local_ec = Arc::new(ExecutionCertificate::new(
             wave_id.clone(),
-            WeightedTimestamp(1_000),
+            WeightedTimestamp::from_millis(1_000),
             GlobalReceiptRoot::from_raw(Hash::from_bytes(b"global_receipt_root")),
             tx_outcomes,
             zero_bls_signature(),
@@ -3176,7 +3176,7 @@ mod tests {
             WaveState::new(
                 local_wave,
                 BlockHash::from_raw(Hash::from_bytes(b"block")),
-                WeightedTimestamp(0),
+                WeightedTimestamp::from_millis(0),
                 vec![(tx, participating)],
                 false,
             ),
@@ -3186,7 +3186,7 @@ mod tests {
         // retro-stamping, would imply an elapsed_since of ~billions of ms.
         let block = make_live_block(&topo, BlockHeight::new(1), 30_000, ValidatorId(0), vec![]);
         let mut certified = certify(block);
-        certified.qc.weighted_timestamp = WeightedTimestamp(30_000);
+        certified.qc.weighted_timestamp = WeightedTimestamp::from_millis(30_000);
 
         let actions = state.on_block_committed(&topo, &certified);
 

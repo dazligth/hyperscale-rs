@@ -417,7 +417,7 @@ mod test_helpers {
                 round,
                 aggregated_signature,
                 signers,
-                weighted_timestamp: WeightedTimestamp(weighted_timestamp_ms),
+                weighted_timestamp: WeightedTimestamp::from_millis(weighted_timestamp_ms),
             })
         }
     }
@@ -444,7 +444,7 @@ mod tests {
             parent_block_hash: BlockHash::from_raw(Hash::from_bytes(b"parent")),
             parent_qc: QuorumCertificate::genesis(ShardGroupId(0)),
             proposer: ValidatorId(0),
-            timestamp: ProposerTimestamp(1_234_567_890),
+            timestamp: ProposerTimestamp::from_millis(1_234_567_890),
             round: Round::INITIAL,
             is_fallback: false,
             state_root: StateRoot::ZERO,
@@ -471,7 +471,7 @@ mod tests {
             Round::INITIAL,
             ValidatorId(voter_index as u64),
             &keys[voter_index],
-            ProposerTimestamp(1_000_000_000_000),
+            ProposerTimestamp::from_millis(1_000_000_000_000),
         )
     }
 

@@ -153,7 +153,7 @@ mod tests {
             round: Round::INITIAL,
             signers,
             aggregated_signature: zero_bls_signature(),
-            weighted_timestamp: WeightedTimestamp(1000),
+            weighted_timestamp: WeightedTimestamp::from_millis(1000),
         };
 
         assert!(!qc.is_genesis());

@@ -211,7 +211,7 @@ pub fn build_qc_from_verified(
         round,
         aggregated_signature,
         signers,
-        weighted_timestamp: WeightedTimestamp(weighted_timestamp_ms),
+        weighted_timestamp: WeightedTimestamp::from_millis(weighted_timestamp_ms),
     })
 }
 
@@ -960,7 +960,7 @@ mod tests {
             round,
             ValidatorId(voter_index as u64),
             &keys[voter_index],
-            ProposerTimestamp(timestamp_ms),
+            ProposerTimestamp::from_millis(timestamp_ms),
         )
     }
 

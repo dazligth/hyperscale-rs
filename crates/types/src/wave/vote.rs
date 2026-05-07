@@ -148,7 +148,7 @@ mod tests {
         ExecutionVote {
             block_hash: BlockHash::from_raw(Hash::from_bytes(b"block")),
             block_height: BlockHeight::new(7),
-            vote_anchor_ts: WeightedTimestamp(11),
+            vote_anchor_ts: WeightedTimestamp::from_millis(11),
             wave_id: WaveId::new(
                 ShardGroupId(0),
                 BlockHeight::new(7),

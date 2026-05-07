@@ -85,7 +85,7 @@ mod tests {
 
         let actions = node.handle(ProtocolEvent::ProvisionsAdmitted {
             provisions,
-            source_block_ts: WeightedTimestamp(0),
+            source_block_ts: WeightedTimestamp::from_millis(0),
         });
 
         let saw_proposal = actions

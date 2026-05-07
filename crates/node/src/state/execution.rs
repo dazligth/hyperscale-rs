@@ -119,7 +119,7 @@ mod tests {
         let wave_id = WaveId::new(shard, height, remote_shards);
         Arc::new(ExecutionCertificate::new(
             wave_id,
-            WeightedTimestamp(0),
+            WeightedTimestamp::from_millis(0),
             GlobalReceiptRoot::ZERO,
             outcomes,
             Bls12381G2Signature([0u8; 96]),

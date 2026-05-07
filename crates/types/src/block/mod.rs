@@ -46,7 +46,7 @@ mod tests {
             parent_block_hash: BlockHash::from_raw(Hash::from_bytes(b"parent")),
             parent_qc: QuorumCertificate::genesis(ShardGroupId(0)),
             proposer: ValidatorId(0),
-            timestamp: ProposerTimestamp(1_234_567_890),
+            timestamp: ProposerTimestamp::from_millis(1_234_567_890),
             round: Round::INITIAL,
             is_fallback: false,
             state_root: StateRoot::ZERO,
@@ -117,7 +117,7 @@ mod tests {
                     BlockHeight::new(10),
                     BTreeSet::from([ShardGroupId(1)]),
                 ),
-                WeightedTimestamp(11),
+                WeightedTimestamp::from_millis(11),
                 GlobalReceiptRoot::from_raw(Hash::from_bytes(&[seed + 100; 4])),
                 vec![TxOutcome {
                     tx_hash: TxHash::from_raw(Hash::from_bytes(&[seed; 4])),
@@ -154,7 +154,7 @@ mod tests {
     fn test_compute_certificate_root_single_cert() {
         let ec = Arc::new(ExecutionCertificate::new(
             WaveId::new(ShardGroupId(0), BlockHeight::new(10), BTreeSet::new()),
-            WeightedTimestamp(11),
+            WeightedTimestamp::from_millis(11),
             GlobalReceiptRoot::from_raw(Hash::from_bytes(b"receipt")),
             vec![TxOutcome {
                 tx_hash: TxHash::from_raw(Hash::from_bytes(b"tx1")),

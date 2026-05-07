@@ -186,7 +186,7 @@ mod tests {
             parent_block_hash,
             parent_qc: QuorumCertificate::genesis(ShardGroupId(0)),
             proposer: ValidatorId(0),
-            timestamp: ProposerTimestamp(1000),
+            timestamp: ProposerTimestamp::from_millis(1000),
             round: Round::INITIAL,
             is_fallback: false,
             state_root: StateRoot::from_raw(Hash::from_bytes(&[height; 32])),
@@ -407,7 +407,7 @@ mod tests {
         let mut qc = QuorumCertificate::genesis(ShardGroupId(0));
         qc.block_hash = qc_block;
         qc.height = BlockHeight::new(5);
-        qc.weighted_timestamp = WeightedTimestamp(1000);
+        qc.weighted_timestamp = WeightedTimestamp::from_millis(1000);
 
         run_view(
             0,

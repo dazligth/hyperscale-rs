@@ -364,7 +364,7 @@ mod tests {
             parent_block_hash: BlockHash::ZERO,
             parent_qc: QuorumCertificate::genesis(ShardGroupId(0)),
             proposer: ValidatorId(0),
-            timestamp: ProposerTimestamp(1_000),
+            timestamp: ProposerTimestamp::from_millis(1_000),
             round: Round::INITIAL,
             is_fallback: false,
             state_root: StateRoot::ZERO,
@@ -410,7 +410,7 @@ mod tests {
         };
         let ec = ExecutionCertificate::new(
             wave_id.clone(),
-            WeightedTimestamp(1),
+            WeightedTimestamp::from_millis(1),
             GlobalReceiptRoot::ZERO,
             vec![outcome],
             Bls12381G2Signature([0u8; 96]),
@@ -567,7 +567,7 @@ mod tests {
         let wave_id = WaveId::new(ShardGroupId(0), HEIGHT, std::collections::BTreeSet::new());
         let ec = ExecutionCertificate::new(
             wave_id.clone(),
-            WeightedTimestamp(1),
+            WeightedTimestamp::from_millis(1),
             GlobalReceiptRoot::ZERO,
             vec![TxOutcome {
                 tx_hash,

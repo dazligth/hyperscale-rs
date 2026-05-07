@@ -276,7 +276,7 @@ mod tests {
         ExecutionVote {
             block_hash: BlockHash::from_raw(Hash::from_bytes(b"block")),
             block_height: BlockHeight::new(10),
-            vote_anchor_ts: WeightedTimestamp(11),
+            vote_anchor_ts: WeightedTimestamp::from_millis(11),
             wave_id: WaveId::new(ShardGroupId(0), BlockHeight::new(0), BTreeSet::new()),
             shard_group_id: ShardGroupId(0),
             global_receipt_root,
@@ -308,7 +308,7 @@ mod tests {
         assert!(result.is_some());
         let (r, vh, power) = result.unwrap();
         assert_eq!(r, root);
-        assert_eq!(vh, WeightedTimestamp(11)); // vote_anchor_ts from make_vote
+        assert_eq!(vh, WeightedTimestamp::from_millis(11)); // vote_anchor_ts from make_vote
         assert_eq!(power, VotePower::new(3));
         assert_eq!(tracker.votes_for_global_receipt_root(&root).len(), 3);
     }

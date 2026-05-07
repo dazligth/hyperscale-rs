@@ -225,7 +225,7 @@ pub fn make_live_block(
         parent_block_hash: BlockHash::ZERO,
         parent_qc: QuorumCertificate::genesis(ShardGroupId(0)),
         proposer,
-        timestamp: ProposerTimestamp(timestamp_ms),
+        timestamp: ProposerTimestamp::from_millis(timestamp_ms),
         round: Round::INITIAL,
         is_fallback: false,
         state_root: StateRoot::ZERO,
@@ -254,7 +254,7 @@ pub fn make_live_block(
 pub fn certify(block: Block, weighted_timestamp_ms: u64) -> CertifiedBlock {
     let qc = QuorumCertificate {
         block_hash: block.hash(),
-        weighted_timestamp: WeightedTimestamp(weighted_timestamp_ms),
+        weighted_timestamp: WeightedTimestamp::from_millis(weighted_timestamp_ms),
         ..QuorumCertificate::genesis(ShardGroupId(0))
     };
     CertifiedBlock::new_unchecked(block, qc)
@@ -284,7 +284,7 @@ pub fn make_finalized_wave(
     let wave_id = WaveId::new(ShardGroupId(0), block_height, BTreeSet::new());
     let ec = ExecutionCertificate::new(
         wave_id.clone(),
-        WeightedTimestamp(block_height.inner() + 1),
+        WeightedTimestamp::from_millis(block_height.inner() + 1),
         GlobalReceiptRoot::ZERO,
         vec![TxOutcome { tx_hash, outcome }],
         Bls12381G2Signature([0u8; 96]),

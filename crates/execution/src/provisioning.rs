@@ -411,7 +411,7 @@ mod tests {
         let tx_fresh = TxHash::from_raw(Hash::from_bytes(b"fresh"));
 
         // Old tx absorbed at clock = ms(1_000).
-        t.advance_clock(WeightedTimestamp(1_000));
+        t.advance_clock(WeightedTimestamp::from_millis(1_000));
         t.record_required(tx_old, std::iter::once(shard(1)).collect());
         t.absorb_provisions(
             &make_provisions(shard(1), BlockHeight::new(5), vec![tx_old]),
@@ -419,7 +419,7 @@ mod tests {
         );
 
         // Fresh tx absorbed at clock = ms(60_000).
-        t.advance_clock(WeightedTimestamp(60_000));
+        t.advance_clock(WeightedTimestamp::from_millis(60_000));
         t.record_required(tx_fresh, std::iter::once(shard(1)).collect());
         t.absorb_provisions(
             &make_provisions(shard(1), BlockHeight::new(6), vec![tx_fresh]),
@@ -429,7 +429,7 @@ mod tests {
         let horizon_ms = u64::try_from(RETENTION_HORIZON.as_millis()).unwrap_or(u64::MAX);
         // Past tx_old's deadline (1_000 + horizon) but not tx_fresh's
         // (60_000 + horizon).
-        let now = WeightedTimestamp(1_000 + horizon_ms + 1);
+        let now = WeightedTimestamp::from_millis(1_000 + horizon_ms + 1);
         assert!(now.as_millis() < 60_000 + horizon_ms);
 
         let evicted = t.gc_stale_provisions(now);
@@ -451,7 +451,7 @@ mod tests {
         let tx = TxHash::from_raw(Hash::from_bytes(b"tx"));
 
         // First insert at clock = ms(1_000) → deadline = 1_000 + horizon.
-        t.advance_clock(WeightedTimestamp(1_000));
+        t.advance_clock(WeightedTimestamp::from_millis(1_000));
         t.absorb_provisions(
             &make_provisions(shard(1), BlockHeight::new(5), vec![tx]),
             shard(0),
@@ -459,7 +459,7 @@ mod tests {
 
         // Second insert at clock = ms(60_000) → deadline extended to
         // 60_000 + horizon.
-        t.advance_clock(WeightedTimestamp(60_000));
+        t.advance_clock(WeightedTimestamp::from_millis(60_000));
         t.absorb_provisions(
             &make_provisions(shard(2), BlockHeight::new(5), vec![tx]),
             shard(0),
@@ -467,7 +467,7 @@ mod tests {
 
         let horizon_ms = u64::try_from(RETENTION_HORIZON.as_millis()).unwrap_or(u64::MAX);
         // Past the FIRST deadline but not the SECOND. Entry must survive.
-        let now = WeightedTimestamp(1_000 + horizon_ms + 1);
+        let now = WeightedTimestamp::from_millis(1_000 + horizon_ms + 1);
         assert_eq!(t.gc_stale_provisions(now), 0);
         assert!(t.verified.contains_key(&tx));
     }
