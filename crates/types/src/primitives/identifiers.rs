@@ -216,11 +216,29 @@ impl Display for Round {
 /// Wave-leader rotation counter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, BasicSbor)]
 #[sbor(transparent)]
-pub struct Attempt(pub u32);
+pub struct Attempt(u32);
 
 impl Attempt {
     /// Initial attempt.
     pub const INITIAL: Self = Self(0);
+
+    /// Construct an attempt from a raw `u32`.
+    ///
+    /// Most call sites should use [`Attempt::next`] or arithmetic operators
+    /// instead — this constructor is the escape hatch for boundaries (wire
+    /// decode, tests) where the attempt genuinely originates as a raw
+    /// integer.
+    #[must_use]
+    pub const fn new(value: u32) -> Self {
+        Self(value)
+    }
+
+    /// Inner `u32`. Use sparingly — at boundaries (display, structured log
+    /// fields) only.
+    #[must_use]
+    pub const fn inner(self) -> u32 {
+        self.0
+    }
 
     /// Get the next attempt.
     #[must_use]
@@ -238,20 +256,20 @@ impl Attempt {
 impl Add<u32> for Attempt {
     type Output = Self;
     fn add(self, rhs: u32) -> Self {
-        Self(self.0 + rhs)
+        Self(self.0.checked_add(rhs).expect("Attempt + u32 overflowed"))
     }
 }
 
 impl Sub<u32> for Attempt {
     type Output = Self;
     fn sub(self, rhs: u32) -> Self {
-        Self(self.0 - rhs)
+        Self(self.0.checked_sub(rhs).expect("Attempt - u32 underflowed"))
     }
 }
 
 impl AddAssign<u32> for Attempt {
     fn add_assign(&mut self, rhs: u32) {
-        self.0 += rhs;
+        self.0 = self.0.checked_add(rhs).expect("Attempt += u32 overflowed");
     }
 }
 

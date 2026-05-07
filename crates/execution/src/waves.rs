@@ -537,7 +537,7 @@ mod tests {
         // At the window: one effect, attempt bumped.
         let effects = r.check_vote_retry_timeouts(ms(timeout_ms));
         assert_eq!(effects.len(), 1);
-        assert_eq!(effects[0].attempt, Attempt(1));
+        assert_eq!(effects[0].attempt, Attempt::new(1));
 
         // Retry cooldown restarts from the new sent_at.
         let effects = r.check_vote_retry_timeouts(ms(timeout_ms + 1));

@@ -1254,7 +1254,7 @@ impl ExecutionCoordinator {
             let new_leader = wave_leader_at(&wave_id, attempt, &committee);
             tracing::info!(
                 wave = %wave_id,
-                attempt = attempt.0,
+                attempt = attempt.inner(),
                 new_leader = new_leader.0,
                 "Vote retry timeout — re-sending to rotated leader"
             );
@@ -2352,7 +2352,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(wid, &wave_id);
-                let expected_leader = wave_leader_at(&wave_id, Attempt(1), &committee);
+                let expected_leader = wave_leader_at(&wave_id, Attempt::new(1), &committee);
                 assert_eq!(*leader, expected_leader, "Should rotate to attempt 1");
             }
             other => panic!(
@@ -2368,7 +2368,7 @@ mod tests {
         let next = state.check_vote_retry_timeouts(&topo);
         assert_eq!(next.len(), 1);
         if let Action::SignAndSendExecutionVote { leader, .. } = &next[0] {
-            let expected = wave_leader_at(&wave_id, Attempt(2), &committee);
+            let expected = wave_leader_at(&wave_id, Attempt::new(2), &committee);
             assert_eq!(*leader, expected, "second fire rotates to attempt 2");
         } else {
             panic!("expected SignAndSendExecutionVote");

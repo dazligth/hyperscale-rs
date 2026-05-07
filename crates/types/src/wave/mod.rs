@@ -620,7 +620,7 @@ mod tests {
         let wave_id = make_wave_id(0, BlockHeight::new(100), &[1]);
         let mut leaders: HashSet<ValidatorId> = HashSet::new();
         for attempt in 0..4 {
-            leaders.insert(wave_leader_at(&wave_id, Attempt(attempt), &committee));
+            leaders.insert(wave_leader_at(&wave_id, Attempt::new(attempt), &committee));
         }
         // With 4 attempts and 4 committee members, we should get multiple distinct leaders.
         // (Not guaranteed to be all 4 due to hash collisions, but at least 2.)
@@ -635,7 +635,7 @@ mod tests {
         let committee = vec![ValidatorId(1), ValidatorId(2), ValidatorId(3)];
         let wave_id = make_wave_id(0, BlockHeight::new(100), &[1]);
         // Large attempt values should not panic — they wrap via modulo.
-        let _ = wave_leader_at(&wave_id, Attempt(1000), &committee);
+        let _ = wave_leader_at(&wave_id, Attempt::new(1000), &committee);
     }
 
     #[test]
@@ -647,8 +647,8 @@ mod tests {
             ValidatorId(4),
         ];
         let wave_id = make_wave_id(0, BlockHeight::new(100), &[1]);
-        let leader1 = wave_leader_at(&wave_id, Attempt(2), &committee);
-        let leader2 = wave_leader_at(&wave_id, Attempt(2), &committee);
+        let leader1 = wave_leader_at(&wave_id, Attempt::new(2), &committee);
+        let leader2 = wave_leader_at(&wave_id, Attempt::new(2), &committee);
         assert_eq!(leader1, leader2);
     }
 
