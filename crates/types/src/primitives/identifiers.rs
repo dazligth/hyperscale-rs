@@ -398,11 +398,29 @@ impl Display for VotePower {
 /// deterministically as `parent + new - finalized`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, BasicSbor)]
 #[sbor(transparent)]
-pub struct InFlightCount(pub u32);
+pub struct InFlightCount(u32);
 
 impl InFlightCount {
     /// Zero in-flight (genesis).
     pub const ZERO: Self = Self(0);
+
+    /// Construct an in-flight count from a raw `u32`.
+    ///
+    /// Most call sites should use [`InFlightCount::saturating_add`] /
+    /// [`InFlightCount::saturating_sub`] instead — this constructor is the
+    /// escape hatch for boundaries (mempool-derived thresholds, tests) where
+    /// the count genuinely originates as a raw integer.
+    #[must_use]
+    pub const fn new(value: u32) -> Self {
+        Self(value)
+    }
+
+    /// Inner `u32`. Use sparingly — at boundaries (display, structured log
+    /// fields) only.
+    #[must_use]
+    pub const fn inner(self) -> u32 {
+        self.0
+    }
 
     /// Add `new_txs` (admissions in this block), saturating at `u32::MAX`.
     #[must_use]

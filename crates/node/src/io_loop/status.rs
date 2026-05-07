@@ -56,7 +56,7 @@ where
         // u64-counter → usize and 80% threshold → u32 are status-readout casts
         // bounded by configured pool sizes; saturating coercions are fine.
         #[allow(clippy::cast_possible_truncation)]
-        let remote_congestion_threshold = InFlightCount((MAX_TX_IN_FLIGHT * 4 / 5) as u32);
+        let remote_congestion_threshold = InFlightCount::new((MAX_TX_IN_FLIGHT * 4 / 5) as u32);
         #[allow(clippy::cast_possible_truncation)]
         let (pending, in_flight) = (
             contention.pending_count as usize,

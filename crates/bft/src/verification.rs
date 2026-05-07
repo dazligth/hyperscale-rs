@@ -844,9 +844,9 @@ impl VerificationPipeline {
             warn!(
                 block_hash = ?block_hash,
                 height = block.height().inner(),
-                proposed = proposed.0,
-                expected = expected.0,
-                parent_in_flight = parent_in_flight.0,
+                proposed = proposed.inner(),
+                expected = expected.inner(),
+                parent_in_flight = parent_in_flight.inner(),
                 new_txs = block.transaction_count(),
                 finalized_txs = certs_finalized,
                 "In-flight count verification failed — proposed value does not match expected"
@@ -1155,7 +1155,7 @@ mod tests {
             provision_root: ProvisionsRoot::ZERO,
             waves: Vec::new(),
             provision_tx_roots: BTreeMap::new(),
-            in_flight: InFlightCount(in_flight),
+            in_flight: InFlightCount::new(in_flight),
         }
     }
 

@@ -196,7 +196,7 @@ mod tests {
             provision_root: ProvisionsRoot::ZERO,
             waves: vec![],
             provision_tx_roots: BTreeMap::new(),
-            in_flight: InFlightCount(u32::from(height)),
+            in_flight: InFlightCount::new(u32::from(height)),
         }
     }
 
