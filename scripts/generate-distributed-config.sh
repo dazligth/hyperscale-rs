@@ -322,7 +322,6 @@ version_interop_mode = "relaxed"
 bootstrap_peers = [$BOOTSTRAP_PEERS]
 upnp_enabled = false
 max_message_size = 16_777_216
-gossipsub_heartbeat_ms = 100
 idle_connection_timeout_ms = 30000
 keep_alive_interval_ms = 5000
 

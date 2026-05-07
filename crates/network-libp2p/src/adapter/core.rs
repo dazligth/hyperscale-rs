@@ -114,6 +114,7 @@ impl Libp2pAdapter {
         // Configure gossipsub
         let gossipsub_config = GossipsubConfigBuilder::default()
             .heartbeat_interval(config.gossipsub_heartbeat)
+            .history_length(config.gossipsub_history_length)
             .validation_mode(ValidationMode::None)
             .validate_messages()
             .message_id_fn(|msg| {

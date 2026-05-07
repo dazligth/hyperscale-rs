@@ -396,7 +396,6 @@ version_interop_mode = "relaxed"
 bootstrap_peers = [$BOOTSTRAP_PEERS]
 upnp_enabled = false
 max_message_size = 10485760
-gossipsub_heartbeat_ms = 100
 
 [threads]
 consensus_crypto_threads = 0

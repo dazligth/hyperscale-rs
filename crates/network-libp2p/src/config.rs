@@ -34,8 +34,18 @@ pub struct Libp2pConfig {
 
     /// Gossipsub heartbeat interval.
     ///
-    /// Default: 1 second
+    /// Drives mesh maintenance and lazy IHAVE emission. Does not gate the
+    /// fast-path forwarding of received messages, which is event-driven.
+    /// At higher RTTs faster heartbeats just churn — the natural cadence
+    /// for mesh repair is bounded by the network's round-trip anyway.
     pub gossipsub_heartbeat: Duration,
+
+    /// Number of heartbeats of message history retained in the gossipsub
+    /// mcache. Together with `gossipsub_heartbeat` this sets the IWANT
+    /// recovery window: a peer that missed a message via the mesh has at
+    /// most `gossipsub_heartbeat * gossipsub_history_length` to send IWANT
+    /// before the message is evicted.
+    pub gossipsub_history_length: usize,
 
     /// Idle connection timeout.
     ///
@@ -113,7 +123,8 @@ impl Default for Libp2pConfig {
             listen_addresses: vec!["/ip4/0.0.0.0/udp/0/quic-v1".parse().unwrap()],
             bootstrap_peers: vec![],
             max_message_size: 1024 * 1024 * 10, // 10MB
-            gossipsub_heartbeat: Duration::from_millis(100),
+            gossipsub_heartbeat: Duration::from_millis(300),
+            gossipsub_history_length: 12,
             idle_connection_timeout: Duration::from_secs(30),
             keep_alive_interval: Duration::from_secs(15),
             version_interop_mode: VersionInteroperabilityMode::Relaxed,
@@ -150,6 +161,13 @@ impl Libp2pConfig {
         self
     }
 
+    /// Set the gossipsub history length (in heartbeats).
+    #[must_use]
+    pub const fn with_gossipsub_history_length(mut self, length: usize) -> Self {
+        self.gossipsub_history_length = length;
+        self
+    }
+
     /// Set the idle connection timeout.
     #[must_use]
     pub const fn with_idle_connection_timeout(mut self, timeout: Duration) -> Self {
@@ -181,6 +199,7 @@ impl Libp2pConfig {
             bootstrap_peers: vec![],
             max_message_size: 1024 * 1024, // 1MB
             gossipsub_heartbeat: Duration::from_millis(500),
+            gossipsub_history_length: 12,
             idle_connection_timeout: Duration::from_secs(30),
             keep_alive_interval: Duration::from_secs(10),
             version_interop_mode: VersionInteroperabilityMode::Relaxed,
@@ -203,7 +222,8 @@ mod tests {
     fn test_default_config() {
         let config = Libp2pConfig::default();
         assert_eq!(config.max_message_size, 1024 * 1024 * 10); // 10MB
-        assert_eq!(config.gossipsub_heartbeat, Duration::from_millis(100));
+        assert_eq!(config.gossipsub_heartbeat, Duration::from_millis(300));
+        assert_eq!(config.gossipsub_history_length, 12);
         assert!(!config.listen_addresses.is_empty());
         assert!(config.bootstrap_peers.is_empty());
     }

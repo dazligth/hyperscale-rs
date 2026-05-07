@@ -247,7 +247,7 @@ const fn default_max_message_size() -> usize {
 }
 
 const fn default_gossipsub_heartbeat_ms() -> u64 {
-    100
+    300
 }
 
 const fn default_upnp_enabled() -> bool {
