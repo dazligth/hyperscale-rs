@@ -798,7 +798,7 @@ impl VerificationPipeline {
             return InFlightCheck::SkipVote;
         };
 
-        let finalized_tx_count: u32 = chain.pending.get(&block_hash).map_or(0, |p| {
+        let finalized_tx_count: u32 = chain.get_pending(block_hash).map_or(0, |p| {
             p.finalized_waves()
                 .iter()
                 .map(|fw| u32::try_from(fw.tx_count()).unwrap_or(u32::MAX))
@@ -880,8 +880,7 @@ impl VerificationPipeline {
                 // run first. Dispatching with empty `finalized_waves` would
                 // recompute the wrong state root against ghost inputs — skip.
                 let block = chain
-                    .pending
-                    .get(&pending.block_hash)
+                    .get_pending(pending.block_hash)
                     .and_then(PendingBlock::block)
                     .or_else(|| {
                         debug!(
@@ -1179,14 +1178,14 @@ mod tests {
         latest_qc: Option<&'a QuorumCertificate>,
         pending: &'a HashMap<BlockHash, PendingBlock>,
     ) -> ChainView<'a> {
-        ChainView {
-            local_shard: ShardGroupId::new(0),
+        ChainView::new(
+            ShardGroupId::new(0),
             committed_height,
             committed_hash,
-            committed_state_root: StateRoot::ZERO,
+            StateRoot::ZERO,
             latest_qc,
             pending,
-        }
+        )
     }
 
     fn bh(tag: &[u8]) -> BlockHash {

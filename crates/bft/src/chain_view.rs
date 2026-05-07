@@ -21,18 +21,43 @@ use tracing::warn;
 use crate::pending::PendingBlock;
 
 pub struct ChainView<'a> {
-    pub local_shard: ShardGroupId,
-    pub committed_height: BlockHeight,
-    pub committed_hash: BlockHash,
-    pub committed_state_root: StateRoot,
-    pub latest_qc: Option<&'a QuorumCertificate>,
-    pub pending: &'a HashMap<BlockHash, PendingBlock>,
+    local_shard: ShardGroupId,
+    committed_height: BlockHeight,
+    committed_hash: BlockHash,
+    committed_state_root: StateRoot,
+    latest_qc: Option<&'a QuorumCertificate>,
+    pending: &'a HashMap<BlockHash, PendingBlock>,
 }
 
-impl ChainView<'_> {
+impl<'a> ChainView<'a> {
+    pub const fn new(
+        local_shard: ShardGroupId,
+        committed_height: BlockHeight,
+        committed_hash: BlockHash,
+        committed_state_root: StateRoot,
+        latest_qc: Option<&'a QuorumCertificate>,
+        pending: &'a HashMap<BlockHash, PendingBlock>,
+    ) -> Self {
+        Self {
+            local_shard,
+            committed_height,
+            committed_hash,
+            committed_state_root,
+            latest_qc,
+            pending,
+        }
+    }
+
+    /// Borrow a pending block by hash. Used by callers that need to inspect
+    /// per-block state (received transactions, finalized waves) beyond what
+    /// the dedicated header / state-root accessors expose.
+    pub fn get_pending(&self, block_hash: BlockHash) -> Option<&PendingBlock> {
+        self.pending.get(&block_hash)
+    }
+
     /// Look up a block by hash in the pending block map (if assembled).
     /// Returns `None` if the block isn't pending or hasn't been constructed.
-    pub fn get_block(&self, block_hash: BlockHash) -> Option<Block> {
+    fn get_block(&self, block_hash: BlockHash) -> Option<Block> {
         let pending = self.pending.get(&block_hash)?;
         let block = pending.block()?;
         Some((*block).clone())
@@ -41,8 +66,8 @@ impl ChainView<'_> {
     /// Header-only lookup, cheaper than `get_block` when only header fields
     /// are needed. Pending blocks always carry their header even before full
     /// assembly, so this succeeds in cases where `get_block` would fail.
-    pub fn get_header(&self, block_hash: BlockHash) -> Option<BlockHeader> {
-        self.pending.get(&block_hash).map(|p| p.header().clone())
+    pub fn get_header(&self, block_hash: BlockHash) -> Option<&BlockHeader> {
+        self.pending.get(&block_hash).map(PendingBlock::header)
     }
 
     /// State root of the parent block. Returns the committed-tip state root

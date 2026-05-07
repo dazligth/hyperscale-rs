@@ -256,14 +256,14 @@ impl BftCoordinator {
     /// from the caller's `topology.local_shard()`) tags genesis-fallback
     /// QCs produced by [`ChainView::proposal_parent`].
     const fn chain_view(&self, local_shard: ShardGroupId) -> ChainView<'_> {
-        ChainView {
+        ChainView::new(
             local_shard,
-            committed_height: self.committed_height,
-            committed_hash: self.committed_hash,
-            committed_state_root: self.committed_state_root,
-            latest_qc: self.latest_qc.as_ref(),
-            pending: &self.pending_blocks,
-        }
+            self.committed_height,
+            self.committed_hash,
+            self.committed_state_root,
+            self.latest_qc.as_ref(),
+            &self.pending_blocks,
+        )
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -1436,14 +1436,14 @@ impl BftCoordinator {
             // Vote-locked validators must still run verification to produce
             // PreparedCommit. Parent-pruned blocks likewise run verification
             // but can't contribute in-flight accounting.
-            let chain = ChainView {
-                local_shard: topology_snapshot.local_shard(),
-                committed_height: self.committed_height,
-                committed_hash: self.committed_hash,
-                committed_state_root: self.committed_state_root,
-                latest_qc: self.latest_qc.as_ref(),
-                pending: &self.pending_blocks,
-            };
+            let chain = ChainView::new(
+                topology_snapshot.local_shard(),
+                self.committed_height,
+                self.committed_hash,
+                self.committed_state_root,
+                self.latest_qc.as_ref(),
+                &self.pending_blocks,
+            );
             let skip_vote = match self.verification.classify_vote_in_flight(
                 &chain,
                 block_hash,
@@ -3068,14 +3068,14 @@ impl BftCoordinator {
         &mut self,
         local_shard: ShardGroupId,
     ) -> Vec<ReadyStateRootVerification> {
-        let chain = ChainView {
+        let chain = ChainView::new(
             local_shard,
-            committed_height: self.committed_height,
-            committed_hash: self.committed_hash,
-            committed_state_root: self.committed_state_root,
-            latest_qc: self.latest_qc.as_ref(),
-            pending: &self.pending_blocks,
-        };
+            self.committed_height,
+            self.committed_hash,
+            self.committed_state_root,
+            self.latest_qc.as_ref(),
+            &self.pending_blocks,
+        );
         self.verification
             .drain_ready_state_root_verifications(&chain)
     }
