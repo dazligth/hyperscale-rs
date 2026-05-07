@@ -167,12 +167,7 @@ impl ChainWriter for SimStorage {
                 c.insert_receipts(&prepared.receipts);
                 for fw in block.certificates().iter() {
                     for ec in &fw.certificate.execution_certificates {
-                        let canonical_hash = ec.canonical_hash();
-                        c.execution_certs.insert(canonical_hash, (**ec).clone());
-                        c.execution_certs_by_height
-                            .entry(ec.block_height())
-                            .or_default()
-                            .push(canonical_hash);
+                        c.execution_certs.insert(ec.wave_id.clone(), (**ec).clone());
                     }
                 }
                 c.committed_height = block.height();
@@ -272,12 +267,7 @@ impl SimStorage {
             // Store execution certificates (extracted from wave certs) atomically.
             for fw in block.certificates().iter() {
                 for ec in &fw.certificate.execution_certificates {
-                    let canonical_hash = ec.canonical_hash();
-                    c.execution_certs.insert(canonical_hash, (**ec).clone());
-                    c.execution_certs_by_height
-                        .entry(ec.block_height())
-                        .or_default()
-                        .push(canonical_hash);
+                    c.execution_certs.insert(ec.wave_id.clone(), (**ec).clone());
                 }
             }
             c.committed_height = block.height();

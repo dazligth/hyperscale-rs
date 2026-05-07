@@ -8,9 +8,9 @@ use hyperscale_types::{
     ExecutionCertificate, QuorumCertificate, RoutableTransaction, TxHash, WaveCertificate, WaveId,
 };
 
-use crate::column_families::{ExecutionCertsByHeightCf, ExecutionCertsCf};
+use crate::column_families::ExecutionCertsCf;
 use crate::core::RocksDbStorage;
-use crate::typed_cf::{TypedCf, get, prefix_iter};
+use crate::typed_cf::{TypedCf, get};
 
 impl ChainReader for RocksDbStorage {
     fn get_block(&self, height: BlockHeight) -> Option<CertifiedBlock> {
@@ -54,21 +54,18 @@ impl ChainReader for RocksDbStorage {
         Self::get_consensus_receipt(self, tx_hash)
     }
 
-    fn get_execution_certificates_by_height(
-        &self,
-        block_height: BlockHeight,
-    ) -> Vec<ExecutionCertificate> {
-        // Resolve both column-family handles once. Per-call `cf_get` would
-        // re-walk `RocksDB`'s name → handle map for every match returned by
-        // the prefix iterator.
+    fn get_execution_certificate(&self, wave_id: &WaveId) -> Option<ExecutionCertificate> {
         let cfs = self.cf();
-        let index_cf = ExecutionCertsByHeightCf::handle(&cfs);
         let certs_cf = ExecutionCertsCf::handle(&cfs);
-        let prefix = block_height.inner().to_be_bytes();
-        prefix_iter::<ExecutionCertsByHeightCf>(&self.db, index_cf, &prefix)
-            .filter_map(|((_height, canonical_hash), ())| {
-                get::<ExecutionCertsCf>(&*self.db, certs_cf, &canonical_hash)
-            })
+        get::<ExecutionCertsCf>(&*self.db, certs_cf, wave_id)
+    }
+
+    fn get_execution_certificates_batch(&self, wave_ids: &[WaveId]) -> Vec<ExecutionCertificate> {
+        let cfs = self.cf();
+        let certs_cf = ExecutionCertsCf::handle(&cfs);
+        wave_ids
+            .iter()
+            .filter_map(|wid| get::<ExecutionCertsCf>(&*self.db, certs_cf, wid))
             .collect()
     }
 }

@@ -118,19 +118,9 @@ hash_newtype!(
 // ── Certificates & waves ─────────────────────────────────────────────────────
 
 hash_newtype!(
-    /// Canonical content hash of an [`ExecutionCertificate`](crate::ExecutionCertificate).
-    ///
-    /// Excludes the BLS signature and signer bitfield — this is the safety
-    /// property that lets multiple aggregators produce the same canonical hash
-    /// for equivalent certificates.
-    pub ExecutionCertificateHash,
-    "ExecutionCertificateHash"
-);
-
-hash_newtype!(
     /// Content identity of a [`WaveCertificate`](crate::WaveCertificate).
     ///
-    /// Computed from the ordered `(shard_group_id, canonical_hash)` pairs of
+    /// Computed from the ordered `(shard_group_id, wave_id)` pairs of
     /// its execution certificates — identifies the set of ECs a wave
     /// committed to.
     pub WaveReceiptHash,
@@ -174,7 +164,6 @@ mod tests {
     #[test]
     fn round_trip_preserves_bytes() {
         let raw = Hash::from_bytes(b"round-trip");
-        assert_eq!(ExecutionCertificateHash::from_raw(raw).into_raw(), raw);
         assert_eq!(*TxHash::from_raw(raw).as_raw(), raw);
         assert_eq!(Hash::from(TransactionRoot::from_raw(raw)), raw);
     }

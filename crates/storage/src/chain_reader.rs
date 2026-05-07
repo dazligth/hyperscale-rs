@@ -80,9 +80,11 @@ pub trait ChainReader: Send + Sync + 'static {
 
     // ─── Execution Certificate Reads ────────────────────────────────────
 
-    /// Retrieve all execution certificates for a given block height.
-    fn get_execution_certificates_by_height(
-        &self,
-        block_height: BlockHeight,
-    ) -> Vec<ExecutionCertificate>;
+    /// Retrieve a single execution certificate by [`WaveId`].
+    fn get_execution_certificate(&self, wave_id: &WaveId) -> Option<ExecutionCertificate>;
+
+    /// Retrieve multiple execution certificates by [`WaveId`] (batch read).
+    ///
+    /// Returns only certificates that were found (missing ids are skipped).
+    fn get_execution_certificates_batch(&self, wave_ids: &[WaveId]) -> Vec<ExecutionCertificate>;
 }

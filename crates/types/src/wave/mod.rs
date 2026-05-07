@@ -42,8 +42,8 @@ mod tests {
     use crate::test_utils::test_transaction_with_nodes;
     use crate::{
         Attempt, BlockHeight, Bls12381G2Signature, ConsensusReceipt, DatabaseUpdates,
-        ExecutionCertificate, ExecutionCertificateHash, ExecutionOutcome, FinalizedWave,
-        GlobalReceiptHash, GlobalReceiptRoot, Hash, NodeId, ProvisionTxRoot, RETENTION_HORIZON,
+        ExecutionCertificate, ExecutionOutcome, FinalizedWave, GlobalReceiptHash,
+        GlobalReceiptRoot, Hash, NodeId, ProvisionTxRoot, RETENTION_HORIZON,
         ReceiptValidationError, ShardGroupId, SignerBitfield, StoredReceipt, TopologySnapshot,
         TxHash, TxOutcome, ValidatorId, ValidatorInfo, ValidatorSet, VotePower, WaveCertificate,
         WaveId, WaveReceiptHash, WeightedTimestamp, compute_global_receipt_root,
@@ -269,49 +269,6 @@ mod tests {
         assert_ne!(tx_outcome_leaf(&executed), tx_outcome_leaf(&aborted));
     }
 
-    fn make_test_ec(
-        signers: SignerBitfield,
-        signature: Bls12381G2Signature,
-    ) -> ExecutionCertificate {
-        ExecutionCertificate::new(
-            make_wave_id(0, BlockHeight::new(10), &[1]),
-            WeightedTimestamp::from_millis(11),
-            GlobalReceiptRoot::from_raw(Hash::from_bytes(b"global_receipt_root")),
-            vec![make_outcome(1), make_outcome(2)],
-            signature,
-            signers,
-        )
-    }
-
-    #[test]
-    fn test_canonical_hash_deterministic() {
-        let signers = SignerBitfield::new(4);
-        let sig = Bls12381G2Signature([0u8; 96]);
-        let ec1 = make_test_ec(signers.clone(), sig);
-        let ec2 = make_test_ec(signers, sig);
-        assert_eq!(ec1.canonical_hash(), ec2.canonical_hash());
-        assert_ne!(ec1.canonical_hash(), ExecutionCertificateHash::ZERO);
-    }
-
-    #[test]
-    fn test_canonical_hash_signer_independent() {
-        let mut signers_a = SignerBitfield::new(4);
-        signers_a.set(0);
-        signers_a.set(1);
-        let sig_a = Bls12381G2Signature([1u8; 96]);
-
-        let mut signers_b = SignerBitfield::new(4);
-        signers_b.set(2);
-        signers_b.set(3);
-        let sig_b = Bls12381G2Signature([2u8; 96]);
-
-        let ec_a = make_test_ec(signers_a, sig_a);
-        let ec_b = make_test_ec(signers_b, sig_b);
-
-        // Different signers + signatures → same canonical hash
-        assert_eq!(ec_a.canonical_hash(), ec_b.canonical_hash());
-    }
-
     #[test]
     fn ec_deadline_is_vote_anchor_ts_plus_retention_horizon() {
         let ec = make_test_wave_ec(0, 1);
@@ -343,6 +300,8 @@ mod tests {
 
     #[test]
     fn test_receipt_hash_changes_with_ec() {
+        // `receipt_hash` commits to `(shard_group_id, wave_id)` pairs, so two
+        // ECs with distinct wave_ids must produce distinct receipt hashes.
         let wave_id = make_wave_id(0, BlockHeight::new(42), &[1]);
         let wc1 = WaveCertificate {
             wave_id: wave_id.clone(),
@@ -350,7 +309,7 @@ mod tests {
         };
         let wc2 = WaveCertificate {
             wave_id,
-            execution_certificates: vec![make_test_wave_ec(0, 2)],
+            execution_certificates: vec![make_test_wave_ec(1, 2)],
         };
         assert_ne!(wc1.receipt_hash(), wc2.receipt_hash());
     }

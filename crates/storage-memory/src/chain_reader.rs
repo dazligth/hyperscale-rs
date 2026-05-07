@@ -77,19 +77,18 @@ impl ChainReader for SimStorage {
             .cloned()
     }
 
-    fn get_execution_certificates_by_height(
-        &self,
-        block_height: BlockHeight,
-    ) -> Vec<ExecutionCertificate> {
+    fn get_execution_certificate(&self, wave_id: &WaveId) -> Option<ExecutionCertificate> {
+        read_or_recover(&self.consensus)
+            .execution_certs
+            .get(wave_id)
+            .cloned()
+    }
+
+    fn get_execution_certificates_batch(&self, wave_ids: &[WaveId]) -> Vec<ExecutionCertificate> {
         let c = read_or_recover(&self.consensus);
-        c.execution_certs_by_height
-            .get(&block_height)
-            .map(|hashes| {
-                hashes
-                    .iter()
-                    .filter_map(|h| c.execution_certs.get(h).cloned())
-                    .collect()
-            })
-            .unwrap_or_default()
+        wave_ids
+            .iter()
+            .filter_map(|wid| c.execution_certs.get(wid).cloned())
+            .collect()
     }
 }

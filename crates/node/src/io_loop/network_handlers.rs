@@ -310,25 +310,23 @@ where
         self.network
             .register_request_handler::<GetExecutionCertsRequest>(
                 move |req: GetExecutionCertsRequest| {
+                    // Hot path: in-memory cache (entries live here between EC
+                    // aggregation and the wave's containing block committing).
                     let mut certs: Vec<Arc<ExecutionCertificate>> = Vec::new();
+                    let mut missing: Vec<WaveId> = Vec::new();
                     for wave_id in &req.wave_ids {
-                        if let Some(cert) = exec_cert_store.get(wave_id) {
-                            certs.push(cert);
+                        match exec_cert_store.get(wave_id) {
+                            Some(cert) => certs.push(cert),
+                            None => missing.push(wave_id.clone()),
                         }
                     }
 
-                    // Storage fallback: if cache miss, try durable storage.
-                    // Every WaveId in a single request shares its source
-                    // block by construction; pick the first as the height
-                    // hint for the by-height index lookup.
-                    if certs.is_empty()
-                        && let Some(block_height) = req.wave_ids.first().map(|w| w.block_height)
-                    {
-                        let stored = storage.get_execution_certificates_by_height(block_height);
-                        for cert in stored {
-                            if req.wave_ids.contains(&cert.wave_id) {
-                                certs.push(Arc::new(cert));
-                            }
+                    // Cold path: durable storage point lookup per missing
+                    // wave_id. Cache eviction happens at wave-cert commit, at
+                    // which point storage is the authoritative source.
+                    if !missing.is_empty() {
+                        for cert in storage.get_execution_certificates_batch(&missing) {
+                            certs.push(Arc::new(cert));
                         }
                     }
 

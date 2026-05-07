@@ -52,29 +52,28 @@ pub struct WaveCertificate {
     /// May contain multiple ECs from the same remote shard — this happens when
     /// a remote shard committed this wave's transactions across multiple blocks,
     /// producing separate ECs.
-    /// Sorted by (`shard_group_id`, `canonical_hash`) for deterministic `receipt_hash`.
+    /// Sorted by (`shard_group_id`, `wave_id`) for deterministic `receipt_hash`.
     pub execution_certificates: Vec<Arc<ExecutionCertificate>>,
 }
 
 impl WaveCertificate {
     /// Compute the receipt hash for this wave certificate.
     ///
-    /// Hashes sorted (`shard_group_id`, `canonical_hash`) pairs. The vec is
-    /// pre-sorted at construction time for deterministic ordering.
-    /// `canonical_hash` already encodes the `WaveId`, `vote_anchor_ts`,
-    /// `global_receipt_root`, and all `tx_outcomes` — so this commits to
-    /// the full content of every contributing EC.
+    /// Hashes sorted (`shard_group_id`, `wave_id`) pairs. The vec is
+    /// pre-sorted at construction time for deterministic ordering. At most
+    /// one valid EC exists per `wave_id` (signature verification upstream
+    /// enforces this), so committing to `wave_id` is content-equivalent.
     ///
     /// # Panics
     ///
-    /// Panics if SBOR encoding of a `ShardGroupId` fails — closed SBOR
-    /// type, infallible in practice.
+    /// Panics if SBOR encoding of a `ShardGroupId` or `WaveId` fails —
+    /// closed SBOR types, infallible in practice.
     #[must_use]
     pub fn receipt_hash(&self) -> WaveReceiptHash {
         let mut hasher = Hasher::new();
         for ec in &self.execution_certificates {
             hasher.update(&basic_encode(&ec.shard_group_id()).unwrap());
-            hasher.update(ec.canonical_hash().as_raw().as_bytes());
+            hasher.update(&basic_encode(&ec.wave_id).unwrap());
         }
         WaveReceiptHash::from_raw(Hash::from_hash_bytes(hasher.finalize().as_bytes()))
     }

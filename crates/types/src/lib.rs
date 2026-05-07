@@ -59,9 +59,9 @@ pub use network::{MessageClass, NetworkMessage, Request, ShardMessage};
 pub use primitives::bloom::{BloomFilter, BloomKey, DEFAULT_FPR, MAX_BITS};
 pub use primitives::hash::{Hash, TypedHash};
 pub use primitives::hash_kinds::{
-    BlockHash, CertificateRoot, EventRoot, ExecutionCertificateHash, GlobalReceiptHash,
-    GlobalReceiptRoot, LocalReceiptRoot, ProvisionHash, ProvisionTxRoot, ProvisionsRoot, StateRoot,
-    TransactionRoot, TxHash, WaveReceiptHash, WritesRoot,
+    BlockHash, CertificateRoot, EventRoot, GlobalReceiptHash, GlobalReceiptRoot, LocalReceiptRoot,
+    ProvisionHash, ProvisionTxRoot, ProvisionsRoot, StateRoot, TransactionRoot, TxHash,
+    WaveReceiptHash, WritesRoot,
 };
 pub use primitives::identifiers::{
     Attempt, BlockHeight, HeaderFetchCount, InFlightCount, NodeId, PartitionNumber, Round,

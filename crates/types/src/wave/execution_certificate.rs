@@ -1,9 +1,8 @@
 //! [`ExecutionCertificate`] — aggregated 2f+1 BLS signature over a wave's
-//! per-tx outcomes, with cached canonical hash.
+//! per-tx outcomes.
 
 use std::fmt::{self, Debug, Formatter};
 
-use blake3::Hasher;
 use sbor::prelude::*;
 use sbor::{
     Categorize, Decode, DecodeError, Decoder, Describe, Encode, EncodeError, Encoder,
@@ -12,9 +11,9 @@ use sbor::{
 
 use crate::sbor_codec::decode_bounded_vec;
 use crate::{
-    BlockHeight, Bls12381G2Signature, ExecutionCertificateHash, GlobalReceiptRoot, Hash,
-    MAX_TXS_PER_BLOCK, RETENTION_HORIZON, ShardGroupId, SignerBitfield, TxOutcome, WaveId,
-    WeightedTimestamp, compute_global_receipt_root,
+    BlockHeight, Bls12381G2Signature, GlobalReceiptRoot, Hash, MAX_TXS_PER_BLOCK,
+    RETENTION_HORIZON, ShardGroupId, SignerBitfield, TxOutcome, WaveId, WeightedTimestamp,
+    compute_global_receipt_root,
 };
 
 /// Aggregated certificate for an execution wave.
@@ -37,8 +36,6 @@ pub struct ExecutionCertificate {
     pub aggregated_signature: Bls12381G2Signature,
     /// Which validators signed (bitfield indexed by committee position).
     pub signers: SignerBitfield,
-    /// Cached canonical hash, computed eagerly at construction and on deserialization.
-    canonical_hash: ExecutionCertificateHash,
     /// Cached SBOR-encoded bytes. Populated at construction or after
     /// deserialization to avoid re-serialization on storage writes.
     cached_sbor: Option<Vec<u8>>,
@@ -53,7 +50,6 @@ impl Debug for ExecutionCertificate {
             .field("tx_outcomes", &self.tx_outcomes)
             .field("aggregated_signature", &self.aggregated_signature)
             .field("signers", &self.signers)
-            .field("canonical_hash", &self.canonical_hash)
             .finish_non_exhaustive()
     }
 }
@@ -67,7 +63,6 @@ impl Clone for ExecutionCertificate {
             tx_outcomes: self.tx_outcomes.clone(),
             aggregated_signature: self.aggregated_signature,
             signers: self.signers.clone(),
-            canonical_hash: self.canonical_hash,
             cached_sbor: self.cached_sbor.clone(),
         }
     }
@@ -75,8 +70,7 @@ impl Clone for ExecutionCertificate {
 
 impl PartialEq for ExecutionCertificate {
     fn eq(&self, other: &Self) -> bool {
-        self.canonical_hash == other.canonical_hash
-            && self.wave_id == other.wave_id
+        self.wave_id == other.wave_id
             && self.vote_anchor_ts == other.vote_anchor_ts
             && self.global_receipt_root == other.global_receipt_root
             && self.tx_outcomes == other.tx_outcomes
@@ -87,7 +81,7 @@ impl PartialEq for ExecutionCertificate {
 
 impl Eq for ExecutionCertificate {}
 
-// Manual SBOR: cached_sbor and canonical_hash are derived, not serialized.
+// Manual SBOR: cached_sbor is derived, not serialized.
 impl<E: Encoder<NoCustomValueKind>> Encode<NoCustomValueKind, E> for ExecutionCertificate {
     fn encode_value_kind(&self, encoder: &mut E) -> Result<(), EncodeError> {
         encoder.write_value_kind(ValueKind::Tuple)
@@ -133,12 +127,6 @@ impl<D: Decoder<NoCustomValueKind>> Decode<NoCustomValueKind, D> for ExecutionCe
         if compute_global_receipt_root(&tx_outcomes) != global_receipt_root {
             return Err(DecodeError::InvalidCustomValue);
         }
-        let canonical_hash = Self::compute_canonical_hash(
-            &wave_id,
-            vote_anchor_ts,
-            &global_receipt_root,
-            &tx_outcomes,
-        );
         let mut ec = Self {
             wave_id,
             vote_anchor_ts,
@@ -146,7 +134,6 @@ impl<D: Decoder<NoCustomValueKind>> Decode<NoCustomValueKind, D> for ExecutionCe
             tx_outcomes,
             aggregated_signature,
             signers,
-            canonical_hash,
             cached_sbor: None,
         };
         ec.populate_cached_sbor();
@@ -169,7 +156,7 @@ impl Describe<NoCustomTypeKind> for ExecutionCertificate {
 }
 
 impl ExecutionCertificate {
-    /// Create a new execution certificate, computing the canonical hash eagerly.
+    /// Create a new execution certificate.
     #[must_use]
     pub fn new(
         wave_id: WaveId,
@@ -179,12 +166,6 @@ impl ExecutionCertificate {
         aggregated_signature: Bls12381G2Signature,
         signers: SignerBitfield,
     ) -> Self {
-        let canonical_hash = Self::compute_canonical_hash(
-            &wave_id,
-            vote_anchor_ts,
-            &global_receipt_root,
-            &tx_outcomes,
-        );
         let mut ec = Self {
             wave_id,
             vote_anchor_ts,
@@ -192,7 +173,6 @@ impl ExecutionCertificate {
             tx_outcomes,
             aggregated_signature,
             signers,
-            canonical_hash,
             cached_sbor: None,
         };
         ec.populate_cached_sbor();
@@ -220,18 +200,6 @@ impl ExecutionCertificate {
     #[must_use]
     pub const fn block_height(&self) -> BlockHeight {
         self.wave_id.block_height
-    }
-
-    /// Return the cached canonical hash.
-    ///
-    /// Hashes only the deterministic execution-result fields, **excluding**
-    /// `aggregated_signature` and `signers`. Different validators aggregate
-    /// different 2f+1 subsets of votes, producing different signatures for the
-    /// same wave — the canonical hash identifies the *logical* EC so that any
-    /// valid aggregation resolves to the same hash.
-    #[must_use]
-    pub const fn canonical_hash(&self) -> ExecutionCertificateHash {
-        self.canonical_hash
     }
 
     /// Pre-serialized SBOR bytes, if available.
@@ -262,19 +230,5 @@ impl ExecutionCertificate {
 
     fn populate_cached_sbor(&mut self) {
         self.cached_sbor = Some(basic_encode(self).expect("EC SBOR encoding must succeed"));
-    }
-
-    fn compute_canonical_hash(
-        wave_id: &WaveId,
-        vote_anchor_ts: WeightedTimestamp,
-        global_receipt_root: &GlobalReceiptRoot,
-        tx_outcomes: &[TxOutcome],
-    ) -> ExecutionCertificateHash {
-        let mut hasher = Hasher::new();
-        hasher.update(&basic_encode(wave_id).unwrap());
-        hasher.update(&vote_anchor_ts.as_millis().to_le_bytes());
-        hasher.update(global_receipt_root.as_raw().as_bytes());
-        hasher.update(&basic_encode(tx_outcomes).unwrap());
-        ExecutionCertificateHash::from_raw(Hash::from_hash_bytes(hasher.finalize().as_bytes()))
     }
 }

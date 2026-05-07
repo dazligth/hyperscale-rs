@@ -11,8 +11,8 @@ use hyperscale_storage::{
 };
 use hyperscale_types::{
     BlockHash, BlockHeight, CertifiedBlock, ConsensusReceipt, ExecutionCertificate,
-    ExecutionCertificateHash, ExecutionMetadata, QuorumCertificate, RoutableTransaction, StateRoot,
-    StoredReceipt, TxHash, WaveCertificate, WaveId,
+    ExecutionMetadata, QuorumCertificate, RoutableTransaction, StateRoot, StoredReceipt, TxHash,
+    WaveCertificate, WaveId,
 };
 
 use crate::tree_store::SimTreeStore;
@@ -110,10 +110,8 @@ pub struct ConsensusState {
     pub execution_metadata: HashMap<TxHash, ExecutionMetadata>,
     /// Insertion height for each receipt, enabling height-based pruning.
     pub receipt_heights: HashMap<TxHash, BlockHeight>,
-    /// Execution certificates keyed by canonical hash.
-    pub execution_certs: HashMap<ExecutionCertificateHash, ExecutionCertificate>,
-    /// Index: `block_height` → set of canonical hashes for that height.
-    pub execution_certs_by_height: HashMap<BlockHeight, Vec<ExecutionCertificateHash>>,
+    /// Execution certificates keyed by [`WaveId`].
+    pub execution_certs: HashMap<WaveId, ExecutionCertificate>,
     /// Index: `block_height` → `WaveId`s at that height.
     pub wave_certs_by_height: HashMap<BlockHeight, Vec<WaveId>>,
 }
@@ -134,7 +132,6 @@ impl ConsensusState {
             execution_metadata: HashMap::new(),
             receipt_heights: HashMap::new(),
             execution_certs: HashMap::new(),
-            execution_certs_by_height: HashMap::new(),
             wave_certs_by_height: HashMap::new(),
         }
     }

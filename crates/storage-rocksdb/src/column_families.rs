@@ -12,9 +12,7 @@ use rocksdb::{ColumnFamily, DB};
 
 use crate::jmt_stored::{StaleTreePart, StoredNodeKey, VersionedStoredNode};
 use crate::substate_key::SubstateKeyCodec;
-use crate::typed_cf::{
-    BeU64Codec, HashCodec, HeightHashCodec, JmtKeyCodec, RawCodec, SborCodec, TypedCf, UnitCodec,
-};
+use crate::typed_cf::{BeU64Codec, HashCodec, JmtKeyCodec, RawCodec, SborCodec, TypedCf};
 use crate::versioned_key::VersionedSubstateKeyCodec;
 
 // ─── CF name constants ───────────────────────────────────────────────────────
@@ -80,12 +78,8 @@ pub const CONSENSUS_RECEIPTS_CF: &str = "consensus_receipts";
 /// error), keyed by tx hash. Absent when the tx was synced from a peer.
 pub const EXECUTION_METADATA_CF: &str = "execution_metadata";
 
-/// Column family for execution certificates keyed by canonical hash.
+/// Column family for execution certificates keyed by [`WaveId`].
 pub const EXECUTION_CERTS_CF: &str = "execution_certs";
-
-/// Column family for execution certificate height index.
-/// Key: `block_height_BE_8B ++ canonical_hash_32B`, Value: `()`.
-pub const EXECUTION_CERTS_BY_HEIGHT_CF: &str = "execution_certs_by_height";
 
 // Default-CF metadata keys are defined as MetadataEntry types in typed_cf.rs.
 // See CommittedHeightEntry, CommittedHashEntry, CommittedQcEntry, JmtMetadataEntry.
@@ -108,7 +102,6 @@ pub const ALL_COLUMN_FAMILIES: &[&str] = &[
     CONSENSUS_RECEIPTS_CF,
     EXECUTION_METADATA_CF,
     EXECUTION_CERTS_CF,
-    EXECUTION_CERTS_BY_HEIGHT_CF,
 ];
 
 // ─── CfHandles ───────────────────────────────────────────────────────────────
@@ -131,7 +124,6 @@ pub struct CfHandles<'a> {
     consensus_receipts: &'a ColumnFamily,
     execution_metadata: &'a ColumnFamily,
     execution_certs: &'a ColumnFamily,
-    execution_certs_by_height: &'a ColumnFamily,
 }
 
 impl<'a> CfHandles<'a> {
@@ -156,7 +148,6 @@ impl<'a> CfHandles<'a> {
             consensus_receipts: resolve(CONSENSUS_RECEIPTS_CF),
             execution_metadata: resolve(EXECUTION_METADATA_CF),
             execution_certs: resolve(EXECUTION_CERTS_CF),
-            execution_certs_by_height: resolve(EXECUTION_CERTS_BY_HEIGHT_CF),
         }
     }
 }
@@ -332,25 +323,11 @@ impl TypedCf for ExecutionMetadataCf {
 pub struct ExecutionCertsCf;
 impl TypedCf for ExecutionCertsCf {
     const NAME: &'static str = EXECUTION_CERTS_CF;
-    type Key = Hash; // canonical hash
+    type Key = WaveId;
     type Value = ExecutionCertificate;
-    type KeyCodec = HashCodec;
+    type KeyCodec = SborCodec<WaveId>;
     type ValueCodec = SborCodec<ExecutionCertificate>;
     fn handle<'a>(cf: &CfHandles<'a>) -> &'a ColumnFamily {
         cf.execution_certs
-    }
-}
-
-/// Height index for execution certificates.
-/// Key: `(block_height, canonical_hash)`, Value: `()`.
-pub struct ExecutionCertsByHeightCf;
-impl TypedCf for ExecutionCertsByHeightCf {
-    const NAME: &'static str = EXECUTION_CERTS_BY_HEIGHT_CF;
-    type Key = (u64, Hash); // (block_height, canonical_hash)
-    type Value = ();
-    type KeyCodec = HeightHashCodec;
-    type ValueCodec = UnitCodec;
-    fn handle<'a>(cf: &CfHandles<'a>) -> &'a ColumnFamily {
-        cf.execution_certs_by_height
     }
 }

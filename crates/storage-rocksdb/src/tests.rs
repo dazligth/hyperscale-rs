@@ -849,6 +849,7 @@ fn test_ec_storage_batch() {
 fn test_ec_survives_reopen() {
     let temp_dir = TempDir::new().unwrap();
     let ec = make_test_execution_certificate(1, BlockHeight::new(1));
+    let wave_id = ec.wave_id.clone();
 
     {
         let storage = RocksDbStorage::open(temp_dir.path()).unwrap();
@@ -860,11 +861,7 @@ fn test_ec_survives_reopen() {
             &mut block,
             Arc::new(FinalizedWave {
                 certificate: Arc::new(WaveCertificate {
-                    wave_id: WaveId::new(
-                        ShardGroupId::new(0),
-                        BlockHeight::new(1),
-                        std::collections::BTreeSet::new(),
-                    ),
+                    wave_id: wave_id.clone(),
                     execution_certificates: vec![Arc::new(ec)],
                 }),
                 receipts: vec![],
@@ -876,9 +873,10 @@ fn test_ec_survives_reopen() {
 
     {
         let storage = RocksDbStorage::open(temp_dir.path()).unwrap();
-        let by_height = storage.get_execution_certificates_by_height(BlockHeight::new(1));
-        assert_eq!(by_height.len(), 1);
-        assert_eq!(by_height[0].block_height(), BlockHeight::new(1));
+        let cert = storage
+            .get_execution_certificate(&wave_id)
+            .expect("EC must survive reopen");
+        assert_eq!(cert.block_height(), BlockHeight::new(1));
     }
 }
 
@@ -888,16 +886,13 @@ fn test_ec_atomic_with_block_commit() {
     let storage = RocksDbStorage::open(temp_dir.path()).unwrap();
 
     let ec = make_test_execution_certificate(1, BlockHeight::new(1));
+    let wave_id = ec.wave_id.clone();
     let mut block = make_test_block(BlockHeight::new(1));
     push_wave(
         &mut block,
         Arc::new(FinalizedWave {
             certificate: Arc::new(WaveCertificate {
-                wave_id: WaveId::new(
-                    ShardGroupId::new(0),
-                    BlockHeight::new(1),
-                    std::collections::BTreeSet::new(),
-                ),
+                wave_id: wave_id.clone(),
                 execution_certificates: vec![Arc::new(ec)],
             }),
             receipts: vec![],
@@ -908,10 +903,10 @@ fn test_ec_atomic_with_block_commit() {
     // Commit block with EC atomically
     storage.commit_block(&Arc::new(block), &Arc::new(qc));
 
-    // EC should be retrievable by height
-    let by_height = storage.get_execution_certificates_by_height(BlockHeight::new(1));
-    assert_eq!(by_height.len(), 1);
-    assert_eq!(by_height[0].block_height(), BlockHeight::new(1));
+    let cert = storage
+        .get_execution_certificate(&wave_id)
+        .expect("EC must be retrievable after commit");
+    assert_eq!(cert.block_height(), BlockHeight::new(1));
 }
 
 // ─── State-history semantics (parity with storage-memory tests) ─────────────

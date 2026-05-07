@@ -767,9 +767,12 @@ mod tests {
         fn get_consensus_receipt(&self, _tx_hash: &TxHash) -> Option<Arc<ConsensusReceipt>> {
             None
         }
-        fn get_execution_certificates_by_height(
+        fn get_execution_certificate(&self, _wave_id: &WaveId) -> Option<ExecutionCertificate> {
+            None
+        }
+        fn get_execution_certificates_batch(
             &self,
-            _block_height: BlockHeight,
+            _wave_ids: &[WaveId],
         ) -> Vec<ExecutionCertificate> {
             Vec::new()
         }

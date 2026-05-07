@@ -29,10 +29,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hyperscale_types::{
-    BlockHash, BlockHeight, ExecutionCertificate, ExecutionCertificateHash, ExecutionOutcome,
-    GlobalReceiptRoot, RoutableTransaction, ShardGroupId, StoredReceipt, TransactionDecision,
-    TxHash, TxOutcome, WAVE_TIMEOUT, WaveCertificate, WaveId, WeightedTimestamp,
-    compute_global_receipt_root,
+    BlockHash, BlockHeight, ExecutionCertificate, ExecutionOutcome, GlobalReceiptRoot,
+    RoutableTransaction, ShardGroupId, StoredReceipt, TransactionDecision, TxHash, TxOutcome,
+    WAVE_TIMEOUT, WaveCertificate, WaveId, WeightedTimestamp, compute_global_receipt_root,
 };
 
 /// Age at which a still-alive wave emits a single diagnostic warning.
@@ -135,8 +134,10 @@ pub struct WaveState {
     tx_has_failure: HashSet<TxHash>,
     /// All collected ECs (local + remote).
     execution_certificates: Vec<Arc<ExecutionCertificate>>,
-    /// Deduplication of received ECs by canonical hash.
-    seen_ec_hashes: HashSet<ExecutionCertificateHash>,
+    /// Deduplication of received ECs by `wave_id`. At most one valid EC
+    /// exists per `wave_id` (signature verification upstream ensures this),
+    /// so `wave_id` is a content-equivalent identity for dedup.
+    seen_ec_wave_ids: HashSet<WaveId>,
 }
 
 impl WaveState {
@@ -206,7 +207,7 @@ impl WaveState {
             tracker_aborted: HashSet::new(),
             tx_has_failure: HashSet::new(),
             execution_certificates: Vec::new(),
-            seen_ec_hashes: HashSet::new(),
+            seen_ec_wave_ids: HashSet::new(),
         }
     }
 
@@ -516,8 +517,7 @@ impl WaveState {
     ///
     /// Returns `true` if the wave is now complete (ready for `finalize_wave`).
     pub fn add_execution_certificate(&mut self, ec: Arc<ExecutionCertificate>) -> bool {
-        let ec_hash = ec.canonical_hash();
-        if !self.seen_ec_hashes.insert(ec_hash) {
+        if !self.seen_ec_wave_ids.insert(ec.wave_id.clone()) {
             return self.is_complete();
         }
 
@@ -709,12 +709,12 @@ impl WaveState {
 
     /// Build the final `WaveCertificate`. Local EC is always included;
     /// remote ECs are included only if they cover at least one non-aborted
-    /// tx. Deterministic order: `(shard_group_id, canonical_hash)`.
+    /// tx. Deterministic order: `(shard_group_id, wave_id)`.
     ///
     /// Callers should invoke only when `is_complete()` is true.
     #[must_use]
     pub fn create_wave_certificate(&self) -> WaveCertificate {
-        let required_remote_ec_hashes: HashSet<ExecutionCertificateHash> = self
+        let required_remote_wave_ids: HashSet<WaveId> = self
             .execution_certificates
             .iter()
             .filter(|ec| ec.wave_id != self.wave_id)
@@ -724,22 +724,20 @@ impl WaveState {
                         && !self.tracker_aborted.contains(&outcome.tx_hash)
                 })
             })
-            .map(|ec| ec.canonical_hash())
+            .map(|ec| ec.wave_id.clone())
             .collect();
 
         let mut ecs: Vec<Arc<ExecutionCertificate>> = self
             .execution_certificates
             .iter()
             .filter(|ec| {
-                ec.wave_id == self.wave_id
-                    || required_remote_ec_hashes.contains(&ec.canonical_hash())
+                ec.wave_id == self.wave_id || required_remote_wave_ids.contains(&ec.wave_id)
             })
             .cloned()
             .collect();
 
         ecs.sort_by(|a, b| {
-            (&a.shard_group_id(), &a.canonical_hash())
-                .cmp(&(&b.shard_group_id(), &b.canonical_hash()))
+            (&a.shard_group_id(), &a.wave_id).cmp(&(&b.shard_group_id(), &b.wave_id))
         });
 
         WaveCertificate {

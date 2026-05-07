@@ -218,11 +218,12 @@ impl ChainReader for SharedStorage {
         self.0.get_consensus_receipt(tx_hash)
     }
 
-    fn get_execution_certificates_by_height(
-        &self,
-        block_height: BlockHeight,
-    ) -> Vec<ExecutionCertificate> {
-        self.0.get_execution_certificates_by_height(block_height)
+    fn get_execution_certificate(&self, wave_id: &WaveId) -> Option<ExecutionCertificate> {
+        self.0.get_execution_certificate(wave_id)
+    }
+
+    fn get_execution_certificates_batch(&self, wave_ids: &[WaveId]) -> Vec<ExecutionCertificate> {
+        self.0.get_execution_certificates_batch(wave_ids)
     }
 }
 

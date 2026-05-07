@@ -192,6 +192,10 @@ pub fn make_test_receipt(seed: u8) -> StoredReceipt {
 
 /// Build a test `ExecutionCertificate` at the given block height with a
 /// deterministic outcome derived from `seed`.
+///
+/// `seed` also disambiguates the `WaveId` (via `remote_shards`), so two ECs
+/// at the same `block_height` with different seeds have distinct identities
+/// — matching the protocol invariant that one wave produces one EC.
 #[must_use]
 pub fn make_test_execution_certificate(
     seed: u8,
@@ -204,8 +208,10 @@ pub fn make_test_execution_certificate(
         },
     }];
     let global_receipt_root = compute_global_receipt_root(&outcomes);
+    let mut remote_shards = BTreeSet::new();
+    remote_shards.insert(ShardGroupId::new(u64::from(seed) + 1));
     ExecutionCertificate::new(
-        WaveId::new(ShardGroupId::new(0), block_height, BTreeSet::new()),
+        WaveId::new(ShardGroupId::new(0), block_height, remote_shards),
         WeightedTimestamp::from_millis(block_height.inner() + 1),
         global_receipt_root,
         outcomes,
@@ -216,17 +222,15 @@ pub fn make_test_execution_certificate(
 
 /// Build a test block that carries ECs inside its wave certificates.
 ///
-/// Callers supply ECs whose `wave_id` matches the wave-certificate's
-/// `wave_id` (callers in this module use [`make_test_execution_certificate`]
-/// at the same `(shard, height)`), so the local-EC invariant enforced at
-/// decode time is satisfied without injecting a placeholder.
+/// The wave-certificate's `wave_id` is taken from the first EC's `wave_id` so
+/// the local-EC decode invariant is satisfied without injecting a placeholder.
 fn make_test_block_with_ecs(height: BlockHeight, ecs: Vec<Arc<ExecutionCertificate>>) -> Block {
     let block = make_test_block(height);
     if ecs.is_empty() {
         return block;
     }
     let certificate = Arc::new(WaveCertificate {
-        wave_id: WaveId::new(ShardGroupId::new(0), height, BTreeSet::new()),
+        wave_id: ecs[0].wave_id.clone(),
         execution_certificates: ecs,
     });
     let new_fw = Arc::new(FinalizedWave {
@@ -274,42 +278,33 @@ fn commit_empty_blocks_up_to(storage: &(impl ChainReader + ChainWriter), target:
     }
 }
 
-/// Shared EC roundtrip test: commit block with ECs → get by height.
+/// Shared EC roundtrip test: commit a block carrying an EC, then read it
+/// back by `wave_id`.
 ///
 /// # Panics
 ///
 /// Panics if any assertion fails (this is a test helper).
 pub fn test_ec_storage_roundtrip(storage: &(impl ChainReader + ChainWriter)) {
     let ec = make_test_execution_certificate(1, BlockHeight::new(10));
-    let canonical_hash = ec.canonical_hash();
+    let wave_id = ec.wave_id.clone();
 
-    // Initially empty
-    assert!(
-        storage
-            .get_execution_certificates_by_height(BlockHeight::new(10))
-            .is_empty()
-    );
+    // Initially absent.
+    assert!(storage.get_execution_certificate(&wave_id).is_none());
 
-    // Commit intermediate blocks, then block at height 10 carrying the EC
     commit_empty_blocks_up_to(storage, BlockHeight::new(10));
     let block = make_test_block_with_ecs(BlockHeight::new(10), vec![Arc::new(ec)]);
     let qc = make_test_qc(&block);
     storage.commit_block(&Arc::new(block), &Arc::new(qc));
 
-    let by_height = storage.get_execution_certificates_by_height(BlockHeight::new(10));
-    assert_eq!(by_height.len(), 1);
-    assert_eq!(by_height[0].block_height(), BlockHeight::new(10));
-    assert_eq!(by_height[0].canonical_hash(), canonical_hash);
-
-    // Different height returns empty
-    assert!(
-        storage
-            .get_execution_certificates_by_height(BlockHeight::new(11))
-            .is_empty()
-    );
+    let direct = storage
+        .get_execution_certificate(&wave_id)
+        .expect("EC must be retrievable by wave_id");
+    assert_eq!(direct.wave_id, wave_id);
+    assert_eq!(direct.block_height(), BlockHeight::new(10));
 }
 
-/// Shared EC batch test: multiple ECs at same and different heights.
+/// Shared EC batch test: commit two ECs at one height plus one at another,
+/// confirm batch read returns hits and skips misses.
 ///
 /// # Panics
 ///
@@ -319,14 +314,14 @@ pub fn test_ec_storage_batch(storage: &(impl ChainReader + ChainWriter)) {
     let ec2 = make_test_execution_certificate(2, BlockHeight::new(10));
     let ec3 = make_test_execution_certificate(3, BlockHeight::new(20));
 
-    // Commit intermediate blocks, then block at height 10 with two ECs
     commit_empty_blocks_up_to(storage, BlockHeight::new(10));
-    let block10 =
-        make_test_block_with_ecs(BlockHeight::new(10), vec![Arc::new(ec1), Arc::new(ec2)]);
+    let block10 = make_test_block_with_ecs(
+        BlockHeight::new(10),
+        vec![Arc::new(ec1.clone()), Arc::new(ec2.clone())],
+    );
     let qc10 = make_test_qc(&block10);
     storage.commit_block(&Arc::new(block10), &Arc::new(qc10));
 
-    // Commit blocks 11-19, then block 20 with one EC
     for h in 11..20 {
         let b = make_test_block(BlockHeight::new(h));
         let q = make_test_qc(&b);
@@ -336,12 +331,13 @@ pub fn test_ec_storage_batch(storage: &(impl ChainReader + ChainWriter)) {
     let qc20 = make_test_qc(&block20);
     storage.commit_block(&Arc::new(block20), &Arc::new(qc20));
 
-    // Both ECs at height 10
-    let at_10 = storage.get_execution_certificates_by_height(BlockHeight::new(10));
-    assert_eq!(at_10.len(), 2);
+    let known = [ec1.wave_id, ec2.wave_id, ec3.wave_id.clone()];
+    let batch = storage.get_execution_certificates_batch(&known);
+    assert_eq!(batch.len(), 3);
 
-    // One EC at height 20
-    let at_20 = storage.get_execution_certificates_by_height(BlockHeight::new(20));
-    assert_eq!(at_20.len(), 1);
-    assert_eq!(at_20[0].canonical_hash(), ec3.canonical_hash());
+    let mut missing_wave_id = known[0].clone();
+    missing_wave_id.block_height = BlockHeight::new(999);
+    let partial = storage.get_execution_certificates_batch(&[ec3.wave_id.clone(), missing_wave_id]);
+    assert_eq!(partial.len(), 1);
+    assert_eq!(partial[0].wave_id, ec3.wave_id);
 }
