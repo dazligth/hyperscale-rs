@@ -197,7 +197,7 @@ fn on_verified_remote_header_for_own_shard_is_no_op() {
 fn on_verified_remote_header_targeting_local_shard_registers_expectation() {
     let (mut coord, topology) = fresh_coordinator_with_topology();
     let local = topology.local_shard();
-    let remote = ShardGroupId::new(u64::from(local.inner() == 0));
+    let remote = ShardGroupId::new(u64::from(local == ShardGroupId::new(0)));
     let header = make_remote_header_targeting(remote, BlockHeight::new(5), local);
     coord.on_verified_remote_header(&topology, &header);
 
@@ -224,7 +224,7 @@ fn first_commit_retro_stamps_pre_genesis_expectations() {
     // committed_ts is suddenly ~now, age reports ~57 years).
     let (mut coord, topology) = fresh_coordinator_with_topology();
     let local = topology.local_shard();
-    let remote = ShardGroupId::new(u64::from(local.inner() == 0));
+    let remote = ShardGroupId::new(u64::from(local == ShardGroupId::new(0)));
     let header = make_remote_header_targeting(remote, BlockHeight::new(5), local);
     coord.on_verified_remote_header(&topology, &header);
 

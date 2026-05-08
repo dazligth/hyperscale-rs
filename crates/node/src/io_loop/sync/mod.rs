@@ -830,7 +830,7 @@ mod tests {
         });
         assert!(outputs.iter().any(|o| matches!(
             o,
-            SyncOutput::Complete { height, .. } if height.inner() == 2
+            SyncOutput::Complete { height, .. } if *height == BlockHeight::new(2)
         )));
         assert!(!s.is_syncing());
     }
@@ -864,7 +864,7 @@ mod tests {
         });
         assert!(!outputs.iter().any(|o| matches!(
             o,
-            SyncOutput::Fetch { from, .. } if from.inner() == 1
+            SyncOutput::Fetch { from, .. } if *from == BlockHeight::new(1)
         )));
 
         // Tick past first-round backoff: re-emerges.
@@ -873,7 +873,7 @@ mod tests {
         });
         assert!(outputs.iter().any(|o| matches!(
             o,
-            SyncOutput::Fetch { from, .. } if from.inner() == 1
+            SyncOutput::Fetch { from, .. } if *from == BlockHeight::new(1)
         )));
     }
 
@@ -905,7 +905,7 @@ mod tests {
         assert!(
             outputs.iter().any(|o| matches!(
                 o,
-                SyncOutput::Fetch { from, .. } if from.inner() == 1
+                SyncOutput::Fetch { from, .. } if *from == BlockHeight::new(1)
             )),
             "Exhausted failure must re-queue immediately"
         );
@@ -1192,9 +1192,9 @@ mod tests {
             "timeout should re-queue, not move to deferred"
         );
         assert!(
-            outputs
-                .iter()
-                .any(|o| matches!(o, SyncOutput::Fetch { from, .. } if from.inner() == 1)),
+            outputs.iter().any(
+                |o| matches!(o, SyncOutput::Fetch { from, .. } if *from == BlockHeight::new(1))
+            ),
             "expected immediate re-fetch starting at the lowest re-queued height"
         );
     }
@@ -1225,9 +1225,9 @@ mod tests {
             now: Instant::now(),
         });
         assert!(
-            outputs
-                .iter()
-                .any(|o| matches!(o, SyncOutput::Fetch { from, .. } if from.inner() == 3)),
+            outputs.iter().any(
+                |o| matches!(o, SyncOutput::Fetch { from, .. } if *from == BlockHeight::new(3))
+            ),
             "expected immediate emission for height 3 on slot release"
         );
     }

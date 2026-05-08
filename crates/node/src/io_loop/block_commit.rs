@@ -621,7 +621,7 @@ mod tests {
                 AccumulateDecision::Accepted {
                     height,
                     notify_now: Some(_),
-                } => assert_eq!(height.inner(), h),
+                } => assert_eq!(height, BlockHeight::new(h)),
                 _ => panic!("expected immediate notify at height {h}"),
             }
         }
@@ -670,11 +670,11 @@ mod tests {
         let pending = &coord.pending;
         let h_deferred = pending
             .iter()
-            .find(|c| c.block.height().inner() == max_lag + 1)
+            .find(|c| c.block.height() == BlockHeight::new(max_lag + 1))
             .unwrap();
         let h_immediate = pending
             .iter()
-            .find(|c| c.block.height().inner() == 1)
+            .find(|c| c.block.height() == BlockHeight::new(1))
             .unwrap();
         assert!(!h_deferred.committed_notified);
         assert!(h_immediate.committed_notified);

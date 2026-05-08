@@ -563,7 +563,7 @@ impl BftCoordinator {
         hash: Option<BlockHash>,
         qc: Option<QuorumCertificate>,
     ) -> Vec<Action> {
-        if height.inner() == 0 && hash.is_none() {
+        if height == BlockHeight::GENESIS && hash.is_none() {
             // No committed blocks - this is a fresh start
             info!(
                 validator = ?topology_snapshot.local_validator_id(),
@@ -1087,7 +1087,7 @@ impl BftCoordinator {
         let advances = self
             .latest_qc
             .as_ref()
-            .is_none_or(|existing| qc.height().inner() > existing.height().inner());
+            .is_none_or(|existing| qc.height() > existing.height());
         if !advances {
             return Vec::new();
         }
@@ -1215,7 +1215,7 @@ impl BftCoordinator {
         let should_adopt = self
             .latest_qc
             .as_ref()
-            .is_none_or(|existing| deferred_qc.height().inner() > existing.height().inner());
+            .is_none_or(|existing| deferred_qc.height() > existing.height());
         if should_adopt {
             self.latest_qc = Some(deferred_qc.clone());
             self.maybe_unlock_for_qc(topology_snapshot, &deferred_qc);
@@ -2037,7 +2037,7 @@ impl BftCoordinator {
         let should_update = self
             .latest_qc
             .as_ref()
-            .is_none_or(|existing| qc.height().inner() > existing.height().inner());
+            .is_none_or(|existing| qc.height() > existing.height());
 
         if should_update {
             // Defer adoption if the header isn't in memory yet — we need it
@@ -2508,7 +2508,7 @@ impl BftCoordinator {
         if self
             .latest_qc
             .as_ref()
-            .is_none_or(|existing| qc.height().inner() > existing.height().inner())
+            .is_none_or(|existing| qc.height() > existing.height())
         {
             self.latest_qc = Some(qc.clone());
             self.maybe_unlock_for_qc(topology_snapshot, &qc);
@@ -2516,9 +2516,10 @@ impl BftCoordinator {
 
         // Adopt the parent_qc from the block header if it's newer still.
         if !block.header().parent_qc().is_genesis()
-            && self.latest_qc.as_ref().is_none_or(|existing| {
-                block.header().parent_qc().height().inner() > existing.height().inner()
-            })
+            && self
+                .latest_qc
+                .as_ref()
+                .is_none_or(|existing| block.header().parent_qc().height() > existing.height())
         {
             self.latest_qc = Some(block.header().parent_qc().clone());
             self.maybe_unlock_for_qc(topology_snapshot, block.header().parent_qc());

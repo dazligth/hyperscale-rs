@@ -339,8 +339,8 @@ impl BlockHeader {
 
     /// Check if this is the genesis block header.
     #[must_use]
-    pub const fn is_genesis(&self) -> bool {
-        self.height.inner() == 0
+    pub fn is_genesis(&self) -> bool {
+        self.height == BlockHeight::GENESIS
     }
 
     /// Get the expected proposer for this height (round-robin).

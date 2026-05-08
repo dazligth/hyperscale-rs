@@ -77,7 +77,7 @@ pub fn validate_header(
             return Err("parent QC does not have quorum".to_string());
         }
 
-        if header.parent_qc().height().inner() + 1 != height.inner() {
+        if header.parent_qc().height().next() != height {
             return Err(format!(
                 "parent QC height {} doesn't match block height {} - 1",
                 header.parent_qc().height().inner(),
@@ -92,7 +92,7 @@ pub fn validate_header(
                 header.parent_qc().block_hash()
             ));
         }
-    } else if height.inner() != committed_height.inner() + 1 {
+    } else if height != committed_height.next() {
         return Err(format!(
             "genesis QC only valid for first block after committed height, got height {}",
             height.inner()

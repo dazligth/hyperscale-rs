@@ -367,8 +367,8 @@ impl SimulationRunner {
         self.io_loops.get(node as usize).map_or(0, |nl| {
             let s = nl.storage();
             let committed = s.committed_height();
-            if committed.inner() == 0 {
-                usize::from(s.get_block(BlockHeight::new(0)).is_some())
+            if committed == BlockHeight::GENESIS {
+                usize::from(s.get_block(BlockHeight::GENESIS).is_some())
             } else {
                 usize::try_from(committed.inner() + 1).unwrap_or(usize::MAX)
             }

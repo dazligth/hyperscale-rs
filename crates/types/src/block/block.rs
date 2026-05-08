@@ -236,7 +236,7 @@ impl Block {
 
     /// Check if this is the genesis block.
     #[must_use]
-    pub const fn is_genesis(&self) -> bool {
+    pub fn is_genesis(&self) -> bool {
         self.header().is_genesis()
     }
 

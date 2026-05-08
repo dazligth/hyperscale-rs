@@ -70,8 +70,8 @@ use hyperscale_storage::ChainReader;
 use hyperscale_storage_rocksdb::{RocksDbStorage, SharedStorage};
 use hyperscale_topology::TopologyCoordinator;
 use hyperscale_types::{
-    Block, Bls12381G1PrivateKey, CertifiedBlock, LocalTimestamp, QuorumCertificate, ShardGroupId,
-    TransactionStatus, TxHash, ValidatorId,
+    Block, BlockHeight, Bls12381G1PrivateKey, CertifiedBlock, LocalTimestamp, QuorumCertificate,
+    ShardGroupId, TransactionStatus, TxHash, ValidatorId,
 };
 use libp2p::identity::Keypair;
 use quick_cache::sync::Cache as QuickCache;
@@ -570,7 +570,7 @@ impl ProductionRunner {
 
         // Check if we already have committed blocks
         let height = io_loop.storage().committed_height();
-        let has_blocks = height.inner() > 0;
+        let has_blocks = height > BlockHeight::GENESIS;
 
         if has_blocks {
             info!("Existing blocks found, skipping genesis initialization");
