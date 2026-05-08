@@ -13,11 +13,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use hyperscale_core::{Action, FetchAbandon, FetchOrigin, FetchPeers, FetchRequest, ProtocolEvent};
+use hyperscale_core::{Action, FetchAbandon, ProtocolEvent};
 use hyperscale_types::{
-    BlockHeight, CertifiedBlock, CommittedBlockHeader, Hash, LocalTimestamp, ProvisionHash,
-    ProvisionTxRoot, Provisions, RETENTION_HORIZON, ShardGroupId, TopologySnapshot,
-    compute_merkle_root,
+    BlockHeight, CertifiedBlock, CommittedBlockHeader, LocalTimestamp, ProvisionHash, Provisions,
+    RETENTION_HORIZON, ShardGroupId, TopologySnapshot,
 };
 use serde::Deserialize;
 use tracing::{debug, info, warn};
@@ -26,6 +25,7 @@ use crate::expected::ExpectedProvisionTracker;
 use crate::pipeline::ProvisionPipeline;
 use crate::queue::QueuedProvisionBuffer;
 use crate::store::ProvisionStore;
+use crate::verification::build_verify_action;
 use crate::verified_headers::VerifiedHeaderBuffer;
 
 /// Default minimum dwell time verified provisions sit in the queue before
@@ -102,8 +102,8 @@ pub struct ProvisionCoordinator {
     // Expected Provision Tracking (fallback detection)
     // ═══════════════════════════════════════════════════════════════════
     /// Outstanding expectations driven by remote header arrivals. Owns
-    /// the local committed anchor every other sub-machine reads through
-    /// (`local_ts`, `local_height`).
+    /// the local committed `local_ts` anchor every other sub-machine reads
+    /// through.
     expected: ExpectedProvisionTracker,
 
     // ═══════════════════════════════════════════════════════════════════
@@ -194,7 +194,7 @@ impl ProvisionCoordinator {
         let mut actions: Vec<Action> = Vec::new();
         let block = certified.block();
         let new_ts = certified.qc().weighted_timestamp();
-        self.expected.record_block_committed(block.height(), new_ts);
+        self.expected.record_block_committed(new_ts);
         let local_ts = self.expected.local_ts();
 
         // Drop provisions committed in this block from the proposer queue
@@ -240,22 +240,7 @@ impl ProvisionCoordinator {
             self.expected
                 .check_timeouts(local_ts)
                 .into_iter()
-                .map(|effect| {
-                    Action::Fetch(FetchRequest::RemoteProvisions {
-                        source_shard: effect.source_shard,
-                        block_height: effect.block_height,
-                        peers: FetchPeers::with_preferred(
-                            effect.proposer,
-                            topology
-                                .committee_for_shard(effect.source_shard)
-                                .iter()
-                                .copied()
-                                .filter(|p| *p != effect.proposer)
-                                .collect(),
-                        ),
-                        origin: FetchOrigin::CrossShard,
-                    })
-                }),
+                .map(|effect| effect.into_fetch_action(topology)),
         );
         actions
     }
@@ -309,20 +294,7 @@ impl ProvisionCoordinator {
                     block_height = effect.block_height.inner(),
                     "Eager fetch — immediately requesting missing provisions"
                 );
-                Action::Fetch(FetchRequest::RemoteProvisions {
-                    source_shard: effect.source_shard,
-                    block_height: effect.block_height,
-                    peers: FetchPeers::with_preferred(
-                        effect.proposer,
-                        topology
-                            .committee_for_shard(effect.source_shard)
-                            .iter()
-                            .copied()
-                            .filter(|p| *p != effect.proposer)
-                            .collect(),
-                    ),
-                    origin: FetchOrigin::CrossShard,
-                })
+                effect.into_fetch_action(topology)
             })
             .collect()
     }
@@ -397,8 +369,8 @@ impl ProvisionCoordinator {
                     );
                     continue;
                 }
-                actions.extend(Self::emit_provision_verification(
-                    topology,
+                actions.extend(build_verify_action(
+                    topology.local_shard(),
                     provisions,
                     Arc::clone(committed_header),
                 ));
@@ -481,7 +453,9 @@ impl ProvisionCoordinator {
                 );
                 return vec![];
             }
-            return Self::emit_provision_verification(topology, provisions, verified_header);
+            return build_verify_action(topology.local_shard(), provisions, verified_header)
+                .into_iter()
+                .collect();
         }
 
         // No verified header yet — buffer the provisions
@@ -496,73 +470,12 @@ impl ProvisionCoordinator {
         vec![]
     }
 
-    /// Emit a `VerifyProvisions` action for async merkle proof verification.
-    ///
-    /// Runs the provisions completeness check first: the source block's
-    /// `provision_tx_roots[local_shard]` commits to the ordered tx hashes the
-    /// target shard is meant to receive. A mismatch means the proposer
-    /// dropped txs on the broadcast path (or the provisions were tampered
-    /// with) — reject entirely so the 10-block fallback timer refetches a
-    /// complete set from a peer.
-    ///
-    /// The QC was already verified by `RemoteHeaderCoordinator`, so the
-    /// downstream `VerifyProvisions` action only needs to check merkle proofs
-    /// against the committed state root.
-    fn emit_provision_verification(
-        topology: &TopologySnapshot,
-        provisions: Provisions,
-        committed_header: Arc<CommittedBlockHeader>,
-    ) -> Vec<Action> {
-        let local_shard = topology.local_shard();
-        let Some(expected_root) = committed_header
-            .header()
-            .provision_tx_roots()
-            .get(&local_shard)
-            .copied()
-        else {
-            warn!(
-                source_shard = provisions.source_shard().inner(),
-                block_height = provisions.block_height().inner(),
-                local_shard = local_shard.inner(),
-                "Dropping provisions: source header has no provision_tx_root for us"
-            );
-            return vec![];
-        };
-
-        let leaves: Vec<Hash> = provisions
-            .transactions()
-            .iter()
-            .map(|t| t.tx_hash.into_raw())
-            .collect();
-        let computed_root = ProvisionTxRoot::from_raw(compute_merkle_root(&leaves));
-
-        if computed_root != expected_root {
-            warn!(
-                source_shard = provisions.source_shard().inner(),
-                block_height = provisions.block_height().inner(),
-                local_shard = local_shard.inner(),
-                tx_count = provisions.transactions().len(),
-                ?expected_root,
-                ?computed_root,
-                "Rejecting incomplete provisions — tx-root mismatch; \
-                 fallback fetch will request a complete set"
-            );
-            return vec![];
-        }
-
-        vec![Action::VerifyProvisions {
-            provisions,
-            committed_header,
-        }]
-    }
-
     /// Handle the verification result for a provisions entry.
     ///
     /// If valid: store, queue, emit events.
     /// Uses the verified header returned by the action handler directly (no re-lookup).
     pub fn on_state_provisions_verified(
         &mut self,
-        _topology: &TopologySnapshot,
         provisions: Arc<Provisions>,
         committed_header: Option<&Arc<CommittedBlockHeader>>,
         valid: bool,
@@ -581,8 +494,8 @@ impl ProvisionCoordinator {
         // for paths where no admission event fires (orphan cleanup in
         // `on_block_committed`).
         if let Some(header) = committed_header {
-            let shard = header.header().shard_group_id();
-            let height = header.header().height();
+            let shard = header.shard_group_id();
+            let height = header.height();
             let key = (shard, height);
 
             if self.expected.on_provisions_verified(shard, height) {
@@ -648,7 +561,7 @@ impl ProvisionCoordinator {
 
     /// Look up verified provisions by their content hash.
     #[must_use]
-    pub fn get_provisions_by_hash(&self, hash: &ProvisionHash) -> Option<Arc<Provisions>> {
+    pub fn get_provisions_by_hash(&self, hash: ProvisionHash) -> Option<Arc<Provisions>> {
         self.pipeline.get_provisions_by_hash(hash)
     }
 
@@ -678,12 +591,14 @@ impl ProvisionCoordinator {
 
 #[cfg(test)]
 mod tests {
+    use hyperscale_core::FetchRequest;
     use hyperscale_types::{
         Block, BlockHash, BlockHeader, Bls12381G1PrivateKey, BoundedVec, CertificateRoot, Hash,
         InFlightCount, LocalReceiptRoot, MerkleInclusionProof, ProposerTimestamp, ProvisionEntry,
-        ProvisionsRoot, QuorumCertificate, Round, ShardGroupId, SignerBitfield, StateRoot,
-        TopologySnapshot, TransactionRoot, TxHash, ValidatorId, ValidatorInfo, ValidatorSet,
-        VotePower, WaveId, WeightedTimestamp, bls_keypair_from_seed, zero_bls_signature,
+        ProvisionTxRoot, ProvisionsRoot, QuorumCertificate, Round, ShardGroupId, SignerBitfield,
+        StateRoot, TopologySnapshot, TransactionRoot, TxHash, ValidatorId, ValidatorInfo,
+        ValidatorSet, VotePower, WaveId, WeightedTimestamp, bls_keypair_from_seed,
+        compute_merkle_root, zero_bls_signature,
     };
     use proptest::bool::ANY as ANY_BOOL;
     use proptest::collection::vec as prop_vec;
@@ -1013,7 +928,6 @@ mod tests {
         );
         coordinator.on_state_provisions_received(&topology, provisions.clone());
         coordinator.on_state_provisions_verified(
-            &topology,
             Arc::new(provisions),
             Some(&header),
             true,
@@ -1054,7 +968,6 @@ mod tests {
 
         // Verify
         let actions = coordinator.on_state_provisions_verified(
-            &topology,
             Arc::new(provisions),
             Some(&header),
             true,
@@ -1089,7 +1002,6 @@ mod tests {
 
         // Verification fails — no committed_header returned
         let actions = coordinator.on_state_provisions_verified(
-            &topology,
             Arc::new(provisions),
             None,
             false,
@@ -1304,7 +1216,6 @@ mod tests {
 
         // Entire provisions fails verification
         let actions = coordinator.on_state_provisions_verified(
-            &topology,
             Arc::new(provisions),
             Some(&header),
             false,
@@ -1474,7 +1385,6 @@ mod tests {
         );
         coordinator.on_state_provisions_received(&topology, provisions.clone());
         coordinator.on_state_provisions_verified(
-            &topology,
             Arc::new(provisions),
             Some(&header),
             true,
@@ -1618,7 +1528,6 @@ mod tests {
         );
         coordinator.on_state_provisions_received(&topology, provisions.clone());
         coordinator.on_state_provisions_verified(
-            &topology,
             Arc::new(provisions),
             Some(&header),
             true,
@@ -1663,7 +1572,6 @@ mod tests {
         );
         coordinator.on_state_provisions_received(&topology, provisions.clone());
         coordinator.on_state_provisions_verified(
-            &topology,
             Arc::new(provisions),
             Some(&header),
             true,
@@ -1783,7 +1691,6 @@ mod tests {
         );
         coordinator.on_state_provisions_received(&topology, provisions.clone());
         coordinator.on_state_provisions_verified(
-            &topology,
             Arc::new(provisions),
             Some(&header),
             true,
@@ -1862,7 +1769,6 @@ mod tests {
         );
         coordinator.on_state_provisions_received(&topology, provisions.clone());
         coordinator.on_state_provisions_verified(
-            &topology,
             Arc::new(provisions),
             Some(&header),
             true,
@@ -2000,13 +1906,7 @@ mod tests {
         coordinator.on_verified_remote_header(topology, &header);
         let provisions = make_provisions(tx_hash, source_shard, ShardGroupId::new(0), height);
         coordinator.on_state_provisions_received(topology, provisions.clone());
-        coordinator.on_state_provisions_verified(
-            topology,
-            Arc::new(provisions),
-            Some(&header),
-            true,
-            now,
-        );
+        coordinator.on_state_provisions_verified(Arc::new(provisions), Some(&header), true, now);
     }
 
     #[test]
@@ -2148,7 +2048,6 @@ mod tests {
                     coordinator.on_verified_remote_header(&topology, &header);
                     coordinator.on_state_provisions_received(&topology, provisions.clone());
                     coordinator.on_state_provisions_verified(
-                        &topology,
                         Arc::new(provisions),
                         Some(&header),
                         true,
