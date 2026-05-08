@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use sbor::prelude::*;
 
 use crate::{
-    BoundedVec, MAX_DECLARED_NODES_PER_TX, MAX_STATE_ENTRIES_PER_TX, NodeId, StateEntry, TxHash,
+    BoundedVec, MAX_DECLARED_NODES_PER_TX, MAX_STATE_ENTRIES_PER_TX, NodeId, SubstateEntry, TxHash,
 };
 
 /// Per-transaction state entries within a provision.
@@ -13,12 +13,12 @@ use crate::{
 /// Identifies which transaction, what state it touched on the source shard,
 /// and what nodes it needs from the target shard (for conflict detection).
 #[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
-pub struct TxEntries {
+pub struct ProvisionEntry {
     /// Hash of the transaction.
     pub tx_hash: TxHash,
 
     /// The state entries this transaction touched on the source shard.
-    pub entries: BoundedVec<StateEntry, MAX_STATE_ENTRIES_PER_TX>,
+    pub entries: BoundedVec<SubstateEntry, MAX_STATE_ENTRIES_PER_TX>,
 
     /// Node IDs this transaction needs from the target shard.
     ///
@@ -28,10 +28,10 @@ pub struct TxEntries {
     pub target_nodes: BoundedVec<NodeId, MAX_DECLARED_NODES_PER_TX>,
 }
 
-impl TxEntries {
-    /// Build a `TxEntries` from raw `Vec`s — wraps each in its bounded type.
+impl ProvisionEntry {
+    /// Build a `ProvisionEntry` from raw `Vec`s — wraps each in its bounded type.
     #[must_use]
-    pub fn new(tx_hash: TxHash, entries: Vec<StateEntry>, target_nodes: Vec<NodeId>) -> Self {
+    pub fn new(tx_hash: TxHash, entries: Vec<SubstateEntry>, target_nodes: Vec<NodeId>) -> Self {
         Self {
             tx_hash,
             entries: entries.into(),
@@ -44,7 +44,7 @@ impl TxEntries {
     pub fn node_ids(&self) -> HashSet<NodeId> {
         self.entries
             .iter()
-            .filter_map(StateEntry::node_id)
+            .filter_map(SubstateEntry::node_id)
             .collect()
     }
 }
@@ -59,20 +59,20 @@ mod tests {
     use super::*;
     use crate::Hash;
 
-    fn sample_entry(seed: u8) -> StateEntry {
-        StateEntry::test_entry(NodeId([seed; 30]), 0, b"sort", Some(vec![seed]))
+    fn sample_entry(seed: u8) -> SubstateEntry {
+        SubstateEntry::test_entry(NodeId([seed; 30]), 0, b"sort", Some(vec![seed]))
     }
 
     #[test]
     fn sbor_roundtrip() {
-        let tx_entries = TxEntries::new(
+        let entry = ProvisionEntry::new(
             TxHash::from_raw(Hash::from_bytes(b"tx")),
             vec![sample_entry(1), sample_entry(2)],
             vec![NodeId([3u8; 30]), NodeId([4u8; 30])],
         );
-        let bytes = basic_encode(&tx_entries).unwrap();
-        let decoded: TxEntries = basic_decode(&bytes).unwrap();
-        assert_eq!(decoded, tx_entries);
+        let bytes = basic_encode(&entry).unwrap();
+        let decoded: ProvisionEntry = basic_decode(&bytes).unwrap();
+        assert_eq!(decoded, entry);
     }
 
     #[test]
@@ -86,9 +86,9 @@ mod tests {
         enc.encode(&TxHash::from_raw(Hash::from_bytes(b"tx")))
             .unwrap();
         enc.write_value_kind(ValueKind::Array).unwrap();
-        enc.write_value_kind(StateEntry::value_kind()).unwrap();
+        enc.write_value_kind(SubstateEntry::value_kind()).unwrap();
         enc.write_size(MAX_STATE_ENTRIES_PER_TX + 1).unwrap();
-        let err = basic_decode::<TxEntries>(&buf).unwrap_err();
+        let err = basic_decode::<ProvisionEntry>(&buf).unwrap_err();
         assert!(matches!(
             err,
             DecodeError::UnexpectedSize {
@@ -108,11 +108,11 @@ mod tests {
         enc.write_size(3).unwrap();
         enc.encode(&TxHash::from_raw(Hash::from_bytes(b"tx")))
             .unwrap();
-        enc.encode(&Vec::<StateEntry>::new()).unwrap();
+        enc.encode(&Vec::<SubstateEntry>::new()).unwrap();
         enc.write_value_kind(ValueKind::Array).unwrap();
         enc.write_value_kind(NodeId::value_kind()).unwrap();
         enc.write_size(MAX_DECLARED_NODES_PER_TX + 1).unwrap();
-        let err = basic_decode::<TxEntries>(&buf).unwrap_err();
+        let err = basic_decode::<ProvisionEntry>(&buf).unwrap_err();
         assert!(matches!(
             err,
             DecodeError::UnexpectedSize {

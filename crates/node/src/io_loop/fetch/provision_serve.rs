@@ -7,7 +7,8 @@ use hyperscale_storage::{ChainReader, SubstateStore};
 use hyperscale_types::network::request::GetProvisionsRequest;
 use hyperscale_types::network::response::GetProvisionResponse;
 use hyperscale_types::{
-    MerkleInclusionProof, Provisions, ShardGroupId, StateEntry, TxEntries, TxHash, shard_for_node,
+    MerkleInclusionProof, ProvisionEntry, Provisions, ShardGroupId, SubstateEntry, TxHash,
+    shard_for_node,
 };
 use tracing::warn;
 
@@ -15,7 +16,7 @@ use tracing::warn;
 ///
 /// Looks up the block at the requested height, identifies transactions
 /// that involve the requesting shard, collects the local state entries
-/// and merkle proofs, and returns them as `StateProvision`s.
+/// and merkle proofs, and returns them as `Provisions` bundles.
 ///
 /// Takes `local_shard` and `num_shards` instead of `&TopologyCoordinator`
 /// to avoid topology dependency in the I/O layer.
@@ -39,7 +40,7 @@ pub fn serve_provision_request(
     let all_txs = block.transactions().iter();
 
     // Phase 1: Fetch state entries for all matching transactions.
-    let mut per_tx: Vec<(TxHash, Vec<StateEntry>)> = Vec::new();
+    let mut per_tx: Vec<(TxHash, Vec<SubstateEntry>)> = Vec::new();
     let mut all_storage_keys: Vec<Vec<u8>> = Vec::new();
 
     for tx in all_txs {
@@ -99,7 +100,7 @@ pub fn serve_provision_request(
     // Phase 3: Build the bundle.
     let transactions = per_tx
         .into_iter()
-        .map(|(tx_hash, entries)| TxEntries::new(tx_hash, entries, vec![]))
+        .map(|(tx_hash, entries)| ProvisionEntry::new(tx_hash, entries, vec![]))
         .collect();
 
     GetProvisionResponse {

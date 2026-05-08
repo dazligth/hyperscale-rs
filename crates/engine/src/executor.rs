@@ -14,9 +14,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use hyperscale_storage::{SubstateDatabase, SubstateStore};
-use hyperscale_types::{
-    BlockHeight, NodeId, RoutableTransaction, ShardGroupId, StateEntry, StateProvision,
-};
+use hyperscale_types::{BlockHeight, NodeId, RoutableTransaction, ShardGroupId, SubstateEntry};
 use radix_common::network::NetworkDefinition;
 use radix_common::types::NodeId as RadixNodeId;
 use radix_engine::transaction::{ExecutionConfig, execute_transaction};
@@ -43,7 +41,7 @@ pub fn fetch_state_entries<S: SubstateStore>(
     storage: &S,
     nodes: &[NodeId],
     block_height: BlockHeight,
-) -> Option<Vec<StateEntry>> {
+) -> Option<Vec<SubstateEntry>> {
     use radix_substate_store_interface::db_key_mapper::{DatabaseKeyMapper, SpreadPrefixKeyMapper};
 
     let mut entries = Vec::new();
@@ -62,7 +60,7 @@ pub fn fetch_state_entries<S: SubstateStore>(
             storage_key.push(partition_num);
             storage_key.extend_from_slice(&db_sort_key.0);
 
-            entries.push(StateEntry::new(storage_key, Some(value)));
+            entries.push(SubstateEntry::new(storage_key, Some(value)));
         }
     }
 
@@ -230,15 +228,14 @@ impl Engine for RadixExecutor {
         &self,
         snapshot: &D,
         transactions: &[Arc<RoutableTransaction>],
-        provisions: &[StateProvision],
+        provisions: &[Arc<Vec<SubstateEntry>>],
         local_shard: ShardGroupId,
         num_shards: u64,
     ) -> ExecutionOutput {
         let start = Instant::now();
         let mut results = Vec::with_capacity(transactions.len());
 
-        let entry_slices: Vec<&[StateEntry]> =
-            provisions.iter().map(|p| p.entries().as_slice()).collect();
+        let entry_slices: Vec<&[SubstateEntry]> = provisions.iter().map(|p| p.as_slice()).collect();
         let provisioned = ProvisionedSnapshot::from_provisions(snapshot, &entry_slices);
 
         for tx in transactions {

@@ -5,7 +5,7 @@
 //! can claim — independent of how many transactions a block carries
 //! (which is governed by [`crate::block::limits`]).
 
-/// Cap on `StateEntry.storage_key` length at decode time.
+/// Cap on `SubstateEntry.storage_key` length at decode time.
 ///
 /// Real keys are `db_node_key` (50 bytes) + partition (1) + `sort_key`
 /// (≤ a few hundred bytes for any realistic substate). 4 KiB is well
@@ -13,7 +13,7 @@
 /// oversized arrivals before allocation.
 pub const MAX_STATE_ENTRY_KEY_LEN: usize = 4 * 1024;
 
-/// Cap on `StateEntry.value` length at decode time.
+/// Cap on `SubstateEntry.value` length at decode time.
 ///
 /// Radix substates have an engine-side ceiling well below this; the cap
 /// exists to bound the SBOR `Vec<u8>` pre-allocation a peer can force on
@@ -28,7 +28,7 @@ pub const MAX_STATE_ENTRY_VALUE_LEN: usize = 1024 * 1024;
 /// cap a touch above for headroom.
 pub const MAX_MERKLE_PROOF_LEN: usize = 4 * 1024 * 1024;
 
-/// Cap on `TxEntries.entries` length at decode time.
+/// Cap on `ProvisionEntry.entries` length at decode time.
 ///
 /// Each entry is one substate the transaction touched on the source
 /// shard. A transaction's substate footprint is bounded by its declared

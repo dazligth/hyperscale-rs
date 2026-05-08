@@ -1,17 +1,8 @@
-//! State-related types for cross-shard execution.
-
-use std::sync::Arc;
+//! Pre-computed-key substate entries shipped between shards as provisions.
 
 use sbor::prelude::*;
 
-use crate::{
-    BlockHeight, BoundedBytes, Hash, MAX_STATE_ENTRY_KEY_LEN, MAX_STATE_ENTRY_VALUE_LEN, NodeId,
-    ShardGroupId, TxHash,
-};
-
-// ============================================================================
-// State entry types with pre-computed storage keys
-// ============================================================================
+use crate::{BoundedBytes, Hash, MAX_STATE_ENTRY_KEY_LEN, MAX_STATE_ENTRY_VALUE_LEN, NodeId};
 
 /// A state entry with pre-computed storage key for fast engine lookup.
 ///
@@ -21,7 +12,7 @@ use crate::{
 /// The storage key format is: `db_node_key(50) + partition_num(1) + sort_key(var)`
 /// where `db_node_key` is the `SpreadPrefixKeyMapper` hash (expensive to compute).
 #[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
-pub struct StateEntry {
+pub struct SubstateEntry {
     /// Pre-computed full storage key (ready for direct DB lookup).
     /// Format: `db_node_key` (50 bytes) + partition (1 byte) + `sort_key`
     pub storage_key: BoundedBytes<MAX_STATE_ENTRY_KEY_LEN>,
@@ -33,7 +24,7 @@ pub struct StateEntry {
 /// Hash prefix length in `db_node_key` (`SpreadPrefixKeyMapper` adds 20-byte hash)
 const HASH_PREFIX_LEN: usize = 20;
 
-impl StateEntry {
+impl SubstateEntry {
     /// Create a new DB state entry with pre-computed storage key.
     #[must_use]
     pub fn new(storage_key: Vec<u8>, value: Option<Vec<u8>>) -> Self {
@@ -105,84 +96,6 @@ impl StateEntry {
         Self::new(storage_key, value)
     }
 }
-
-/// Per-tx provision view used inside the execution path.
-///
-/// Built from a [`crate::Provisions`] bundle when it lands at the execution
-/// coordinator: each `TxEntries` in the bundle becomes one `StateProvision`
-/// keyed to the tx, carrying the bundle's source/target shard and block
-/// height alongside the tx's slice of state entries. Not on the wire.
-#[derive(Debug, Clone)]
-pub struct StateProvision {
-    transaction_hash: TxHash,
-    target_shard: ShardGroupId,
-    source_shard: ShardGroupId,
-    block_height: BlockHeight,
-    entries: Arc<Vec<StateEntry>>,
-}
-
-impl StateProvision {
-    /// Build a `StateProvision` from its parts.
-    #[must_use]
-    pub const fn new(
-        transaction_hash: TxHash,
-        target_shard: ShardGroupId,
-        source_shard: ShardGroupId,
-        block_height: BlockHeight,
-        entries: Arc<Vec<StateEntry>>,
-    ) -> Self {
-        Self {
-            transaction_hash,
-            target_shard,
-            source_shard,
-            block_height,
-            entries,
-        }
-    }
-
-    /// Hash of the transaction this provision is for.
-    #[must_use]
-    pub const fn transaction_hash(&self) -> TxHash {
-        self.transaction_hash
-    }
-
-    /// Target shard (the shard executing the transaction).
-    #[must_use]
-    pub const fn target_shard(&self) -> ShardGroupId {
-        self.target_shard
-    }
-
-    /// Source shard (the shard providing the state).
-    #[must_use]
-    pub const fn source_shard(&self) -> ShardGroupId {
-        self.source_shard
-    }
-
-    /// Block height when this provision was created (anchors merkle proofs).
-    #[must_use]
-    pub const fn block_height(&self) -> BlockHeight {
-        self.block_height
-    }
-
-    /// The state entries with pre-computed storage keys.
-    #[must_use]
-    pub const fn entries(&self) -> &Arc<Vec<StateEntry>> {
-        &self.entries
-    }
-}
-
-impl PartialEq for StateProvision {
-    fn eq(&self, other: &Self) -> bool {
-        self.transaction_hash == other.transaction_hash
-            && self.target_shard == other.target_shard
-            && self.source_shard == other.source_shard
-            && self.block_height == other.block_height
-            && *self.entries == *other.entries
-    }
-}
-
-impl Eq for StateProvision {}
-
 #[cfg(test)]
 mod tests {
     use sbor::{
@@ -193,8 +106,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_db_state_entry_hash() {
-        let entry = StateEntry::test_entry(NodeId([1u8; 30]), 0, b"key", Some(b"value".to_vec()));
+    fn test_substate_entry_hash() {
+        let entry =
+            SubstateEntry::test_entry(NodeId([1u8; 30]), 0, b"key", Some(b"value".to_vec()));
 
         let hash1 = entry.hash();
         let hash2 = entry.hash();
@@ -203,22 +117,22 @@ mod tests {
 
     #[test]
     fn sbor_roundtrip_some_value() {
-        let entry = StateEntry::test_entry(NodeId([7u8; 30]), 3, b"sort", Some(vec![9u8; 128]));
+        let entry = SubstateEntry::test_entry(NodeId([7u8; 30]), 3, b"sort", Some(vec![9u8; 128]));
         let bytes = basic_encode(&entry).unwrap();
-        let decoded: StateEntry = basic_decode(&bytes).unwrap();
+        let decoded: SubstateEntry = basic_decode(&bytes).unwrap();
         assert_eq!(decoded, entry);
     }
 
     #[test]
     fn sbor_roundtrip_none_value() {
-        let entry = StateEntry::test_entry(NodeId([7u8; 30]), 3, b"sort", None);
+        let entry = SubstateEntry::test_entry(NodeId([7u8; 30]), 3, b"sort", None);
         let bytes = basic_encode(&entry).unwrap();
-        let decoded: StateEntry = basic_decode(&bytes).unwrap();
+        let decoded: SubstateEntry = basic_decode(&bytes).unwrap();
         assert_eq!(decoded, entry);
     }
 
     /// Encode an oversized `storage_key` directly (without going through
-    /// `StateEntry::Encode`) and verify decode rejects it before allocation.
+    /// `SubstateEntry::Encode`) and verify decode rejects it before allocation.
     #[test]
     fn decode_rejects_oversized_storage_key() {
         let mut buf = Vec::with_capacity(64);
@@ -230,7 +144,7 @@ mod tests {
         enc.write_value_kind(ValueKind::Array).unwrap();
         enc.write_value_kind(ValueKind::U8).unwrap();
         enc.write_size(MAX_STATE_ENTRY_KEY_LEN + 1).unwrap();
-        let err = basic_decode::<StateEntry>(&buf).unwrap_err();
+        let err = basic_decode::<SubstateEntry>(&buf).unwrap_err();
         assert!(matches!(
             err,
             DecodeError::UnexpectedSize {
@@ -257,7 +171,7 @@ mod tests {
         enc.write_value_kind(ValueKind::Array).unwrap();
         enc.write_value_kind(ValueKind::U8).unwrap();
         enc.write_size(MAX_STATE_ENTRY_VALUE_LEN + 1).unwrap();
-        let err = basic_decode::<StateEntry>(&buf).unwrap_err();
+        let err = basic_decode::<SubstateEntry>(&buf).unwrap_err();
         assert!(matches!(
             err,
             DecodeError::UnexpectedSize {
