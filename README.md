@@ -16,32 +16,34 @@ Rust implementation of Hyperscale consensus protocol.
 
 | Crate | Purpose |
 |-------|---------|
-| `hyperscale-types` | Core types: hashes, blocks, votes, QCs, keys, transactions, topology |
-| `hyperscale-core` | The `StateMachine` and `SubStateMachine` traits that everything implements |
-| `hyperscale-bft` | BFT consensus: block proposal, voting, QC formation, view changes |
-| `hyperscale-execution` | Transaction execution with cross-shard coordination |
-| `hyperscale-mempool` | Transaction pool management |
-| `hyperscale-livelock` | Cross-shard deadlock detection and prevention |
-| `hyperscale-node` | Composes all sub-state machines into the main `NodeStateMachine` |
-| `hyperscale-provisions` | Centralized provision coordination for cross-shard transactions |
-| `hyperscale-engine` | Radix Engine integration for smart contract execution |
-| `hyperscale-dispatch` | Abstract trait for scheduling CPU-intensive work across priority-isolated pools |
-| `hyperscale-dispatch-pooled` | Production dispatch using rayon thread pools with core allocation and pinning |
-| `hyperscale-dispatch-sync` | Deterministic inline dispatch for simulation (runs closures on calling thread) |
-| `hyperscale-network` | Shared network protocol logic: Network trait, handler registry, wire framing |
-| `hyperscale-network-libp2p` | Production libp2p transport with gossipsub broadcast and QUIC/TCP streams |
-| `hyperscale-network-memory` | Deterministic in-memory network for simulation with configurable latency and partitions |
-| `hyperscale-storage` | Storage trait abstractions (SubstateStore, CommitStore, ConsensusStore) and JMT integration |
-| `hyperscale-storage-rocksdb` | Production RocksDB storage with JMT state roots and snapshot isolation |
-| `hyperscale-storage-memory` | In-memory storage using persistent data structures for deterministic simulation |
-| `hyperscale-metrics` | Metrics facade with domain-specific trait and global singleton recorder |
-| `hyperscale-metrics-memory` | In-memory metrics backend for tests and simulation assertions |
-| `hyperscale-metrics-prometheus` | Prometheus metrics backend with counters, gauges, and histograms |
-| `hyperscale-simulation` | Deterministic simulation runner with event queue and multi-node orchestration |
-| `hyperscale-simulator` | CLI tool for running simulations with metrics |
-| `hyperscale-production` | Production runner: async event loop, RPC server, telemetry |
-| `hyperscale-spammer` | Transaction spammer CLI and library for load testing |
-| `hyperscale-test-helpers` | Test helpers providing properly-signed fixtures for crypto testing |
+| [`hyperscale-bft`](crates/bft) | BFT consensus: block proposal, voting, QC formation, view changes |
+| [`hyperscale-core`](crates/core) | The `StateMachine` and `SubStateMachine` traits that everything implements |
+| [`hyperscale-dispatch`](crates/dispatch) | Abstract trait for scheduling CPU-intensive work across priority-isolated pools |
+| [`hyperscale-dispatch-pooled`](crates/dispatch-pooled) | Production dispatch using rayon thread pools with core allocation and pinning |
+| [`hyperscale-dispatch-sync`](crates/dispatch-sync) | Deterministic inline dispatch for simulation (runs closures on calling thread) |
+| [`hyperscale-engine`](crates/engine) | Radix Engine integration for smart contract execution |
+| [`hyperscale-execution`](crates/execution) | Transaction execution with cross-shard coordination |
+| [`hyperscale-jmt`](crates/jmt) | Jellyfish Merkle Tree with generic hasher and batched multiproofs |
+| [`hyperscale-mempool`](crates/mempool) | Transaction pool management |
+| [`hyperscale-metrics`](crates/metrics) | Metrics facade with domain-specific trait and global singleton recorder |
+| [`hyperscale-metrics-memory`](crates/metrics-memory) | In-memory metrics backend for tests and simulation assertions |
+| [`hyperscale-metrics-prometheus`](crates/metrics-prometheus) | Prometheus metrics backend with counters, gauges, and histograms |
+| [`hyperscale-network`](crates/network) | Shared network protocol logic: Network trait, handler registry, wire framing |
+| [`hyperscale-network-libp2p`](crates/network-libp2p) | Production libp2p transport with gossipsub broadcast and QUIC/TCP streams |
+| [`hyperscale-network-memory`](crates/network-memory) | Deterministic in-memory network for simulation with configurable latency and partitions |
+| [`hyperscale-node`](crates/node) | Composes all sub-state machines into the main `NodeStateMachine` |
+| [`hyperscale-production`](crates/production) | Production runner: async event loop, RPC server, telemetry |
+| [`hyperscale-provisions`](crates/provisions) | Centralized provision coordination for cross-shard transactions |
+| [`hyperscale-remote-headers`](crates/remote-headers) | Centralized remote block header coordination for cross-shard verification |
+| [`hyperscale-simulation`](crates/simulation) | Deterministic simulation runner with event queue and multi-node orchestration |
+| [`hyperscale-simulator`](crates/simulator) | CLI tool for running simulations with metrics |
+| [`hyperscale-spammer`](crates/spammer) | Transaction spammer CLI and library for load testing |
+| [`hyperscale-storage`](crates/storage) | Storage trait abstractions (SubstateStore, CommitStore, ConsensusStore) and JMT integration |
+| [`hyperscale-storage-memory`](crates/storage-memory) | In-memory storage using persistent data structures for deterministic simulation |
+| [`hyperscale-storage-rocksdb`](crates/storage-rocksdb) | Production RocksDB storage with JMT state roots and snapshot isolation |
+| [`hyperscale-test-helpers`](crates/test-helpers) | Test helpers providing properly-signed fixtures for crypto testing |
+| [`hyperscale-topology`](crates/topology) | Topology coordinator wrapping shard committee state for the node |
+| [`hyperscale-types`](crates/types) | Core types: hashes, blocks, votes, QCs, keys, transactions, topology |
 
 ## Installation
 
