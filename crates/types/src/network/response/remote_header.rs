@@ -4,13 +4,13 @@ use sbor::prelude::BasicSbor;
 
 use crate::{CommittedBlockHeader, MessageClass, NetworkMessage};
 
-/// Response to a [`crate::request::GetRemoteHeadersRequest`].
+/// Response to a [`crate::network::request::GetRemoteHeadersRequest`].
 ///
 /// Carries up to `count` consecutive headers starting at the requested
 /// `from_height`, in ascending height order. Empty when the responder
 /// has no header at `from_height`; otherwise contiguous from
 /// `from_height` up to whatever the responder could serve before
-/// hitting either `count`, [`crate::request::MAX_REMOTE_HEADERS_PER_REQUEST`],
+/// hitting either `count`, [`crate::network::request::MAX_REMOTE_HEADERS_PER_REQUEST`],
 /// or its own tip.
 #[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
 pub struct GetRemoteHeadersResponse {
