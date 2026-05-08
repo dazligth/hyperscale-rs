@@ -117,13 +117,13 @@ fn commit_with(
             }),
             metadata: None,
         };
-        let new_fw = Arc::new(FinalizedWave {
-            certificate: Arc::new(WaveCertificate {
+        let new_fw = Arc::new(FinalizedWave::new(
+            Arc::new(WaveCertificate {
                 wave_id: WaveId::new(ShardGroupId::new(0), block.height(), BTreeSet::new()),
                 execution_certificates: vec![],
             }),
-            receipts: vec![receipt],
-        });
+            vec![receipt],
+        ));
         match block {
             Block::Live {
                 header,
@@ -395,7 +395,7 @@ fn test_transactions_batch_with_indexed_block() {
             ..
         } => Block::Live {
             header,
-            transactions: Arc::new(vec![tx]),
+            transactions: Arc::new(vec![tx].into()),
             certificates,
             provisions,
         },
@@ -405,7 +405,7 @@ fn test_transactions_batch_with_indexed_block() {
             ..
         } => Block::Sealed {
             header,
-            transactions: Arc::new(vec![tx]),
+            transactions: Arc::new(vec![tx].into()),
             certificates,
         },
     };

@@ -3284,14 +3284,13 @@ impl BftCoordinator {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
 
     use hyperscale_core::Action;
     use hyperscale_types::{
-        Bls12381G1PrivateKey, CertificateRoot, Hash, InFlightCount, LocalReceiptRoot,
-        ProvisionsRoot, RoutableTransaction, ShardGroupId, SignerBitfield, TopologySnapshot,
-        TransactionRoot, ValidatorId, ValidatorInfo, ValidatorSet, VotePower, WeightedTimestamp,
-        generate_bls_keypair, test_utils, zero_bls_signature,
+        Bls12381G1PrivateKey, BoundedBTreeMap, BoundedVec, CertificateRoot, Hash, InFlightCount,
+        LocalReceiptRoot, ProvisionsRoot, RoutableTransaction, ShardGroupId, SignerBitfield,
+        TopologySnapshot, TransactionRoot, ValidatorId, ValidatorInfo, ValidatorSet, VotePower,
+        WeightedTimestamp, generate_bls_keypair, test_utils, zero_bls_signature,
     };
 
     use super::*;
@@ -3382,8 +3381,8 @@ mod tests {
             certificate_root: CertificateRoot::ZERO,
             local_receipt_root: LocalReceiptRoot::ZERO,
             provision_root: ProvisionsRoot::ZERO,
-            waves: vec![],
-            provision_tx_roots: BTreeMap::new(),
+            waves: BoundedVec::new(),
+            provision_tx_roots: BoundedBTreeMap::new(),
             in_flight: InFlightCount::ZERO,
         }
     }
@@ -3550,9 +3549,9 @@ mod tests {
 
         let parent_block = Block::Live {
             header: make_header_at_height(BlockHeight::new(1), 99_000),
-            transactions: Arc::new(vec![]),
-            certificates: Arc::new(vec![]),
-            provisions: Arc::new(vec![]),
+            transactions: Arc::new(BoundedVec::new()),
+            certificates: Arc::new(BoundedVec::new()),
+            provisions: Arc::new(BoundedVec::new()),
         };
         let parent_block_hash = parent_block.hash();
         state.committed_height = BlockHeight::new(1);
@@ -4487,9 +4486,9 @@ mod tests {
                 timestamp: ProposerTimestamp::from_millis(1000),
                 ..make_header_at_height(BlockHeight::new(1), 1000)
             },
-            transactions: Arc::new(vec![]),
-            certificates: Arc::new(vec![]),
-            provisions: Arc::new(vec![]),
+            transactions: Arc::new(BoundedVec::new()),
+            certificates: Arc::new(BoundedVec::new()),
+            provisions: Arc::new(BoundedVec::new()),
         };
         let mut sub_quorum_signers = SignerBitfield::new(4);
         sub_quorum_signers.set(0); // single signer — far below 2f+1 = 3
@@ -4527,9 +4526,9 @@ mod tests {
                 timestamp: ProposerTimestamp::from_millis(1000),
                 ..make_header_at_height(BlockHeight::new(1), 1000)
             },
-            transactions: Arc::new(vec![]),
-            certificates: Arc::new(vec![]),
-            provisions: Arc::new(vec![]),
+            transactions: Arc::new(BoundedVec::new()),
+            certificates: Arc::new(BoundedVec::new()),
+            provisions: Arc::new(BoundedVec::new()),
         };
         let qc = QuorumCertificate {
             weighted_timestamp: WeightedTimestamp::from_millis(1000),
@@ -4661,9 +4660,9 @@ mod tests {
                 parent_block_hash: BlockHash::from_raw(Hash::from_bytes(b"grandparent")),
                 ..make_header_at_height(BlockHeight::new(5), 100_000)
             },
-            transactions: Arc::new(vec![tx1.clone()]),
-            certificates: Arc::new(vec![]),
-            provisions: Arc::new(vec![]),
+            transactions: Arc::new(vec![tx1.clone()].into()),
+            certificates: Arc::new(BoundedVec::new()),
+            provisions: Arc::new(BoundedVec::new()),
         };
         let ancestor_hash = ancestor_block.hash();
         install_complete_block(&mut state, &ancestor_block);
@@ -4676,9 +4675,9 @@ mod tests {
                 parent_block_hash: ancestor_hash,
                 ..make_header_at_height(BlockHeight::new(6), 100_001)
             },
-            transactions: Arc::new(txs),
-            certificates: Arc::new(vec![]),
-            provisions: Arc::new(vec![]),
+            transactions: Arc::new(txs.into()),
+            certificates: Arc::new(BoundedVec::new()),
+            provisions: Arc::new(BoundedVec::new()),
         };
 
         let result = {
@@ -4703,9 +4702,9 @@ mod tests {
                 parent_block_hash: BlockHash::from_raw(Hash::from_bytes(b"grandparent")),
                 ..make_header_at_height(BlockHeight::new(5), 100_000)
             },
-            transactions: Arc::new(vec![tx1.clone()]),
-            certificates: Arc::new(vec![]),
-            provisions: Arc::new(vec![]),
+            transactions: Arc::new(vec![tx1.clone()].into()),
+            certificates: Arc::new(BoundedVec::new()),
+            provisions: Arc::new(BoundedVec::new()),
         };
         let ancestor_hash = ancestor_block.hash();
 
@@ -4716,9 +4715,9 @@ mod tests {
                 parent_block_hash: ancestor_hash,
                 ..make_header_at_height(BlockHeight::new(6), 100_001)
             },
-            transactions: Arc::new(vec![tx1]),
-            certificates: Arc::new(vec![]),
-            provisions: Arc::new(vec![]),
+            transactions: Arc::new(vec![tx1].into()),
+            certificates: Arc::new(BoundedVec::new()),
+            provisions: Arc::new(BoundedVec::new()),
         };
 
         // Ancestor is at committed height, so walk stops before checking it

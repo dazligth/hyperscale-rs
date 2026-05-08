@@ -153,7 +153,7 @@ pub fn validate_transaction_ordering(block: &Block) -> Result<(), String> {
 pub fn validate_waves(topology: &TopologySnapshot, block: &Block) -> Result<(), String> {
     let expected = compute_waves(topology, block.height(), block.transactions());
 
-    if block.header().waves != expected {
+    if block.header().waves.0 != expected {
         return Err(format!(
             "waves mismatch: header={:?}, computed={:?}",
             block.header().waves,
@@ -301,13 +301,13 @@ fn verify_hash_sorted(txs: &[Arc<RoutableTransaction>], section: &str) -> Result
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeSet;
 
     use hyperscale_test_helpers::{TestCommittee, make_finalized_wave};
     use hyperscale_types::{
-        BlockHash, BlockHeader, CertificateRoot, FinalizedWave, Hash, InFlightCount,
-        LocalReceiptRoot, MerkleInclusionProof, ProposerTimestamp, Provisions, ProvisionsRoot,
-        QuorumCertificate, Round, RoutableTransaction, ShardGroupId, StateRoot,
+        BlockHash, BlockHeader, BoundedBTreeMap, BoundedVec, CertificateRoot, FinalizedWave, Hash,
+        InFlightCount, LocalReceiptRoot, MerkleInclusionProof, ProposerTimestamp, Provisions,
+        ProvisionsRoot, QuorumCertificate, Round, RoutableTransaction, ShardGroupId, StateRoot,
         TransactionDecision, TransactionRoot, TxEntries, ValidatorId, ValidatorInfo, ValidatorSet,
         WeightedTimestamp, compute_waves, test_utils,
     };
@@ -341,8 +341,8 @@ mod tests {
             certificate_root: CertificateRoot::ZERO,
             local_receipt_root: LocalReceiptRoot::ZERO,
             provision_root: ProvisionsRoot::ZERO,
-            waves: vec![],
-            provision_tx_roots: BTreeMap::new(),
+            waves: BoundedVec::new(),
+            provision_tx_roots: BoundedBTreeMap::new(),
             in_flight: InFlightCount::ZERO,
         }
     }
@@ -362,15 +362,15 @@ mod tests {
             certificate_root: CertificateRoot::ZERO,
             local_receipt_root: LocalReceiptRoot::ZERO,
             provision_root: ProvisionsRoot::ZERO,
-            waves,
-            provision_tx_roots: BTreeMap::new(),
+            waves: waves.into(),
+            provision_tx_roots: BoundedBTreeMap::new(),
             in_flight: InFlightCount::ZERO,
         };
         Block::Live {
             header,
-            transactions: Arc::new(Vec::new()),
-            certificates: Arc::new(Vec::new()),
-            provisions: Arc::new(Vec::new()),
+            transactions: Arc::new(BoundedVec::new()),
+            certificates: Arc::new(BoundedVec::new()),
+            provisions: Arc::new(BoundedVec::new()),
         }
     }
 
@@ -477,9 +477,9 @@ mod tests {
     ) -> Block {
         Block::Live {
             header: header_at_height(height, 100_000),
-            transactions: Arc::new(transactions),
-            certificates: Arc::new(Vec::new()),
-            provisions: Arc::new(Vec::new()),
+            transactions: Arc::new(transactions.into()),
+            certificates: Arc::new(BoundedVec::new()),
+            provisions: Arc::new(BoundedVec::new()),
         }
     }
 
@@ -573,9 +573,9 @@ mod tests {
     ) -> Block {
         Block::Live {
             header: header_at_height(height, 100_000),
-            transactions: Arc::new(Vec::new()),
-            certificates: Arc::new(certificates),
-            provisions: Arc::new(Vec::new()),
+            transactions: Arc::new(BoundedVec::new()),
+            certificates: Arc::new(certificates.into()),
+            provisions: Arc::new(BoundedVec::new()),
         }
     }
 
@@ -634,9 +634,9 @@ mod tests {
     fn block_with_provisions(height: BlockHeight, provisions: Vec<Arc<Provisions>>) -> Block {
         Block::Live {
             header: header_at_height(height, 100_000),
-            transactions: Arc::new(Vec::new()),
-            certificates: Arc::new(Vec::new()),
-            provisions: Arc::new(provisions),
+            transactions: Arc::new(BoundedVec::new()),
+            certificates: Arc::new(BoundedVec::new()),
+            provisions: Arc::new(provisions.into()),
         }
     }
 
@@ -647,11 +647,7 @@ mod tests {
             ShardGroupId::new(1),
             BlockHeight::new(u64::from(seed)),
             MerkleInclusionProof::dummy(),
-            vec![TxEntries {
-                tx_hash,
-                entries: vec![],
-                target_nodes: vec![],
-            }],
+            vec![TxEntries::new(tx_hash, vec![], vec![])],
         ))
     }
 

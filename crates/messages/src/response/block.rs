@@ -4,7 +4,8 @@ use std::fmt;
 use std::sync::Arc;
 
 use hyperscale_types::{
-    Block, BlockHash, BlockHeader, BloomFilter, BloomKey, CertifiedBlock, FinalizedWave,
+    Block, BlockHash, BlockHeader, BloomFilter, BloomKey, BoundedVec, CertifiedBlock,
+    FinalizedWave, MAX_FINALIZED_TX_PER_BLOCK, MAX_PROVISIONS_PER_BLOCK, MAX_TXS_PER_BLOCK,
     MessageClass, NetworkMessage, ProvisionHash, Provisions, QuorumCertificate,
     RoutableTransaction, TxHash, WaveId,
 };
@@ -25,6 +26,10 @@ use crate::request::Inventory;
 /// Hash lists are always complete — they commit to the block's content
 /// and let the requester reconstruct a `Block` even when bodies are
 /// missing.
+///
+/// Per-collection caps mirror [`Block`]'s caps one-to-one — the elided
+/// form is a structural transformation of `Block` and inherits its
+/// natural ceilings.
 #[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
 pub struct ElidedCertifiedBlock {
     /// Block header (always inline).
@@ -36,12 +41,13 @@ pub struct ElidedCertifiedBlock {
     /// Bodies are `Arc`-wrapped so server-side elision and receiver-side
     /// rehydration share the same allocations as the local mempool /
     /// pending-block stores rather than deep-cloning every body.
-    pub transactions: Vec<(TxHash, Option<Arc<RoutableTransaction>>)>,
+    pub transactions: BoundedVec<(TxHash, Option<Arc<RoutableTransaction>>), MAX_TXS_PER_BLOCK>,
     /// Per-certificate `(wave id, optional body)` pairs; body is `None` when elided.
-    pub certificates: Vec<(WaveId, Option<Arc<FinalizedWave>>)>,
+    pub certificates: BoundedVec<(WaveId, Option<Arc<FinalizedWave>>), MAX_FINALIZED_TX_PER_BLOCK>,
     /// Per-provision `(hash, optional body)` pairs. `None` overall preserves the
     /// `Block::Sealed` shape; `Some(_)` preserves `Block::Live`.
-    pub provisions: Option<Vec<(ProvisionHash, Option<Arc<Provisions>>)>>,
+    pub provisions:
+        Option<BoundedVec<(ProvisionHash, Option<Arc<Provisions>>), MAX_PROVISIONS_PER_BLOCK>>,
 }
 
 impl ElidedCertifiedBlock {
@@ -54,7 +60,11 @@ impl ElidedCertifiedBlock {
         let header = block.header().clone();
         let is_live = block.is_live();
 
-        let transactions = block
+        // The `block.transactions()/certificates()/provisions()` source
+        // collections are themselves `BoundedVec`s capped at the same
+        // limits as the elided fields, so each `.into()` below cannot
+        // panic — the iterator can't outproduce its source.
+        let transactions: Vec<_> = block
             .transactions()
             .iter()
             .map(|tx| {
@@ -68,7 +78,7 @@ impl ElidedCertifiedBlock {
             })
             .collect();
 
-        let certificates = block
+        let certificates: Vec<_> = block
             .certificates()
             .iter()
             .map(|fw| {
@@ -83,21 +93,20 @@ impl ElidedCertifiedBlock {
             .collect();
 
         let provisions = if is_live {
-            Some(
-                block
-                    .provisions()
-                    .iter()
-                    .map(|p| {
-                        let hash = p.hash();
-                        let body = if matches_filter(inventory.provision_have.as_ref(), &hash) {
-                            None
-                        } else {
-                            Some(Arc::clone(p))
-                        };
-                        (hash, body)
-                    })
-                    .collect(),
-            )
+            let entries: Vec<_> = block
+                .provisions()
+                .iter()
+                .map(|p| {
+                    let hash = p.hash();
+                    let body = if matches_filter(inventory.provision_have.as_ref(), &hash) {
+                        None
+                    } else {
+                        Some(Arc::clone(p))
+                    };
+                    (hash, body)
+                })
+                .collect();
+            Some(entries.into())
         } else {
             None
         };
@@ -105,8 +114,8 @@ impl ElidedCertifiedBlock {
         Self {
             header,
             qc,
-            transactions,
-            certificates,
+            transactions: transactions.into(),
+            certificates: certificates.into(),
             provisions,
         }
     }
@@ -150,7 +159,7 @@ impl ElidedCertifiedBlock {
         }
         let mut miss = RehydrationMiss::default();
         let mut txs = Vec::with_capacity(self.transactions.len());
-        for (hash, body) in &self.transactions {
+        for (hash, body) in self.transactions.iter() {
             if let Some(tx) = body {
                 txs.push(Some(Arc::clone(tx)));
             } else if let Some(resolved) = tx_lookup(hash) {
@@ -162,7 +171,7 @@ impl ElidedCertifiedBlock {
         }
 
         let mut certs = Vec::with_capacity(self.certificates.len());
-        for (id, body) in &self.certificates {
+        for (id, body) in self.certificates.iter() {
             if let Some(fw) = body {
                 certs.push(Some(Arc::clone(fw)));
             } else if let Some(resolved) = cert_lookup(id) {
@@ -175,7 +184,7 @@ impl ElidedCertifiedBlock {
 
         let provs = self.provisions.as_ref().map(|entries| {
             let mut out = Vec::with_capacity(entries.len());
-            for (hash, body) in entries {
+            for (hash, body) in entries.iter() {
                 if let Some(p) = body {
                     out.push(Some(Arc::clone(p)));
                 } else if let Some(resolved) = provision_lookup(hash) {
@@ -194,8 +203,8 @@ impl ElidedCertifiedBlock {
 
         let txs: Vec<Arc<RoutableTransaction>> = txs.into_iter().map(Option::unwrap).collect();
         let certs: Vec<Arc<FinalizedWave>> = certs.into_iter().map(Option::unwrap).collect();
-        let txs = Arc::new(txs);
-        let certs = Arc::new(certs);
+        let txs = Arc::new(txs.into());
+        let certs = Arc::new(certs.into());
         let block = match provs {
             Some(entries) => {
                 let provisions: Vec<Arc<Provisions>> =
@@ -204,7 +213,7 @@ impl ElidedCertifiedBlock {
                     header: self.header.clone(),
                     transactions: txs,
                     certificates: certs,
-                    provisions: Arc::new(provisions),
+                    provisions: Arc::new(provisions.into()),
                 }
             }
             None => Block::Sealed {
@@ -342,13 +351,12 @@ impl NetworkMessage for GetBlockResponse {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use hyperscale_types::test_utils::test_transaction;
     use hyperscale_types::{
-        BlockHash, BlockHeight, BloomFilter, CertificateRoot, Hash, InFlightCount,
-        LocalReceiptRoot, ProposerTimestamp, ProvisionsRoot, Round, ShardGroupId, SignerBitfield,
-        StateRoot, TransactionRoot, ValidatorId, WeightedTimestamp, zero_bls_signature,
+        BlockHash, BlockHeight, BloomFilter, BoundedBTreeMap, BoundedVec, CertificateRoot, Hash,
+        InFlightCount, LocalReceiptRoot, ProposerTimestamp, ProvisionsRoot, Round, ShardGroupId,
+        SignerBitfield, StateRoot, TransactionRoot, ValidatorId, WeightedTimestamp,
+        zero_bls_signature,
     };
 
     use super::*;
@@ -371,13 +379,13 @@ mod tests {
                 certificate_root: CertificateRoot::ZERO,
                 local_receipt_root: LocalReceiptRoot::ZERO,
                 provision_root: ProvisionsRoot::ZERO,
-                waves: vec![],
-                provision_tx_roots: BTreeMap::new(),
+                waves: BoundedVec::new(),
+                provision_tx_roots: BoundedBTreeMap::new(),
                 in_flight: InFlightCount::ZERO,
             },
-            transactions: Arc::new(vec![Arc::new(tx)]),
-            certificates: Arc::new(vec![]),
-            provisions: Arc::new(vec![]),
+            transactions: Arc::new(vec![Arc::new(tx)].into()),
+            certificates: Arc::new(BoundedVec::new()),
+            provisions: Arc::new(BoundedVec::new()),
         }
     }
 
@@ -532,5 +540,121 @@ mod tests {
         let nf = GetBlockResponse::not_found();
         assert!(!nf.has_block());
         assert_eq!(nf.into_elided(), None);
+    }
+
+    /// Hand-roll an `ElidedCertifiedBlock` whose `transactions` length
+    /// prefix exceeds the cap. The `BoundedVec` decoder fires before any
+    /// per-element work happens.
+    #[test]
+    fn decode_rejects_oversized_transactions_count() {
+        use hyperscale_types::MAX_TXS_PER_BLOCK;
+        use sbor::{
+            BASIC_SBOR_V1_MAX_DEPTH, BASIC_SBOR_V1_PAYLOAD_PREFIX, DecodeError, Encoder as _,
+            NoCustomValueKind, ValueKind, VecEncoder, basic_decode,
+        };
+
+        let block = create_test_block();
+        let qc = create_test_qc(&block);
+        let header = block.header().clone();
+
+        let mut buf = Vec::with_capacity(512);
+        {
+            let mut enc = VecEncoder::<NoCustomValueKind>::new(&mut buf, BASIC_SBOR_V1_MAX_DEPTH);
+            enc.write_payload_prefix(BASIC_SBOR_V1_PAYLOAD_PREFIX)
+                .unwrap();
+            enc.write_value_kind(ValueKind::Tuple).unwrap();
+            enc.write_size(5).unwrap();
+            enc.encode(&header).unwrap();
+            enc.encode(&qc).unwrap();
+            enc.write_value_kind(ValueKind::Array).unwrap();
+            enc.write_value_kind(ValueKind::Tuple).unwrap();
+            enc.write_size(MAX_TXS_PER_BLOCK + 1).unwrap();
+        }
+        let err = basic_decode::<ElidedCertifiedBlock>(&buf).unwrap_err();
+        assert!(matches!(
+            err,
+            DecodeError::UnexpectedSize { expected, actual }
+                if expected == MAX_TXS_PER_BLOCK && actual == MAX_TXS_PER_BLOCK + 1
+        ));
+    }
+
+    #[test]
+    fn decode_rejects_oversized_certificates_count() {
+        use hyperscale_types::MAX_FINALIZED_TX_PER_BLOCK;
+        use sbor::{
+            BASIC_SBOR_V1_MAX_DEPTH, BASIC_SBOR_V1_PAYLOAD_PREFIX, DecodeError, Encoder as _,
+            NoCustomValueKind, ValueKind, VecEncoder, basic_decode,
+        };
+
+        let block = create_test_block();
+        let qc = create_test_qc(&block);
+        let header = block.header().clone();
+
+        let mut buf = Vec::with_capacity(512);
+        {
+            let mut enc = VecEncoder::<NoCustomValueKind>::new(&mut buf, BASIC_SBOR_V1_MAX_DEPTH);
+            enc.write_payload_prefix(BASIC_SBOR_V1_PAYLOAD_PREFIX)
+                .unwrap();
+            enc.write_value_kind(ValueKind::Tuple).unwrap();
+            enc.write_size(5).unwrap();
+            enc.encode(&header).unwrap();
+            enc.encode(&qc).unwrap();
+            // Empty transactions.
+            enc.encode(&Vec::<(TxHash, Option<Arc<RoutableTransaction>>)>::new())
+                .unwrap();
+            // Oversized certificates.
+            enc.write_value_kind(ValueKind::Array).unwrap();
+            enc.write_value_kind(ValueKind::Tuple).unwrap();
+            enc.write_size(MAX_FINALIZED_TX_PER_BLOCK + 1).unwrap();
+        }
+        let err = basic_decode::<ElidedCertifiedBlock>(&buf).unwrap_err();
+        assert!(matches!(
+            err,
+            DecodeError::UnexpectedSize { expected, actual }
+                if expected == MAX_FINALIZED_TX_PER_BLOCK
+                    && actual == MAX_FINALIZED_TX_PER_BLOCK + 1
+        ));
+    }
+
+    #[test]
+    fn decode_rejects_oversized_provisions_count() {
+        use hyperscale_types::MAX_PROVISIONS_PER_BLOCK;
+        use sbor::{
+            BASIC_SBOR_V1_MAX_DEPTH, BASIC_SBOR_V1_PAYLOAD_PREFIX, DecodeError, Encoder as _,
+            NoCustomValueKind, ValueKind, VecEncoder, basic_decode,
+        };
+
+        let block = create_test_block();
+        let qc = create_test_qc(&block);
+        let header = block.header().clone();
+
+        let mut buf = Vec::with_capacity(512);
+        {
+            let mut enc = VecEncoder::<NoCustomValueKind>::new(&mut buf, BASIC_SBOR_V1_MAX_DEPTH);
+            enc.write_payload_prefix(BASIC_SBOR_V1_PAYLOAD_PREFIX)
+                .unwrap();
+            enc.write_value_kind(ValueKind::Tuple).unwrap();
+            enc.write_size(5).unwrap();
+            enc.encode(&header).unwrap();
+            enc.encode(&qc).unwrap();
+            enc.encode(&Vec::<(TxHash, Option<Arc<RoutableTransaction>>)>::new())
+                .unwrap();
+            enc.encode(&Vec::<(WaveId, Option<Arc<FinalizedWave>>)>::new())
+                .unwrap();
+            // Some(oversized) provisions.
+            enc.write_value_kind(ValueKind::Enum).unwrap();
+            enc.write_discriminator(1).unwrap();
+            enc.write_size(1).unwrap();
+            enc.write_value_kind(ValueKind::Array).unwrap();
+            enc.write_value_kind(ValueKind::Tuple).unwrap();
+            enc.write_size(MAX_PROVISIONS_PER_BLOCK + 1).unwrap();
+        }
+        let err = basic_decode::<ElidedCertifiedBlock>(&buf).unwrap_err();
+        assert!(matches!(
+            err,
+            DecodeError::UnexpectedSize { expected, actual }
+                if expected == MAX_PROVISIONS_PER_BLOCK
+                    && actual == MAX_PROVISIONS_PER_BLOCK + 1
+        ));
     }
 }

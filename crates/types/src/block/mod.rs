@@ -23,14 +23,14 @@ pub use block::{Block, SharedCertificates, SharedProvisions, SharedTransactions}
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeSet;
     use std::sync::Arc;
 
     use super::*;
     use crate::test_utils::test_validity_range;
     use crate::{
-        BlockHash, BlockHeader, BlockHeight, Bls12381G2Signature, CertificateRoot,
-        ExecutionCertificate, ExecutionOutcome, FinalizedWave, GlobalReceiptHash,
+        BlockHash, BlockHeader, BlockHeight, Bls12381G2Signature, BoundedBTreeMap, BoundedVec,
+        CertificateRoot, ExecutionCertificate, ExecutionOutcome, FinalizedWave, GlobalReceiptHash,
         GlobalReceiptRoot, Hash, InFlightCount, LocalReceiptRoot, ProposerTimestamp,
         ProvisionsRoot, QuorumCertificate, Round, ShardGroupId, SignerBitfield, StateRoot,
         TransactionRoot, TxHash, TxOutcome, ValidatorId, WaveCertificate, WaveId,
@@ -54,8 +54,8 @@ mod tests {
             certificate_root: CertificateRoot::ZERO,
             local_receipt_root: LocalReceiptRoot::ZERO,
             provision_root: ProvisionsRoot::ZERO,
-            waves: vec![],
-            provision_tx_roots: BTreeMap::new(),
+            waves: BoundedVec::new(),
+            provision_tx_roots: BoundedBTreeMap::new(),
             in_flight: InFlightCount::ZERO,
         };
 
@@ -139,7 +139,7 @@ mod tests {
                     ),
                     execution_certificates: vec![ec],
                 }),
-                receipts: vec![],
+                receipts: BoundedVec::new(),
             })
         };
 
@@ -172,7 +172,7 @@ mod tests {
         let expected_receipt_hash = cert.receipt_hash();
         let fw = Arc::new(FinalizedWave {
             certificate: cert,
-            receipts: vec![],
+            receipts: BoundedVec::new(),
         });
 
         let root = compute_certificate_root(std::slice::from_ref(&fw));
@@ -198,7 +198,7 @@ mod tests {
         let mut bad_block =
             Block::genesis(ShardGroupId::new(0), ValidatorId::new(0), StateRoot::ZERO)
                 .into_sealed()
-                .into_live(Arc::new(Vec::new()));
+                .into_live(Arc::new(BoundedVec::new()));
         if let Block::Live { ref mut header, .. } = bad_block {
             header.height = BlockHeight::new(7);
         }

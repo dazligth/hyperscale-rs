@@ -106,7 +106,7 @@ impl PendingBlock {
             provisions.iter().map(|p| p.hash()).collect();
         provision_hashes.sort();
         let mut manifest = BlockManifest::from_block(block);
-        manifest.provision_hashes = provision_hashes;
+        manifest.provision_hashes = provision_hashes.into();
         let mut received_provisions: BTreeMap<ProvisionHash, Arc<Provisions>> = BTreeMap::new();
         for p in provisions {
             received_provisions.insert(p.hash(), p);
@@ -276,9 +276,9 @@ impl PendingBlock {
 
         let block = Arc::new(Block::Live {
             header: self.header.clone(),
-            transactions: Arc::new(transactions),
-            certificates: Arc::new(certificates),
-            provisions: Arc::new(provisions),
+            transactions: Arc::new(transactions.into()),
+            certificates: Arc::new(certificates.into()),
+            provisions: Arc::new(provisions.into()),
         });
 
         self.constructed_block = Some(Arc::clone(&block));
@@ -419,9 +419,9 @@ mod tests {
 
     use hyperscale_types::test_utils::test_transaction;
     use hyperscale_types::{
-        Block, BlockHeight, CertificateRoot, Hash, InFlightCount, LocalReceiptRoot,
-        ProposerTimestamp, ProvisionsRoot, QuorumCertificate, Round, ShardGroupId, StateRoot,
-        TransactionRoot, ValidatorId, WaveCertificate, WaveId,
+        Block, BlockHeight, BoundedBTreeMap, BoundedVec, CertificateRoot, Hash, InFlightCount,
+        LocalReceiptRoot, ProposerTimestamp, ProvisionsRoot, QuorumCertificate, Round,
+        ShardGroupId, StateRoot, TransactionRoot, ValidatorId, WaveCertificate, WaveId,
     };
 
     use super::*;
@@ -441,8 +441,8 @@ mod tests {
             certificate_root: CertificateRoot::ZERO,
             local_receipt_root: LocalReceiptRoot::ZERO,
             provision_root: ProvisionsRoot::ZERO,
-            waves: vec![],
-            provision_tx_roots: BTreeMap::new(),
+            waves: BoundedVec::new(),
+            provision_tx_roots: BoundedBTreeMap::new(),
             in_flight: InFlightCount::ZERO,
         }
     }
@@ -456,7 +456,7 @@ mod tests {
         let pb = PendingBlock::from_manifest(
             header,
             BlockManifest {
-                tx_hashes: vec![tx1, tx2],
+                tx_hashes: vec![tx1, tx2].into(),
                 ..Default::default()
             },
             LocalTimestamp::ZERO,
@@ -488,8 +488,8 @@ mod tests {
         let pb = PendingBlock::from_manifest(
             header,
             BlockManifest {
-                tx_hashes: vec![tx1],
-                cert_ids: vec![wave1.clone(), wave2.clone()],
+                tx_hashes: vec![tx1].into(),
+                cert_ids: vec![wave1.clone(), wave2.clone()].into(),
                 ..Default::default()
             },
             LocalTimestamp::ZERO,
@@ -510,7 +510,7 @@ mod tests {
         let mut pb = PendingBlock::from_manifest(
             header,
             BlockManifest {
-                cert_ids: vec![wave_id.clone()],
+                cert_ids: vec![wave_id.clone()].into(),
                 ..Default::default()
             },
             LocalTimestamp::ZERO,
@@ -524,7 +524,7 @@ mod tests {
                 wave_id,
                 execution_certificates: vec![],
             }),
-            receipts: vec![],
+            receipts: BoundedVec::new(),
         });
 
         let added = pb.add_finalized_wave(fw);
@@ -543,8 +543,8 @@ mod tests {
         let mut pb = PendingBlock::from_manifest(
             header,
             BlockManifest {
-                tx_hashes: vec![tx_hash],
-                cert_ids: vec![wave_id.clone()],
+                tx_hashes: vec![tx_hash].into(),
+                cert_ids: vec![wave_id.clone()].into(),
                 ..Default::default()
             },
             LocalTimestamp::ZERO,
@@ -563,7 +563,7 @@ mod tests {
                 wave_id,
                 execution_certificates: vec![],
             }),
-            receipts: vec![],
+            receipts: BoundedVec::new(),
         });
         pb.add_finalized_wave(fw);
         assert!(pb.is_complete());
@@ -579,14 +579,14 @@ mod tests {
 
         let fw = Arc::new(FinalizedWave {
             certificate: cert,
-            receipts: vec![],
+            receipts: BoundedVec::new(),
         });
 
         let block = Block::Live {
             header: make_header(BlockHeight::new(1)),
-            transactions: Arc::new(vec![]),
-            certificates: Arc::new(vec![Arc::clone(&fw)]),
-            provisions: Arc::new(vec![]),
+            transactions: Arc::new(BoundedVec::new()),
+            certificates: Arc::new(vec![Arc::clone(&fw)].into()),
+            provisions: Arc::new(BoundedVec::new()),
         };
 
         let pending =

@@ -219,7 +219,8 @@ impl FetchBinding for LocalProvisionBinding {
             origin.class_override(),
             Box::new(move |result| {
                 if let Ok(resp) = result {
-                    let split = partition_solicited(resp.provisions, &hs, |p| p.hash());
+                    let split =
+                        partition_solicited(resp.provisions.into_inner(), &hs, |p| p.hash());
                     for provisions in split.kept {
                         // Refcount is 1 right after decode, so this moves rather than clones.
                         let provisions = Arc::unwrap_or_clone(provisions);
@@ -560,22 +561,22 @@ mod tests {
             ShardGroupId::new(2),
             BlockHeight::new(10),
             MerkleInclusionProof::dummy(),
-            vec![TxEntries {
-                tx_hash: TxHash::from_raw(Hash::from_bytes(b"asked")),
-                entries: vec![],
-                target_nodes: vec![],
-            }],
+            vec![TxEntries::new(
+                TxHash::from_raw(Hash::from_bytes(b"asked")),
+                vec![],
+                vec![],
+            )],
         ));
         let extra = Arc::new(Provisions::new(
             ShardGroupId::new(3),
             ShardGroupId::new(2),
             BlockHeight::new(11),
             MerkleInclusionProof::dummy(),
-            vec![TxEntries {
-                tx_hash: TxHash::from_raw(Hash::from_bytes(b"extra")),
-                entries: vec![],
-                target_nodes: vec![],
-            }],
+            vec![TxEntries::new(
+                TxHash::from_raw(Hash::from_bytes(b"extra")),
+                vec![],
+                vec![],
+            )],
         ));
         let asked_hash = asked.hash();
         let split = partition_solicited(

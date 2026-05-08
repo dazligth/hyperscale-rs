@@ -677,7 +677,7 @@ impl VerificationPipeline {
         vec![Action::VerifyProvisionRoot {
             block_hash,
             expected_root: block.header().provision_root,
-            batch_hashes: manifest.provision_hashes.clone(),
+            batch_hashes: manifest.provision_hashes.0.clone(),
         }]
     }
 
@@ -696,7 +696,7 @@ impl VerificationPipeline {
         self.mark_root_in_flight(block_hash, VerificationKind::ProvisionTxRoots);
         vec![Action::VerifyProvisionTxRoots {
             block_hash,
-            expected: block.header().provision_tx_roots.clone(),
+            expected: block.header().provision_tx_roots.0.clone(),
             transactions: block.transactions().clone(),
             topology_snapshot: topology.clone(),
         }]
@@ -1127,11 +1127,11 @@ impl VerificationPipeline {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
 
     use hyperscale_types::{
-        CertificateRoot, Hash, LocalReceiptRoot, LocalTimestamp, ProposerTimestamp,
-        QuorumCertificate, Round, RoutableTransaction, ShardGroupId, TransactionRoot, ValidatorId,
+        BoundedBTreeMap, BoundedVec, CertificateRoot, Hash, LocalReceiptRoot, LocalTimestamp,
+        ProposerTimestamp, QuorumCertificate, Round, RoutableTransaction, ShardGroupId,
+        TransactionRoot, ValidatorId,
     };
 
     use super::*;
@@ -1152,8 +1152,8 @@ mod tests {
             certificate_root: CertificateRoot::ZERO,
             local_receipt_root: LocalReceiptRoot::ZERO,
             provision_root: ProvisionsRoot::ZERO,
-            waves: Vec::new(),
-            provision_tx_roots: BTreeMap::new(),
+            waves: BoundedVec::new(),
+            provision_tx_roots: BoundedBTreeMap::new(),
             in_flight: InFlightCount::new(in_flight),
         }
     }
@@ -1166,9 +1166,9 @@ mod tests {
     ) -> Block {
         Block::Live {
             header: header(height, parent_block_hash, in_flight),
-            transactions: Arc::new(transactions),
-            certificates: Arc::new(Vec::new()),
-            provisions: Arc::new(Vec::new()),
+            transactions: Arc::new(transactions.into()),
+            certificates: Arc::new(BoundedVec::new()),
+            provisions: Arc::new(BoundedVec::new()),
         }
     }
 
@@ -1219,9 +1219,9 @@ mod tests {
         h.parent_qc = parent_qc;
         let block = Block::Live {
             header: h,
-            transactions: Arc::new(Vec::new()),
-            certificates: Arc::new(Vec::new()),
-            provisions: Arc::new(Vec::new()),
+            transactions: Arc::new(BoundedVec::new()),
+            certificates: Arc::new(BoundedVec::new()),
+            provisions: Arc::new(BoundedVec::new()),
         };
         let block_hash = block.hash();
         let pending = HashMap::new();

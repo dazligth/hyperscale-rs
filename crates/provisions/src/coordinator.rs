@@ -679,11 +679,11 @@ impl ProvisionCoordinator {
 #[cfg(test)]
 mod tests {
     use hyperscale_types::{
-        Block, BlockHash, BlockHeader, Bls12381G1PrivateKey, CertificateRoot, Hash, InFlightCount,
-        LocalReceiptRoot, MerkleInclusionProof, ProposerTimestamp, ProvisionsRoot,
-        QuorumCertificate, Round, StateRoot, TopologySnapshot, TransactionRoot, TxEntries, TxHash,
-        ValidatorId, ValidatorInfo, ValidatorSet, VotePower, WaveId, WeightedTimestamp,
-        bls_keypair_from_seed,
+        Block, BlockHash, BlockHeader, Bls12381G1PrivateKey, BoundedBTreeMap, BoundedVec,
+        CertificateRoot, Hash, InFlightCount, LocalReceiptRoot, MerkleInclusionProof,
+        ProposerTimestamp, ProvisionsRoot, QuorumCertificate, Round, StateRoot, TopologySnapshot,
+        TransactionRoot, TxEntries, TxHash, ValidatorId, ValidatorInfo, ValidatorSet, VotePower,
+        WaveId, WeightedTimestamp, bls_keypair_from_seed,
     };
     use proptest::bool::ANY as ANY_BOOL;
     use proptest::collection::vec as prop_vec;
@@ -745,7 +745,7 @@ mod tests {
         let header = Arc::get_mut(&mut header_arc).unwrap();
         let raw: Vec<Hash> = tx_hashes.iter().map(|h| h.into_raw()).collect();
         let root = ProvisionTxRoot::from_raw(compute_merkle_root(&raw));
-        header.header.provision_tx_roots.insert(local_shard, root);
+        header.header.provision_tx_roots.0.insert(local_shard, root);
         header_arc
     }
 
@@ -857,11 +857,7 @@ mod tests {
     ) -> Provisions {
         let transactions = tx_hashes
             .into_iter()
-            .map(|tx_hash| TxEntries {
-                tx_hash,
-                entries: vec![],
-                target_nodes: vec![],
-            })
+            .map(|tx_hash| TxEntries::new(tx_hash, vec![], vec![]))
             .collect();
         Provisions::new(
             source_shard,
@@ -1317,11 +1313,7 @@ mod tests {
         // `provision_targets()` on the resulting header yields the input set.
         let waves: Vec<WaveId> = provision_targets
             .into_iter()
-            .map(|s| WaveId {
-                shard_group_id: shard,
-                block_height: height,
-                remote_shards: std::collections::BTreeSet::from([s]),
-            })
+            .map(|s| WaveId::new(shard, height, std::collections::BTreeSet::from([s])))
             .collect();
         let header = BlockHeader {
             shard_group_id: shard,
@@ -1339,8 +1331,8 @@ mod tests {
             certificate_root: CertificateRoot::ZERO,
             local_receipt_root: LocalReceiptRoot::ZERO,
             provision_root: ProvisionsRoot::ZERO,
-            waves,
-            provision_tx_roots: std::collections::BTreeMap::new(),
+            waves: waves.into(),
+            provision_tx_roots: BoundedBTreeMap::new(),
             in_flight: InFlightCount::ZERO,
         };
         let header_hash = header.hash();
@@ -1363,9 +1355,9 @@ mod tests {
         header.height = height;
         let block = Block::Live {
             header,
-            transactions: Arc::new(vec![]),
-            certificates: Arc::new(vec![]),
-            provisions: Arc::new(vec![]),
+            transactions: Arc::new(BoundedVec::new()),
+            certificates: Arc::new(BoundedVec::new()),
+            provisions: Arc::new(BoundedVec::new()),
         };
         let qc = QuorumCertificate {
             block_hash: block.hash(),

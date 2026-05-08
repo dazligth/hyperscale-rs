@@ -114,19 +114,19 @@ mod tests {
     use std::collections::BTreeSet;
 
     use hyperscale_types::{
-        BlockHeight, ExecutionCertificate, ExecutionOutcome, GlobalReceiptHash, GlobalReceiptRoot,
-        Hash, ShardGroupId, SignerBitfield, TxHash, TxOutcome, WeightedTimestamp,
-        zero_bls_signature,
+        BlockHeight, BoundedVec, ExecutionCertificate, ExecutionOutcome, GlobalReceiptHash,
+        GlobalReceiptRoot, Hash, ShardGroupId, SignerBitfield, TxHash, TxOutcome,
+        WeightedTimestamp, zero_bls_signature,
     };
 
     use super::*;
 
     fn make_wave_id(block_height: u64) -> WaveId {
-        WaveId {
-            shard_group_id: ShardGroupId::new(0),
-            block_height: BlockHeight::new(block_height),
-            remote_shards: BTreeSet::new(),
-        }
+        WaveId::new(
+            ShardGroupId::new(0),
+            BlockHeight::new(block_height),
+            BTreeSet::new(),
+        )
     }
 
     fn make_finalized_wave(block_height: u64, tx_hashes: &[TxHash]) -> (WaveId, FinalizedWave) {
@@ -156,7 +156,7 @@ mod tests {
         // empty receipts vector is fine for the store's contract.
         let fw = FinalizedWave {
             certificate: Arc::new(cert),
-            receipts: vec![],
+            receipts: BoundedVec::new(),
         };
         (wave_id, fw)
     }

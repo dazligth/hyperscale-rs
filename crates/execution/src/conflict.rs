@@ -153,7 +153,7 @@ impl ConflictDetector {
         let source_shard = provisions.source_shard;
         let mut conflicts = Vec::new();
 
-        for tx_entry in &provisions.transactions {
+        for tx_entry in provisions.transactions.iter() {
             let remote_tx = tx_entry.tx_hash;
             let source_nodes: HashSet<NodeId> = tx_entry.node_ids();
             let target_nodes: HashSet<NodeId> = tx_entry.target_nodes.iter().copied().collect();
@@ -357,10 +357,12 @@ mod tests {
             height,
             MerkleInclusionProof::dummy(),
             txs.into_iter()
-                .map(|(hash, source_nodes, target_nodes)| TxEntries {
-                    tx_hash: hash,
-                    entries: source_nodes.into_iter().map(make_entry).collect(),
-                    target_nodes,
+                .map(|(hash, source_nodes, target_nodes)| {
+                    TxEntries::new(
+                        hash,
+                        source_nodes.into_iter().map(make_entry).collect(),
+                        target_nodes,
+                    )
                 })
                 .collect(),
         )

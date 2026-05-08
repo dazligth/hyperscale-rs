@@ -10,10 +10,10 @@ use std::sync::Arc;
 use hyperscale_provisions::{ProvisionConfig, ProvisionCoordinator, ProvisionMemoryStats};
 use hyperscale_test_helpers::TestCommittee;
 use hyperscale_types::{
-    Block, BlockHash, BlockHeader, BlockHeight, CertificateRoot, CertifiedBlock,
-    CommittedBlockHeader, Hash, InFlightCount, LocalReceiptRoot, LocalTimestamp, ProposerTimestamp,
-    ProvisionHash, ProvisionsRoot, QuorumCertificate, Round, ShardGroupId, StateRoot,
-    TopologySnapshot, TransactionRoot, ValidatorId, WaveId, WeightedTimestamp,
+    Block, BlockHash, BlockHeader, BlockHeight, BoundedBTreeMap, BoundedVec, CertificateRoot,
+    CertifiedBlock, CommittedBlockHeader, Hash, InFlightCount, LocalReceiptRoot, LocalTimestamp,
+    ProposerTimestamp, ProvisionHash, ProvisionsRoot, QuorumCertificate, Round, ShardGroupId,
+    StateRoot, TopologySnapshot, TransactionRoot, ValidatorId, WaveId, WeightedTimestamp,
 };
 
 const TEST_BLOCK_INTERVAL_MS: u64 = 500;
@@ -33,9 +33,9 @@ fn make_block(height: BlockHeight) -> CertifiedBlock {
     header.height = height;
     let block = Block::Live {
         header,
-        transactions: Arc::new(vec![]),
-        certificates: Arc::new(vec![]),
-        provisions: Arc::new(vec![]),
+        transactions: Arc::new(BoundedVec::new()),
+        certificates: Arc::new(BoundedVec::new()),
+        provisions: Arc::new(BoundedVec::new()),
     };
     let qc = QuorumCertificate {
         block_hash: block.hash(),
@@ -53,11 +53,11 @@ fn make_remote_header_targeting(
     height: BlockHeight,
     local_shard: ShardGroupId,
 ) -> Arc<CommittedBlockHeader> {
-    let waves = vec![WaveId {
-        shard_group_id: source_shard,
-        block_height: height,
-        remote_shards: std::collections::BTreeSet::from([local_shard]),
-    }];
+    let waves = vec![WaveId::new(
+        source_shard,
+        height,
+        std::collections::BTreeSet::from([local_shard]),
+    )];
     let header = BlockHeader {
         shard_group_id: source_shard,
         height,
@@ -72,8 +72,8 @@ fn make_remote_header_targeting(
         certificate_root: CertificateRoot::ZERO,
         local_receipt_root: LocalReceiptRoot::ZERO,
         provision_root: ProvisionsRoot::ZERO,
-        waves,
-        provision_tx_roots: std::collections::BTreeMap::new(),
+        waves: waves.into(),
+        provision_tx_roots: BoundedBTreeMap::new(),
         in_flight: InFlightCount::ZERO,
     };
     let header_hash = header.hash();

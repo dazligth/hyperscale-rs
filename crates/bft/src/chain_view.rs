@@ -154,11 +154,11 @@ impl<'a> ChainView<'a> {
             }
             let manifest = pending.manifest();
             if pending.block().is_none() {
-                for tx_hash in &manifest.tx_hashes {
+                for tx_hash in manifest.tx_hashes.iter() {
                     tx_hashes.insert(*tx_hash);
                 }
             }
-            for batch_hash in &manifest.provision_hashes {
+            for batch_hash in manifest.provision_hashes.iter() {
                 provision_hashes.insert(*batch_hash);
             }
             current_hash = pending.header().parent_block_hash;
@@ -170,12 +170,12 @@ impl<'a> ChainView<'a> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use hyperscale_types::{
-        BlockManifest, CertificateRoot, Hash, LocalReceiptRoot, LocalTimestamp, ProposerTimestamp,
-        ProvisionsRoot, Round, ShardGroupId, TransactionRoot, ValidatorId, WeightedTimestamp,
+        BlockManifest, BoundedBTreeMap, BoundedVec, CertificateRoot, Hash, LocalReceiptRoot,
+        LocalTimestamp, ProposerTimestamp, ProvisionsRoot, Round, ShardGroupId, TransactionRoot,
+        ValidatorId, WeightedTimestamp,
     };
 
     use super::*;
@@ -195,8 +195,8 @@ mod tests {
             certificate_root: CertificateRoot::ZERO,
             local_receipt_root: LocalReceiptRoot::ZERO,
             provision_root: ProvisionsRoot::ZERO,
-            waves: vec![],
-            provision_tx_roots: BTreeMap::new(),
+            waves: BoundedVec::new(),
+            provision_tx_roots: BoundedBTreeMap::new(),
             in_flight: InFlightCount::new(u32::from(height)),
         }
     }
@@ -204,9 +204,9 @@ mod tests {
     fn make_block(height: u8, parent_block_hash: BlockHash) -> Block {
         Block::Live {
             header: make_header(height, parent_block_hash),
-            transactions: Arc::new(vec![]),
-            certificates: Arc::new(vec![]),
-            provisions: Arc::new(vec![]),
+            transactions: Arc::new(BoundedVec::new()),
+            certificates: Arc::new(BoundedVec::new()),
+            provisions: Arc::new(BoundedVec::new()),
         }
     }
 

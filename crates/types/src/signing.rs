@@ -129,7 +129,7 @@ pub const DOMAIN_STATE_PROVISION_BATCH: &[u8] = b"STATE_PROVISION_BATCH";
 #[must_use]
 pub fn state_provisions_message(provisions: &Provisions) -> Vec<u8> {
     let mut hasher = Hasher::new();
-    for tx in &provisions.transactions {
+    for tx in provisions.transactions.iter() {
         hasher.update(tx.tx_hash.as_bytes());
     }
     let tx_digest = hasher.finalize();
@@ -224,7 +224,7 @@ pub fn exec_vote_message(
             .unwrap_or(u32::MAX)
             .to_le_bytes(),
     );
-    for shard in &wave_id.remote_shards {
+    for shard in wave_id.remote_shards.iter() {
         message.extend_from_slice(&shard.to_le_bytes());
     }
     message.extend_from_slice(&shard_group.to_le_bytes());
@@ -330,11 +330,11 @@ mod tests {
             ShardGroupId::new(2),
             BlockHeight::new(10),
             MerkleInclusionProof::dummy(),
-            vec![TxEntries {
-                tx_hash: TxHash::from_raw(Hash::from_bytes(b"tx1")),
-                entries: vec![],
-                target_nodes: vec![],
-            }],
+            vec![TxEntries::new(
+                TxHash::from_raw(Hash::from_bytes(b"tx1")),
+                vec![],
+                vec![],
+            )],
         );
 
         let msg1 = state_provisions_message(&provisions);

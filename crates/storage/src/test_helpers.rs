@@ -4,18 +4,18 @@
 //! `WaveCertificate`, `Block`, and `QuorumCertificate` so that
 //! storage-memory and storage-rocksdb tests can share a single source of truth.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use hyperscale_types::test_utils::test_event_type_identifier;
 use hyperscale_types::{
     ApplicationEvent, Block, BlockHash, BlockHeader, BlockHeight, Bls12381G2Signature,
-    CertificateRoot, ConsensusReceipt, EventData, ExecutionCertificate, ExecutionMetadata,
-    ExecutionOutcome, FeeSummary, FinalizedWave, GlobalReceiptHash, GlobalReceiptRoot, Hash,
-    InFlightCount, LocalReceiptRoot, LogLevel, NodeId, ProposerTimestamp, ProvisionsRoot,
-    QuorumCertificate, Round, ShardGroupId, SignerBitfield, StateRoot, StoredReceipt,
-    TransactionRoot, TxHash, TxOutcome, ValidatorId, WaveCertificate, WaveId, WeightedTimestamp,
-    compute_global_receipt_root, zero_bls_signature,
+    BoundedBTreeMap, BoundedVec, CertificateRoot, ConsensusReceipt, EventData,
+    ExecutionCertificate, ExecutionMetadata, ExecutionOutcome, FeeSummary, FinalizedWave,
+    GlobalReceiptHash, GlobalReceiptRoot, Hash, InFlightCount, LocalReceiptRoot, LogLevel, NodeId,
+    ProposerTimestamp, ProvisionsRoot, QuorumCertificate, Round, ShardGroupId, SignerBitfield,
+    StateRoot, StoredReceipt, TransactionRoot, TxHash, TxOutcome, ValidatorId, WaveCertificate,
+    WaveId, WeightedTimestamp, compute_global_receipt_root, zero_bls_signature,
 };
 use indexmap::IndexMap;
 use radix_common::math::Decimal;
@@ -130,13 +130,13 @@ pub fn make_test_block(height: BlockHeight) -> Block {
             certificate_root: CertificateRoot::ZERO,
             local_receipt_root: LocalReceiptRoot::ZERO,
             provision_root: ProvisionsRoot::ZERO,
-            waves: vec![],
-            provision_tx_roots: BTreeMap::new(),
+            waves: BoundedVec::new(),
+            provision_tx_roots: BoundedBTreeMap::new(),
             in_flight: InFlightCount::ZERO,
         },
-        transactions: Arc::new(vec![]),
-        certificates: Arc::new(vec![]),
-        provisions: Arc::new(vec![]),
+        transactions: Arc::new(BoundedVec::new()),
+        certificates: Arc::new(BoundedVec::new()),
+        provisions: Arc::new(BoundedVec::new()),
     }
 }
 
@@ -169,16 +169,16 @@ pub fn make_test_receipt(seed: u8) -> StoredReceipt {
             data: EventData(vec![seed, seed + 1]),
         }],
     };
-    let metadata = Some(ExecutionMetadata {
-        fee_summary: FeeSummary {
+    let metadata = Some(ExecutionMetadata::new(
+        FeeSummary {
             total_execution_cost: Some(Decimal::from(u64::from(seed))),
             total_royalty_cost: None,
             total_storage_cost: None,
             total_tipping_cost: None,
         },
-        log_messages: vec![(LogLevel::Info, format!("tx {seed}"))],
-        error_message: None,
-    });
+        vec![(LogLevel::Info, format!("tx {seed}"))],
+        None,
+    ));
     StoredReceipt {
         tx_hash,
         consensus: Arc::new(consensus),
@@ -233,10 +233,7 @@ fn make_test_block_with_ecs(height: BlockHeight, ecs: Vec<Arc<ExecutionCertifica
         wave_id: ecs[0].wave_id.clone(),
         execution_certificates: ecs,
     });
-    let new_fw = Arc::new(FinalizedWave {
-        certificate,
-        receipts: vec![],
-    });
+    let new_fw = Arc::new(FinalizedWave::new(certificate, vec![]));
     match block {
         Block::Live {
             header,
