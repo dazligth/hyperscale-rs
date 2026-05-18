@@ -27,20 +27,28 @@ pub struct Metrics {
     // === Consensus ===
     pub blocks_committed: Counter,
     pub block_commit_latency: HistogramVec,
-    pub block_height: Gauge,
-    pub round: Gauge,
-    pub view_changes: Gauge,
-    pub view_syncs: Gauge,
+    /// Per-shard chain height. Each hosted shard maintains its own height.
+    pub block_height: GaugeVec,
+    /// Per-vnode current BFT round.
+    pub round: GaugeVec,
+    /// Per-vnode self-originated view changes (leader-activity timer fired).
+    pub view_changes: GaugeVec,
+    /// Per-vnode view syncs (rounds caught up to from peers).
+    pub view_syncs: GaugeVec,
     pub build_info: GaugeVec,
 
     // === Transactions ===
     pub transactions_finalized: HistogramVec,
-    pub mempool_size: Gauge,
+    /// Per-vnode mempool size.
+    pub mempool_size: GaugeVec,
 
     // === Backpressure ===
-    pub in_flight: Gauge,
-    pub backpressure_active: Gauge,
-    pub txs_with_commitment_proof: Gauge,
+    /// Per-vnode in-flight transaction count.
+    pub in_flight: GaugeVec,
+    /// Per-vnode backpressure flag (0 or 1).
+    pub backpressure_active: GaugeVec,
+    /// Per-vnode count of TXs with commitment proofs in last proposal.
+    pub txs_with_commitment_proof: GaugeVec,
 
     // === Infrastructure ===
     pub network_messages_sent: Counter,
@@ -84,9 +92,10 @@ pub struct Metrics {
 
     // === Sync ===
     //
-    // Per-scope status keyed by `kind` (`block` or `remote_header`).
-    // Filtering / response-error dimensions remain because they don't
-    // collapse into the per-`kind` fetch counters below.
+    // Per-scope status keyed by (`kind`, `shard`). `kind` is `block` or
+    // `remote_header`; `shard` is the hosted shard's id. Filtering /
+    // response-error dimensions remain because they don't collapse into
+    // the per-`kind` fetch counters below.
     pub sync_blocks_behind: GaugeVec,
     pub sync_in_progress: GaugeVec,
     pub sync_blocks_filtered: CounterVec,
@@ -111,7 +120,8 @@ pub struct Metrics {
     pub expected_tx_dropped: Counter,
 
     // === Lock Contention ===
-    pub lock_contention_ratio: Gauge,
+    /// Per-vnode lock contention ratio (deferred / total).
+    pub lock_contention_ratio: GaugeVec,
 
     // === Errors ===
     pub signature_verification_failures: Counter,
@@ -185,24 +195,31 @@ impl Metrics {
             )
             .unwrap(),
 
-            block_height: register_gauge!("hyperscale_block_height", "Current block height")
-                .unwrap(),
+            block_height: register_gauge_vec!(
+                "hyperscale_block_height",
+                "Current block height, per shard",
+                &["shard"]
+            )
+            .unwrap(),
 
-            round: register_gauge!(
+            round: register_gauge_vec!(
                 "hyperscale_round",
-                "Current BFT round within current height"
+                "Current BFT round within current height, per (shard, validator_id)",
+                &["shard", "validator_id"]
             )
             .unwrap(),
 
-            view_changes: register_gauge!(
+            view_changes: register_gauge_vec!(
                 "hyperscale_view_changes",
-                "Self-originated view changes (this validator's leader-activity timer fired)"
+                "Self-originated view changes (this validator's leader-activity timer fired)",
+                &["shard", "validator_id"]
             )
             .unwrap(),
 
-            view_syncs: register_gauge!(
+            view_syncs: register_gauge_vec!(
                 "hyperscale_view_syncs",
-                "Rounds advanced via sync_to_qc_round (caught up to higher round seen on peers)"
+                "Rounds advanced via sync_to_qc_round (caught up to higher round seen on peers)",
+                &["shard", "validator_id"]
             )
             .unwrap(),
 
@@ -215,26 +232,30 @@ impl Metrics {
             )
             .unwrap(),
 
-            mempool_size: register_gauge!(
+            mempool_size: register_gauge_vec!(
                 "hyperscale_mempool_size",
-                "Number of pending transactions in mempool"
+                "Number of pending transactions in mempool, per (shard, validator_id)",
+                &["shard", "validator_id"]
             )
             .unwrap(),
 
             // Backpressure
-            in_flight: register_gauge!(
+            in_flight: register_gauge_vec!(
                 "hyperscale_in_flight",
-                "Number of transactions holding state locks (Committed or Executed)"
+                "Number of transactions holding state locks (Committed or Executed)",
+                &["shard", "validator_id"]
             )
             .unwrap(),
-            backpressure_active: register_gauge!(
+            backpressure_active: register_gauge_vec!(
                 "hyperscale_backpressure_active",
-                "Whether backpressure limit is currently active (1) or not (0)"
+                "Whether backpressure limit is currently active (1) or not (0)",
+                &["shard", "validator_id"]
             )
             .unwrap(),
-            txs_with_commitment_proof: register_gauge!(
+            txs_with_commitment_proof: register_gauge_vec!(
                 "hyperscale_txs_with_commitment_proof",
-                "Number of TXs with commitment proofs in last proposal"
+                "Number of TXs with commitment proofs in last proposal",
+                &["shard", "validator_id"]
             )
             .unwrap(),
 
@@ -441,18 +462,18 @@ impl Metrics {
             )
             .unwrap(),
 
-            // Sync — per-scope status (`kind` = "block" or "remote_header").
+            // Sync — per-scope status (`kind` = "block" or "remote_header"), per-shard.
             sync_blocks_behind: register_gauge_vec!(
                 "hyperscale_sync_blocks_behind",
-                "Per-scope blocks behind the latest known target",
-                &["kind"]
+                "Per-(scope, shard) blocks behind the latest known target",
+                &["kind", "shard"]
             )
             .unwrap(),
 
             sync_in_progress: register_gauge_vec!(
                 "hyperscale_sync_in_progress",
-                "Per-scope sync activity (0 or 1)",
-                &["kind"]
+                "Per-(scope, shard) sync activity (0 or 1)",
+                &["kind", "shard"]
             )
             .unwrap(),
 
@@ -493,8 +514,8 @@ impl Metrics {
 
             sync_round_in_flight: register_gauge_vec!(
                 "hyperscale_sync_round_in_flight",
-                "Per-scope in-flight sync range fetches",
-                &["kind"]
+                "Per-(scope, shard) in-flight sync range fetches",
+                &["kind", "shard"]
             )
             .unwrap(),
 
@@ -554,8 +575,8 @@ impl Metrics {
 
             fetch_in_flight: register_gauge_vec!(
                 "hyperscale_fetch_in_flight",
-                "Number of fetch requests currently in flight",
-                &["kind"]
+                "Number of fetch requests currently in flight, per (kind, shard)",
+                &["kind", "shard"]
             )
             .unwrap(),
 
@@ -573,9 +594,10 @@ impl Metrics {
             .unwrap(),
 
             // Lock Contention
-            lock_contention_ratio: register_gauge!(
+            lock_contention_ratio: register_gauge_vec!(
                 "hyperscale_lock_contention_ratio",
-                "Ratio of deferred transactions to total (0.0 to 1.0)"
+                "Ratio of deferred transactions to total (0.0 to 1.0), per (shard, validator_id)",
+                &["shard", "validator_id"]
             )
             .unwrap(),
 
@@ -794,13 +816,15 @@ impl MetricsRecorder for PrometheusRecorder {
 
     // ── Consensus ────────────────────────────────────────────────────
 
-    fn record_block_committed(&self, height: u64, commit_latency_secs: f64, source: &str) {
+    fn record_block_committed(&self, _height: u64, commit_latency_secs: f64, source: &str) {
         self.metrics.blocks_committed.inc();
         self.metrics
             .block_commit_latency
             .with_label_values(&[source])
             .observe(commit_latency_secs);
-        self.metrics.block_height.set(height as f64);
+        // `block_height` is set via the explicit per-shard `set_block_height`
+        // setter at the same call site; not stamped here because we lack the
+        // shard label.
     }
 
     fn record_transaction_finalized(&self, latency_secs: f64, cross_shard: bool) {
@@ -811,38 +835,60 @@ impl MetricsRecorder for PrometheusRecorder {
             .observe(latency_secs);
     }
 
-    fn set_block_height(&self, height: u64) {
-        self.metrics.block_height.set(height as f64);
+    fn set_block_height(&self, shard: u64, height: u64) {
+        self.metrics
+            .block_height
+            .with_label_values(&[&shard.to_string()])
+            .set(height as f64);
     }
 
-    fn set_bft_round(&self, round: u64) {
-        self.metrics.round.set(round as f64);
+    fn set_bft_round(&self, shard: u64, validator_id: u64, round: u64) {
+        self.metrics
+            .round
+            .with_label_values(&[&shard.to_string(), &validator_id.to_string()])
+            .set(round as f64);
     }
 
-    fn set_view_changes(&self, count: u64) {
-        self.metrics.view_changes.set(count as f64);
+    fn set_view_changes(&self, shard: u64, validator_id: u64, count: u64) {
+        self.metrics
+            .view_changes
+            .with_label_values(&[&shard.to_string(), &validator_id.to_string()])
+            .set(count as f64);
     }
 
-    fn set_view_syncs(&self, count: u64) {
-        self.metrics.view_syncs.set(count as f64);
+    fn set_view_syncs(&self, shard: u64, validator_id: u64, count: u64) {
+        self.metrics
+            .view_syncs
+            .with_label_values(&[&shard.to_string(), &validator_id.to_string()])
+            .set(count as f64);
     }
 
-    fn set_mempool_size(&self, size: usize) {
-        self.metrics.mempool_size.set(size as f64);
+    fn set_mempool_size(&self, shard: u64, validator_id: u64, size: usize) {
+        self.metrics
+            .mempool_size
+            .with_label_values(&[&shard.to_string(), &validator_id.to_string()])
+            .set(size as f64);
     }
 
-    fn set_in_flight(&self, count: usize) {
-        self.metrics.in_flight.set(count as f64);
+    fn set_in_flight(&self, shard: u64, validator_id: u64, count: usize) {
+        self.metrics
+            .in_flight
+            .with_label_values(&[&shard.to_string(), &validator_id.to_string()])
+            .set(count as f64);
     }
 
-    fn set_backpressure_active(&self, active: bool) {
+    fn set_backpressure_active(&self, shard: u64, validator_id: u64, active: bool) {
         self.metrics
             .backpressure_active
+            .with_label_values(&[&shard.to_string(), &validator_id.to_string()])
             .set(if active { 1.0 } else { 0.0 });
     }
 
-    fn set_txs_with_commitment_proof(&self, count: usize) {
-        self.metrics.txs_with_commitment_proof.set(count as f64);
+    fn set_txs_with_commitment_proof(&self, shard: u64, validator_id: u64, count: usize) {
+        self.metrics
+            .txs_with_commitment_proof
+            .with_label_values(&[&shard.to_string(), &validator_id.to_string()])
+            .set(count as f64);
     }
 
     // ── Infrastructure ───────────────────────────────────────────────
@@ -1017,17 +1063,17 @@ impl MetricsRecorder for PrometheusRecorder {
 
     // ── Sync ─────────────────────────────────────────────────────────
 
-    fn set_sync_blocks_behind(&self, kind: &str, blocks_behind: u64) {
+    fn set_sync_blocks_behind(&self, kind: &str, shard: u64, blocks_behind: u64) {
         self.metrics
             .sync_blocks_behind
-            .with_label_values(&[kind])
+            .with_label_values(&[kind, &shard.to_string()])
             .set(blocks_behind as f64);
     }
 
-    fn set_sync_in_progress(&self, kind: &str, in_progress: bool) {
+    fn set_sync_in_progress(&self, kind: &str, shard: u64, in_progress: bool) {
         self.metrics
             .sync_in_progress
-            .with_label_values(&[kind])
+            .with_label_values(&[kind, &shard.to_string()])
             .set(if in_progress { 1.0 } else { 0.0 });
     }
 
@@ -1066,10 +1112,10 @@ impl MetricsRecorder for PrometheusRecorder {
             .inc();
     }
 
-    fn set_sync_round_in_flight(&self, kind: &str, count: usize) {
+    fn set_sync_round_in_flight(&self, kind: &str, shard: u64, count: usize) {
         self.metrics
             .sync_round_in_flight
-            .with_label_values(&[kind])
+            .with_label_values(&[kind, &shard.to_string()])
             .set(count as f64);
     }
 
@@ -1111,10 +1157,10 @@ impl MetricsRecorder for PrometheusRecorder {
             .observe(latency_secs);
     }
 
-    fn set_fetch_in_flight(&self, kind: &str, count: usize) {
+    fn set_fetch_in_flight(&self, kind: &str, shard: u64, count: usize) {
         self.metrics
             .fetch_in_flight
-            .with_label_values(&[kind])
+            .with_label_values(&[kind, &shard.to_string()])
             .set(count as f64);
     }
 
@@ -1158,8 +1204,11 @@ impl MetricsRecorder for PrometheusRecorder {
 
     // ── Lock Contention ──────────────────────────────────────────────
 
-    fn set_lock_contention(&self, ratio: f64) {
-        self.metrics.lock_contention_ratio.set(ratio);
+    fn set_lock_contention(&self, shard: u64, validator_id: u64, ratio: f64) {
+        self.metrics
+            .lock_contention_ratio
+            .with_label_values(&[&shard.to_string(), &validator_id.to_string()])
+            .set(ratio);
     }
 
     // ── Memory ──────────────────────────────────────────────────────

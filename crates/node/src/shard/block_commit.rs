@@ -380,7 +380,7 @@ where
         let commit_latency_secs =
             (now_ms.saturating_sub(commit.block.header().timestamp().as_millis())) as f64 / 1000.0;
         record_block_committed(height.inner(), commit_latency_secs, commit.source.as_str());
-        set_block_height(height.inner());
+        set_block_height(self.shard.inner(), height.inner());
 
         // Fire BlockCommitted immediately unless persistence is falling
         // too far behind (backpressure). When deferred, flush sends

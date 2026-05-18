@@ -56,6 +56,10 @@ pub struct ShardMetrics {
 /// Per-vnode consensus counts.
 #[allow(missing_docs)] // fields are flat readouts; names are the documentation
 pub struct VnodeMetrics {
+    /// Shard this vnode participates in. Carried alongside the consensus
+    /// counts so [`record_metrics`] can label the per-vnode gauges with
+    /// both `shard` and `validator_id`.
+    pub shard: ShardGroupId,
     pub bft_round: u64,
     pub view_changes: u64,
     pub view_syncs: u64,
@@ -81,8 +85,9 @@ pub struct MetricsSnapshot {
 
 impl MetricsSnapshot {
     /// Pick a representative `(ShardMetrics, VnodeMetrics)` pair for
-    /// the flat prometheus emitter. Returns `None` if there's nothing
-    /// hosted (shouldn't happen for a running `IoLoop`).
+    /// the memory readouts and any flat gauge that's still process-wide.
+    /// Returns `None` if there's nothing hosted (shouldn't happen for a
+    /// running `IoLoop`).
     #[must_use]
     pub fn primary(&self) -> Option<(&ShardMetrics, &VnodeMetrics)> {
         let shard = self.shards.values().next()?;
@@ -93,34 +98,37 @@ impl MetricsSnapshot {
 
 /// Record a [`MetricsSnapshot`] to the metrics backend.
 ///
-/// This performs the prometheus `set_*` calls plus the `RocksDB` property
-/// queries for storage memory usage. Designed to run off the pinned
-/// thread via `spawn_blocking`.
-///
-/// Emits flat gauges from [`MetricsSnapshot::primary`].
+/// Iterates the per-shard and per-vnode maps and emits one labeled gauge
+/// per entry. Process-wide readouts (memory, `RocksDB` properties) come
+/// from the primary shard/vnode. Designed to run off the pinned thread
+/// via `spawn_blocking`.
 pub fn record_metrics<S: ChainWriter>(snapshot: MetricsSnapshot, storage: &S) {
-    let Some((shard, vnode)) = snapshot.primary() else {
-        return;
-    };
+    for (shard_id, shard) in &snapshot.shards {
+        let s = shard_id.inner();
+        set_sync_blocks_behind("block", s, shard.blocks_behind);
+        set_sync_in_progress("block", s, shard.is_syncing);
+        set_sync_round_in_flight("block", s, shard.block_sync_round_in_flight);
+        set_sync_blocks_behind("remote_header", s, shard.remote_header_blocks_behind);
+        set_sync_in_progress("remote_header", s, shard.remote_header_is_syncing);
+        set_sync_round_in_flight("remote_header", s, shard.remote_header_round_in_flight);
+        set_fetch_in_flight("transaction", s, shard.fetch_transaction);
+        set_fetch_in_flight("provision", s, shard.fetch_provision);
+        set_fetch_in_flight("local_provision", s, shard.fetch_local_provision);
+        set_fetch_in_flight("exec_cert", s, shard.fetch_exec_cert);
+        set_fetch_in_flight("finalized_wave", s, shard.fetch_finalized_wave);
+    }
 
-    set_bft_round(vnode.bft_round);
-    set_view_changes(vnode.view_changes);
-    set_view_syncs(vnode.view_syncs);
-    set_mempool_size(vnode.mempool_size);
-    set_lock_contention(vnode.contention_ratio);
-    set_in_flight(vnode.in_flight);
-    set_backpressure_active(vnode.backpressure_active);
-    set_sync_blocks_behind("block", shard.blocks_behind);
-    set_sync_in_progress("block", shard.is_syncing);
-    set_sync_round_in_flight("block", shard.block_sync_round_in_flight);
-    set_sync_blocks_behind("remote_header", shard.remote_header_blocks_behind);
-    set_sync_in_progress("remote_header", shard.remote_header_is_syncing);
-    set_sync_round_in_flight("remote_header", shard.remote_header_round_in_flight);
-    set_fetch_in_flight("transaction", shard.fetch_transaction);
-    set_fetch_in_flight("provision", shard.fetch_provision);
-    set_fetch_in_flight("local_provision", shard.fetch_local_provision);
-    set_fetch_in_flight("exec_cert", shard.fetch_exec_cert);
-    set_fetch_in_flight("finalized_wave", shard.fetch_finalized_wave);
+    for (validator_id, vnode) in &snapshot.vnodes {
+        let s = vnode.shard.inner();
+        let v = validator_id.inner();
+        set_bft_round(s, v, vnode.bft_round);
+        set_view_changes(s, v, vnode.view_changes);
+        set_view_syncs(s, v, vnode.view_syncs);
+        set_mempool_size(s, v, vnode.mempool_size);
+        set_lock_contention(s, v, vnode.contention_ratio);
+        set_in_flight(s, v, vnode.in_flight);
+        set_backpressure_active(s, v, vnode.backpressure_active);
+    }
 
     // RocksDB property queries — potentially slow under compaction pressure.
     let (rocksdb_bc, rocksdb_mt) = storage.memory_usage_bytes();
@@ -181,6 +189,7 @@ where
                 vnodes.insert(
                     vnode.validator_id,
                     VnodeMetrics {
+                        shard,
                         bft_round: bft_stats.current_round,
                         view_changes: bft_stats.view_changes,
                         view_syncs: bft_stats.view_syncs,

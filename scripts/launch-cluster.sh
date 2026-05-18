@@ -731,55 +731,27 @@ if [ "$MONITORING" = true ] || [ "$TRACING" = true ]; then
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     MONITORING_DIR="$SCRIPT_DIR/monitoring"
 
-    # Generate prometheus.yml with one target per host (multi-vnode hosts
-    # expose a single metrics port; per-vnode prometheus labels are deferred).
+    # Generate prometheus.yml with one target per host. The `shard` and
+    # `validator_id` labels are stamped by the application on per-shard /
+    # per-vnode metrics, so the scrape config doesn't inject them — every
+    # host is a single target.
     echo "Generating Prometheus configuration for $TOTAL_HOSTS hosts across $NUM_SHARDS shards..."
 
-    # Build static configs. Under same-shard packing, group by shard with a
-    # per-shard label. Under cross-shard packing every host spans every shard,
-    # so the shard label loses meaning — emit one group with a `pack` label.
-    PROM_STATIC_CONFIGS=""
-    if [ "$CROSS_SHARD_PACK" = true ]; then
-        ALL_TARGETS=""
-        for host_idx in $(seq 0 $((TOTAL_HOSTS - 1))); do
-            rpc_port=$((BASE_RPC_PORT + host_idx))
-            if [ -n "$ALL_TARGETS" ]; then
-                ALL_TARGETS="$ALL_TARGETS
+    ALL_TARGETS=""
+    for host_idx in $(seq 0 $((TOTAL_HOSTS - 1))); do
+        rpc_port=$((BASE_RPC_PORT + host_idx))
+        if [ -n "$ALL_TARGETS" ]; then
+            ALL_TARGETS="$ALL_TARGETS
           - 'host.docker.internal:$rpc_port'"
-            else
-                ALL_TARGETS="- 'host.docker.internal:$rpc_port'"
-            fi
-        done
-        PROM_STATIC_CONFIGS="
-      # Cross-shard hosts (each serves every shard)
+        else
+            ALL_TARGETS="- 'host.docker.internal:$rpc_port'"
+        fi
+    done
+    PROM_STATIC_CONFIGS="
       - targets:
           $ALL_TARGETS
         labels:
-          cluster: 'local'
-          pack: 'cross-shard'"
-    else
-        for shard in $(seq 0 $((NUM_SHARDS - 1))); do
-            SHARD_TARGETS=""
-            for h in $(seq 0 $((HOSTS_PER_SHARD - 1))); do
-                host_idx=$((shard * HOSTS_PER_SHARD + h))
-                rpc_port=$((BASE_RPC_PORT + host_idx))
-                if [ -n "$SHARD_TARGETS" ]; then
-                    SHARD_TARGETS="$SHARD_TARGETS
-          - 'host.docker.internal:$rpc_port'"
-                else
-                    SHARD_TARGETS="- 'host.docker.internal:$rpc_port'"
-                fi
-            done
-
-            PROM_STATIC_CONFIGS="$PROM_STATIC_CONFIGS
-      # Shard $shard hosts
-      - targets:
-          $SHARD_TARGETS
-        labels:
-          cluster: 'local'
-          shard: '$shard'"
-        done
-    fi
+          cluster: 'local'"
 
     cat > "$MONITORING_DIR/prometheus.yml" << EOF
 # Prometheus configuration for Hyperscale local cluster

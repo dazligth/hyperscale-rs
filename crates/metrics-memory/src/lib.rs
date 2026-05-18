@@ -181,24 +181,40 @@ impl MetricsRecorder for MemoryRecorder {
         self.observe("transaction_latency", Some(label), latency_secs);
     }
 
-    fn set_block_height(&self, height: u64) {
-        self.set("block_height", None, height as f64);
+    fn set_block_height(&self, shard: u64, height: u64) {
+        self.set("block_height", Some(&shard.to_string()), height as f64);
     }
 
-    fn set_bft_round(&self, round: u64) {
-        self.set("bft_round", None, round as f64);
+    fn set_bft_round(&self, shard: u64, validator_id: u64, round: u64) {
+        self.set(
+            "bft_round",
+            Some(&format!("{shard}:{validator_id}")),
+            round as f64,
+        );
     }
 
-    fn set_view_changes(&self, count: u64) {
-        self.set("view_changes", None, count as f64);
+    fn set_view_changes(&self, shard: u64, validator_id: u64, count: u64) {
+        self.set(
+            "view_changes",
+            Some(&format!("{shard}:{validator_id}")),
+            count as f64,
+        );
     }
 
-    fn set_view_syncs(&self, count: u64) {
-        self.set("view_syncs", None, count as f64);
+    fn set_view_syncs(&self, shard: u64, validator_id: u64, count: u64) {
+        self.set(
+            "view_syncs",
+            Some(&format!("{shard}:{validator_id}")),
+            count as f64,
+        );
     }
 
-    fn set_mempool_size(&self, size: usize) {
-        self.set("mempool_size", None, size as f64);
+    fn set_mempool_size(&self, shard: u64, validator_id: u64, size: usize) {
+        self.set(
+            "mempool_size",
+            Some(&format!("{shard}:{validator_id}")),
+            size as f64,
+        );
     }
 
     // ── Network ──────────────────────────────────────────────────────
@@ -237,14 +253,18 @@ impl MetricsRecorder for MemoryRecorder {
 
     // ── Sync ─────────────────────────────────────────────────────────
 
-    fn set_sync_blocks_behind(&self, kind: &str, blocks_behind: u64) {
-        self.set("sync_blocks_behind", Some(kind), blocks_behind as f64);
+    fn set_sync_blocks_behind(&self, kind: &str, shard: u64, blocks_behind: u64) {
+        self.set(
+            "sync_blocks_behind",
+            Some(&format!("{kind}:{shard}")),
+            blocks_behind as f64,
+        );
     }
 
-    fn set_sync_in_progress(&self, kind: &str, in_progress: bool) {
+    fn set_sync_in_progress(&self, kind: &str, shard: u64, in_progress: bool) {
         self.set(
             "sync_in_progress",
-            Some(kind),
+            Some(&format!("{kind}:{shard}")),
             if in_progress { 1.0 } else { 0.0 },
         );
     }
@@ -274,8 +294,12 @@ impl MetricsRecorder for MemoryRecorder {
         self.inc("sync_round_retried", Some(kind), 1);
     }
 
-    fn set_sync_round_in_flight(&self, kind: &str, count: usize) {
-        self.set("sync_round_in_flight", Some(kind), count as f64);
+    fn set_sync_round_in_flight(&self, kind: &str, shard: u64, count: usize) {
+        self.set(
+            "sync_round_in_flight",
+            Some(&format!("{kind}:{shard}")),
+            count as f64,
+        );
     }
 
     // ── Fetch ────────────────────────────────────────────────────────
@@ -304,8 +328,12 @@ impl MetricsRecorder for MemoryRecorder {
         self.observe("fetch_latency", Some(kind), latency_secs);
     }
 
-    fn set_fetch_in_flight(&self, kind: &str, count: usize) {
-        self.set("fetch_in_flight", Some(kind), count as f64);
+    fn set_fetch_in_flight(&self, kind: &str, shard: u64, count: usize) {
+        self.set(
+            "fetch_in_flight",
+            Some(&format!("{kind}:{shard}")),
+            count as f64,
+        );
     }
 
     fn record_fetch_response_sent(&self, kind: &str, count: usize) {
@@ -359,9 +387,9 @@ mod tests {
     #[test]
     fn gauge_overwrites() {
         let r = MemoryRecorder::new();
-        r.set_block_height(5);
-        r.set_block_height(10);
-        assert!((r.gauge("block_height", None) - 10.0).abs() < f64::EPSILON);
+        r.set_block_height(0, 5);
+        r.set_block_height(0, 10);
+        assert!((r.gauge("block_height", Some("0")) - 10.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -374,11 +402,10 @@ mod tests {
     }
 
     #[test]
-    fn block_committed_updates_three_metrics() {
+    fn block_committed_updates_counter_and_histogram() {
         let r = MemoryRecorder::new();
         r.record_block_committed(42, 0.05, "qc");
         assert_eq!(r.counter("blocks_committed", None), 1);
-        assert!((r.gauge("block_height", None) - 42.0).abs() < f64::EPSILON);
         assert_eq!(r.histogram_count("block_commit_latency", Some("qc")), 1);
     }
 
@@ -386,10 +413,10 @@ mod tests {
     fn reset_clears_state() {
         let r = MemoryRecorder::new();
         r.record_fetch_started("transaction");
-        r.set_block_height(7);
+        r.set_block_height(0, 7);
         r.reset();
         assert_eq!(r.counter("fetch_started", Some("transaction")), 0);
-        assert!((r.gauge("block_height", None) - 0.0).abs() < f64::EPSILON);
+        assert!((r.gauge("block_height", Some("0")) - 0.0).abs() < f64::EPSILON);
     }
 
     #[test]

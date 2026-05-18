@@ -246,29 +246,29 @@ pub trait MetricsRecorder: Send + Sync + 'static {
     /// Record a transaction finalized.
     fn record_transaction_finalized(&self, latency_secs: f64, cross_shard: bool) {}
 
-    /// Set the current block height gauge.
-    fn set_block_height(&self, height: u64) {}
+    /// Set the current block height gauge for a shard.
+    fn set_block_height(&self, shard: u64, height: u64) {}
 
-    /// Set the current BFT round gauge.
-    fn set_bft_round(&self, round: u64) {}
+    /// Set the current BFT round gauge for one hosted vnode.
+    fn set_bft_round(&self, shard: u64, validator_id: u64, round: u64) {}
 
-    /// Set the view changes gauge (self-originated round advances).
-    fn set_view_changes(&self, count: u64) {}
+    /// Set the view changes gauge (self-originated round advances) for one vnode.
+    fn set_view_changes(&self, shard: u64, validator_id: u64, count: u64) {}
 
-    /// Set the view syncs gauge (rounds we caught up to from peers).
-    fn set_view_syncs(&self, count: u64) {}
+    /// Set the view syncs gauge (rounds caught up to from peers) for one vnode.
+    fn set_view_syncs(&self, shard: u64, validator_id: u64, count: u64) {}
 
-    /// Set the mempool size gauge.
-    fn set_mempool_size(&self, size: usize) {}
+    /// Set the mempool size gauge for one vnode.
+    fn set_mempool_size(&self, shard: u64, validator_id: u64, size: usize) {}
 
-    /// Set the in-flight transaction count gauge.
-    fn set_in_flight(&self, count: usize) {}
+    /// Set the in-flight transaction count gauge for one vnode.
+    fn set_in_flight(&self, shard: u64, validator_id: u64, count: usize) {}
 
-    /// Set whether backpressure is active.
-    fn set_backpressure_active(&self, active: bool) {}
+    /// Set whether backpressure is active for one vnode.
+    fn set_backpressure_active(&self, shard: u64, validator_id: u64, active: bool) {}
 
-    /// Set count of TXs with commitment proofs.
-    fn set_txs_with_commitment_proof(&self, count: usize) {}
+    /// Set count of TXs with commitment proofs in the latest proposal from one vnode.
+    fn set_txs_with_commitment_proof(&self, shard: u64, validator_id: u64, count: usize) {}
 
     // ── Infrastructure ───────────────────────────────────────────────
 
@@ -374,10 +374,10 @@ pub trait MetricsRecorder: Send + Sync + 'static {
     // under one chart.
 
     /// Set the per-scope `blocks_behind` gauge.
-    fn set_sync_blocks_behind(&self, kind: &str, blocks_behind: u64) {}
+    fn set_sync_blocks_behind(&self, kind: &str, shard: u64, blocks_behind: u64) {}
 
     /// Set the per-scope `in_progress` gauge (0/1).
-    fn set_sync_in_progress(&self, kind: &str, in_progress: bool) {}
+    fn set_sync_in_progress(&self, kind: &str, shard: u64, in_progress: bool) {}
 
     /// Record a sync response that was filtered out before delivery
     /// (height mismatch, QC mismatch, certificate-root mismatch, etc.).
@@ -397,7 +397,7 @@ pub trait MetricsRecorder: Send + Sync + 'static {
     fn record_sync_round_retried(&self, kind: &str) {}
 
     /// Set the per-scope in-flight range gauge.
-    fn set_sync_round_in_flight(&self, kind: &str, count: usize) {}
+    fn set_sync_round_in_flight(&self, kind: &str, shard: u64, count: usize) {}
 
     // ── Fetch ────────────────────────────────────────────────────────
     //
@@ -430,7 +430,7 @@ pub trait MetricsRecorder: Send + Sync + 'static {
     fn record_fetch_latency(&self, kind: &str, latency_secs: f64) {}
 
     /// Set the fetch in-flight gauge (per kind).
-    fn set_fetch_in_flight(&self, kind: &str, count: usize) {}
+    fn set_fetch_in_flight(&self, kind: &str, shard: u64, count: usize) {}
 
     /// Record items sent in response to a fetch request.
     fn record_fetch_response_sent(&self, kind: &str, count: usize) {}
@@ -463,7 +463,7 @@ pub trait MetricsRecorder: Send + Sync + 'static {
     // ── Lock Contention ──────────────────────────────────────────────
 
     /// Set lock contention metrics.
-    fn set_lock_contention(&self, ratio: f64) {}
+    fn set_lock_contention(&self, shard: u64, validator_id: u64, ratio: f64) {}
 
     // ── Memory ────────────────────────────────────────────────────────
 
@@ -607,52 +607,52 @@ pub fn record_transaction_finalized(latency_secs: f64, cross_shard: bool) {
     recorder().record_transaction_finalized(latency_secs, cross_shard);
 }
 
-/// Set the current block height gauge.
+/// Set the current block height gauge for a shard.
 #[inline]
-pub fn set_block_height(height: u64) {
-    recorder().set_block_height(height);
+pub fn set_block_height(shard: u64, height: u64) {
+    recorder().set_block_height(shard, height);
 }
 
-/// Set the current BFT round gauge.
+/// Set the current BFT round gauge for one hosted vnode.
 #[inline]
-pub fn set_bft_round(round: u64) {
-    recorder().set_bft_round(round);
+pub fn set_bft_round(shard: u64, validator_id: u64, round: u64) {
+    recorder().set_bft_round(shard, validator_id, round);
 }
 
-/// Set the view changes gauge.
+/// Set the view changes gauge for one hosted vnode.
 #[inline]
-pub fn set_view_changes(count: u64) {
-    recorder().set_view_changes(count);
+pub fn set_view_changes(shard: u64, validator_id: u64, count: u64) {
+    recorder().set_view_changes(shard, validator_id, count);
 }
 
-/// Set the view syncs gauge.
+/// Set the view syncs gauge for one hosted vnode.
 #[inline]
-pub fn set_view_syncs(count: u64) {
-    recorder().set_view_syncs(count);
+pub fn set_view_syncs(shard: u64, validator_id: u64, count: u64) {
+    recorder().set_view_syncs(shard, validator_id, count);
 }
 
-/// Set the mempool size gauge.
+/// Set the mempool size gauge for one hosted vnode.
 #[inline]
-pub fn set_mempool_size(size: usize) {
-    recorder().set_mempool_size(size);
+pub fn set_mempool_size(shard: u64, validator_id: u64, size: usize) {
+    recorder().set_mempool_size(shard, validator_id, size);
 }
 
-/// Set the in-flight transaction count gauge.
+/// Set the in-flight transaction count gauge for one hosted vnode.
 #[inline]
-pub fn set_in_flight(count: usize) {
-    recorder().set_in_flight(count);
+pub fn set_in_flight(shard: u64, validator_id: u64, count: usize) {
+    recorder().set_in_flight(shard, validator_id, count);
 }
 
-/// Set whether backpressure is active.
+/// Set whether backpressure is active for one hosted vnode.
 #[inline]
-pub fn set_backpressure_active(active: bool) {
-    recorder().set_backpressure_active(active);
+pub fn set_backpressure_active(shard: u64, validator_id: u64, active: bool) {
+    recorder().set_backpressure_active(shard, validator_id, active);
 }
 
-/// Set count of TXs with commitment proofs.
+/// Set count of TXs with commitment proofs in the latest proposal from one vnode.
 #[inline]
-pub fn set_txs_with_commitment_proof(count: usize) {
-    recorder().set_txs_with_commitment_proof(count);
+pub fn set_txs_with_commitment_proof(shard: u64, validator_id: u64, count: usize) {
+    recorder().set_txs_with_commitment_proof(shard, validator_id, count);
 }
 
 // ── Infrastructure ───────────────────────────────────────────────────
@@ -804,16 +804,16 @@ pub fn set_inbound_streams_in_use(protocol: &str, count: usize) {
 
 // ── Sync ─────────────────────────────────────────────────────────────
 
-/// Set the per-scope `blocks_behind` gauge.
+/// Set the per-scope `blocks_behind` gauge for a shard.
 #[inline]
-pub fn set_sync_blocks_behind(kind: &str, blocks_behind: u64) {
-    recorder().set_sync_blocks_behind(kind, blocks_behind);
+pub fn set_sync_blocks_behind(kind: &str, shard: u64, blocks_behind: u64) {
+    recorder().set_sync_blocks_behind(kind, shard, blocks_behind);
 }
 
-/// Set the per-scope `in_progress` gauge (0/1).
+/// Set the per-scope `in_progress` gauge (0/1) for a shard.
 #[inline]
-pub fn set_sync_in_progress(kind: &str, in_progress: bool) {
-    recorder().set_sync_in_progress(kind, in_progress);
+pub fn set_sync_in_progress(kind: &str, shard: u64, in_progress: bool) {
+    recorder().set_sync_in_progress(kind, shard, in_progress);
 }
 
 /// Record a sync response filtered out before delivery.
@@ -846,10 +846,10 @@ pub fn record_sync_round_retried(kind: &str) {
     recorder().record_sync_round_retried(kind);
 }
 
-/// Set the per-scope in-flight range gauge.
+/// Set the per-scope in-flight range gauge for a shard.
 #[inline]
-pub fn set_sync_round_in_flight(kind: &str, count: usize) {
-    recorder().set_sync_round_in_flight(kind, count);
+pub fn set_sync_round_in_flight(kind: &str, shard: u64, count: usize) {
+    recorder().set_sync_round_in_flight(kind, shard, count);
 }
 
 // ── Fetch ────────────────────────────────────────────────────────────
@@ -890,10 +890,10 @@ pub fn record_fetch_latency(kind: &str, latency_secs: f64) {
     recorder().record_fetch_latency(kind, latency_secs);
 }
 
-/// Set the fetch in-flight gauge (per kind).
+/// Set the fetch in-flight gauge (per kind, per shard).
 #[inline]
-pub fn set_fetch_in_flight(kind: &str, count: usize) {
-    recorder().set_fetch_in_flight(kind, count);
+pub fn set_fetch_in_flight(kind: &str, shard: u64, count: usize) {
+    recorder().set_fetch_in_flight(kind, shard, count);
 }
 
 /// Record items sent in response to a fetch request.
@@ -944,10 +944,10 @@ pub fn record_expected_tx_dropped() {
 
 // ── Lock Contention ──────────────────────────────────────────────────
 
-/// Set lock contention metrics.
+/// Set lock contention ratio for one hosted vnode.
 #[inline]
-pub fn set_lock_contention(ratio: f64) {
-    recorder().set_lock_contention(ratio);
+pub fn set_lock_contention(shard: u64, validator_id: u64, ratio: f64) {
+    recorder().set_lock_contention(shard, validator_id, ratio);
 }
 
 // ── Memory ────────────────────────────────────────────────────────
