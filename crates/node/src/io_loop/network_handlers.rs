@@ -131,7 +131,7 @@ where
             // thrashing.
 
             let storage = Arc::clone(&self.shard_io(shard).storage);
-            let topology = self.topology_snapshot.clone();
+            let num_shards = self.topology_snapshot.load().num_shards();
             let outbound_cache = Arc::clone(&self.shard_io(shard).caches.provision_store);
 
             let dedup: Arc<std::sync::Mutex<ProvisionsRequestDedup>> =
@@ -241,13 +241,7 @@ where
                             cache_key,
                         };
 
-                        let topo = topology.load();
-                        let response = serve_provision_request(
-                            &*storage,
-                            topo.local_shard(),
-                            topo.num_shards(),
-                            &req,
-                        );
+                        let response = serve_provision_request(&*storage, shard, num_shards, &req);
                         if let Some(p) = &response.provisions {
                             record_fetch_response_sent("provision", p.transactions().len());
                         }
