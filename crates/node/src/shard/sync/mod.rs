@@ -158,6 +158,17 @@ pub trait SyncBinding: 'static {
     /// Stable identifier for tracing / metrics.
     const NAME: &'static str;
 
+    /// True when this binding's responder walks contiguous heights from
+    /// `from` and stops at the first missing height, so a short response
+    /// proves the responder's tip is at `from + delivered.len() - 1`
+    /// (or strictly below `from` if the response is empty). The generic
+    /// uses this to cap `target` to the inferred tip instead of
+    /// backoff-retrying heights that don't exist anywhere yet — the
+    /// coordinator's liveness timer is the right tool for re-probing
+    /// past a known tip. Defaults to `false` for per-id bindings whose
+    /// empty response just means "this peer doesn't have it."
+    const RESPONDER_SERVES_CONTIGUOUS_PREFIX: bool = false;
+
     /// Hook fired when a height is admitted. Bindings with per-id
     /// auxiliary state (e.g. block-sync's `force_full_refetch`) clean up
     /// entries at or below `committed` here. Default no-op.
@@ -466,6 +477,47 @@ impl<B: SyncBinding> Sync<B> {
         let delivered: HashSet<BlockHeight> = delivered_heights.iter().copied().collect();
         let pending_deadline = now + PENDING_ADMISSION_TIMEOUT;
 
+        // For prefix-responder bindings, a short response signals the
+        // responder's tip: heights past `from + delivered.len() - 1` do
+        // not exist anywhere yet. Cap `target` to the inferred tip so
+        // the missing-tail branch below skips them and `queue_window`
+        // doesn't re-queue them. The coordinator's liveness timer is the
+        // re-probe mechanism past a known tip — burning deferred backoff
+        // on nonexistent heights just inflates the blocks-behind metric
+        // without making progress.
+        if B::RESPONDER_SERVES_CONTIGUOUS_PREFIX
+            && delivered.len() < usize::try_from(count).unwrap_or(usize::MAX)
+        {
+            let len = u64::try_from(delivered.len()).unwrap_or(u64::MAX);
+            // Trust the inference only if the delivered set is actually
+            // a contiguous prefix from `from`. An internal gap (which
+            // a contiguous-prefix responder shouldn't produce) falls
+            // back to the default deferred-retry path so a buggy peer
+            // can't trick us into abandoning a real fetch range.
+            let is_prefix =
+                (0..len).all(|i| delivered.contains(&BlockHeight::new(from.inner() + i)));
+            if is_prefix {
+                let inferred_tip = if len == 0 {
+                    // Tip is strictly below `from`; floor at `committed`
+                    // (we never lower `target` past what we already have).
+                    state.committed
+                } else {
+                    BlockHeight::new(from.inner() + len - 1)
+                };
+                if inferred_tip < state.target {
+                    state.target = inferred_tip.max(state.committed);
+                    // Drop deferred entries past the new target so the
+                    // next Tick doesn't promote them back into the queue.
+                    // `heights_queued` was already drained when this
+                    // range went in-flight, and `pending_admission` only
+                    // holds delivered heights ≤ tip, so neither needs
+                    // cleanup.
+                    let new_target = state.target;
+                    state.deferred.retain(|&h, _| h <= new_target);
+                }
+            }
+        }
+
         for offset in 0..count {
             let h = BlockHeight::new(from.inner() + offset);
             state.in_flight.remove(&h);
@@ -733,6 +785,16 @@ mod tests {
         type Scope = u64;
         type State = ();
         const NAME: &'static str = "test_shard";
+    }
+
+    /// Multi-scope binding mirroring remote-header sync's prefix-responder
+    /// semantics: short responses prove the responder's tip.
+    struct PrefixBinding;
+    impl SyncBinding for PrefixBinding {
+        type Scope = u64;
+        type State = ();
+        const NAME: &'static str = "test_prefix";
+        const RESPONDER_SERVES_CONTIGUOUS_PREFIX: bool = true;
     }
 
     fn cfg_per_id() -> SyncConfig {
@@ -1026,6 +1088,158 @@ mod tests {
             BlockHeight::new(40),
             "implicit advance should clamp at committed + window + max_per_request"
         );
+    }
+
+    #[test]
+    fn short_prefix_response_caps_target_to_inferred_tip() {
+        // Liveness-driven probe pushes target far past the remote's
+        // actual tip. A short prefix response proves the tip; we should
+        // cap target to it and *not* deferred-retry the nonexistent
+        // tail. The coordinator's liveness timer will re-probe later.
+        let mut s: Sync<PrefixBinding> = Sync::new(cfg_range());
+        let _ = s.handle(SyncInput::StartSync {
+            scope: 1,
+            target: BlockHeight::new(8),
+        });
+        let now = Instant::now();
+        // Asked for heights 1..=8; responder has only committed 1..=3.
+        let _ = s.handle(SyncInput::FetchSucceeded {
+            scope: 1,
+            from: BlockHeight::new(1),
+            count: 8,
+            delivered_heights: (1..=3).map(BlockHeight::new).collect(),
+            now,
+        });
+        let st = s.scopes.get(&1).unwrap();
+        assert_eq!(
+            st.target,
+            BlockHeight::new(3),
+            "target should cap to the prefix tip"
+        );
+        assert!(
+            st.deferred.is_empty(),
+            "nonexistent heights past the tip must not enter deferred backoff: {:?}",
+            st.deferred.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            st.pending_admission.len(),
+            3,
+            "delivered heights park in pending_admission as usual"
+        );
+    }
+
+    #[test]
+    fn empty_prefix_response_caps_target_to_committed() {
+        // Tip is strictly below `from`. With no max_delivered to anchor
+        // on, target floors at `committed` — we have no evidence the
+        // responder has anything past what we already know.
+        let mut s: Sync<PrefixBinding> = Sync::new(cfg_range());
+        let _ = s.handle(SyncInput::StartSync {
+            scope: 1,
+            target: BlockHeight::new(8),
+        });
+        let _ = s.handle(SyncInput::FetchSucceeded {
+            scope: 1,
+            from: BlockHeight::new(1),
+            count: 8,
+            delivered_heights: vec![],
+            now: Instant::now(),
+        });
+        let st = s.scopes.get(&1).unwrap();
+        assert_eq!(st.target, st.committed);
+        assert!(st.deferred.is_empty());
+    }
+
+    #[test]
+    fn short_response_on_non_prefix_binding_defers_as_before() {
+        // Bindings without RESPONDER_SERVES_CONTIGUOUS_PREFIX (e.g.
+        // block-sync) treat undelivered heights as "this peer doesn't
+        // have it" and keep the deferred-retry backoff. Regression
+        // check that the new cap path is opt-in.
+        let mut s: Sync<ShardBinding> = Sync::new(cfg_range());
+        let _ = s.handle(SyncInput::StartSync {
+            scope: 1,
+            target: BlockHeight::new(8),
+        });
+        let _ = s.handle(SyncInput::FetchSucceeded {
+            scope: 1,
+            from: BlockHeight::new(1),
+            count: 8,
+            delivered_heights: (1..=3).map(BlockHeight::new).collect(),
+            now: Instant::now(),
+        });
+        let st = s.scopes.get(&1).unwrap();
+        assert_eq!(st.target, BlockHeight::new(8), "target unchanged");
+        let mut deferred_heights: Vec<u64> = st.deferred.keys().map(|h| h.inner()).collect();
+        deferred_heights.sort_unstable();
+        assert_eq!(
+            deferred_heights,
+            vec![4, 5, 6, 7, 8],
+            "undelivered in-range heights defer as before"
+        );
+    }
+
+    #[test]
+    fn non_contiguous_short_response_falls_back_to_deferral() {
+        // A buggy or hostile responder that returns an internal gap
+        // ({1, 3} for a request of 1..=8) violates the prefix invariant.
+        // The cap-to-tip inference doesn't apply — fall back to the
+        // default behavior so the gap is retried rather than abandoned.
+        let mut s: Sync<PrefixBinding> = Sync::new(cfg_range());
+        let _ = s.handle(SyncInput::StartSync {
+            scope: 1,
+            target: BlockHeight::new(8),
+        });
+        let _ = s.handle(SyncInput::FetchSucceeded {
+            scope: 1,
+            from: BlockHeight::new(1),
+            count: 8,
+            delivered_heights: vec![BlockHeight::new(1), BlockHeight::new(3)],
+            now: Instant::now(),
+        });
+        let st = s.scopes.get(&1).unwrap();
+        assert_eq!(st.target, BlockHeight::new(8), "target unchanged on gap");
+        let mut deferred_heights: Vec<u64> = st.deferred.keys().map(|h| h.inner()).collect();
+        deferred_heights.sort_unstable();
+        assert_eq!(deferred_heights, vec![2, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn capped_target_emits_complete_when_admissions_catch_up() {
+        // After the cap, the inferred tip becomes a *real* target that
+        // the FSM can reach. Admissions of the delivered heights must
+        // fire Complete exactly once when the last one lands.
+        let mut s: Sync<PrefixBinding> = Sync::new(cfg_range());
+        let _ = s.handle(SyncInput::StartSync {
+            scope: 1,
+            target: BlockHeight::new(8),
+        });
+        let _ = s.handle(SyncInput::FetchSucceeded {
+            scope: 1,
+            from: BlockHeight::new(1),
+            count: 8,
+            delivered_heights: (1..=3).map(BlockHeight::new).collect(),
+            now: Instant::now(),
+        });
+        let outputs_1 = s.handle(SyncInput::Admitted {
+            scope: 1,
+            height: BlockHeight::new(1),
+        });
+        let outputs_2 = s.handle(SyncInput::Admitted {
+            scope: 1,
+            height: BlockHeight::new(2),
+        });
+        let outputs_3 = s.handle(SyncInput::Admitted {
+            scope: 1,
+            height: BlockHeight::new(3),
+        });
+        let complete_count = outputs_1
+            .iter()
+            .chain(outputs_2.iter())
+            .chain(outputs_3.iter())
+            .filter(|o| matches!(o, SyncOutput::Complete { .. }))
+            .count();
+        assert_eq!(complete_count, 1, "Complete fires exactly once at tip");
     }
 
     #[test]

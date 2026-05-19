@@ -43,6 +43,10 @@ impl SyncBinding for RemoteHeaderSyncBinding {
     type Scope = ShardGroupId;
     type State = ();
     const NAME: &'static str = "remote_header_sync";
+    /// The remote-header responder walks a contiguous height range and
+    /// stops on the first missing height, so short responses signal the
+    /// responder's tip.
+    const RESPONDER_SERVES_CONTIGUOUS_PREFIX: bool = true;
 }
 
 /// Construct a [`SyncConfig`] populated with the remote-header defaults.
