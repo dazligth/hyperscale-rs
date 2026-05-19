@@ -44,10 +44,16 @@ use crate::event_queue::EventKey;
 /// Type alias for the simulation's concrete `IoLoop`.
 type SimIoLoop = IoLoop<SimStorage, SimNetworkAdapter, SyncDispatch, SimulationEngine>;
 
-/// Per-(host, shard) shared store bundle — `TxStore`, `ExecCertStore`,
-/// and `FinalizedWaveStore` cloned into every same-shard vnode on the
-/// host so the per-shard coordinators converge on one canonical view.
-type ShardStoreBundle = (Arc<TxStore>, Arc<ExecCertStore>, Arc<FinalizedWaveStore>);
+/// Per-(host, shard) shared store bundle — `ProvisionStore`, `TxStore`,
+/// `ExecCertStore`, and `FinalizedWaveStore` cloned into every same-shard
+/// vnode on the host so the per-shard coordinators converge on one
+/// canonical view.
+type ShardStoreBundle = (
+    Arc<ProvisionStore>,
+    Arc<TxStore>,
+    Arc<ExecCertStore>,
+    Arc<FinalizedWaveStore>,
+);
 
 /// Deterministic simulation runner.
 ///
@@ -226,12 +232,17 @@ impl SimulationRunner {
             }
 
             // Build per-(host, shard) store bundles. Vnodes in the same
-            // shard on the same host share the bundle.
+            // shard on the same host share the bundle. Per-shard scoping
+            // for `ProvisionStore` keeps a co-hosted source shard's
+            // `OutboundProvisionTracker` from evicting entries the target
+            // shard's inbound coordinator still needs to verify proposals
+            // against.
             let mut shard_stores: HashMap<ShardGroupId, ShardStoreBundle> = HashMap::new();
             for shard in by_shard.keys() {
                 shard_stores.insert(
                     *shard,
                     (
+                        Arc::new(ProvisionStore::new()),
                         Arc::new(TxStore::new()),
                         Arc::new(ExecCertStore::new()),
                         Arc::new(FinalizedWaveStore::new()),
@@ -242,7 +253,7 @@ impl SimulationRunner {
             let mut vnode_inits: Vec<VnodeInit> = Vec::with_capacity(host_vnodes.len());
             let mut topology_arc_for_io_loop = None;
             for (shard, validator_idxs) in &by_shard {
-                let (tx_store, exec_cert_store, fw_store) =
+                let (provision_store, tx_store, exec_cert_store, fw_store) =
                     shard_stores.get(shard).expect("shard bundle just inserted");
                 for &validator_idx in validator_idxs {
                     let validator_id = ValidatorId::new(u64::from(validator_idx));
@@ -278,7 +289,7 @@ impl SimulationRunner {
                         RecoveredState::default(),
                         MempoolConfig::default(),
                         ProvisionConfig::default(),
-                        Arc::new(ProvisionStore::new()),
+                        Arc::clone(provision_store),
                         Arc::clone(tx_store),
                         Arc::clone(exec_cert_store),
                         Arc::clone(fw_store),

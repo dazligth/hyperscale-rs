@@ -520,23 +520,27 @@ impl ProvisionCoordinator {
         let mut actions = vec![];
         let source_shard = provisions.source_shard();
 
-        // Clear expected-provision tracking and the matching header. The
-        // header's only job — verify these provisions — is done; hanging on
-        // to it wastes memory. The in-flight fallback fetch (if any) is
-        // drained by the `ProvisionsAdmitted` continuation emitted below —
-        // `drive_fetch_admission` translates that into
-        // `FetchInput::Admitted`, which counts toward
-        // `record_fetch_completed`. Explicit `AbandonFetch` is reserved
+        // Clear the expectation tracker so the in-flight fallback fetch
+        // (if any) is drained — once one batch verifies the BFT
+        // expectation is satisfied. The `ProvisionsAdmitted` continuation
+        // emitted below drives that drain via `FetchInput::Admitted` in
+        // `drive_fetch_admission`. Explicit `AbandonFetch` is reserved
         // for paths where no admission event fires (orphan cleanup in
         // `on_block_committed`).
+        //
+        // The matching header stays in `self.headers` until
+        // `drop_past_deadline` evicts it alongside the pipeline's
+        // verified entry. Source-shard validators can broadcast distinct
+        // Provisions batches for the same `(source_shard, source_height,
+        // target_shard)` key — competing rounds, JMT history coverage,
+        // proof generation order — and any of them may be the one a
+        // remote proposer later commits. Keeping the header lets every
+        // distinct batch verify against it, so the pending-block lookup
+        // can find whichever hash the proposer committed.
         if let Some(header) = committed_header {
             let shard = header.shard_group_id();
             let height = header.height();
-            let key = (shard, height);
-
-            if self.expected.on_provisions_verified(shard, height) {
-                self.headers.remove(key);
-            }
+            self.expected.on_provisions_verified(shard, height);
         }
 
         if !valid {
@@ -556,6 +560,24 @@ impl ProvisionCoordinator {
             return actions;
         };
         let source_block_ts = header.qc().weighted_timestamp();
+        let provisions_hash = provisions.hash();
+
+        // The verify path is async: the action was dispatched at receipt,
+        // before the same batch may have been committed in another block.
+        // Re-enqueueing a tombstoned batch lets the proposer re-include it,
+        // and peers reject the proposal at the BFT dedup gate ("already
+        // committed within its retention window"), forcing a view change.
+        // The receipt-side tombstone check (`on_state_provisions_received`)
+        // only catches arrivals that haven't started verifying yet — this
+        // catches the verify-completes-after-commit race.
+        if self.committed_tombstones.contains(&provisions_hash) {
+            debug!(
+                source_shard = source_shard.inner(),
+                provisions_hash = ?provisions_hash,
+                "Dropping post-commit verify result — batch already committed"
+            );
+            return actions;
+        }
 
         let provisions = self.pipeline.insert_verified(provisions, source_block_ts);
 
@@ -1894,7 +1916,13 @@ mod tests {
     }
 
     #[test]
-    fn test_header_dropped_on_batch_verification() {
+    fn test_header_retained_after_first_batch_verification() {
+        // Source-shard validators can broadcast distinct `Provisions` batches
+        // for the same `(source_shard, source_height, target_shard)` key —
+        // competing rounds, JMT history coverage, proof generation order.
+        // Each verifies against the same remote header, and any of them may
+        // be the one a remote proposer later commits. The header must stay
+        // available so a second-arriving batch can verify against it.
         let topology = make_test_topology(ShardGroupId::new(0));
         let mut coordinator = ProvisionCoordinator::new();
 
@@ -1926,8 +1954,9 @@ mod tests {
 
         assert_eq!(
             coordinator.verified_remote_header_count(),
-            0,
-            "Header must be dropped once its provisions is verified"
+            1,
+            "Header must stay until retention deadline so additional batches \
+             for the same source key can verify against it"
         );
     }
 

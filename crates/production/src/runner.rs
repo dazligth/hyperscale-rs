@@ -393,14 +393,22 @@ impl ProductionRunnerBuilder {
 
         // Recovery state is read from the primary shard's storage.
         let recovered = primary_storage.load_recovered_state();
-        let provision_store = Arc::new(ProvisionStore::new());
 
-        // One `TxStore` + `ExecCertStore` + `FinalizedWaveStore` per
-        // hosted shard, shared across every same-shard vnode and into the
-        // `IoLoop`'s `SharedCaches`. Determinism guarantees same-shard
-        // vnodes admit identical sets, but co-owning the stores makes the
-        // canonical view explicit and gives the request/sync handlers one
-        // place to read.
+        // One `ProvisionStore` + `TxStore` + `ExecCertStore` +
+        // `FinalizedWaveStore` per hosted shard, shared across every same-
+        // shard vnode and into the `IoLoop`'s `SharedCaches`. Determinism
+        // guarantees same-shard vnodes admit identical sets, but co-owning
+        // the stores makes the canonical view explicit and gives the
+        // request/sync handlers one place to read. Per-shard scoping
+        // matters for `ProvisionStore`: under cross-shard packing the
+        // co-hosted source-shard's `OutboundProvisionTracker` evicts on
+        // every acknowledged EC, and a host-wide store lets that eviction
+        // delete entries the inbound coordinator on the target shard
+        // still needs to verify proposals against.
+        let provision_stores: HashMap<ShardGroupId, Arc<ProvisionStore>> = local_shards
+            .iter()
+            .map(|s| (*s, Arc::new(ProvisionStore::new())))
+            .collect();
         let tx_stores: HashMap<ShardGroupId, Arc<TxStore>> = local_shards
             .iter()
             .map(|s| (*s, Arc::new(TxStore::new())))
@@ -418,6 +426,11 @@ impl ProductionRunnerBuilder {
             .into_iter()
             .map(|cfg| {
                 let shard = cfg.topology.snapshot().local_shard();
+                let provision_store = Arc::clone(
+                    provision_stores
+                        .get(&shard)
+                        .expect("hosted shard derived from vnodes"),
+                );
                 let tx_store = Arc::clone(
                     tx_stores
                         .get(&shard)
@@ -439,7 +452,7 @@ impl ProductionRunnerBuilder {
                     recovered.clone(),
                     self.mempool_config.clone(),
                     self.provision_config,
-                    Arc::clone(&provision_store),
+                    provision_store,
                     tx_store,
                     exec_cert_store,
                     finalized_wave_store,
