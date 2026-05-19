@@ -42,34 +42,45 @@ impl SubmissionResult {
     }
 }
 
-/// Response from node status endpoint.
+/// Response from node status endpoint. Process-level fields plus a list of
+/// per-hosted-vnode entries.
 #[allow(missing_docs)] // flat status readouts; field names are the documentation
 #[derive(Debug, Deserialize)]
 pub struct NodeStatusResponse {
-    pub validator_id: u32,
-    pub shard: u64,
     #[serde(default)]
     pub num_shards: u64,
-    #[serde(default)]
-    pub block_height: u64,
-    #[serde(default)]
-    pub view: u64,
     #[serde(default)]
     pub connected_peers: usize,
     #[serde(default)]
     pub uptime_secs: u64,
     #[serde(default)]
     pub version: String,
+    #[serde(default)]
+    pub vnodes: Vec<VnodeStatusEntry>,
 }
 
-/// Simplified node status.
+/// Per-vnode status entry inside [`NodeStatusResponse::vnodes`].
+#[allow(missing_docs)] // flat status readouts; field names are the documentation
+#[derive(Debug, Deserialize)]
+pub struct VnodeStatusEntry {
+    pub validator_id: u32,
+    pub shard: u64,
+    #[serde(default)]
+    pub block_height: u64,
+    #[serde(default)]
+    pub view: u64,
+}
+
+/// Simplified node status — process summary collapsed over every hosted vnode.
+///
+/// `min_block_height` is the slowest hosted vnode's committed height — the
+/// relevant signal for "have all of this host's vnodes made progress?".
 #[allow(missing_docs)] // flat status readouts; field names are the documentation
 #[derive(Debug)]
 pub struct NodeStatus {
-    pub validator_id: u32,
-    pub shard: u64,
-    pub block_height: u64,
     pub connected_peers: usize,
+    pub vnode_count: usize,
+    pub min_block_height: u64,
 }
 
 /// Response from transaction status endpoint.

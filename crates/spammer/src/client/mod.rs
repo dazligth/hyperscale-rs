@@ -73,6 +73,11 @@ impl RpcClient {
 
     /// Get node status.
     ///
+    /// Collapses the per-vnode entries into a process-level summary. Reports
+    /// the minimum committed height across hosted vnodes so a multi-vnode
+    /// host that's only producing for one of its shards still looks "behind"
+    /// to consumers polling for readiness.
+    ///
     /// # Errors
     ///
     /// Returns [`RpcError::Http`] for any HTTP-level failure.
@@ -86,11 +91,17 @@ impl RpcClient {
 
         let status: NodeStatusResponse = response.json().await.map_err(RpcError::Http)?;
 
+        let min_block_height = status
+            .vnodes
+            .iter()
+            .map(|v| v.block_height)
+            .min()
+            .unwrap_or(0);
+
         Ok(NodeStatus {
-            validator_id: status.validator_id,
-            shard: status.shard,
-            block_height: status.block_height,
             connected_peers: status.connected_peers,
+            vnode_count: status.vnodes.len(),
+            min_block_height,
         })
     }
 

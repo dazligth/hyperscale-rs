@@ -10,6 +10,7 @@ use crossbeam::channel::Sender;
 use hyperscale_node::io_loop::ShardEvent;
 use hyperscale_types::{InFlightCount, ShardGroupId, TransactionStatus, TxHash};
 use quick_cache::sync::Cache as QuickCache;
+use serde::{Deserialize, Serialize};
 
 use crate::status::SyncStatus;
 
@@ -106,17 +107,40 @@ impl Default for MempoolSnapshot {
 }
 
 /// Mutable node status state updated by the runner.
+///
+/// Process-level fields (`num_shards`, `connected_peers`) sit at the top;
+/// per-vnode readouts live in `vnodes`, sorted by `validator_id` for stable
+/// output. Multi-vnode hosts surface every hosted vnode; single-vnode hosts
+/// produce a one-element `vnodes` vec.
 #[allow(missing_docs)] // flat readouts; field names are the documentation
 #[derive(Debug, Clone, Default)]
 pub struct NodeStatusState {
+    pub num_shards: u64,
+    pub connected_peers: usize,
+    pub vnodes: Vec<VnodeStatusEntry>,
+}
+
+/// Per-hosted-vnode status entry. Mirrors the wire shape exposed under
+/// `vnodes[]` in the `/api/v1/status` response.
+#[allow(missing_docs)] // flat readouts; field names are the documentation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VnodeStatusEntry {
     pub validator_id: u64,
     pub shard: u64,
-    pub num_shards: u64,
     pub block_height: u64,
     pub view: u64,
-    pub connected_peers: usize,
     /// Current JMT state root hash (hex-encoded).
     pub state_root_hash: String,
+    pub mempool: VnodeMempoolStats,
+}
+
+/// Per-vnode mempool counts, embedded in each [`VnodeStatusEntry`].
+#[allow(missing_docs)] // flat readouts; field names are the documentation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VnodeMempoolStats {
+    pub pending_count: usize,
+    pub in_flight_count: usize,
+    pub total_count: usize,
 }
 
 #[cfg(test)]

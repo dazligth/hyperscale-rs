@@ -37,6 +37,7 @@ pub struct ShardStatus {
 #[derive(Debug, Clone)]
 #[allow(missing_docs)] // flat readouts; field names are the documentation
 pub struct VnodeStatus {
+    pub shard: ShardGroupId,
     pub committed_height: BlockHeight,
     pub view: u64,
     pub state_root: StateRoot,
@@ -125,6 +126,7 @@ where
                 vnodes.insert(
                     vnode.validator_id,
                     VnodeStatus {
+                        shard,
                         committed_height: state.bft().committed_height(),
                         view: state.bft().view().inner(),
                         state_root: state.last_committed_jmt_root(),

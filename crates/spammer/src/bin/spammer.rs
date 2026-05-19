@@ -372,7 +372,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let mut all_ready = true;
                     for client in &clients {
                         match client.get_status().await {
-                            Ok(status) if status.block_height > 0 => {}
+                            Ok(status) if status.vnode_count > 0 && status.min_block_height > 0 => {
+                            }
                             _ => {
                                 all_ready = false;
                                 break;

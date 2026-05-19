@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub use super::state::VnodeStatusEntry;
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Health & Readiness
 // ═══════════════════════════════════════════════════════════════════════════
@@ -35,28 +37,21 @@ pub struct ReadyResponse {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Response for `/api/v1/status` endpoint.
+///
+/// Process-level fields sit at the top; one [`VnodeStatusEntry`] per hosted
+/// vnode lives in `vnodes`, sorted by `validator_id` for stable output.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeStatusResponse {
-    /// Validator ID of this node.
-    pub validator_id: u64,
-    /// Shard group this node belongs to.
-    pub shard: u64,
     /// Total number of shards in the network.
     pub num_shards: u64,
-    /// Current block height.
-    pub block_height: u64,
-    /// Current view number.
-    pub view: u64,
     /// Number of connected peers.
     pub connected_peers: usize,
     /// Node uptime in seconds.
     pub uptime_secs: u64,
     /// Version string.
     pub version: String,
-    /// Current JMT state root hash (hex-encoded).
-    pub state_root_hash: String,
-    /// Mempool statistics.
-    pub mempool: MempoolStatusResponse,
+    /// Per-hosted-vnode status entries.
+    pub vnodes: Vec<VnodeStatusEntry>,
 }
 
 /// Response for `/api/v1/sync` endpoint.

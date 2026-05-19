@@ -414,7 +414,7 @@ impl Spammer {
 
             for client in self.clients.iter() {
                 match client.get_status().await {
-                    Ok(status) if status.block_height > 0 => {}
+                    Ok(status) if status.vnode_count > 0 && status.min_block_height > 0 => {}
                     _ => {
                         all_ready = false;
                         break;

@@ -50,7 +50,9 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::rpc::{MempoolSnapshot, NodeStatusResponse, NodeStatusState};
+    use crate::rpc::{
+        MempoolSnapshot, NodeStatusResponse, NodeStatusState, VnodeMempoolStats, VnodeStatusEntry,
+    };
     use crate::status::SyncStatus;
 
     fn create_test_state() -> RpcState {
@@ -59,13 +61,20 @@ mod tests {
             ready: Arc::new(AtomicBool::new(true)),
             sync_status: Arc::new(ArcSwap::new(Arc::new(SyncStatus::default()))),
             node_status: Arc::new(ArcSwap::new(Arc::new(NodeStatusState {
-                validator_id: 1,
-                shard: 0,
                 num_shards: 2,
-                block_height: 100,
-                view: 100,
                 connected_peers: 5,
-                state_root_hash: "0".repeat(64),
+                vnodes: vec![VnodeStatusEntry {
+                    validator_id: 1,
+                    shard: 0,
+                    block_height: 100,
+                    view: 100,
+                    state_root_hash: "0".repeat(64),
+                    mempool: VnodeMempoolStats {
+                        pending_count: 0,
+                        in_flight_count: 0,
+                        total_count: 0,
+                    },
+                }],
             }))),
             tx_submission_tx,
             start_time: Instant::now(),

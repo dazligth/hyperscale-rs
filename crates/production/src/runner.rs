@@ -86,7 +86,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{MissedTickBehavior, interval, sleep};
 use tracing::{debug, info, warn};
 
-use crate::rpc::{MempoolSnapshot, NodeStatusState};
+use crate::rpc::{MempoolSnapshot, NodeStatusState, VnodeMempoolStats, VnodeStatusEntry};
 use crate::status::SyncStatus;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1117,25 +1117,41 @@ fn wall_clock_local() -> LocalTimestamp {
 
 /// Push a [`NodeStatusSnapshot`] into the shared RPC state objects.
 ///
-/// Surfaces one status per node via [`NodeStatusSnapshot::primary`].
+/// `node_status` carries one [`VnodeStatusEntry`] per hosted vnode (sorted
+/// by `validator_id` for stable output). `sync_status` and `mempool_snapshot`
+/// stay primary-driven for now — `/sync` and `/mempool` plus the
+/// submission-time backpressure check are still single-readout surfaces.
 fn update_rpc_state(config: &PinnedLoopConfig, snapshot: &NodeStatusSnapshot) {
+    if let Some(ref rpc_status) = config.rpc_status {
+        let current = rpc_status.load();
+        let mut vnodes: Vec<VnodeStatusEntry> = snapshot
+            .vnodes
+            .iter()
+            .map(|(vid, v)| VnodeStatusEntry {
+                validator_id: vid.inner(),
+                shard: v.shard.inner(),
+                block_height: v.committed_height.inner(),
+                view: v.view,
+                state_root_hash: hex_encode(v.state_root.as_bytes()),
+                mempool: VnodeMempoolStats {
+                    pending_count: v.mempool_pending,
+                    in_flight_count: v.mempool_in_flight,
+                    total_count: v.mempool_total,
+                },
+            })
+            .collect();
+        vnodes.sort_by_key(|v| v.validator_id);
+        rpc_status.store(Arc::new(NodeStatusState {
+            num_shards: current.num_shards,
+            // Preserve connected_peers — written by collect_metrics.
+            connected_peers: current.connected_peers,
+            vnodes,
+        }));
+    }
+
     let Some((shard, vnode)) = snapshot.primary() else {
         return;
     };
-
-    if let Some(ref rpc_status) = config.rpc_status {
-        let current = rpc_status.load();
-        rpc_status.store(Arc::new(NodeStatusState {
-            block_height: vnode.committed_height.inner(),
-            view: vnode.view,
-            state_root_hash: hex_encode(vnode.state_root.as_bytes()),
-            // Preserve fields set by other writers (runner sets connected_peers)
-            validator_id: current.validator_id,
-            shard: current.shard,
-            num_shards: current.num_shards,
-            connected_peers: current.connected_peers,
-        }));
-    }
 
     if let Some(ref sync_status) = config.sync_status {
         let current = sync_status.load();

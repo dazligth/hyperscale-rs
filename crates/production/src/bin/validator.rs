@@ -1218,15 +1218,11 @@ async fn async_main(cli: Cli, config: ValidatorConfig) -> Result<()> {
     }
 
     // Shared RPC state objects used by both runner and RPC server. ArcSwap gives
-    // HTTP handlers lock-free reads. Multi-vnode hosts surface the *primary*
-    // (first-listed) vnode's identity; per-vnode RPC fan-out is a later
-    // deliverable.
-    let primary = &config.vnodes[0];
+    // HTTP handlers lock-free reads. Per-vnode entries are filled in by the
+    // runner's first status tick; until then `vnodes` is empty.
     let rpc_ready = Arc::new(AtomicBool::new(false));
     let rpc_sync_status = Arc::new(ArcSwap::new(Arc::new(SyncStatus::default())));
     let rpc_node_status = Arc::new(ArcSwap::new(Arc::new(NodeStatusState {
-        validator_id: primary.validator_id,
-        shard: primary.shard,
         num_shards: config.node.num_shards,
         ..Default::default()
     })));

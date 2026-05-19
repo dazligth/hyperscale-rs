@@ -100,26 +100,16 @@ pub async fn metrics_handler() -> impl IntoResponse {
 /// Handler for `GET /api/v1/status` - node status.
 pub async fn status_handler(State(state): State<RpcState>) -> impl IntoResponse {
     let node_status = state.node_status.load();
-    let mempool_snapshot = state.mempool_snapshot.load();
     let uptime = state.start_time.elapsed().as_secs();
 
     Json(NodeStatusResponse {
-        validator_id: node_status.validator_id,
-        shard: node_status.shard,
         num_shards: node_status.num_shards,
-        block_height: node_status.block_height,
-        view: node_status.view,
         connected_peers: node_status.connected_peers,
         uptime_secs: uptime,
         version: option_env!("HYPERSCALE_VERSION")
             .unwrap_or("localdev")
             .to_string(),
-        state_root_hash: node_status.state_root_hash.clone(),
-        mempool: MempoolStatusResponse {
-            pending_count: mempool_snapshot.pending_count,
-            in_flight_count: mempool_snapshot.in_flight_count,
-            total_count: mempool_snapshot.total_count,
-        },
+        vnodes: node_status.vnodes.clone(),
     })
 }
 
