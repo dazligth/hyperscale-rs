@@ -225,7 +225,7 @@ impl Network for SimNetworkAdapter {
         self.registry.register_request(shard, handler);
     }
 
-    fn request<R: Request + 'static>(
+    fn request<R: Request + Clone + 'static>(
         &self,
         shard: ShardGroupId,
         preferred_peer: Option<ValidatorId>,

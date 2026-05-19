@@ -78,6 +78,10 @@ impl NetworkMessage for GetBlockRequest {
 /// `GetBlockRequest` expects `GetBlockResponse`.
 impl Request for GetBlockRequest {
     type Response = GetBlockResponse;
+
+    fn is_empty_response(response: &Self::Response) -> bool {
+        response.certified.is_none()
+    }
 }
 
 #[cfg(test)]

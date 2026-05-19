@@ -42,6 +42,10 @@ impl NetworkMessage for GetRemoteHeadersRequest {
 
 impl Request for GetRemoteHeadersRequest {
     type Response = GetRemoteHeadersResponse;
+
+    fn is_empty_response(response: &Self::Response) -> bool {
+        response.headers.is_empty()
+    }
 }
 
 #[cfg(test)]

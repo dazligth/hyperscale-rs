@@ -37,6 +37,10 @@ impl NetworkMessage for GetFinalizedWavesRequest {
 
 impl Request for GetFinalizedWavesRequest {
     type Response = GetFinalizedWavesResponse;
+
+    fn is_empty_response(response: &Self::Response) -> bool {
+        response.waves.is_empty()
+    }
 }
 
 #[cfg(test)]

@@ -31,6 +31,10 @@ impl NetworkMessage for GetExecutionCertsRequest {
 
 impl Request for GetExecutionCertsRequest {
     type Response = GetExecutionCertsResponse;
+
+    fn is_empty_response(response: &Self::Response) -> bool {
+        response.certificates.as_ref().is_none_or(Vec::is_empty)
+    }
 }
 
 #[cfg(test)]

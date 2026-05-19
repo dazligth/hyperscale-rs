@@ -44,6 +44,10 @@ impl NetworkMessage for GetTransactionsRequest {
 /// Type-safe request/response pairing.
 impl Request for GetTransactionsRequest {
     type Response = GetTransactionsResponse;
+
+    fn is_empty_response(response: &Self::Response) -> bool {
+        response.transactions.is_empty()
+    }
 }
 
 #[cfg(test)]

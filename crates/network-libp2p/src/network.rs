@@ -70,7 +70,9 @@ pub struct Libp2pNetwork {
     /// requests. Updated lock-free via [`Self::update_topology`].
     topology: Arc<ArcSwap<TopologySnapshot>>,
     /// Count of `PeerUnreachable` errors (cold-start diagnostics).
-    peer_unreachable_count: AtomicUsize,
+    /// `Arc` so the wire-fetch path can read it from a spawned task that
+    /// the local-serve fallback hands off to.
+    peer_unreachable_count: Arc<AtomicUsize>,
     /// Persistent per-peer notification stream pool.
     notify_pool: NotifyStreamPool,
     /// Inbound router handle — spawned eagerly at construction.
@@ -109,7 +111,7 @@ impl Libp2pNetwork {
             registry,
             local_shards,
             topology,
-            peer_unreachable_count: AtomicUsize::new(0),
+            peer_unreachable_count: Arc::new(AtomicUsize::new(0)),
             notify_pool,
             _inbound_router: inbound_router,
         }
@@ -258,7 +260,8 @@ impl Network for Libp2pNetwork {
         self.registry.register_request(shard, handler);
     }
 
-    fn request<R: Request + 'static>(
+    #[allow(clippy::too_many_lines)] // single dispatch over the request lifecycle (local-serve → wire)
+    fn request<R: Request + Clone + 'static>(
         &self,
         shard: ShardGroupId,
         preferred_peer: Option<ValidatorId>,
@@ -266,99 +269,95 @@ impl Network for Libp2pNetwork {
         class_override: Option<MessageClass>,
         on_response: Box<dyn FnOnce(Result<R::Response, RequestError>) -> ResponseVerdict + Send>,
     ) {
-        // Local-serve fast path: if `shard` is hosted on-process and a
-        // request handler is registered for it, dispatch to the typed
-        // handler directly. Skips libp2p, skips SBOR round-trip on both
-        // request and response — `Arc`-shared payloads stay shared
-        // instead of being deep-copied through bytes. Cross-shard
-        // hosting can answer peers it could not otherwise reach (e.g.
-        // when it's the only member of `shard`'s committee on this
-        // host).
-        if self.local_shards.contains(&shard) {
-            let registry = Arc::clone(&self.registry);
-            // Run off the pinned thread — request handlers may take
-            // locks or block on condvars (the provision-dedup handler
-            // is the canonical example).
-            self.tokio_handle.spawn(async move {
-                if let Some(response) = registry.local_dispatch_request::<R>(shard, request) {
-                    let _ = on_response(Ok(response));
+        // Capture state for the spawned task: local-serve attempt + wire
+        // fallback both run there. Local-serve runs off the pinned thread
+        // because handlers may take locks or block on condvars (the
+        // provision-dedup handler is the canonical example).
+        let registry = self
+            .local_shards
+            .contains(&shard)
+            .then(|| Arc::clone(&self.registry));
+        let topology = Arc::clone(&self.topology);
+        let adapter = Arc::clone(&self.adapter);
+        let rm = Arc::clone(&self.request_manager);
+        let peer_unreachable_count = Arc::clone(&self.peer_unreachable_count);
+
+        self.tokio_handle.spawn(async move {
+            // Step 1 — local-serve if we host the shard. A non-empty hit
+            // is terminal; an empty hit (e.g. our co-located vnode's
+            // `ExecCertStore` hasn't admitted the wave yet) falls through
+            // to the remote committee. Without this fall-through, a
+            // cross-shard packed host would never ask any other peer.
+            if let Some(registry) = registry {
+                let local_request = request.clone();
+                if let Some(response) = registry.local_dispatch_request::<R>(shard, local_request) {
+                    if !R::is_empty_response(&response) {
+                        let _ = on_response(Ok(response));
+                        return;
+                    }
                 } else {
-                    // Shouldn't happen: we host the shard but no handler is
-                    // registered. Treat as the same error class the wire
-                    // path would surface.
                     warn!(
                         request_type = R::message_type_id(),
                         shard = shard.inner(),
-                        "Local-serve: no handler registered for hosted shard"
+                        "Local-serve: no handler registered for hosted shard — falling through"
                     );
-                    let _ = on_response(Err(RequestError::NoPeers));
                 }
-            });
-            return;
-        }
-
-        let type_id = R::message_type_id();
-
-        // Resolve `shard` → committee → libp2p PeerIds via the topology
-        // snapshot and the adapter's validator-bind registry. Filter out
-        // every validator-id this host carries — we never round-trip a
-        // request through our own peer.
-        let topology = self.topology.load();
-        let committee = topology.committee_for_shard(shard);
-        let self_ids: HashSet<ValidatorId> =
-            self.adapter.local_validator_ids().iter().copied().collect();
-        let resolved_peers: Vec<PeerId> = committee
-            .iter()
-            .filter(|v| !self_ids.contains(v))
-            .filter_map(|&v| self.adapter.peer_for_validator(v))
-            .collect();
-
-        if resolved_peers.is_empty() {
-            let count = self.peer_unreachable_count.fetch_add(1, Ordering::Relaxed);
-            if count == 0 {
-                info!(
-                    request_type = type_id,
-                    shard = shard.inner(),
-                    committee_size = committee.len(),
-                    "No validator-to-peer mappings resolved yet \
-                     (expected during cold start, protocol-level retries will resolve)"
-                );
-            } else if count.is_multiple_of(100) {
-                warn!(
-                    request_type = type_id,
-                    shard = shard.inner(),
-                    total_unreachable = count,
-                    "PeerUnreachable errors continue (validator-bind still in progress)"
-                );
             }
-            // Verdict ignored on the Err path — the network already recorded
-            // the failure (or there's nothing to penalize).
-            let _ = on_response(Err(RequestError::PeerUnreachable(
-                preferred_peer.unwrap_or(ValidatorId::new(0)),
-            )));
-            return;
-        }
 
-        let preferred_libp2p = preferred_peer.and_then(|v| self.validator_peer_id(v));
-        let class = class_override.unwrap_or_else(R::class);
+            // Step 2 — wire fetch. Resolve shard → committee → PeerIds
+            // via the topology snapshot and the adapter's validator-bind
+            // registry. Filter out every validator-id this host carries —
+            // we never round-trip a request through our own peer.
+            let type_id = R::message_type_id();
+            let topology_snapshot = topology.load();
+            let committee = topology_snapshot.committee_for_shard(shard);
+            let self_ids: HashSet<ValidatorId> =
+                adapter.local_validator_ids().iter().copied().collect();
+            let resolved_peers: Vec<PeerId> = committee
+                .iter()
+                .filter(|v| !self_ids.contains(v))
+                .filter_map(|&v| adapter.peer_for_validator(v))
+                .collect();
 
-        // SBOR-encode for the wire — the local-serve fast path above
-        // never reaches here, so the encode cost is only paid when we
-        // actually go out to a peer.
-        let request_bytes = match basic_encode(&request) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                warn!(error = ?e, "Libp2pNetwork: failed to encode request");
-                let _ = on_response(Err(RequestError::PeerError(format!("encode error: {e:?}"))));
+            if resolved_peers.is_empty() {
+                let count = peer_unreachable_count.fetch_add(1, Ordering::Relaxed);
+                if count == 0 {
+                    info!(
+                        request_type = type_id,
+                        shard = shard.inner(),
+                        committee_size = committee.len(),
+                        "No validator-to-peer mappings resolved yet \
+                         (expected during cold start, protocol-level retries will resolve)"
+                    );
+                } else if count.is_multiple_of(100) {
+                    warn!(
+                        request_type = type_id,
+                        shard = shard.inner(),
+                        total_unreachable = count,
+                        "PeerUnreachable errors continue (validator-bind still in progress)"
+                    );
+                }
+                let _ = on_response(Err(RequestError::PeerUnreachable(
+                    preferred_peer.unwrap_or(ValidatorId::new(0)),
+                )));
                 return;
             }
-        };
 
-        // Pass type_id + SBOR bytes separately — the transport writes the typed frame.
-        let description = format!("{}({}B)", type_id, request_bytes.len());
-        let rm = self.request_manager.clone();
+            let preferred_libp2p = preferred_peer.and_then(|v| adapter.peer_for_validator(v));
+            let class = class_override.unwrap_or_else(R::class);
 
-        self.tokio_handle.spawn(async move {
+            let request_bytes = match basic_encode(&request) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    warn!(error = ?e, "Libp2pNetwork: failed to encode request");
+                    let _ =
+                        on_response(Err(RequestError::PeerError(format!("encode error: {e:?}"))));
+                    return;
+                }
+            };
+
+            let description = format!("{}({}B)", type_id, request_bytes.len());
+
             match rm
                 .request(
                     &resolved_peers,
@@ -372,9 +371,6 @@ impl Network for Libp2pNetwork {
                 .await
             {
                 Ok((peer, bytes)) => {
-                    // RequestManager returns decompressed SBOR response bytes.
-                    // The serving peer is captured so we can deprioritize it
-                    // in the health tracker if the app rejects the response.
                     let verdict = match basic_decode::<R::Response>(&bytes) {
                         Ok(response) => on_response(Ok(response)),
                         Err(e) => {

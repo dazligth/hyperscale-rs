@@ -256,7 +256,7 @@ pub trait Network: Send + Sync + 'static {
     /// static [`NetworkMessage::class()`]. Bimodal types like
     /// `GetTransactionsRequest` use this to differentiate hot-path
     /// pending-block fetches from sync / DA-backfill fetches.
-    fn request<R: Request + 'static>(
+    fn request<R: Request + Clone + 'static>(
         &self,
         shard: ShardGroupId,
         preferred_peer: Option<ValidatorId>,

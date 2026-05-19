@@ -237,4 +237,23 @@ pub trait GossipMessage: NetworkMessage + Clone {
 pub trait Request: NetworkMessage {
     /// The response type for this request.
     type Response: NetworkMessage;
+
+    /// Whether `response` indicates the responder had nothing matching
+    /// the request — e.g. a fetch hit a store that hasn't admitted the
+    /// requested key yet.
+    ///
+    /// Used by the network's local-serve short-circuit (a host that
+    /// carries a vnode in the target shard answers without going to the
+    /// wire). Returning `true` tells the caller to fall through to the
+    /// remote committee instead of treating the empty local answer as
+    /// terminal — without this, a cross-shard packed host that misses
+    /// in its co-located shard's store never asks any other peer.
+    ///
+    /// Default: `false` (every response is meaningful). Fetch-style
+    /// requests (`Get*Request`) where the responder may legitimately
+    /// not hold the data should override.
+    #[must_use]
+    fn is_empty_response(_response: &Self::Response) -> bool {
+        false
+    }
 }

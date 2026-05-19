@@ -32,6 +32,10 @@ impl NetworkMessage for GetProvisionsRequest {
 
 impl Request for GetProvisionsRequest {
     type Response = GetProvisionResponse;
+
+    fn is_empty_response(response: &Self::Response) -> bool {
+        response.provisions.is_none()
+    }
 }
 
 #[cfg(test)]
