@@ -2,9 +2,7 @@
 
 use sbor::prelude::BasicSbor;
 
-use crate::{
-    BlockHeight, Bls12381G2Signature, MessageClass, NetworkMessage, ShardMessage, ValidatorId,
-};
+use crate::{BlockHeight, Bls12381G2Signature, MessageClass, NetworkMessage, ValidatorId};
 
 /// Broadcast that validator has caught up to network head and is ready to participate.
 #[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
@@ -45,8 +43,6 @@ impl NetworkMessage for SyncCompleteAnnouncement {
         MessageClass::Recovery
     }
 }
-
-impl ShardMessage for SyncCompleteAnnouncement {}
 
 #[cfg(test)]
 mod tests {

@@ -75,7 +75,7 @@ async fn test_network_adapter_starts() {
         keypair,
         vec![(validator_id, bind_sig)],
         HashSet::from([shard]),
-        Arc::new(HandlerRegistry::new()),
+        Arc::new(HandlerRegistry::default()),
         topo,
     )
     .unwrap();
@@ -109,7 +109,7 @@ async fn test_two_node_connection() {
         keypair1,
         vec![(ValidatorId::new(0), bind_sig1)],
         HashSet::from([ShardGroupId::new(0)]),
-        Arc::new(HandlerRegistry::new()),
+        Arc::new(HandlerRegistry::default()),
         topo1,
     )
     .unwrap();
@@ -134,7 +134,7 @@ async fn test_two_node_connection() {
         keypair2,
         vec![(ValidatorId::new(1), bind_sig2)],
         HashSet::from([ShardGroupId::new(0)]),
-        Arc::new(HandlerRegistry::new()),
+        Arc::new(HandlerRegistry::default()),
         topo2,
     )
     .unwrap();
@@ -184,7 +184,7 @@ async fn test_topic_subscription() {
         keypair,
         vec![(ValidatorId::new(0), bind_sig)],
         HashSet::from([ShardGroupId::new(0)]),
-        Arc::new(HandlerRegistry::new()),
+        Arc::new(HandlerRegistry::default()),
         topo,
     )
     .unwrap();
@@ -221,7 +221,7 @@ async fn test_validator_bind_success() {
         keypair0,
         vec![(ValidatorId::new(0), bind_sig0)],
         HashSet::from([ShardGroupId::new(0)]),
-        Arc::new(HandlerRegistry::new()),
+        Arc::new(HandlerRegistry::default()),
         fixtures.validator_key_map(0),
     )
     .unwrap();
@@ -244,7 +244,7 @@ async fn test_validator_bind_success() {
         keypair1,
         vec![(ValidatorId::new(1), bind_sig1)],
         HashSet::from([ShardGroupId::new(0)]),
-        Arc::new(HandlerRegistry::new()),
+        Arc::new(HandlerRegistry::default()),
         fixtures.validator_key_map(1),
     )
     .unwrap();
@@ -296,7 +296,7 @@ async fn test_validator_bind_rejects_wrong_key() {
         keypair0,
         vec![(ValidatorId::new(0), bind_sig0)],
         HashSet::from([ShardGroupId::new(0)]),
-        Arc::new(HandlerRegistry::new()),
+        Arc::new(HandlerRegistry::default()),
         fixtures.validator_key_map(0),
     )
     .unwrap();
@@ -321,7 +321,7 @@ async fn test_validator_bind_rejects_wrong_key() {
         keypair1,
         vec![(ValidatorId::new(1), wrong_signing_key)],
         HashSet::from([ShardGroupId::new(0)]),
-        Arc::new(HandlerRegistry::new()),
+        Arc::new(HandlerRegistry::default()),
         fixtures.validator_key_map(1),
     )
     .unwrap();
@@ -373,7 +373,7 @@ async fn test_validator_bind_evicted_on_disconnect() {
         keypair0,
         vec![(ValidatorId::new(0), bind_sig0)],
         HashSet::from([ShardGroupId::new(0)]),
-        Arc::new(HandlerRegistry::new()),
+        Arc::new(HandlerRegistry::default()),
         fixtures.validator_key_map(0),
     )
     .unwrap();
@@ -396,7 +396,7 @@ async fn test_validator_bind_evicted_on_disconnect() {
         keypair1,
         vec![(ValidatorId::new(1), bind_sig1)],
         HashSet::from([ShardGroupId::new(0)]),
-        Arc::new(HandlerRegistry::new()),
+        Arc::new(HandlerRegistry::default()),
         fixtures.validator_key_map(1),
     )
     .unwrap();

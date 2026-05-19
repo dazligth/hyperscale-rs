@@ -14,10 +14,10 @@ use std::sync::{Arc, Mutex};
 
 use hyperscale_network::{
     GossipHandler, HandlerRegistry, Network, NotificationHandler, RequestError, RequestHandler,
-    ResponseVerdict, TopicScope, compression,
+    ResponseVerdict, compression,
 };
 use hyperscale_types::{
-    MessageClass, NetworkMessage, Request, ShardGroupId, ShardMessage, ValidatorId,
+    GossipMessage, MessageClass, NetworkMessage, Request, ShardGroupId, ValidatorId,
 };
 use sbor::{basic_decode, basic_encode};
 
@@ -150,16 +150,17 @@ impl SimNetworkAdapter {
 
 impl Default for SimNetworkAdapter {
     fn default() -> Self {
-        Self::new(Arc::new(HandlerRegistry::new()))
+        Self::new(Arc::new(HandlerRegistry::default()))
     }
 }
 
 impl Network for SimNetworkAdapter {
-    fn broadcast_to_shard<M: ShardMessage + 'static>(&self, shard: ShardGroupId, message: &M) {
+    fn broadcast_to_shard<M: GossipMessage + 'static>(&self, shard: ShardGroupId, message: &M) {
         // Tee to in-process subscribers — the harness's `accept_gossip`
         // skips the publisher's own node (matching gossipsub's no-loop
         // semantics), so colocated vnodes would otherwise miss their
-        // own host's broadcasts. Verdict ignored: we are the publisher.
+        // own host's broadcasts. The registry computes the per-vnode
+        // fan-out from `hosted_shards`.
         let _ = self.registry.local_dispatch_gossip(message, Some(shard));
         let data = compression::compress(
             &basic_encode(message).expect("SimNetworkAdapter: failed to encode message"),
@@ -171,7 +172,7 @@ impl Network for SimNetworkAdapter {
         });
     }
 
-    fn broadcast_global<M: NetworkMessage + 'static>(&self, message: &M) {
+    fn broadcast_global<M: GossipMessage + 'static>(&self, message: &M) {
         let _ = self.registry.local_dispatch_gossip(message, None);
         let data = compression::compress(
             &basic_encode(message).expect("SimNetworkAdapter: failed to encode message"),
@@ -183,13 +184,9 @@ impl Network for SimNetworkAdapter {
         });
     }
 
-    fn register_gossip_handler<M: NetworkMessage + Clone + 'static>(
-        &self,
-        _scope: TopicScope,
-        handler: impl GossipHandler<M>,
-    ) {
-        // Registry owns SBOR decode — just forward.
-        // Scope is irrelevant in simulation (delivery controlled by harness).
+    fn register_gossip_handler<M: GossipMessage + 'static>(&self, handler: impl GossipHandler<M>) {
+        // Registry owns SBOR decode + per-vnode fan-out. Topic scope
+        // is irrelevant in simulation (delivery controlled by harness).
         self.registry.register_gossip(handler);
     }
 
@@ -328,7 +325,7 @@ mod tests {
         use hyperscale_types::network::request::GetBlockRequest;
         use hyperscale_types::network::response::GetBlockResponse;
 
-        let registry = Arc::new(HandlerRegistry::new());
+        let registry = Arc::new(HandlerRegistry::default());
         let adapter = SimNetworkAdapter::new(registry.clone());
         let shard = ShardGroupId::new(0);
 

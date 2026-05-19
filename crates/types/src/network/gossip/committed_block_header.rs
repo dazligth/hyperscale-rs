@@ -4,18 +4,18 @@ use std::sync::Arc;
 
 use sbor::prelude::BasicSbor;
 
+use crate::network::{GossipMessage, TopicScope};
 use crate::{
-    Bls12381G2Signature, CommittedBlockHeader, MessageClass, NetworkMessage, ValidatorId,
-    committed_block_header_message,
+    Bls12381G2Signature, CommittedBlockHeader, MessageClass, NetworkMessage, ShardGroupId,
+    ValidatorId, committed_block_header_message,
 };
 
 /// Gossips a committed block header globally to all shards.
 ///
-/// This is used for the light-client provisions pattern: when a block commits,
-/// the committed header (header + QC) is broadcast globally so remote shards
-/// can verify state roots and validate merkle inclusion proofs for provisions.
-///
-/// Does NOT implement `ShardMessage` — this is a global broadcast.
+/// Used for the light-client provisions pattern: when a block commits,
+/// the committed header (header + QC) is broadcast globally so remote
+/// shards can verify state roots and validate merkle inclusion proofs
+/// for provisions.
 #[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
 pub struct CommittedBlockHeaderGossip {
     /// The committed block header (header + QC).
@@ -47,6 +47,26 @@ impl NetworkMessage for CommittedBlockHeaderGossip {
 
     fn class() -> MessageClass {
         MessageClass::CrossShardProgress
+    }
+}
+
+impl GossipMessage for CommittedBlockHeaderGossip {
+    const SCOPE: TopicScope = TopicScope::Global;
+
+    fn source_shard(&self) -> Option<ShardGroupId> {
+        Some(self.committed_header.header().shard_group_id())
+    }
+
+    fn dedup_key(&self) -> Option<u64> {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        // Hash of the committed header (excludes sender / sender_signature),
+        // so every committee member's copy of the same logical header
+        // collapses to a single key.
+        let mut hasher = DefaultHasher::new();
+        self.committed_header.header().hash().hash(&mut hasher);
+        Some(hasher.finish())
     }
 }
 

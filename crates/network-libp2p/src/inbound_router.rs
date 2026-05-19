@@ -533,7 +533,7 @@ mod tests {
 
     fn make_router(global_cap: usize) -> Arc<InboundRouter> {
         Arc::new(InboundRouter {
-            registry: Arc::new(HandlerRegistry::new()),
+            registry: Arc::new(HandlerRegistry::default()),
             global_semaphore: Arc::new(Semaphore::new(global_cap)),
             per_peer: Arc::new(DashMap::new()),
             per_peer_failures: Arc::new(DashMap::new()),

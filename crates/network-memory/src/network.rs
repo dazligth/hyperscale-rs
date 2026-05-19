@@ -349,8 +349,20 @@ impl SimulatedNetwork {
                 config.validators_per_shard as usize
             }
         };
+        let num_shards = u64::from(config.num_shards);
         let registries = (0..num_hosts)
-            .map(|_| Arc::new(HandlerRegistry::new()))
+            .map(|host_index| {
+                let host_index = u32::try_from(host_index).expect("host_index fits u32");
+                let hosted: HashSet<ShardGroupId> = match config.hosting_mode {
+                    HostingMode::SameShardBundled => {
+                        let hosts_per_shard = config.validators_per_shard / config.vnodes_per_host;
+                        std::iter::once(ShardGroupId::new(u64::from(host_index / hosts_per_shard)))
+                            .collect()
+                    }
+                    HostingMode::CrossShard => (0..num_shards).map(ShardGroupId::new).collect(),
+                };
+                Arc::new(HandlerRegistry::new(Arc::new(hosted)))
+            })
             .collect();
         Self {
             config,

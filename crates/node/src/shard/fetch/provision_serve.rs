@@ -86,7 +86,7 @@ pub fn serve_provision_request(
     // `Jmt::prove` sorts and dedups its keys internally, so we hand it the
     // raw accumulated list.
     let proof = if per_tx.is_empty() {
-        MerkleInclusionProof::dummy()
+        MerkleInclusionProof::new(Vec::new())
     } else if let Some(p) = storage.generate_merkle_proofs(&all_storage_keys, jmt_height) {
         p
     } else {

@@ -12,11 +12,11 @@ use hyperscale_metrics::record_request_retry;
 use hyperscale_network::compression::compress;
 use hyperscale_network::{
     GossipHandler, HandlerRegistry, Network, NotificationHandler, RequestError, RequestHandler,
-    ResponseVerdict, Topic, TopicScope, ValidatorKeyMap,
+    ResponseVerdict, Topic, ValidatorKeyMap,
 };
 use hyperscale_types::{
-    MessageClass, NetworkMessage, Request, ShardGroupId, ShardMessage, TopologySnapshot,
-    ValidatorId,
+    GossipMessage, MessageClass, NetworkMessage, Request, ShardGroupId, TopicScope,
+    TopologySnapshot, ValidatorId,
 };
 use libp2p::PeerId;
 use sbor::{basic_decode, basic_encode};
@@ -135,17 +135,17 @@ impl Network for Libp2pNetwork {
         self.topology.store(snapshot);
     }
 
-    fn broadcast_to_shard<M: ShardMessage + 'static>(&self, shard: ShardGroupId, message: &M) {
+    fn broadcast_to_shard<M: GossipMessage + 'static>(&self, shard: ShardGroupId, message: &M) {
+        debug_assert_eq!(
+            M::SCOPE,
+            TopicScope::Shard,
+            "broadcast_to_shard requires SCOPE = Shard"
+        );
         // Tee to in-process subscribers when we host a vnode in this
         // shard — gossipsub never loops the publication back to the
         // publisher, so colocated vnodes would otherwise miss it. The
-        // shard is supplied to the local dispatcher so the handler
-        // tags the resulting `NodeInput` with the right hosted shard.
-        if self.local_shards.contains(&shard) {
-            // Verdict only matters for forwarding decisions; we're the
-            // publisher so peer-side gossipsub handles that.
-            let _ = self.registry.local_dispatch_gossip(message, Some(shard));
-        }
+        // registry computes the per-vnode fan-out from `hosted_shards`.
+        let _ = self.registry.local_dispatch_gossip(message, Some(shard));
         let topic = Topic::shard(M::message_type_id(), shard);
         let data = compress(&basic_encode(message).expect("SBOR encode failed"));
         if let Err(e) = self.adapter.publish(&topic, data, M::class()) {
@@ -153,11 +153,16 @@ impl Network for Libp2pNetwork {
         }
     }
 
-    fn broadcast_global<M: NetworkMessage + 'static>(&self, message: &M) {
-        // Every host subscribes to the global topic, so always tee
-        // locally; handlers dedup or self-filter their own emissions.
-        // Global-scoped publishes pass `None` as the shard — the
-        // handler extracts any relevant shard from the message body.
+    fn broadcast_global<M: GossipMessage + 'static>(&self, message: &M) {
+        debug_assert_eq!(
+            M::SCOPE,
+            TopicScope::Global,
+            "broadcast_global requires SCOPE = Global"
+        );
+        // Tee to in-process subscribers — the registry fans into every
+        // hosted shard except `M::source_shard`. Gossipsub doesn't loop
+        // self-publishes back, so colocated cross-shard vnodes would
+        // miss this without the local tee.
         let _ = self.registry.local_dispatch_gossip(message, None);
         let topic = Topic::global(M::message_type_id());
         let data = compress(&basic_encode(message).expect("SBOR encode failed"));
@@ -166,18 +171,14 @@ impl Network for Libp2pNetwork {
         }
     }
 
-    fn register_gossip_handler<M: NetworkMessage + Clone + 'static>(
-        &self,
-        scope: TopicScope,
-        handler: impl GossipHandler<M>,
-    ) {
-        // Registry owns SBOR decode — just forward.
+    fn register_gossip_handler<M: GossipMessage + 'static>(&self, handler: impl GossipHandler<M>) {
+        // Registry owns SBOR decode + per-vnode fan-out — just forward.
         self.registry.register_gossip(handler);
 
         // Auto-subscribe to the corresponding gossipsub topic(s). Shard-
         // scoped handlers register one topic per hosted shard so a
         // multi-shard host receives gossip for every shard it serves.
-        let topics: Vec<Topic> = match scope {
+        let topics: Vec<Topic> = match M::SCOPE {
             TopicScope::Shard => self
                 .local_shards
                 .iter()

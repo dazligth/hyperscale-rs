@@ -14,11 +14,12 @@
 //! the read-heavy `RwLock` pattern is ideal.
 
 use std::any::{Any, TypeId};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 use std::sync::{Arc, PoisonError, RwLock};
 
-use hyperscale_types::{NetworkMessage, Request, ShardGroupId};
+use hyperscale_types::{GossipMessage, NetworkMessage, Request, ShardGroupId, TopicScope};
+use quick_cache::sync::Cache as QuickCache;
 use sbor::{basic_decode, basic_encode};
 
 use crate::traits::{GossipHandler, GossipVerdict, NotificationHandler, RequestHandler};
@@ -68,21 +69,90 @@ pub trait LocalRequestDispatcher: Send + Sync {
     fn dispatch(&self, req: Box<dyn Any + Send>) -> Box<dyn Any + Send>;
 }
 
+/// Capacity for the per-type [`GossipMessage::dedup_key`] cache. Sized
+/// for a few rounds of committee-size N publishes per type, well bounded.
+const DEDUP_CACHE_CAPACITY: usize = 1024;
+
 struct TypedGossipDispatcher<M, H> {
     handler: Arc<H>,
+    hosted_shards: Arc<HashSet<ShardGroupId>>,
+    /// Content-key dedup cache (see [`GossipMessage::dedup_key`]). Idle
+    /// for types whose `dedup_key` returns `None`.
+    dedup: QuickCache<u64, ()>,
     _phantom: PhantomData<fn() -> M>,
+}
+
+impl<M, H> TypedGossipDispatcher<M, H>
+where
+    M: GossipMessage + 'static,
+    H: GossipHandler<M>,
+{
+    /// Compute the per-message target hosted-shard set.
+    ///
+    /// - `Shard` messages: the topic's shard, if hosted.
+    /// - `Global` messages: every hosted shard except [`GossipMessage::source_shard`].
+    fn target_shards(&self, msg: &M, topic_shard: Option<ShardGroupId>) -> Vec<ShardGroupId> {
+        match M::SCOPE {
+            TopicScope::Shard => match topic_shard {
+                Some(s) if self.hosted_shards.contains(&s) => vec![s],
+                _ => Vec::new(),
+            },
+            TopicScope::Global => {
+                let src = msg.source_shard();
+                self.hosted_shards
+                    .iter()
+                    .copied()
+                    .filter(|s| Some(*s) != src)
+                    .collect()
+            }
+        }
+    }
+
+    /// Check the dedup cache for `msg`. Returns `true` if dispatch
+    /// should proceed (key was new or type opts out of dedup), `false`
+    /// if the message is a duplicate and the caller should short-circuit.
+    ///
+    /// `QuickCache` has no atomic insert-if-absent, so two concurrent
+    /// calls with the same key may both observe "not present" and both
+    /// dispatch. The downstream handler's app-level dedup absorbs this;
+    /// the cache is purely a perf optimization.
+    fn admit(&self, msg: &M) -> bool {
+        let Some(key) = msg.dedup_key() else {
+            return true;
+        };
+        if self.dedup.get(&key).is_some() {
+            false
+        } else {
+            self.dedup.insert(key, ());
+            true
+        }
+    }
+
+    fn dispatch_to_targets(&self, typed: &M, targets: &[ShardGroupId]) -> GossipVerdict {
+        let mut verdict = GossipVerdict::Accept;
+        for &target in targets {
+            if self.handler.on_message(typed.clone(), target) == GossipVerdict::Reject {
+                verdict = GossipVerdict::Reject;
+            }
+        }
+        verdict
+    }
 }
 
 impl<M, H> LocalGossipDispatcher for TypedGossipDispatcher<M, H>
 where
-    M: NetworkMessage + Clone + 'static,
+    M: GossipMessage + 'static,
     H: GossipHandler<M>,
 {
     fn dispatch(&self, msg: &dyn Any, shard: Option<ShardGroupId>) -> GossipVerdict {
         let typed = msg
             .downcast_ref::<M>()
             .expect("local gossip dispatch type mismatch");
-        self.handler.on_message(typed.clone(), shard)
+        if !self.admit(typed) {
+            return GossipVerdict::Accept;
+        }
+        let targets = self.target_shards(typed, shard);
+        self.dispatch_to_targets(typed, &targets)
     }
 }
 
@@ -135,9 +205,19 @@ where
 /// Requests are keyed by `(type_id, ShardGroupId)`: a multi-shard host
 /// registers one handler per hosted shard so each closure can capture
 /// its own `ShardIo`'s storage. Gossip and notifications stay flat
-/// because their closures dispatch into the state machine, which
-/// internally fans out across hosted shards.
+/// because the registry computes the per-vnode fan-out itself, using
+/// [`HandlerRegistry::hosted_shards`] supplied at construction:
+///
+/// - [`TopicScope::Shard`] messages dispatch to the topic's shard if it
+///   is hosted, otherwise dropped (we still `Accept` to forward to peers).
+/// - [`TopicScope::Global`] messages fan into every hosted shard except
+///   [`GossipMessage::source_shard`], so a vnode in a cross-shard pack
+///   sees its peer's commits without the handler closure encoding any
+///   routing logic.
 pub struct HandlerRegistry {
+    /// Shards hosted by the owning process. Drives the per-vnode
+    /// fan-out inside [`TypedGossipDispatcher`].
+    hosted_shards: Arc<HashSet<ShardGroupId>>,
     gossip: RwLock<HashMap<&'static str, Arc<RawGossipHandler>>>,
     request: RwLock<HashMap<(&'static str, ShardGroupId), Arc<RawRequestHandler>>>,
     notification: RwLock<HashMap<&'static str, Arc<RawNotificationHandler>>>,
@@ -154,10 +234,11 @@ pub struct HandlerRegistry {
 }
 
 impl HandlerRegistry {
-    /// Create an empty registry.
+    /// Create a registry serving the given hosted shards.
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(hosted_shards: Arc<HashSet<ShardGroupId>>) -> Self {
         Self {
+            hosted_shards,
             gossip: RwLock::new(HashMap::new()),
             request: RwLock::new(HashMap::new()),
             notification: RwLock::new(HashMap::new()),
@@ -167,12 +248,21 @@ impl HandlerRegistry {
         }
     }
 
+    /// Shards hosted by the registry's owner.
+    #[must_use]
+    pub const fn hosted_shards(&self) -> &Arc<HashSet<ShardGroupId>> {
+        &self.hosted_shards
+    }
+
     // ── Typed registration (used by Network impls) ──
 
     /// Register a typed gossip handler for a message type.
     ///
-    /// Wraps the handler in a closure that SBOR-decodes the payload before
-    /// calling the handler. Decode errors are logged and the message is dropped.
+    /// SBOR-decodes the payload (wire path only), then dispatches the
+    /// user handler once per target hosted shard as computed by
+    /// [`TypedGossipDispatcher::target_shards`]. The handler closure
+    /// makes no routing decisions and sees only well-formed
+    /// `(message, target_shard)` pairs.
     ///
     /// # Panics
     ///
@@ -180,15 +270,30 @@ impl HandlerRegistry {
     /// registrations happen once at init; a duplicate is a programmer error.
     pub fn register_gossip<M>(&self, handler: impl GossipHandler<M>)
     where
-        M: NetworkMessage + Clone + 'static,
+        M: GossipMessage + 'static,
     {
-        let handler = Arc::new(handler);
+        let dispatcher = Arc::new(TypedGossipDispatcher::<M, _> {
+            handler: Arc::new(handler),
+            hosted_shards: Arc::clone(&self.hosted_shards),
+            dedup: QuickCache::new(DEDUP_CACHE_CAPACITY),
+            _phantom: PhantomData,
+        });
 
-        let bytes_handler = Arc::clone(&handler);
+        let bytes_dispatcher = Arc::clone(&dispatcher);
         let raw: Arc<RawGossipHandler> =
             Arc::new(move |payload: Vec<u8>, shard: Option<ShardGroupId>| {
                 match basic_decode::<M>(&payload) {
-                    Ok(msg) => bytes_handler.on_message(msg, shard),
+                    Ok(msg) => {
+                        if !bytes_dispatcher.admit(&msg) {
+                            return GossipVerdict::Accept;
+                        }
+                        let targets = bytes_dispatcher.target_shards(&msg, shard);
+                        if targets.is_empty() {
+                            GossipVerdict::Accept
+                        } else {
+                            bytes_dispatcher.dispatch_to_targets(&msg, &targets)
+                        }
+                    }
                     Err(e) => {
                         tracing::warn!(
                             message_type = M::message_type_id(),
@@ -210,10 +315,7 @@ impl HandlerRegistry {
             M::message_type_id(),
         );
 
-        let typed: Arc<dyn LocalGossipDispatcher> = Arc::new(TypedGossipDispatcher::<M, _> {
-            handler,
-            _phantom: PhantomData,
-        });
+        let typed: Arc<dyn LocalGossipDispatcher> = dispatcher;
         self.local_gossip
             .write()
             .unwrap_or_else(PoisonError::into_inner)
@@ -497,7 +599,7 @@ impl HandlerRegistry {
 
 impl Default for HandlerRegistry {
     fn default() -> Self {
-        Self::new()
+        Self::new(Arc::new(HashSet::new()))
     }
 }
 
@@ -519,13 +621,17 @@ mod tests {
                 "test.gossip"
             }
         }
+        impl GossipMessage for TestMsg {
+            const SCOPE: TopicScope = TopicScope::Shard;
+        }
 
-        let registry = HandlerRegistry::new();
+        let hosted = Arc::new(std::iter::once(ShardGroupId::new(0)).collect());
+        let registry = HandlerRegistry::new(hosted);
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
 
         registry.register_gossip(
-            move |_msg: TestMsg, _shard: Option<ShardGroupId>| -> GossipVerdict {
+            move |_msg: TestMsg, _shard: ShardGroupId| -> GossipVerdict {
                 counter_clone.fetch_add(1, Ordering::SeqCst);
                 GossipVerdict::Accept
             },
@@ -533,12 +639,12 @@ mod tests {
 
         let handler = registry.get_gossip("test.gossip").unwrap();
         let encoded = basic_encode(&TestMsg(42)).unwrap();
-        let verdict = handler(encoded, None);
+        let verdict = handler(encoded, Some(ShardGroupId::new(0)));
         assert_eq!(counter.load(Ordering::SeqCst), 1);
         assert_eq!(verdict, GossipVerdict::Accept);
 
         // SBOR decode failure should return Reject.
-        let verdict = handler(vec![0xFF, 0xFE], None);
+        let verdict = handler(vec![0xFF, 0xFE], Some(ShardGroupId::new(0)));
         assert_eq!(verdict, GossipVerdict::Reject);
         assert_eq!(counter.load(Ordering::SeqCst), 1); // handler not called
 
@@ -570,7 +676,7 @@ mod tests {
             type Response = TestResp;
         }
 
-        let registry = HandlerRegistry::new();
+        let registry = HandlerRegistry::default();
         let shard = ShardGroupId::new(0);
 
         registry.register_request(shard, |req: TestReq| TestResp(req.0 * 2));
@@ -602,13 +708,16 @@ mod tests {
                 "test"
             }
         }
+        impl GossipMessage for TestMsg {
+            const SCOPE: TopicScope = TopicScope::Shard;
+        }
 
-        let registry = HandlerRegistry::new();
-        registry.register_gossip(
-            |_: TestMsg, _shard: Option<ShardGroupId>| -> GossipVerdict { GossipVerdict::Accept },
-        );
-        registry.register_gossip(
-            |_: TestMsg, _shard: Option<ShardGroupId>| -> GossipVerdict { GossipVerdict::Accept },
-        );
+        let registry = HandlerRegistry::default();
+        registry.register_gossip(|_: TestMsg, _shard: ShardGroupId| -> GossipVerdict {
+            GossipVerdict::Accept
+        });
+        registry.register_gossip(|_: TestMsg, _shard: ShardGroupId| -> GossipVerdict {
+            GossipVerdict::Accept
+        });
     }
 }

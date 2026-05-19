@@ -10,8 +10,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+// Re-export for back-compat call sites; the canonical definition lives in
+// `hyperscale_types`.
+pub use hyperscale_types::TopicScope;
 use hyperscale_types::{
-    Bls12381G1PublicKey, MessageClass, NetworkMessage, Request, ShardGroupId, ShardMessage,
+    Bls12381G1PublicKey, GossipMessage, MessageClass, NetworkMessage, Request, ShardGroupId,
     TopologySnapshot, ValidatorId,
 };
 
@@ -51,21 +54,6 @@ pub enum RequestError {
     Shutdown,
 }
 
-/// Whether a gossip message type is shard-scoped or global.
-///
-/// Determines topic subscription in production:
-/// - `Shard` → `hyperscale/{type_id}/shard-{local}/1.0.0`
-/// - `Global` → `hyperscale/{type_id}/1.0.0`
-///
-/// Ignored in simulation (delivery is controlled by the harness).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TopicScope {
-    /// Shard-local topic. Only peers subscribed to the local shard receive it.
-    Shard,
-    /// Global topic. All connected peers receive it.
-    Global,
-}
-
 /// Result of gossip message validation by the application handler.
 ///
 /// Returned by [`GossipHandler::on_message`] to tell the network layer whether
@@ -98,31 +86,32 @@ pub enum ResponseVerdict {
 
 /// Typed handler for a single gossip message type.
 ///
-/// Called after the network layer SBOR-decodes the raw payload into `M`.
-/// Implementations typically convert the message into a `ProtocolEvent` and
-/// send it to the `IoLoop` via a captured channel sender.
+/// Called once per **target hosted shard** the framework decides this
+/// message should land in:
 ///
-/// `shard` is the shard the topic encoded for [`TopicScope::Shard`]
-/// gossip and `None` for [`TopicScope::Global`] gossip; cross-shard
-/// hosting uses it to route the emitted `NodeInput` to the right
-/// hosted shard. Global handlers (e.g. `CommittedBlockHeaderGossip`)
-/// usually extract the relevant shard from the message body itself.
+/// - For [`TopicScope::Shard`] messages the target is the topic's shard
+///   (filtered to the host's hosted shards).
+/// - For [`TopicScope::Global`] messages the framework fans the message
+///   out to every hosted shard except [`GossipMessage::source_shard`]
+///   (which sees its own commits directly, not through gossip).
 ///
-/// Returns [`GossipVerdict`] to indicate whether the message should be
-/// accepted (forwarded) or rejected (dropped with peer penalty).
-pub trait GossipHandler<M: NetworkMessage>: Send + Sync + 'static {
-    /// Process a decoded gossip message; return whether to forward it.
-    fn on_message(&self, message: M, shard: Option<ShardGroupId>) -> GossipVerdict;
+/// The handler closure therefore makes no routing decisions and never
+/// inspects `hosted_shards` — it just translates "this decoded message
+/// destined for shard S" into a `ShardScopedInput` or equivalent.
+pub trait GossipHandler<M: GossipMessage>: Send + Sync + 'static {
+    /// Process a decoded gossip message for `shard`; return whether to
+    /// forward it.
+    fn on_message(&self, message: M, shard: ShardGroupId) -> GossipVerdict;
 }
 
-/// Blanket impl: any `Fn(M, Option<ShardGroupId>) -> GossipVerdict` can serve
-/// as a typed gossip handler.
+/// Blanket impl: any `Fn(M, ShardGroupId) -> GossipVerdict` can serve as
+/// a typed gossip handler.
 impl<M, F> GossipHandler<M> for F
 where
-    M: NetworkMessage,
-    F: Fn(M, Option<ShardGroupId>) -> GossipVerdict + Send + Sync + 'static,
+    M: GossipMessage,
+    F: Fn(M, ShardGroupId) -> GossipVerdict + Send + Sync + 'static,
 {
-    fn on_message(&self, message: M, shard: Option<ShardGroupId>) -> GossipVerdict {
+    fn on_message(&self, message: M, shard: ShardGroupId) -> GossipVerdict {
         (self)(message, shard)
     }
 }
@@ -171,10 +160,10 @@ pub trait Network: Send + Sync + 'static {
     // ── Pub/sub messaging ──
 
     /// Broadcast a shard-scoped message to all peers subscribed to that shard's topic.
-    fn broadcast_to_shard<M: ShardMessage + 'static>(&self, shard: ShardGroupId, message: &M);
+    fn broadcast_to_shard<M: GossipMessage + 'static>(&self, shard: ShardGroupId, message: &M);
 
     /// Broadcast a message to all connected peers globally.
-    fn broadcast_global<M: NetworkMessage + 'static>(&self, message: &M);
+    fn broadcast_global<M: GossipMessage + 'static>(&self, message: &M);
 
     // ── Handler registration ──
 
@@ -183,15 +172,12 @@ pub trait Network: Send + Sync + 'static {
     /// The implementation SBOR-decodes the raw network payload into `M` before
     /// calling the handler. Decode errors are logged and the message is dropped.
     ///
-    /// In production, this also auto-subscribes to the corresponding gossipsub
-    /// topic (shard-scoped or global, per `scope`).
+    /// In production, this also auto-subscribes to the corresponding
+    /// gossipsub topic(s); the scope (shard / global) is read from
+    /// [`GossipMessage::SCOPE`].
     ///
     /// Called during node initialization — once per message type.
-    fn register_gossip_handler<M: NetworkMessage + Clone + 'static>(
-        &self,
-        scope: TopicScope,
-        handler: impl GossipHandler<M>,
-    );
+    fn register_gossip_handler<M: GossipMessage + 'static>(&self, handler: impl GossipHandler<M>);
 
     /// Register a typed request handler for a message type on `shard`.
     ///
@@ -290,24 +276,27 @@ mod tests {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        use hyperscale_types::NetworkMessage;
+        use hyperscale_types::{GossipMessage, NetworkMessage, TopicScope};
         use sbor::{Decode, Encode};
 
-        #[derive(Debug, Encode, Decode)]
+        #[derive(Debug, Clone, Encode, Decode)]
         struct TestMsg(u32);
         impl NetworkMessage for TestMsg {
             fn message_type_id() -> &'static str {
                 "test.msg"
             }
         }
+        impl GossipMessage for TestMsg {
+            const SCOPE: TopicScope = TopicScope::Shard;
+        }
 
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        let handler = move |_msg: TestMsg, _shard: Option<ShardGroupId>| -> GossipVerdict {
+        let handler = move |_msg: TestMsg, _shard: ShardGroupId| -> GossipVerdict {
             counter_clone.fetch_add(1, Ordering::SeqCst);
             GossipVerdict::Accept
         };
-        let verdict = handler.on_message(TestMsg(42), None);
+        let verdict = handler.on_message(TestMsg(42), ShardGroupId::new(0));
         assert_eq!(counter.load(Ordering::SeqCst), 1);
         assert_eq!(verdict, GossipVerdict::Accept);
     }

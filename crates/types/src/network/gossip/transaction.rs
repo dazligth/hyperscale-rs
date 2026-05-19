@@ -12,7 +12,8 @@ use std::sync::Arc;
 
 use sbor::prelude::BasicSbor;
 
-use crate::{BoundedVec, MessageClass, NetworkMessage, RoutableTransaction, ShardMessage};
+use crate::network::{GossipMessage, TopicScope};
+use crate::{BoundedVec, MessageClass, NetworkMessage, RoutableTransaction};
 
 /// Cap on transactions accepted in a single gossip batch at decode time.
 ///
@@ -84,7 +85,12 @@ impl NetworkMessage for TransactionGossip {
 }
 
 // Transactions are filtered to shards that have state touched by the batch.
-impl ShardMessage for TransactionGossip {}
+// Single-publisher per batch (the host that received the tx via RPC),
+// so gossipsub's bytes-id dedup covers the mesh-redundancy path — no
+// content-key dedup needed here.
+impl GossipMessage for TransactionGossip {
+    const SCOPE: TopicScope = TopicScope::Shard;
+}
 
 #[cfg(test)]
 mod tests {
