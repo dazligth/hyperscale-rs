@@ -2036,20 +2036,22 @@ impl BftCoordinator {
         }
 
         // The certifying QC for the committable block (block N-1) is the
-        // parent_qc of the block whose QC this is (block N).
+        // parent_qc of the block whose QC this is (block N). If we no longer
+        // hold block N (evicted from pending_blocks), we can't extract that
+        // parent_qc — defer the commit rather than pair `qc` (which certifies
+        // N) with the block at `committable_hash` (N-1). The next QC for this
+        // chain or the sync path will re-drive the commit.
         let block_hash = qc.block_hash();
-        let certifying_qc = self.pending_blocks.get(block_hash).map_or_else(
-            || {
-                warn!(
-                    validator = ?topology_snapshot.local_validator_id(),
-                    block_hash = ?block_hash,
-                    committable_hash = ?committable_hash,
-                    "Cannot find block to extract certifying QC for committable block"
-                );
-                qc.clone()
-            },
-            |pending| pending.header().parent_qc().clone(),
-        );
+        let Some(pending) = self.pending_blocks.get(block_hash) else {
+            warn!(
+                validator = ?topology_snapshot.local_validator_id(),
+                block_hash = ?block_hash,
+                committable_hash = ?committable_hash,
+                "Cannot extract certifying QC for committable block — child block missing from pending_blocks; deferring commit"
+            );
+            return vec![];
+        };
+        let certifying_qc = pending.header().parent_qc().clone();
 
         vec![Action::Continuation(ProtocolEvent::BlockReadyToCommit {
             block_hash: committable_hash,
@@ -2070,6 +2072,22 @@ impl BftCoordinator {
         qc: QuorumCertificate,
         source: CommitSource,
     ) -> Vec<Action> {
+        // The downstream commit pipeline pairs this `qc` with the block
+        // looked up under `block_hash` and feeds the pair into
+        // `CertifiedBlock::new_unchecked`, which panics on a mismatch. A
+        // miswired caller would crash the shard loop; reject and let the
+        // next QC / sync re-drive the commit.
+        if qc.block_hash() != block_hash {
+            warn!(
+                validator = ?topology_snapshot.local_validator_id(),
+                block_hash = ?block_hash,
+                qc_block_hash = ?qc.block_hash(),
+                qc_height = qc.height().inner(),
+                "Rejecting commit: qc.block_hash does not match block_hash"
+            );
+            return vec![];
+        }
+
         let block = self
             .pending_blocks
             .get_block(block_hash)
@@ -4095,6 +4113,121 @@ mod tests {
             has_build_proposal,
             "Should propose empty block immediately after QC formation to advance finalization"
         );
+    }
+
+    #[test]
+    fn test_two_chain_commit_defers_when_child_block_missing() {
+        // Two-chain commit emits `BlockReadyToCommit { committable_hash, qc:
+        // parent_qc }`, pulling `parent_qc` from `pending_blocks[block_hash]`
+        // (the child of the committable block). If we no longer hold the
+        // child, we must defer — pairing `qc` (which certifies the child)
+        // with the block at `committable_hash` (the parent) would land at
+        // `CertifiedBlock::new_unchecked` and panic the shard loop.
+        let (state, topology) = make_test_state();
+
+        let committable_hash = BlockHash::from_raw(Hash::from_bytes(b"parent"));
+        let child_hash = BlockHash::from_raw(Hash::from_bytes(b"child"));
+        let qc = QuorumCertificate::new(
+            child_hash,
+            ShardGroupId::new(0),
+            BlockHeight::new(4),
+            committable_hash,
+            Round::new(0),
+            SignerBitfield::empty(),
+            zero_bls_signature(),
+            WeightedTimestamp::from_millis(100_000),
+        );
+
+        // No insert into pending_blocks — exercises the fallback path.
+        let actions = state.try_two_chain_commit(&topology, &qc, CommitSource::Aggregator);
+        assert!(
+            actions.is_empty(),
+            "expected no BlockReadyToCommit when child block missing, got {actions:?}"
+        );
+    }
+
+    #[test]
+    fn test_two_chain_commit_uses_child_parent_qc_when_present() {
+        // Happy path: when the child block is in `pending_blocks`, the
+        // emitted `BlockReadyToCommit` carries its `parent_qc`, not the
+        // current QC.
+        let (mut state, topology) = make_test_state();
+
+        let parent_hash = BlockHash::from_raw(Hash::from_bytes(b"parent_h3"));
+        let parent_qc = make_test_qc(parent_hash, BlockHeight::new(3));
+
+        let mut child_header = make_header_at_height(BlockHeight::new(4), 100_000);
+        child_header = BlockHeader::new(
+            child_header.shard_group_id(),
+            child_header.height(),
+            parent_hash,
+            parent_qc.clone(),
+            child_header.proposer(),
+            child_header.timestamp(),
+            child_header.round(),
+            child_header.is_fallback(),
+            child_header.state_root(),
+            child_header.transaction_root(),
+            child_header.certificate_root(),
+            child_header.local_receipt_root(),
+            child_header.provision_root(),
+            child_header.waves().clone().into_inner(),
+            child_header.provision_tx_roots().clone().into_inner(),
+            child_header.in_flight(),
+        );
+        let child_hash = child_header.hash();
+        state.pending_blocks.insert(PendingBlock::from_manifest(
+            child_header,
+            BlockManifest::default(),
+            LocalTimestamp::ZERO,
+        ));
+
+        let qc = QuorumCertificate::new(
+            child_hash,
+            ShardGroupId::new(0),
+            BlockHeight::new(4),
+            parent_hash,
+            Round::new(0),
+            SignerBitfield::empty(),
+            zero_bls_signature(),
+            WeightedTimestamp::from_millis(100_000),
+        );
+
+        let actions = state.try_two_chain_commit(&topology, &qc, CommitSource::Aggregator);
+        let Some(Action::Continuation(ProtocolEvent::BlockReadyToCommit {
+            block_hash: emitted_block_hash,
+            qc: emitted_qc,
+            ..
+        })) = actions.into_iter().next()
+        else {
+            panic!("expected BlockReadyToCommit continuation");
+        };
+        assert_eq!(emitted_block_hash, parent_hash);
+        assert_eq!(emitted_qc.block_hash(), parent_qc.block_hash());
+    }
+
+    #[test]
+    fn test_on_block_ready_to_commit_rejects_mismatched_qc() {
+        // Defense in depth at the BFT entry point: a `(block_hash, qc)` pair
+        // where `qc.block_hash() != block_hash` would land at
+        // `CertifiedBlock::new_unchecked` downstream and panic the shard
+        // loop. Reject early and let the next QC / sync re-drive the commit.
+        let (mut state, topology) = make_test_state();
+        state.committed_height = BlockHeight::new(3);
+
+        let block_hash = BlockHash::from_raw(Hash::from_bytes(b"target_block"));
+        let qc = make_test_qc(
+            BlockHash::from_raw(Hash::from_bytes(b"some_other_block")),
+            BlockHeight::new(4),
+        );
+
+        let actions =
+            state.on_block_ready_to_commit(&topology, block_hash, qc, CommitSource::Aggregator);
+        assert!(
+            actions.is_empty(),
+            "expected no actions on mismatched (block_hash, qc), got {actions:?}"
+        );
+        assert_eq!(state.committed_height, BlockHeight::new(3));
     }
 
     #[test]
