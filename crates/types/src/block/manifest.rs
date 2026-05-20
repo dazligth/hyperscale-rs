@@ -69,6 +69,12 @@ impl BlockManifest {
     }
 
     /// Build a manifest from a full block (extracting hashes).
+    ///
+    /// `Block::Sealed` carries no provisions, so the resulting manifest's
+    /// `provision_hashes` is empty for sealed blocks. The caller is
+    /// responsible for only invoking this on `Live` blocks (or accepting
+    /// the empty result) when provision-hash fidelity matters — e.g. the
+    /// commit-bookkeeping path that populates `CommitDedupIndex`.
     #[must_use]
     pub fn from_block(block: &Block) -> Self {
         // The source `Block` collections are themselves `BoundedVec`s capped
@@ -80,7 +86,8 @@ impl BlockManifest {
             .iter()
             .map(|c| c.wave_id().clone())
             .collect();
-        Self::new(tx_hashes, cert_ids, vec![])
+        let provision_hashes: Vec<_> = block.provisions().iter().map(|p| p.hash()).collect();
+        Self::new(tx_hashes, cert_ids, provision_hashes)
     }
 }
 

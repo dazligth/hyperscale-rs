@@ -30,8 +30,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use hyperscale_types::{
-    FinalizedWave, ProvisionHash, Provisions, RETENTION_HORIZON, RoutableTransaction, TxHash,
-    WaveId, WeightedTimestamp,
+    FinalizedWave, ProvisionHash, RETENTION_HORIZON, RoutableTransaction, TxHash, WaveId,
+    WeightedTimestamp,
 };
 
 #[allow(clippy::struct_field_names)] // shared `_retention` postfix is the artifact-tier convention
@@ -84,17 +84,18 @@ impl CommitDedupIndex {
 
     /// Record a block's provisions in the retention lookup. Anchored on
     /// `local_committed_ts` (a conservative surrogate for
-    /// `source_weighted_ts`).
+    /// `source_weighted_ts`). Keyed by `ProvisionHash` so the caller can
+    /// source from the block's manifest (which is independent of
+    /// `Block::Live`/`Sealed`) rather than depending on `block.provisions()`
+    /// (which is empty for `Sealed`).
     pub fn register_committed_provisions(
         &mut self,
-        provisions: &[Arc<Provisions>],
+        provision_hashes: &[ProvisionHash],
         local_committed_ts: WeightedTimestamp,
     ) {
         let deadline = local_committed_ts.plus(RETENTION_HORIZON);
-        for batch in provisions {
-            self.provision_retention
-                .entry(batch.hash())
-                .or_insert(deadline);
+        for hash in provision_hashes {
+            self.provision_retention.entry(*hash).or_insert(deadline);
         }
     }
 
@@ -139,8 +140,8 @@ mod tests {
     use hyperscale_test_helpers::make_finalized_wave;
     use hyperscale_types::test_utils::test_notarized_transaction_v1;
     use hyperscale_types::{
-        BlockHeight, Hash, MerkleInclusionProof, ProvisionEntry, ShardGroupId, TimestampRange,
-        TransactionDecision, routable_from_notarized_v1,
+        BlockHeight, Hash, MerkleInclusionProof, ProvisionEntry, Provisions, ShardGroupId,
+        TimestampRange, TransactionDecision, routable_from_notarized_v1,
     };
 
     use super::*;
@@ -239,10 +240,7 @@ mod tests {
     fn register_provisions_populates_retention() {
         let mut idx = CommitDedupIndex::new();
         let p = make_provisions(1);
-        idx.register_committed_provisions(
-            std::slice::from_ref(&p),
-            WeightedTimestamp::from_millis(1_000),
-        );
+        idx.register_committed_provisions(&[p.hash()], WeightedTimestamp::from_millis(1_000));
         assert!(idx.contains_provision(&p.hash()));
         assert_eq!(idx.provision_retention_len(), 1);
     }
@@ -252,7 +250,7 @@ mod tests {
         let mut idx = CommitDedupIndex::new();
         let p = make_provisions(1);
         let now = WeightedTimestamp::from_millis(1_000);
-        idx.register_committed_provisions(std::slice::from_ref(&p), now);
+        idx.register_committed_provisions(&[p.hash()], now);
 
         idx.prune(now);
         assert!(idx.contains_provision(&p.hash()));

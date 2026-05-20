@@ -718,7 +718,8 @@ mod tests {
         let block = block_with_provisions(BlockHeight::new(6), vec![Arc::clone(&p)]);
         let qc_chain = HashSet::new();
         let mut dedup_index = CommitDedupIndex::new();
-        dedup_index.register_committed_provisions(&[p], WeightedTimestamp::from_millis(1_000));
+        dedup_index
+            .register_committed_provisions(&[p.hash()], WeightedTimestamp::from_millis(1_000));
         let err = validate_no_duplicate_provisions(&block, &qc_chain, &dedup_index).unwrap_err();
         assert!(err.contains("already committed"));
     }

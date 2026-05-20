@@ -15,8 +15,8 @@ use std::time::Duration;
 
 use hyperscale_core::{Action, FetchAbandon, ProtocolEvent};
 use hyperscale_types::{
-    BlockHeight, CertifiedBlock, CommittedBlockHeader, LocalTimestamp, ProvisionHash, Provisions,
-    RETENTION_HORIZON, ShardGroupId, TopologySnapshot,
+    BlockHeight, BlockManifest, CertifiedBlock, CommittedBlockHeader, LocalTimestamp,
+    ProvisionHash, Provisions, RETENTION_HORIZON, ShardGroupId, TopologySnapshot,
 };
 use serde::Deserialize;
 use tracing::{debug, info, warn};
@@ -214,12 +214,15 @@ impl ProvisionCoordinator {
         // and tombstone them so a late re-arrival (gossip retransmit,
         // fetch fall-through, range-sync delivery) is dropped at receipt
         // rather than re-entering the queue and forcing a view change at
-        // the BFT validation gate.
+        // the BFT validation gate. Sourced from the block's manifest so a
+        // `Block::Sealed` reaching this path still enumerates its hashes
+        // via the manifest's `provision_hashes`.
+        let manifest = BlockManifest::from_block(block);
         let committed: std::collections::HashSet<ProvisionHash> =
-            block.provisions().iter().map(|p| p.hash()).collect();
+            manifest.provision_hashes().iter().copied().collect();
         self.queue.on_block_committed(&committed);
-        for batch in block.provisions() {
-            self.committed_tombstones.register(batch.hash(), new_ts);
+        for hash in manifest.provision_hashes().iter() {
+            self.committed_tombstones.register(*hash, new_ts);
         }
         self.committed_tombstones.prune(new_ts);
 

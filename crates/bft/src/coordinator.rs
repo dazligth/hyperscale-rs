@@ -2180,13 +2180,17 @@ impl BftCoordinator {
         // are populated here so the just-committed block's contents are
         // visible to dedup before any subsequent `try_propose` runs in the
         // same `on_qc_formed` tick — even though `cleanup_old_state` below
-        // evicts the block from `pending_blocks`.
+        // evicts the block from `pending_blocks`. Provisions are keyed off
+        // the block's manifest rather than `block.provisions()` so a
+        // `Block::Sealed` arriving via the sync path past the live serve
+        // window still registers its hashes correctly.
+        let manifest = BlockManifest::from_block(block);
         self.dedup_index
             .register_committed_txs(block.transactions());
         self.dedup_index
             .register_committed_certs(block.certificates());
         self.dedup_index
-            .register_committed_provisions(block.provisions(), commit_ts);
+            .register_committed_provisions(manifest.provision_hashes(), commit_ts);
 
         // Reset backoff tracking — new height means fresh round counting.
         self.view_change.reset_for_height_advance();
