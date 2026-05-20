@@ -25,11 +25,10 @@
 //! ([`Self::on_block_committed`]) catches entries orphaned by reorgs,
 //! mid-flight shard removal, or bookkeeping bugs.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use hyperscale_types::{RETENTION_HORIZON, ShardGroupId, TxHash, WeightedTimestamp};
-use indexmap::IndexMap;
 
 use crate::receipt::CachedVmOutput;
 
@@ -75,7 +74,19 @@ struct Entry {
 }
 
 struct Inner {
-    entries: IndexMap<TxHash, Entry>,
+    entries: BTreeMap<TxHash, Entry>,
+    /// Inserted-timestamp secondary index. Each tx hash is pushed onto
+    /// `by_ts[entry.inserted_at_ts]` at insertion so the retention sweep
+    /// can drop expired entries in `O(k_expired · log N)` by popping the
+    /// front of the map, instead of scanning every entry on every commit.
+    ///
+    /// May hold stale tx hashes whose primary-map entry was removed via
+    /// [`ProcessExecutionCache::on_finalized_wave`], or re-inserted under
+    /// a fresher timestamp. The sweep validates each candidate against
+    /// the live `inserted_at_ts` before removing from `entries`, so
+    /// staleness is harmless — it just delays reclaim of the tx hash
+    /// itself by at most `RETENTION_HORIZON`.
+    by_ts: BTreeMap<WeightedTimestamp, Vec<TxHash>>,
     /// Most recent committed `WeightedTimestamp` observed via
     /// [`ProcessExecutionCache::on_block_committed`]. Stamped on new
     /// entries and drives the retention sweep.
@@ -104,11 +115,12 @@ impl ProcessExecutionCache {
     /// [`Self::on_finalized_wave`]; the retention sweep cleans up
     /// anything missed.
     #[must_use]
-    pub fn new(hosted_shards: HashSet<ShardGroupId>) -> Self {
+    pub const fn new(hosted_shards: HashSet<ShardGroupId>) -> Self {
         Self {
             hosted_shards,
             inner: Mutex::new(Inner {
-                entries: IndexMap::new(),
+                entries: BTreeMap::new(),
+                by_ts: BTreeMap::new(),
                 now: WeightedTimestamp::ZERO,
             }),
         }
@@ -155,6 +167,7 @@ impl ProcessExecutionCache {
                 inserted_at_ts: now,
             },
         );
+        guard.by_ts.entry(now).or_default().push(tx_hash);
         drop(guard);
         SlotStatus::Claimed(slot)
     }
@@ -178,7 +191,7 @@ impl ProcessExecutionCache {
             };
             entry.pending_shards.remove(&shard);
             if entry.pending_shards.is_empty() {
-                guard.entries.shift_remove(&tx_hash);
+                guard.entries.remove(&tx_hash);
             }
         }
     }
@@ -186,13 +199,38 @@ impl ProcessExecutionCache {
     /// Advance the cache's view of "now" and sweep entries past the
     /// retention horizon. Called once per accepted block commit with
     /// the QC's `weighted_timestamp`.
+    ///
+    /// Uses the `by_ts` secondary index to bound work at
+    /// `O(k_expired · log N)` — only entries whose insertion bucket has
+    /// rotated past the horizon are visited, not the full primary map.
+    /// A bucket whose primary-map entry has been re-inserted under a
+    /// fresher timestamp is left alone (the equality check guards
+    /// against evicting live entries via a stale index pointer).
     pub fn on_block_committed(&self, now: WeightedTimestamp) {
+        // Lock held across the sweep on purpose — the index and the
+        // primary map are consulted together for every expired bucket.
+        #[allow(clippy::significant_drop_tightening)]
         let mut guard = lock(&self.inner);
         if now > guard.now {
             guard.now = now;
         }
         let cutoff = now.minus(RETENTION_HORIZON);
-        guard.entries.retain(|_, e| e.inserted_at_ts > cutoff);
+        let expired_ts: Vec<WeightedTimestamp> =
+            guard.by_ts.range(..=cutoff).map(|(ts, _)| *ts).collect();
+        for ts in expired_ts {
+            let Some(popped) = guard.by_ts.remove(&ts) else {
+                continue;
+            };
+            for tx_hash in popped {
+                let still_at_ts = guard
+                    .entries
+                    .get(&tx_hash)
+                    .is_some_and(|e| e.inserted_at_ts == ts);
+                if still_at_ts {
+                    guard.entries.remove(&tx_hash);
+                }
+            }
+        }
     }
 
     /// Current entry count, including in-flight (uninitialised) slots.
@@ -333,5 +371,42 @@ mod tests {
         let still_fresh = now.plus(Duration::from_secs(1));
         cache.on_block_committed(still_fresh);
         assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn retention_sweep_spares_reinserted_entries() {
+        // A tx hash that's removed via `on_finalized_wave` and re-inserted
+        // under a fresher timestamp leaves a stale entry in `by_ts` for
+        // the original bucket. When that stale bucket rotates past the
+        // horizon, the equality check against the live entry's
+        // `inserted_at_ts` must spare the re-inserted slot.
+        let cache = ProcessExecutionCache::new(hosted(&[0]));
+        let early = WeightedTimestamp::from_millis(1_000);
+        cache.on_block_committed(early);
+
+        populate(&cache, tx_hash(1), [shard(0)]);
+        cache.on_finalized_wave(shard(0), [tx_hash(1)]);
+        assert!(cache.is_empty());
+
+        // Advance `now` enough that the *new* insertion gets a fresher
+        // bucket, but the early bucket is still within the horizon.
+        let mid = early.plus(Duration::from_secs(1));
+        cache.on_block_committed(mid);
+        populate(&cache, tx_hash(1), [shard(0)]);
+        assert_eq!(cache.len(), 1);
+
+        // Rotate past the `early` bucket but not past `mid`.
+        let after_early = early.plus(RETENTION_HORIZON).plus(Duration::from_millis(1));
+        cache.on_block_committed(after_early);
+        assert_eq!(
+            cache.len(),
+            1,
+            "re-inserted entry must survive the stale bucket's sweep"
+        );
+
+        // Rotate past `mid` as well — the live entry should now go.
+        let after_mid = mid.plus(RETENTION_HORIZON).plus(Duration::from_millis(1));
+        cache.on_block_committed(after_mid);
+        assert!(cache.is_empty());
     }
 }

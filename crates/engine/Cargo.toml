@@ -9,7 +9,6 @@ hyperscale-storage.workspace = true
 hyperscale-types.workspace = true
 
 # External dependencies
-indexmap.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
