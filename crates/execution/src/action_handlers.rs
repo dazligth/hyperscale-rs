@@ -14,6 +14,7 @@ use std::sync::Arc;
 use hyperscale_core::{Action, ActionContext, ProtocolEvent};
 use hyperscale_engine::{
     CachedSlot, CachedVmOutput, ProcessExecutionCache, SlotStatus, project_to_shard,
+    resolve_owned_nodes,
 };
 use hyperscale_metrics::record_execution_latency;
 use hyperscale_network::Network;
@@ -23,7 +24,7 @@ use hyperscale_types::network::notification::{
 };
 use hyperscale_types::{
     Bls12381G1PublicKey, Bls12381G2Signature, ExecutionCertificate, ExecutionVote,
-    GlobalReceiptRoot, RoutableTransaction, ShardGroupId, SignerBitfield, StoredReceipt,
+    GlobalReceiptRoot, NodeId, RoutableTransaction, ShardGroupId, SignerBitfield, StoredReceipt,
     ValidatorId, VotePower, WaveId, WeightedTimestamp, batch_verify_bls_same_message,
     compute_global_receipt_root, exec_cert_batch_message, exec_vote_batch_message,
     exec_vote_message, shard_for_node, verify_bls12381_v1, zero_bls_signature,
@@ -404,11 +405,28 @@ where
                 .collect();
             let cached =
                 batch_compute_cached(ctx.execution_cache.as_ref(), &txs, num_shards, |i| {
+                    let req = &requests[i];
+                    // Provisions only carry ownership for accounts owned by remote
+                    // shards. Local-shard ownership must be resolved from the local
+                    // snapshot and merged in; without it, vaults owned by local
+                    // accounts go unattributed and the cached output diverges across
+                    // shards. Provisions win conflicts — they're BFT-attested.
+                    let declared: Vec<NodeId> = req
+                        .transaction
+                        .declared_reads()
+                        .iter()
+                        .chain(req.transaction.declared_writes().iter())
+                        .copied()
+                        .collect();
+                    let mut ownership = req.ownership.clone();
+                    for (vault, owner) in resolve_owned_nodes(&view_snap, &declared) {
+                        ownership.entry(vault).or_insert(owner);
+                    }
                     ctx.executor.compute_vm_output_cross_shard(
                         &view_snap,
-                        &requests[i].transaction,
-                        &requests[i].provisions,
-                        requests[i].ownership.clone(),
+                        &req.transaction,
+                        &req.provisions,
+                        ownership,
                     )
                 });
             let (tx_outcomes, results): (Vec<_>, Vec<_>) = requests
