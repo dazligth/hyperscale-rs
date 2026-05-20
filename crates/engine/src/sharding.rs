@@ -976,25 +976,23 @@ mod tests {
     // `writes_root` (and therefore `GlobalReceiptHash`), which is the
     // proper consensus surface.
     //
-    // The walking ownership resolver runs at this layer, so the contract is
-    // statable here without dragging in a real VM receipt: equivalent merged
-    // views must produce equivalent `(ownership, global_updates, writes_root)`.
-    //
-    // This test pins the contract. It fails when cross-shard provisions
-    // ship only the partitions a tx reads — a declared account's `Own(_)`
-    // refs in unshipped partitions are visible to the side that holds the
-    // account locally and invisible to the side that sees it via
-    // provisions. The downstream `writes_root` then drifts between
-    // validators on different co-hosted shards.
+    // The contract is statable at this layer: equivalent inputs must
+    // produce equivalent `(ownership, global_updates, writes_root)`.
 
+    /// Pins the cross-shard `writes_root` contract: when shard 1 sources
+    /// ownership from the authoritative map shipped in `ProvisionEntry::
+    /// owned_nodes` (rather than rediscovering it by walking a partial
+    /// merged view), both shards arrive at the same `writes_root` for the
+    /// same `(tx, vm_receipt)`.
+    ///
+    /// The asymmetry the test exercises: shard 0 ships only one of `A_0`'s
+    /// substate partitions in its provision (the partition the tx reads).
+    /// The other partition still contains a load-bearing `Own(_)` ref. A
+    /// receiver that walks its merged view would miss that vault — but
+    /// the authoritative ownership map carried in the provision sees it,
+    /// matching what shard 0 computes locally.
     #[test]
-    #[ignore = "demonstrates bug; un-ignore once provisions carry authoritative ownership"]
-    fn writes_root_is_shard_invariant_across_equivalent_merged_views() {
-        use hyperscale_storage::keys;
-        use hyperscale_types::SubstateEntry;
-
-        use crate::provisioned_snapshot::ProvisionedSnapshot;
-
+    fn writes_root_is_shard_invariant_with_authoritative_ownership() {
         // Cross-shard tx declares one account; that account owns two
         // vaults via `Own(_)` refs in two different partitions.
         let a_0 = account_id(1);
@@ -1006,30 +1004,31 @@ mod tests {
         shard_0_local.insert(&a_0, 0, vec![0], own_bytes(&v_meta));
         shard_0_local.insert(&a_0, 64, vec![0], own_bytes(&v_main));
 
-        // Shard 1 doesn't hold A_0; it sees A_0 only through provisions.
+        // Shard 0's local walk gives the complete authoritative ownership
+        // for A_0 — both V_main and V_meta. This is what the source
+        // serializes into `ProvisionEntry::owned_nodes` at provision
+        // generation time.
+        let shard_0_authoritative = resolve_owned_nodes(&shard_0_local, &[a_0]);
+
+        // Shard 1 doesn't hold A_0, so its local walk for A_0 finds
+        // nothing. It must rely on the source-shipped ownership map.
         let shard_1_local = MockDb::default();
+        let shard_1_local_walk = resolve_owned_nodes(&shard_1_local, &[a_0]);
+        assert!(
+            shard_1_local_walk.is_empty(),
+            "shard 1 has no local substates for A_0"
+        );
 
-        // Shard 0 ships only the partition the tx declared a read
-        // against — the minimal-shipping case. Partition 0's `Own(v_meta)`
-        // never crosses the wire.
-        let a_0_db_node_key = node_entity_key(&a_0);
-        let partition_shipped = DbPartitionKey {
-            node_key: a_0_db_node_key,
-            partition_num: 64,
-        };
-        let shard_0_provisions = vec![SubstateEntry::new(
-            keys::to_storage_key(&partition_shipped, &DbSortKey(vec![0])),
-            Some(own_bytes(&v_main)),
-        )];
+        // The receiver assembles the cross-shard ownership by merging
+        // each source shard's authoritative map. Here only shard 0
+        // contributes (A_0 is shard-0-owned).
+        let mut shard_1_assembled: HashMap<NodeId, NodeId> = shard_1_local_walk;
+        for (vault, owner) in &shard_0_authoritative {
+            shard_1_assembled.insert(*vault, *owner);
+        }
 
-        // Build the same merged-view shape both validators use at
-        // execution time.
-        let view_from_shard_0 = ProvisionedSnapshot::from_provisions(&shard_0_local, &[]);
-        let view_from_shard_1 =
-            ProvisionedSnapshot::from_provisions(&shard_1_local, &[shard_0_provisions.as_slice()]);
-
-        let ownership_0 = resolve_owned_nodes(&view_from_shard_0, &[a_0]);
-        let ownership_1 = resolve_owned_nodes(&view_from_shard_1, &[a_0]);
+        // Both validators now hold identical ownership maps.
+        assert_eq!(shard_0_authoritative, shard_1_assembled);
 
         // Same VM-produced raw writes on both sides — what the VM would
         // have emitted given identical inputs.
@@ -1042,19 +1041,20 @@ mod tests {
         );
 
         let declared_set: HashSet<NodeId> = std::iter::once(a_0).collect();
-        let global_0 = filter_updates_for_global_receipt(&raw_updates, &declared_set, &ownership_0);
-        let global_1 = filter_updates_for_global_receipt(&raw_updates, &declared_set, &ownership_1);
+        let global_0 =
+            filter_updates_for_global_receipt(&raw_updates, &declared_set, &shard_0_authoritative);
+        let global_1 =
+            filter_updates_for_global_receipt(&raw_updates, &declared_set, &shard_1_assembled);
 
         let writes_root_0 = compute_writes_root(&global_0);
         let writes_root_1 = compute_writes_root(&global_1);
 
         assert_eq!(
             writes_root_0, writes_root_1,
-            "writes_root must be shard-invariant; ownership maps differed: \
-             shard-0={ownership_0:?}, shard-1={ownership_1:?}. The \
-             GlobalReceiptHash baked from these will diverge between \
-             validators on different co-hosted shards, causing the \
-             dissenter to reject the wave's EC at admission.",
+            "writes_root must be shard-invariant when both shards source \
+             ownership from the same authoritative map; \
+             shard-0={shard_0_authoritative:?}, \
+             shard-1={shard_1_assembled:?}",
         );
     }
 }

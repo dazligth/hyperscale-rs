@@ -40,6 +40,13 @@ pub struct ProvisioningTracker {
     /// retention horizon elapsed without ever finalizing.
     verified: HashMap<TxHash, Vec<Arc<Vec<SubstateEntry>>>>,
 
+    /// Authoritative `vault → owning_account` map for each cross-shard
+    /// tx's declared accounts, merged from each source shard's
+    /// `ProvisionEntry::owned_nodes`. Read alongside `verified` when the
+    /// wave dispatches so the executor doesn't have to rediscover
+    /// ownership by walking a partial merged view.
+    verified_ownership: HashMap<TxHash, HashMap<NodeId, NodeId>>,
+
     /// Remote shards each cross-shard tx needs provisions from. Populated
     /// at wave creation.
     required: HashMap<TxHash, BTreeSet<ShardGroupId>>,
@@ -72,6 +79,7 @@ impl ProvisioningTracker {
     pub fn new() -> Self {
         Self {
             verified: HashMap::new(),
+            verified_ownership: HashMap::new(),
             required: HashMap::new(),
             received: HashMap::new(),
             deadlines: HashMap::new(),
@@ -142,6 +150,15 @@ impl ProvisioningTracker {
             let tx_hash = tx_entry.tx_hash;
             let entries = Arc::new(tx_entry.entries.0.clone());
             self.verified.entry(tx_hash).or_default().push(entries);
+            // Merge this source's authoritative ownership for the tx's
+            // declared accounts into the per-tx map. Each source shard
+            // resolves ownership for the declared accounts it owns; the
+            // disjoint per-source maps compose into a complete ownership
+            // map at the receiver.
+            let entry = self.verified_ownership.entry(tx_hash).or_default();
+            for (vault, owner) in tx_entry.owned_nodes.iter() {
+                entry.insert(*vault, *owner);
+            }
             self.received
                 .entry(tx_hash)
                 .or_default()
@@ -195,6 +212,7 @@ impl ProvisioningTracker {
     /// wave certificate commits and the transaction reaches terminal state.
     pub fn remove_tx(&mut self, tx_hash: TxHash) {
         self.verified.remove(&tx_hash);
+        self.verified_ownership.remove(&tx_hash);
         self.required.remove(&tx_hash);
         self.received.remove(&tx_hash);
         self.deadlines.remove(&tx_hash);
@@ -231,6 +249,17 @@ impl ProvisioningTracker {
     /// per-tx lookup against committed provisions.
     pub fn provisions_for(&self, tx_hash: TxHash) -> Option<&[Arc<Vec<SubstateEntry>>]> {
         self.verified.get(&tx_hash).map(Vec::as_slice)
+    }
+
+    /// Merged `vault → owning_account` map for `tx_hash`, accumulated
+    /// across every source shard's contribution. Returns an empty map
+    /// for txs without any verified provisions or whose source shards
+    /// shipped no ownership entries.
+    pub fn ownership_for(&self, tx_hash: TxHash) -> HashMap<NodeId, NodeId> {
+        self.verified_ownership
+            .get(&tx_hash)
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub fn verified_len(&self) -> usize {

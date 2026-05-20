@@ -27,6 +27,13 @@ pub struct CrossShardExecutionRequest {
     /// State entries provisioned by other shards (one `Arc` per source shard
     /// contribution). Engine layers them on top of the local snapshot.
     pub provisions: Vec<Arc<Vec<SubstateEntry>>>,
+    /// Authoritative `vault → owning_account` map for this tx's declared
+    /// accounts, assembled by merging each source shard's
+    /// `ProvisionEntry::owned_nodes`. The executor uses this directly
+    /// instead of rediscovering ownership by walking the merged view —
+    /// whose coverage depends on which partitions each source shipped
+    /// and is therefore not shard-invariant.
+    pub ownership: HashMap<NodeId, NodeId>,
 }
 
 /// A single cross-shard transaction's provisioning needs.

@@ -23,14 +23,11 @@ use radix_engine::transaction::{
     CommitResult, TransactionOutcome, TransactionReceipt, TransactionResult,
 };
 use radix_engine_interface::types::Level;
-use radix_substate_store_interface::interface::{
-    CreateDatabaseUpdates, DatabaseUpdates, SubstateDatabase,
-};
+use radix_substate_store_interface::interface::{CreateDatabaseUpdates, DatabaseUpdates};
 
 use crate::output::ExecutedTx;
 use crate::sharding::{
     compute_writes_root, filter_updates_for_global_receipt, filter_updates_for_shard,
-    resolve_owned_nodes,
 };
 
 /// Extract `DatabaseUpdates` from a transaction receipt.
@@ -102,15 +99,23 @@ impl CachedVmOutput {
 
 /// Project a Radix Engine receipt into a [`CachedVmOutput`].
 ///
-/// `storage` must match the view execution ran against — the local
-/// snapshot for single-shard transactions, the provisioned merged view
-/// for cross-shard. `resolve_owned_nodes` walks this view, so anything
-/// narrower yields a partial ownership map and a shard-divergent
-/// `writes_root`; anything wider races with concurrent cert commits.
-pub fn compute_vm_output<S: SubstateDatabase>(
-    storage: &S,
+/// `ownership` is the authoritative `vault → owning_account` map for this
+/// transaction's declared accounts. Callers source it deterministically:
+/// for single-shard execution, by walking the local snapshot (which has
+/// the declared accounts in full); for cross-shard execution, by merging
+/// the per-source-shard ownership maps shipped on each provision
+/// (`ProvisionEntry::owned_nodes`).
+///
+/// Doing the resolution outside `compute_vm_output` keeps this function
+/// independent of the storage view's coverage — every validator with
+/// identical `(tx, receipt, ownership)` inputs produces a byte-equal
+/// `CachedVmOutput`, which is what the shared `ProcessExecutionCache`
+/// relies on.
+#[allow(clippy::implicit_hasher)] // ownership is stored in CachedVmOutput, which fixes the hasher
+pub fn compute_vm_output(
     tx: &RoutableTransaction,
     receipt: &TransactionReceipt,
+    ownership: HashMap<NodeId, NodeId>,
 ) -> CachedVmOutput {
     let TransactionResult::Commit(commit) = &receipt.result else {
         tracing::warn!(
@@ -134,14 +139,12 @@ pub fn compute_vm_output<S: SubstateDatabase>(
         };
     }
 
-    let declared_nodes: Vec<NodeId> = tx
+    let declared_set: HashSet<NodeId> = tx
         .declared_reads()
         .iter()
         .chain(tx.declared_writes().iter())
         .copied()
         .collect();
-    let declared_set: HashSet<NodeId> = declared_nodes.iter().copied().collect();
-    let ownership = resolve_owned_nodes(storage, &declared_nodes);
 
     let application_events = extract_application_events(commit);
     let raw_updates = extract_database_updates(receipt);
@@ -211,14 +214,17 @@ pub fn project_to_shard(
 /// Build an [`ExecutedTx`] from a Radix Engine receipt — compose
 /// [`compute_vm_output`] + [`project_to_shard`] for callers that don't
 /// cache the intermediate.
-pub fn build_executed_tx<S: SubstateDatabase>(
-    storage: &S,
+///
+/// See [`compute_vm_output`] for how to source `ownership`.
+#[allow(clippy::implicit_hasher)] // forwards ownership into compute_vm_output's fixed-hasher store
+pub fn build_executed_tx(
     tx: &RoutableTransaction,
     receipt: &TransactionReceipt,
+    ownership: HashMap<NodeId, NodeId>,
     local_shard: ShardGroupId,
     num_shards: u64,
 ) -> ExecutedTx {
-    let cached = compute_vm_output(storage, tx, receipt);
+    let cached = compute_vm_output(tx, receipt, ownership);
     project_to_shard(&cached, tx.hash(), local_shard, num_shards)
 }
 

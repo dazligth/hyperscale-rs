@@ -318,10 +318,12 @@ impl WaveState {
             }
             let tx = self.transactions.get(&tx_hash)?;
             let provisions = provisioning.provisions_for(tx_hash)?.to_vec();
+            let ownership = provisioning.ownership_for(tx_hash);
             requests.push(CrossShardExecutionRequest {
                 tx_hash,
                 transaction: Arc::clone(tx),
                 provisions,
+                ownership,
             });
         }
         if requests.is_empty() {

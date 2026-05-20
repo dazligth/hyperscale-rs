@@ -16,6 +16,7 @@
 //! values whose `DatabaseUpdates` the state machine caches and applies
 //! later, when the wave's certificate is included in a committed block.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -31,6 +32,7 @@ use tracing::{Level, Span, instrument};
 
 use crate::provisioned_snapshot::ProvisionedSnapshot;
 use crate::receipt::{CachedVmOutput, compute_vm_output};
+use crate::sharding::resolve_owned_nodes;
 
 /// Fetch state entries for the given nodes from storage at a specific block height.
 ///
@@ -126,6 +128,10 @@ impl RadixExecutor {
     /// receipt. Caller pairs this with
     /// [`crate::project_to_shard`] to produce an [`ExecutedTx`] for
     /// each participating shard.
+    ///
+    /// Ownership is resolved locally against `snapshot`: every declared
+    /// account of a single-shard transaction is owned by the executing
+    /// shard, so the walk sees the full substate set.
     #[instrument(level = Level::DEBUG, skip_all, fields(latency_us = Empty))]
     pub fn compute_vm_output_single_shard<D: SubstateDatabase>(
         &self,
@@ -143,7 +149,14 @@ impl RadixExecutor {
             &self.caches.exec_config,
             &executable,
         );
-        let output = compute_vm_output(snapshot, tx, &receipt);
+        let declared_nodes: Vec<NodeId> = tx
+            .declared_reads()
+            .iter()
+            .chain(tx.declared_writes().iter())
+            .copied()
+            .collect();
+        let ownership = resolve_owned_nodes(snapshot, &declared_nodes);
+        let output = compute_vm_output(tx, &receipt, ownership);
         Span::current().record(
             "latency_us",
             u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX),
@@ -155,6 +168,13 @@ impl RadixExecutor {
     /// and executes against the merged view. Provisions carry pre-computed
     /// storage keys from the sending shard for O(log n) lookups without
     /// expensive hash work.
+    ///
+    /// `ownership` is the authoritative `vault → owning_account` map for
+    /// this transaction's declared accounts, merged from each source
+    /// shard's `ProvisionEntry::owned_nodes`. Unlike a walk of the merged
+    /// view, this map sees every owned vault regardless of which
+    /// partitions the source shipped — preserving the cache's
+    /// shard-invariance guarantee.
     #[instrument(level = Level::DEBUG, skip_all, fields(
         provision_count = provisions.len(),
         latency_us = Empty,
@@ -164,6 +184,7 @@ impl RadixExecutor {
         snapshot: &D,
         tx: &RoutableTransaction,
         provisions: &[Arc<Vec<SubstateEntry>>],
+        ownership: HashMap<NodeId, NodeId>,
     ) -> CachedVmOutput {
         let start = Instant::now();
         let Some(validated) = tx.get_or_validate(&self.caches.validator) else {
@@ -177,7 +198,7 @@ impl RadixExecutor {
             &self.caches.vm_modules,
             &self.caches.exec_config,
         );
-        let output = compute_vm_output(&provisioned, tx, &receipt);
+        let output = compute_vm_output(tx, &receipt, ownership);
         Span::current().record(
             "latency_us",
             u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX),

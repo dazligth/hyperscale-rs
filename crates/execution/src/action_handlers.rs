@@ -408,6 +408,7 @@ where
                         &view_snap,
                         &requests[i].transaction,
                         &requests[i].provisions,
+                        requests[i].ownership.clone(),
                     )
                 });
             let (tx_outcomes, results): (Vec<_>, Vec<_>) = requests
