@@ -158,11 +158,15 @@ pub fn build_provision_requests(
             .into_iter()
             .filter(|&s| s != local_shard)
         {
-            let needed: Vec<NodeId> = all_nodes
+            let mut needed: Vec<NodeId> = all_nodes
                 .iter()
                 .copied()
                 .filter(|n| topology.shard_for_node_id(n) == target_shard)
                 .collect();
+            // Canonicalise so gossip-emitted and fetch-served `ProvisionEntry`s
+            // hash identically — `serve_provision_request` sorts and dedups too.
+            needed.sort();
+            needed.dedup();
             target_nodes.push((target_shard, needed));
         }
 
