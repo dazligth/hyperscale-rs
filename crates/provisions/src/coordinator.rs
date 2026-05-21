@@ -251,7 +251,9 @@ impl ProvisionCoordinator {
         // queue and end up in proposals that peers cannot verify (their
         // paired remote header is gone). Drives the cluster into endless
         // view changes.
-        self.drop_past_deadline();
+        if let Some(abandon) = self.drop_past_deadline() {
+            actions.push(abandon);
+        }
 
         // Lift each timed-out expectation into a fallback fetch action,
         // attaching the source shard's committee from topology.
@@ -280,21 +282,24 @@ impl ProvisionCoordinator {
     /// header to verify them). Proposers then keep including them and the
     /// cluster falls into endless view changes around the failing
     /// proposal.
-    fn drop_past_deadline(&mut self) {
+    fn drop_past_deadline(&mut self) -> Option<Action> {
         let now = self.expected.local_ts();
 
         self.queue.drop_past_deadline(now);
 
-        // Pipeline eviction is post-receipt buffering only — these keys are
-        // satisfied from the fetch's perspective (the response arrived; the
-        // entry is waiting on a header to verify against). No in-flight
-        // fetch corresponds, so no `AbandonFetch` is owed. Cancellation of
-        // genuine in-flight fetches flows through `expected.cleanup_orphans`
-        // in `on_block_committed`.
-        let evicted_keys = self.pipeline.drop_past_deadline(now);
-        for key in evicted_keys {
+        // Pending evictions correspond to buffered payloads — both gossip-
+        // and fetch-arrived — that aged out before their paired remote
+        // header verified them. Any in-flight local-DA fetch on that hash
+        // would otherwise sit pinned forever; the returned abandon clears it.
+        let sweep = self.pipeline.drop_past_deadline(now);
+        for key in sweep.evicted_keys {
             self.headers.remove(key);
         }
+        (!sweep.evicted_pending.is_empty()).then(|| {
+            Action::AbandonFetch(FetchAbandon::LocalProvisions {
+                hashes: sweep.evicted_pending,
+            })
+        })
     }
 
     /// Immediately emit `Action::Fetch(FetchRequest::RemoteProvisions)` for all outstanding expected
@@ -380,12 +385,16 @@ impl ProvisionCoordinator {
             let local_ts = self.expected.local_ts();
             let source_block_ts = committed_header.qc().weighted_timestamp();
             for provisions in drained {
-                if self.committed_tombstones.contains(&provisions.hash()) {
+                let provisions_hash = provisions.hash();
+                if self.committed_tombstones.contains(&provisions_hash) {
                     debug!(
                         shard = shard.inner(),
                         height = height.inner(),
                         "Dropping drained provisions: already committed"
                     );
+                    actions.push(Action::AbandonFetch(FetchAbandon::LocalProvisions {
+                        hashes: vec![provisions_hash],
+                    }));
                     continue;
                 }
                 if provisions.deadline(source_block_ts) <= local_ts {
@@ -394,6 +403,9 @@ impl ProvisionCoordinator {
                         height = height.inner(),
                         "Dropping drained provisions past deadline"
                     );
+                    actions.push(Action::AbandonFetch(FetchAbandon::LocalProvisions {
+                        hashes: vec![provisions_hash],
+                    }));
                     continue;
                 }
                 actions.extend(build_verify_action(
@@ -1827,16 +1839,17 @@ mod tests {
         coordinator.on_block_committed(&committing_block);
         assert!(coordinator.committed_tombstones.contains(&provisions_hash));
 
-        // Second lifecycle: provisions re-arrive before any header (so
-        // they buffer as pending). Then header re-arrives (e.g. via a
-        // sync replay) and the drain path inspects each buffered entry.
+        // Second lifecycle: provisions re-arrive before any header. The
+        // receipt-time tombstone guard short-circuits at receipt — no
+        // pending buffering, no drain work, no re-enqueue.
         coordinator.on_state_provisions_received(&topology, provisions);
         let actions = coordinator.on_verified_remote_header(&topology, &header);
         assert!(
             actions.is_empty(),
-            "drained pending should be dropped by tombstone — no verify action"
+            "tombstoned re-arrival should be dropped at receipt — no drain work"
         );
         assert_eq!(coordinator.queue.queue_len(), 0);
+        let _ = provisions_hash;
     }
 
     #[test]
@@ -2108,7 +2121,9 @@ mod tests {
     fn test_pending_buffer_evicted_when_received_too_long_ago() {
         // Batch buffered waiting for a header that never arrives; once
         // `received_at + RETENTION_HORIZON` is past `local_committed_ts`
-        // the entry must be evicted by the deadline sweep.
+        // the entry must be evicted by the deadline sweep — and its hash
+        // surfaced as an `AbandonFetch::LocalProvisions` so any pinned
+        // local-DA fetch on that hash releases its slot.
         let topology = make_test_topology(ShardGroupId::new(0));
         let mut coordinator = ProvisionCoordinator::new();
 
@@ -2122,20 +2137,33 @@ mod tests {
             ShardGroupId::new(0),
             BlockHeight::new(10),
         );
+        let provisions_hash = provisions.hash();
         coordinator.on_state_provisions_received(&topology, provisions);
         assert_eq!(coordinator.pipeline.pending_len(), 1);
 
-        // Advance past the deadline horizon measured from received_at.
+        // Advance past the deadline horizon measured from received_at,
+        // accumulating actions so the eviction commit's abandon surfaces
+        // regardless of which iteration crosses the threshold.
         let cutoff_blocks = u64::try_from(RETENTION_HORIZON.as_millis()).unwrap_or(u64::MAX)
             / TEST_BLOCK_INTERVAL_MS;
+        let mut sweep_actions = Vec::new();
         for h in 2..=cutoff_blocks + 3 {
-            coordinator.on_block_committed(&make_block(BlockHeight::new(h)));
+            sweep_actions.extend(coordinator.on_block_committed(&make_block(BlockHeight::new(h))));
         }
 
         assert_eq!(
             coordinator.pipeline.pending_len(),
             0,
             "pending entry past `received_at + RETENTION_HORIZON` must be evicted"
+        );
+        let abandon = sweep_actions.iter().find_map(|a| match a {
+            Action::AbandonFetch(FetchAbandon::LocalProvisions { hashes }) => Some(hashes),
+            _ => None,
+        });
+        assert_eq!(
+            abandon,
+            Some(&vec![provisions_hash]),
+            "deadline sweep must abandon the pinned local-DA fetch for the dropped hash"
         );
     }
 

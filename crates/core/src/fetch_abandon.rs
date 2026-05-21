@@ -10,7 +10,7 @@
 //! `io_loop`'s dispatcher matches the inner enum and feeds the ids through
 //! `FetchInput::Abandoned` on the corresponding binding.
 
-use hyperscale_types::{BlockHeight, ShardGroupId, TxHash};
+use hyperscale_types::{BlockHeight, ProvisionHash, ShardGroupId, TxHash};
 
 /// Fetch-cancel family — one variant per payload type. Variants are added
 /// when each binding migrates to push-cancel.
@@ -34,5 +34,14 @@ pub enum FetchAbandon {
         source_shard: ShardGroupId,
         /// Source-shard block height for the cancelled fetch.
         block_height: BlockHeight,
+    },
+    /// Intra-shard local-provision fetch keyed by [`ProvisionHash`]. Emitted
+    /// when the provisions pipeline terminally drops a buffered batch
+    /// (deadline reached, post-commit tombstone hit) so the in-flight
+    /// local-DA fetch — which would otherwise stay pinned on a payload
+    /// that can no longer be admitted — releases its slot.
+    LocalProvisions {
+        /// Provision hashes whose in-flight fetch should be cancelled.
+        hashes: Vec<ProvisionHash>,
     },
 }

@@ -30,6 +30,19 @@ use crate::store::ProvisionStore;
 
 type Key = (ShardGroupId, BlockHeight);
 
+/// Outputs of one deadline sweep — partitioned so the coordinator can
+/// prune header buffers from one half and emit fetch cancellations from
+/// the other without the call site re-deriving them.
+pub struct DeadlineSweep {
+    /// `(source_shard, source_block_height)` keys whose verified entries
+    /// evicted. Header buffers keyed by `(shard, height)` are pruned here.
+    pub evicted_keys: Vec<Key>,
+    /// Content hashes of pending entries dropped before verification.
+    /// The coordinator emits an `AbandonFetch::LocalProvisions` for each
+    /// so any pinned local-DA fetch releases its slot.
+    pub evicted_pending: Vec<ProvisionHash>,
+}
+
 /// Verified provisions held in `verified`, paired with their source
 /// block's `weighted_timestamp` for deadline-anchored eviction.
 #[derive(Debug, Clone)]
@@ -129,13 +142,20 @@ impl ProvisionPipeline {
     }
 
     /// Drop verified and pending entries whose deadline has passed `now`.
-    /// Returns the `(source_shard, source_block_height)` keys whose
-    /// verified entries evicted so the coordinator can prune matching
-    /// header buffer entries. Multiple distinct hashes may share the
-    /// same `(shard, height)`; each evicted entry contributes its key
-    /// independently — duplicates in the returned vec are harmless
-    /// because `headers.remove` is idempotent.
-    pub(crate) fn drop_past_deadline(&mut self, now: WeightedTimestamp) -> Vec<Key> {
+    ///
+    /// Returns:
+    /// - `evicted_keys` — `(source_shard, source_block_height)` keys whose
+    ///   verified entries evicted, so the coordinator can prune matching
+    ///   header buffer entries. Multiple distinct hashes may share the same
+    ///   `(shard, height)`; each evicted entry contributes its key
+    ///   independently — duplicates in the returned vec are harmless
+    ///   because `headers.remove` is idempotent.
+    /// - `evicted_pending` — content hashes of pending entries dropped
+    ///   before they could be verified. Any in-flight local-DA fetch for
+    ///   these hashes is now waiting on a payload that will never be
+    ///   admitted; the coordinator forwards them as `AbandonFetch` so the
+    ///   FSM releases its slot.
+    pub(crate) fn drop_past_deadline(&mut self, now: WeightedTimestamp) -> DeadlineSweep {
         let mut evicted_keys = Vec::new();
         let store = &self.store;
         self.verified.retain(|hash, entry| {
@@ -154,12 +174,22 @@ impl ProvisionPipeline {
         // ts (we received the provisions after the source committed them),
         // so `received_at + RETENTION_HORIZON` conservatively bounds the
         // true deadline — past that, it has provably passed.
+        let mut evicted_pending = Vec::new();
         self.pending.retain(|_, entries| {
-            entries.retain(|p| p.provisions.deadline(p.received_at) > now);
+            entries.retain(|p| {
+                let alive = p.provisions.deadline(p.received_at) > now;
+                if !alive {
+                    evicted_pending.push(p.provisions.hash());
+                }
+                alive
+            });
             !entries.is_empty()
         });
 
-        evicted_keys
+        DeadlineSweep {
+            evicted_keys,
+            evicted_pending,
+        }
     }
 
     pub(crate) fn get_provisions_by_hash(&self, hash: ProvisionHash) -> Option<Arc<Provisions>> {
@@ -293,21 +323,26 @@ mod tests {
         let live_after = provisions_v.deadline(source_ts);
         pl.insert_verified(Arc::new(provisions_v), source_ts);
 
+        let pending = make_provisions(2, ShardGroupId::new(2), BlockHeight::new(5));
+        let pending_hash = pending.hash();
         pl.buffer_pending(
             (ShardGroupId::new(2), BlockHeight::new(5)),
-            make_provisions(2, ShardGroupId::new(2), BlockHeight::new(5)),
+            pending,
             ts(1_000),
         );
 
         // Just before deadline: nothing evicted.
-        let evicted = pl.drop_past_deadline(ts(live_after.as_millis().saturating_sub(1)));
-        assert!(evicted.is_empty());
+        let sweep = pl.drop_past_deadline(ts(live_after.as_millis().saturating_sub(1)));
+        assert!(sweep.evicted_keys.is_empty());
+        assert!(sweep.evicted_pending.is_empty());
         assert!(pl.has_verified(&hash_v));
         assert_eq!(pl.pending_len(), 1);
 
-        // Past deadline: verified evicted, pending evicted.
-        let evicted = pl.drop_past_deadline(ts(live_after.as_millis() + 1));
-        assert_eq!(evicted, vec![key_v]);
+        // Past deadline: verified evicted, pending evicted with its hash
+        // surfaced so the coordinator can cancel any pinned local-DA fetch.
+        let sweep = pl.drop_past_deadline(ts(live_after.as_millis() + 1));
+        assert_eq!(sweep.evicted_keys, vec![key_v]);
+        assert_eq!(sweep.evicted_pending, vec![pending_hash]);
         assert!(!pl.has_verified(&hash_v));
         assert_eq!(pl.pending_len(), 0);
     }

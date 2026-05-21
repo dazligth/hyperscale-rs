@@ -428,6 +428,9 @@ where
                     ids: vec![(source_shard, local_shard, block_height)],
                 });
             }
+            FetchAbandon::LocalProvisions { hashes } => {
+                self.drive_fetch::<LocalProvisionBinding>(FetchInput::Abandoned { ids: hashes });
+            }
         }
     }
 
