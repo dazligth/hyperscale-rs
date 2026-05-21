@@ -10,7 +10,7 @@
 //! `io_loop`'s dispatcher matches the inner enum and feeds the ids through
 //! `FetchInput::Abandoned` on the corresponding binding.
 
-use hyperscale_types::{BlockHeight, ProvisionHash, ShardGroupId, TxHash};
+use hyperscale_types::{BlockHeight, ProvisionHash, ShardGroupId, TxHash, WaveId};
 
 /// Fetch-cancel family — one variant per payload type. Variants are added
 /// when each binding migrates to push-cancel.
@@ -43,5 +43,14 @@ pub enum FetchAbandon {
     LocalProvisions {
         /// Provision hashes whose in-flight fetch should be cancelled.
         hashes: Vec<ProvisionHash>,
+    },
+    /// Per-block finalized-wave fetch keyed by [`WaveId`]. Emitted by the
+    /// execution coordinator when a fetched wave fails terminal admission
+    /// checks (no quorum power on a contained EC, committee keys not
+    /// resolvable, BLS signature invalid) so the FSM clears the in-flight
+    /// slot it would otherwise pin on a wave that cannot be admitted.
+    FinalizedWaves {
+        /// Wave ids whose in-flight fetch should be cancelled.
+        ids: Vec<WaveId>,
     },
 }

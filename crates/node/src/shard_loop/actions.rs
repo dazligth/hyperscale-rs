@@ -431,6 +431,9 @@ where
             FetchAbandon::LocalProvisions { hashes } => {
                 self.drive_fetch::<LocalProvisionBinding>(FetchInput::Abandoned { ids: hashes });
             }
+            FetchAbandon::FinalizedWaves { ids } => {
+                self.drive_fetch::<FinalizedWaveBinding>(FetchInput::Abandoned { ids });
+            }
         }
     }
 

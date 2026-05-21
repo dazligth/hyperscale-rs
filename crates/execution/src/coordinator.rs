@@ -40,7 +40,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 
-use hyperscale_core::{Action, FetchRequest, ProtocolEvent};
+use hyperscale_core::{Action, FetchAbandon, FetchRequest, ProtocolEvent};
 use hyperscale_types::{
     Attempt, Block, BlockHash, BlockHeader, BlockHeight, BloomFilter, CertifiedBlock,
     ExecutionCertificate, ExecutionVote, FinalizedWave, GlobalReceiptRoot, Hash, Provisions,
@@ -1620,7 +1620,10 @@ impl ExecutionCoordinator {
                     shard = shard.inner(),
                     "Rejecting fetched FinalizedWave: contained EC lacks quorum power"
                 );
-                return Vec::new();
+                self.pending_finalized_wave_verifications.remove(&wave_id);
+                return vec![Action::AbandonFetch(FetchAbandon::FinalizedWaves {
+                    ids: vec![wave_id],
+                })];
             }
             let Some(public_keys) = committee_public_keys_for_shard(topology, shard) else {
                 tracing::warn!(
@@ -1628,7 +1631,10 @@ impl ExecutionCoordinator {
                     shard = shard.inner(),
                     "Rejecting fetched FinalizedWave: cannot resolve EC committee keys"
                 );
-                return Vec::new();
+                self.pending_finalized_wave_verifications.remove(&wave_id);
+                return vec![Action::AbandonFetch(FetchAbandon::FinalizedWaves {
+                    ids: vec![wave_id],
+                })];
             };
             ec_public_keys.push(public_keys);
         }
@@ -1656,7 +1662,9 @@ impl ExecutionCoordinator {
                 wave = %wave.wave_id(),
                 "Dropping fetched FinalizedWave: contained EC signature invalid"
             );
-            return Vec::new();
+            return vec![Action::AbandonFetch(FetchAbandon::FinalizedWaves {
+                ids: vec![wave.wave_id().clone()],
+            })];
         }
         vec![Action::Continuation(
             ProtocolEvent::FinalizedWavesAdmitted { waves: vec![wave] },
@@ -2381,7 +2389,9 @@ mod tests {
 
     /// `on_finalized_wave_verified` with `valid = false` must drop the wave
     /// rather than emit the admission continuation — that's exactly the
-    /// poisoning vector this gate exists to close.
+    /// poisoning vector this gate exists to close. The dropped wave also
+    /// surfaces a `FetchAbandon::FinalizedWaves` so any pinned fetch
+    /// FSM entry releases its slot.
     #[test]
     fn on_finalized_wave_verified_drops_invalid() {
         let mut state = make_test_state();
@@ -2395,11 +2405,119 @@ mod tests {
             SignerBitfield::new(4),
         ));
         let wave = Arc::new(FinalizedWave::new(
-            Arc::new(WaveCertificate::new(wave_id, vec![ec])),
+            Arc::new(WaveCertificate::new(wave_id.clone(), vec![ec])),
             vec![],
         ));
         let actions = state.on_finalized_wave_verified(wave, false);
-        assert!(actions.is_empty());
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                Action::AbandonFetch(FetchAbandon::FinalizedWaves { ids }) if ids == &vec![wave_id.clone()]
+            )),
+            "BLS-invalid drop must emit AbandonFetch::FinalizedWaves, got: {actions:?}"
+        );
+        assert!(
+            !actions.iter().any(|a| matches!(
+                a,
+                Action::Continuation(ProtocolEvent::FinalizedWavesAdmitted { .. })
+            )),
+            "must not emit admission continuation on invalid"
+        );
+    }
+
+    /// `admit_finalized_wave` with an EC lacking quorum power must emit
+    /// the abandon (so the FSM doesn't pin) AND must clear the in-flight
+    /// dedup set so future arrivals can retry — without that the same
+    /// `WaveId` would silently fail every subsequent admission.
+    #[test]
+    fn admit_finalized_wave_quorum_power_fail_abandons_and_clears_dedup() {
+        let topo = make_test_topology();
+        let mut state = make_test_state();
+
+        let wave_id = WaveId::new(ShardGroupId::new(0), BlockHeight::new(1), BTreeSet::new());
+        // Only one signer in a 4-validator committee — sub-quorum
+        // (2f+1=3 needed).
+        let mut signers = SignerBitfield::new(4);
+        signers.set(0);
+        let ec = Arc::new(ExecutionCertificate::new(
+            wave_id.clone(),
+            WeightedTimestamp::ZERO,
+            GlobalReceiptRoot::ZERO,
+            vec![],
+            zero_bls_signature(),
+            signers,
+        ));
+        let wave = Arc::new(FinalizedWave::new(
+            Arc::new(WaveCertificate::new(wave_id.clone(), vec![ec])),
+            vec![],
+        ));
+
+        let actions = state.admit_finalized_wave(&topo, Arc::clone(&wave));
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                Action::AbandonFetch(FetchAbandon::FinalizedWaves { ids }) if ids == &vec![wave_id.clone()]
+            )),
+            "quorum-power drop must emit AbandonFetch::FinalizedWaves, got: {actions:?}"
+        );
+
+        // Regression: dedup set must NOT retain this wave so a fresh
+        // arrival of the same id (e.g., a peer retransmitting after
+        // gossiping a corrected wave) is allowed to dispatch.
+        let retry_actions = state.admit_finalized_wave(&topo, wave);
+        assert!(
+            retry_actions
+                .iter()
+                .any(|a| matches!(a, Action::AbandonFetch(FetchAbandon::FinalizedWaves { .. }))),
+            "retry must still reach the quorum gate, got: {retry_actions:?}"
+        );
+    }
+
+    /// `admit_finalized_wave` with an unresolvable committee shard must
+    /// emit the abandon AND clear the dedup set, same shape as the
+    /// quorum-power path.
+    #[test]
+    fn admit_finalized_wave_unknown_committee_abandons_and_clears_dedup() {
+        let topo = make_test_topology();
+        let mut state = make_test_state();
+
+        // EC for a shard the test topology doesn't know about — the
+        // committee-keys lookup returns `None` and triggers the gate.
+        let wave_id = WaveId::new(ShardGroupId::new(0), BlockHeight::new(1), BTreeSet::new());
+        let mut signers = SignerBitfield::new(4);
+        signers.set(0);
+        signers.set(1);
+        signers.set(2);
+        let ec = Arc::new(ExecutionCertificate::new(
+            WaveId::new(ShardGroupId::new(99), BlockHeight::new(1), BTreeSet::new()),
+            WeightedTimestamp::ZERO,
+            GlobalReceiptRoot::ZERO,
+            vec![],
+            zero_bls_signature(),
+            signers,
+        ));
+        let wave = Arc::new(FinalizedWave::new(
+            Arc::new(WaveCertificate::new(wave_id.clone(), vec![ec])),
+            vec![],
+        ));
+
+        let actions = state.admit_finalized_wave(&topo, Arc::clone(&wave));
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                Action::AbandonFetch(FetchAbandon::FinalizedWaves { ids }) if ids == &vec![wave_id.clone()]
+            )),
+            "unknown-committee drop must emit AbandonFetch::FinalizedWaves, got: {actions:?}"
+        );
+
+        // Regression: dedup set clear lets retries through.
+        let retry_actions = state.admit_finalized_wave(&topo, wave);
+        assert!(
+            retry_actions
+                .iter()
+                .any(|a| matches!(a, Action::AbandonFetch(FetchAbandon::FinalizedWaves { .. }))),
+            "retry must still reach the committee-keys gate, got: {retry_actions:?}"
+        );
     }
 
     /// `on_finalized_wave_verified` with `valid = true` emits exactly the
@@ -2583,14 +2701,27 @@ mod tests {
             SignerBitfield::empty(), // no signers — far below 2f+1
         ));
         let wave = Arc::new(FinalizedWave::new(
-            Arc::new(WaveCertificate::new(wave_id, vec![bogus_ec])),
+            Arc::new(WaveCertificate::new(wave_id.clone(), vec![bogus_ec])),
             vec![],
         ));
 
         let actions = state.admit_finalized_wave(&topo, wave);
+        // No admission continuation — the poisoning vector this gate
+        // exists to close. The rejection now emits a `FetchAbandon` so
+        // any pinned fetch FSM entry releases its slot.
         assert!(
-            actions.is_empty(),
+            !actions.iter().any(|a| matches!(
+                a,
+                Action::Continuation(ProtocolEvent::FinalizedWavesAdmitted { .. })
+            )),
             "sub-quorum FinalizedWave must produce no admission Continuation"
+        );
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                Action::AbandonFetch(FetchAbandon::FinalizedWaves { ids }) if ids == &vec![wave_id.clone()]
+            )),
+            "sub-quorum drop must emit AbandonFetch::FinalizedWaves, got: {actions:?}"
         );
     }
 
