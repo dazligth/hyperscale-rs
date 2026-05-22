@@ -57,10 +57,8 @@ pub struct Metrics {
     pub signature_verification_latency: HistogramVec,
     pub execution_latency: Histogram,
     // === Thread Pools ===
-    pub consensus_crypto_pool_queue_depth: Gauge,
-    pub crypto_pool_queue_depth: Gauge,
-    pub tx_validation_pool_queue_depth: Gauge,
-    pub execution_pool_queue_depth: Gauge,
+    pub consensus_pool_queue_depth: Gauge,
+    pub throughput_pool_queue_depth: Gauge,
     pub pool_task_duration: HistogramVec,
 
     // === Event Channel Depths ===
@@ -296,27 +294,15 @@ impl Metrics {
             .unwrap(),
 
             // Thread Pools
-            consensus_crypto_pool_queue_depth: register_gauge!(
-                "hyperscale_consensus_crypto_pool_queue_depth",
-                "Number of pending tasks in consensus crypto pool (block votes, QC verification)"
+            consensus_pool_queue_depth: register_gauge!(
+                "hyperscale_consensus_pool_queue_depth",
+                "Number of pending tasks in the consensus pool (votes, QCs, state root, proposals)"
             )
             .unwrap(),
 
-            crypto_pool_queue_depth: register_gauge!(
-                "hyperscale_crypto_pool_queue_depth",
-                "Number of pending tasks in general crypto pool (provisions, execution votes)"
-            )
-            .unwrap(),
-
-            tx_validation_pool_queue_depth: register_gauge!(
-                "hyperscale_tx_validation_pool_queue_depth",
-                "Number of pending tasks in tx validation pool (transaction signature verification)"
-            )
-            .unwrap(),
-
-            execution_pool_queue_depth: register_gauge!(
-                "hyperscale_execution_pool_queue_depth",
-                "Number of pending tasks in execution pool"
+            throughput_pool_queue_depth: register_gauge!(
+                "hyperscale_throughput_pool_queue_depth",
+                "Number of pending tasks in the throughput pool (crypto verify, tx validation, execution)"
             )
             .unwrap(),
 
@@ -905,23 +891,13 @@ impl MetricsRecorder for PrometheusRecorder {
 
     // ── Infrastructure ───────────────────────────────────────────────
 
-    fn set_pool_queue_depths(
-        &self,
-        consensus_crypto: usize,
-        crypto: usize,
-        tx_validation: usize,
-        execution: usize,
-    ) {
+    fn set_pool_queue_depths(&self, consensus: usize, throughput: usize) {
         self.metrics
-            .consensus_crypto_pool_queue_depth
-            .set(consensus_crypto as f64);
-        self.metrics.crypto_pool_queue_depth.set(crypto as f64);
+            .consensus_pool_queue_depth
+            .set(consensus as f64);
         self.metrics
-            .tx_validation_pool_queue_depth
-            .set(tx_validation as f64);
-        self.metrics
-            .execution_pool_queue_depth
-            .set(execution as f64);
+            .throughput_pool_queue_depth
+            .set(throughput as f64);
     }
 
     fn record_pool_task_completed(&self, pool: &str, latency_secs: f64) {

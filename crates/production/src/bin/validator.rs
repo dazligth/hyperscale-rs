@@ -31,8 +31,8 @@
 //! bootstrap_peers = []
 //!
 //! [threads]
-//! crypto_threads = 4
-//! execution_threads = 8
+//! consensus_threads = 2
+//! throughput_threads = 12
 //! io_threads = 2
 //!
 //! [metrics]
@@ -281,24 +281,17 @@ const fn default_keep_alive_interval_ms() -> u64 {
 /// Thread pool configuration.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct ThreadsConfig {
-    /// Number of consensus crypto threads (0 = auto, default 2).
-    /// These are liveness-critical for block vote and QC verification.
+    /// Threads in the consensus pool (0 = auto). Liveness-critical work
+    /// — block votes, QC verification, state root, proposal building.
     #[serde(default)]
-    pub consensus_crypto_threads: usize,
+    pub consensus_threads: usize,
 
-    /// Number of crypto verification threads (0 = auto)
+    /// Threads in the throughput pool (0 = auto). General crypto
+    /// verification, transaction signature validation, and Radix Engine
+    /// execution share this pool; in-handler `par_iter` fans batches
+    /// across the same workers.
     #[serde(default)]
-    pub crypto_threads: usize,
-
-    /// Number of transaction validation threads (0 = auto).
-    /// Isolated from general crypto to prevent transaction floods
-    /// from blocking provision/execution vote verification.
-    #[serde(default)]
-    pub tx_validation_threads: usize,
-
-    /// Number of execution threads (0 = auto)
-    #[serde(default)]
-    pub execution_threads: usize,
+    pub throughput_threads: usize,
 
     /// Number of tokio runtime worker threads (0 = auto).
     /// Controls the async I/O runtime used for networking, timers, and RPC.
@@ -766,73 +759,42 @@ fn build_engine_genesis_config(config: &GenesisConfig) -> Result<EngineGenesisCo
     Ok(engine_config)
 }
 
-/// Compute rayon pool thread counts for a given number of available cores.
+/// Compute (consensus, throughput) pool thread counts for the given host
+/// core count.
 ///
-/// Reserves 1 core for the state machine thread, then splits the remainder:
-/// - Consensus Crypto: 2 threads (fixed, liveness-critical for block votes/QC)
-/// - State Root: 10% of pool budget (JMT updates, proposal building)
-/// - Execution: 25% of pool budget (Radix Engine)
-/// - TX Validation: 15% of pool budget (transaction signature verification)
-/// - Crypto: remainder (provisions, execution votes, certificate verification)
-///
-/// On systems with fewer than 8 cores, all variable pools get 1 thread each.
-fn for_core_count(total_cores: usize) -> (usize, usize, usize, usize) {
-    // Reserve 1 core for state machine.
-    // Floor at 6 so small machines still get minimum threads per pool (over-subscribing is fine).
-    // 6 = 2 (consensus crypto) + 2 (crypto) + 1 (tx validation) + 1 (execution)
-    let pool_budget = total_cores.saturating_sub(1).max(6);
-
-    if pool_budget <= 6 {
-        // Minimum viable: 2 consensus crypto + 2 crypto + 1 each for other pools
-        (2, 2, 1, 1)
-    } else {
-        // Execution is the bottleneck (~80% utilization in production);
-        // crypto pools are lightly loaded (<5%). Give execution the lion's share.
-        let consensus_crypto = 2;
-        let crypto = 2;
-        let tx_validation = (pool_budget * 10 / 100).max(1);
-        let execution = pool_budget
-            .saturating_sub(consensus_crypto)
-            .saturating_sub(crypto)
-            .saturating_sub(tx_validation)
-            .max(1);
-        (consensus_crypto, crypto, tx_validation, execution)
-    }
+/// 2 cores go to the dedicated consensus pool (liveness-critical work);
+/// every remaining core goes to the throughput pool. State-machine
+/// threads are not reserved against because pinning is off by default —
+/// the OS scheduler interleaves them with pool workers. Floors at
+/// (2, 1) so small machines still come up; oversubscription is tolerable
+/// there.
+fn for_core_count(total_cores: usize) -> (usize, usize) {
+    let consensus = 2;
+    let throughput = total_cores.saturating_sub(consensus).max(1);
+    (consensus, throughput)
 }
 
 /// Build thread pool configuration from TOML config.
 ///
-/// When TOML values are 0 (auto), computes thread counts based on available cores.
-/// The I/O (tokio) thread count is returned separately since it is not part of
-/// the rayon pool configuration.
+/// When TOML values are 0 (auto), computes thread counts based on
+/// available cores. The I/O (tokio) thread count is returned separately
+/// since it is not part of the rayon pool configuration.
 fn build_thread_pool_config(config: &ThreadsConfig) -> ThreadPoolConfig {
-    // If all pool counts are zero, auto-detect based on available cores.
-    let all_auto = config.consensus_crypto_threads == 0
-        && config.crypto_threads == 0
-        && config.tx_validation_threads == 0
-        && config.execution_threads == 0;
+    let all_auto = config.consensus_threads == 0 && config.throughput_threads == 0;
 
     let mut builder = if all_auto {
         let available = std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get);
-        let (cc, crypto, tx_val, exec) = for_core_count(available);
+        let (consensus, throughput) = for_core_count(available);
         ThreadPoolConfig::builder()
-            .consensus_crypto_threads(cc)
-            .crypto_threads(crypto)
-            .tx_validation_threads(tx_val)
-            .execution_threads(exec)
+            .consensus_threads(consensus)
+            .throughput_threads(throughput)
     } else {
         let mut b = ThreadPoolConfig::builder();
-        if config.consensus_crypto_threads > 0 {
-            b = b.consensus_crypto_threads(config.consensus_crypto_threads);
+        if config.consensus_threads > 0 {
+            b = b.consensus_threads(config.consensus_threads);
         }
-        if config.crypto_threads > 0 {
-            b = b.crypto_threads(config.crypto_threads);
-        }
-        if config.tx_validation_threads > 0 {
-            b = b.tx_validation_threads(config.tx_validation_threads);
-        }
-        if config.execution_threads > 0 {
-            b = b.execution_threads(config.execution_threads);
+        if config.throughput_threads > 0 {
+            b = b.throughput_threads(config.throughput_threads);
         }
         b
     };
@@ -1340,54 +1302,48 @@ mod tests {
 
     #[test]
     fn test_for_core_count() {
-        // 4 cores: pool_budget = max(4-1, 6) = 6, minimum viable mode
-        let (cc, crypto, tx_val, exec) = for_core_count(4);
-        assert_eq!(cc, 2);
-        assert_eq!(crypto, 2);
-        assert_eq!(tx_val, 1);
-        assert_eq!(exec, 1);
+        // 16 cores: 2 consensus + 14 throughput
+        let (consensus, throughput) = for_core_count(16);
+        assert_eq!(consensus, 2);
+        assert_eq!(throughput, 14);
 
-        // 12 cores: pool_budget = 11
-        // cc=2, crypto=2, tx_val=10%=1, execution=remainder=6
-        let (cc, crypto, tx_val, exec) = for_core_count(12);
-        assert_eq!(cc, 2);
-        assert_eq!(crypto, 2);
-        assert_eq!(tx_val, 1);
-        assert_eq!(exec, 6);
+        // 32 cores: 2 consensus + 30 throughput
+        let (consensus, throughput) = for_core_count(32);
+        assert_eq!(consensus, 2);
+        assert_eq!(throughput, 30);
 
-        // 32 cores: pool_budget = 31
-        // cc=2, crypto=2, tx_val=10%=3, execution=remainder=24
-        let (cc, crypto, tx_val, exec) = for_core_count(32);
-        assert_eq!(cc, 2);
-        assert_eq!(crypto, 2);
-        assert_eq!(tx_val, 3);
-        assert_eq!(exec, 24);
+        // 4 cores: 2 consensus + 2 throughput
+        let (consensus, throughput) = for_core_count(4);
+        assert_eq!(consensus, 2);
+        assert_eq!(throughput, 2);
+    }
+
+    #[test]
+    fn test_for_core_count_floor() {
+        // 2 cores: floored at 1 throughput (consensus would otherwise eat both).
+        let (consensus, throughput) = for_core_count(2);
+        assert_eq!(consensus, 2);
+        assert_eq!(throughput, 1);
     }
 
     #[test]
     fn test_build_thread_pool_config_auto() {
         let config = ThreadsConfig::default();
         let pool_config = build_thread_pool_config(&config);
-        assert!(pool_config.consensus_crypto_threads >= 2);
-        assert!(pool_config.crypto_threads >= 2);
-        assert!(pool_config.tx_validation_threads >= 1);
-        assert!(pool_config.execution_threads >= 1);
+        assert!(pool_config.consensus_threads >= 2);
+        assert!(pool_config.throughput_threads >= 1);
     }
 
     #[test]
     fn test_build_thread_pool_config_explicit() {
         let config = ThreadsConfig {
-            consensus_crypto_threads: 3,
-            crypto_threads: 8,
-            tx_validation_threads: 4,
-            execution_threads: 10,
+            consensus_threads: 3,
+            throughput_threads: 14,
             io_threads: 0,
             pin_cores: false,
         };
         let pool_config = build_thread_pool_config(&config);
-        assert_eq!(pool_config.consensus_crypto_threads, 3);
-        assert_eq!(pool_config.crypto_threads, 8);
-        assert_eq!(pool_config.tx_validation_threads, 4);
-        assert_eq!(pool_config.execution_threads, 10);
+        assert_eq!(pool_config.consensus_threads, 3);
+        assert_eq!(pool_config.throughput_threads, 14);
     }
 }

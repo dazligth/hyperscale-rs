@@ -118,7 +118,7 @@ where
         let local_shard = self.shard;
         self.process
             .dispatch
-            .spawn(DispatchPool::ConsensusCrypto, move || {
+            .spawn(DispatchPool::Consensus, move || {
                 let input = match validate_synced_block(height, &cert) {
                     Ok(()) => ShardScopedInput::SyncBlockValidated {
                         height,

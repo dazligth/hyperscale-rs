@@ -833,8 +833,8 @@ impl ProductionRunner {
         let config = self.dispatch.config();
         info!(
             shards = ?self.local_shards,
-            crypto_threads = config.crypto_threads,
-            execution_threads = config.execution_threads,
+            consensus_threads = config.consensus_threads,
+            throughput_threads = config.throughput_threads,
             pin_cores = config.pin_cores,
             "Starting production runner (per-shard thread architecture)"
         );
@@ -939,10 +939,8 @@ impl ProductionRunner {
     fn collect_metrics(&self) {
         // ── Thread pool queue depths ─────────────────────────────────────
         set_pool_queue_depths(
-            self.dispatch.queue_depth(DispatchPool::ConsensusCrypto),
-            self.dispatch.queue_depth(DispatchPool::Crypto),
-            self.dispatch.queue_depth(DispatchPool::TxValidation),
-            self.dispatch.queue_depth(DispatchPool::Execution),
+            self.dispatch.queue_depth(DispatchPool::Consensus),
+            self.dispatch.queue_depth(DispatchPool::Throughput),
         );
 
         // ── Peer count ───────────────────────────────────────────────────

@@ -66,36 +66,38 @@ where
 
         let shard = self.shard;
         let event_tx = self.event_sender().clone();
-        self.process.dispatch.spawn(DispatchPool::Crypto, move || {
-            for (committed_header, sender, public_key, sender_signature) in items {
-                let msg = committed_block_header_message(
-                    committed_header.header().shard_group_id(),
-                    committed_header.header().height(),
-                    &committed_header.header().hash(),
-                );
-                let valid = verify_bls_with_metrics(
-                    &msg,
-                    &public_key,
-                    &sender_signature,
-                    "committed_header",
-                );
-                if valid {
-                    push_protocol_event(
-                        &event_tx,
-                        shard,
-                        ProtocolEvent::RemoteHeaderReceived {
-                            committed_header,
-                            sender,
-                        },
+        self.process
+            .dispatch
+            .spawn(DispatchPool::Throughput, move || {
+                for (committed_header, sender, public_key, sender_signature) in items {
+                    let msg = committed_block_header_message(
+                        committed_header.header().shard_group_id(),
+                        committed_header.header().height(),
+                        &committed_header.header().hash(),
                     );
-                } else {
-                    tracing::warn!(
-                        sender = sender.inner(),
-                        height = committed_header.header().height().inner(),
-                        "Committed header sender signature verification failed"
+                    let valid = verify_bls_with_metrics(
+                        &msg,
+                        &public_key,
+                        &sender_signature,
+                        "committed_header",
                     );
+                    if valid {
+                        push_protocol_event(
+                            &event_tx,
+                            shard,
+                            ProtocolEvent::RemoteHeaderReceived {
+                                committed_header,
+                                sender,
+                            },
+                        );
+                    } else {
+                        tracing::warn!(
+                            sender = sender.inner(),
+                            height = committed_header.header().height().inner(),
+                            "Committed header sender signature verification failed"
+                        );
+                    }
                 }
-            }
-        });
+            });
     }
 }

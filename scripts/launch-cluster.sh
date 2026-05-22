@@ -508,10 +508,8 @@ upnp_enabled = false
 max_message_size = 10485760
 
 [threads]
-consensus_crypto_threads = 0
-crypto_threads = 0
-tx_validation_threads = 0
-execution_threads = 0
+consensus_threads = 0
+throughput_threads = 0
 io_threads = 0
 pin_cores = false
 

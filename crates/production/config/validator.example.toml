@@ -52,17 +52,15 @@ gossipsub_heartbeat_ms = 100
 # ═══════════════════════════════════════════════════════════════════════════════
 
 [threads]
-# Threads for consensus-critical crypto (block votes, QC verification, state root, proposal building) (0 = auto)
-consensus_crypto_threads = 0
+# Consensus pool: liveness-critical work (block votes, QC verification,
+# state root, proposal building). Kept small and dedicated so a long
+# execution batch can't queue ahead of consensus traffic. (0 = auto.)
+consensus_threads = 0
 
-# Threads for general crypto verification (provisions, execution votes, cert aggregation) (0 = auto)
-crypto_threads = 0
-
-# Threads for transaction signature validation (0 = auto-detect)
-tx_validation_threads = 0
-
-# Threads for transaction execution (0 = auto-detect)
-execution_threads = 0
+# Throughput pool: general crypto verification (provisions, execution
+# votes, cert aggregation), transaction signature validation, and Radix
+# Engine execution share this pool with work-stealing. (0 = auto.)
+throughput_threads = 0
 
 # Tokio runtime worker threads for async I/O (network, timers, RPC) (0 = auto-detect)
 io_threads = 0

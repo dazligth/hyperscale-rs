@@ -335,7 +335,7 @@ where
 
         self.process
             .dispatch
-            .spawn(DispatchPool::ConsensusCrypto, move || {
+            .spawn(DispatchPool::Consensus, move || {
                 let result = run_qc_only_prep(&pending_chain, &prepared_commits, &pending);
                 let QcOnlyPending {
                     block, qc, source, ..

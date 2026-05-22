@@ -43,22 +43,18 @@
 //!
 //! // Configure thread pools with explicit counts
 //! let config = ThreadPoolConfig::builder()
-//!     .consensus_crypto_threads(2)
-//!     .crypto_threads(4)
-//!     .execution_threads(8)
-//!     .tx_validation_threads(2)
+//!     .consensus_threads(2)
+//!     .throughput_threads(12)
 //!     .build()
 //!     .unwrap();
 //!
 //! // Enable core pinning for cache locality (Linux only)
 //! let config = ThreadPoolConfig::builder()
-//!     .consensus_crypto_threads(2)
-//!     .crypto_threads(4)
-//!     .execution_threads(8)
-//!     .tx_validation_threads(2)
+//!     .consensus_threads(2)
+//!     .throughput_threads(12)
 //!     .pin_cores(true)
-//!     .crypto_core_start(3)     // Crypto pool on cores 3-6
-//!     .execution_core_start(7)  // Execution pool on cores 7-14
+//!     .consensus_core_start(1)   // Consensus pool on cores 1-2
+//!     .throughput_core_start(3)  // Throughput pool on cores 3-14
 //!     .build()
 //!     .unwrap();
 //!

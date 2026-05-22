@@ -46,28 +46,22 @@ mod tests {
         let dispatch = SyncDispatch::new();
         let counter = Arc::new(AtomicUsize::new(0));
 
-        for pool in [
-            DispatchPool::ConsensusCrypto,
-            DispatchPool::Crypto,
-            DispatchPool::TxValidation,
-            DispatchPool::Execution,
-        ] {
+        for pool in [DispatchPool::Consensus, DispatchPool::Throughput] {
             let c = counter.clone();
             dispatch.spawn(pool, move || {
                 c.fetch_add(1, Ordering::SeqCst);
             });
         }
-        assert_eq!(counter.load(Ordering::SeqCst), 4);
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
     }
 
     #[test]
     fn test_queue_depths_always_zero() {
         let dispatch = SyncDispatch::new();
         for pool in [
-            DispatchPool::ConsensusCrypto,
-            DispatchPool::Crypto,
-            DispatchPool::TxValidation,
-            DispatchPool::Execution,
+            DispatchPool::Consensus,
+            DispatchPool::Throughput,
+            DispatchPool::Io,
         ] {
             assert_eq!(dispatch.queue_depth(pool), 0);
         }

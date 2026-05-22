@@ -22,8 +22,8 @@ RPC_BASE_PORT=8080
 NUM_SHARDS=1 # Simplification for now: 1 shard for N nodes
 CLEAN=false
 NODES_PER_HOST=1
-CRYPTO_THREADS=0
-EXECUTION_THREADS=0
+CONSENSUS_THREADS=0
+THROUGHPUT_THREADS=0
 IO_THREADS=0
 COPY_TO_REMOTE=false
 REMOTE_PATH="~/git/hyperscale-rs/distributed-cluster-data/"
@@ -66,12 +66,12 @@ while [[ $# -gt 0 ]]; do
             NUM_SHARDS="$2"
             shift 2
             ;;
-        --crypto-threads)
-            CRYPTO_THREADS="$2"
+        --consensus-threads)
+            CONSENSUS_THREADS="$2"
             shift 2
             ;;
-        --execution-threads)
-            EXECUTION_THREADS="$2"
+        --throughput-threads)
+            THROUGHPUT_THREADS="$2"
             shift 2
             ;;
         --io-threads)
@@ -96,7 +96,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --help|-h)
             echo "Usage: $0 --hosts \"IP1,IP2...\" [--nodes-per-host N] [--shards N] [--out-dir DIR] [--clean]"
-            echo "       [--node-names \"name1,name2...\"] [--crypto-threads N] [--execution-threads N] [--io-threads N]"
+            echo "       [--node-names \"name1,name2...\"] [--consensus-threads N] [--throughput-threads N] [--io-threads N]"
             echo "       [--copy-to-remote] [--remote-path DIR] [--remote-user USER]"
             echo "       [--mempool-max-pending N]"
             echo ""
@@ -326,10 +326,8 @@ idle_connection_timeout_ms = 30000
 keep_alive_interval_ms = 5000
 
 [threads]
-consensus_crypto_threads = 0
-crypto_threads = $CRYPTO_THREADS
-tx_validation_threads = 0
-execution_threads = $EXECUTION_THREADS
+consensus_threads = $CONSENSUS_THREADS
+throughput_threads = $THROUGHPUT_THREADS
 io_threads = $IO_THREADS
 pin_cores = false
 

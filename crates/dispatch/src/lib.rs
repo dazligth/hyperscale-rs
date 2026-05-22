@@ -12,30 +12,30 @@
 //!
 //! # Pool Categories
 //!
-//! Work is categorized by priority and isolation requirements:
+//! Three routing classes:
 //!
-//! - **Consensus Crypto**: Liveness-critical (block votes, QC verification, state root, proposal building)
-//! - **Crypto**: General signature verification (provisions, execution votes, cert aggregation)
-//! - **TX Validation**: Transaction signature verification (isolated from crypto)
-//! - **Execution**: Radix Engine transaction execution
+//! - **Consensus**: liveness-critical work (block votes, QC verification,
+//!   state root, proposal building). Routes to a small dedicated pool so
+//!   long execution batches can't queue ahead of it.
+//! - **Throughput**: throughput-bound CPU work — general crypto
+//!   verification, transaction signature validation, Radix Engine
+//!   execution. Routes to one shared work-stealing pool; in-handler
+//!   `par_iter` fans batches across the whole pool's workers.
+//! - **I/O**: network sends, filesystem, GC. Routes to tokio.
 
-/// Thread-pool kind hint for [`Dispatch::spawn`]. Production runners use
-/// this to pick a dedicated pool; simulation runners ignore it (everything
-/// runs inline).
+/// Routing class for [`Dispatch::spawn`]. Production runners use this to
+/// pick the right rayon pool (or tokio for I/O); simulation runners ignore
+/// it and run every closure inline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchPool {
-    /// Liveness-critical consensus crypto (block votes, QC verification,
-    /// state root, proposal building).
-    ConsensusCrypto,
-    /// General crypto verification (provisions, execution votes, cert
-    /// aggregation).
-    Crypto,
-    /// Transaction signature validation. Isolated from general crypto so
-    /// transaction floods can't block provision/execution vote
-    /// verification.
-    TxValidation,
-    /// Radix Engine transaction execution.
-    Execution,
+    /// Liveness-critical work (block votes, QC verification, state root,
+    /// proposal building). Dedicated small pool so it's never queued
+    /// behind a long execution batch.
+    Consensus,
+    /// Throughput-bound CPU work: general crypto verification (provisions,
+    /// execution votes, cert aggregation), transaction signature
+    /// validation, and Radix Engine execution. Shared work-stealing pool.
+    Throughput,
     /// Network I/O and other non-CPU work. Production routes to the tokio
     /// runtime; simulation runs inline. Use for broadcasts, request sends,
     /// and any path that posts to the network or filesystem.

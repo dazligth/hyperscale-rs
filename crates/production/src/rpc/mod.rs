@@ -25,8 +25,8 @@
 //! synchronously and returns 400 on failure. Valid submissions are forwarded
 //! into the consensus thread via the same dispatch pool that handles network
 //! gossip, so signature verification and admission run on the configurable
-//! `tx_validation_threads` worker pool. Clients receive 202 Accepted plus
-//! the transaction hash and poll `GET /api/v1/transactions/{hash}` for the
+//! throughput-pool workers. Clients receive 202 Accepted plus the
+//! transaction hash and poll `GET /api/v1/transactions/{hash}` for the
 //! verification outcome.
 
 mod handlers;

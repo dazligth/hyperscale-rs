@@ -273,14 +273,7 @@ pub trait MetricsRecorder: Send + Sync + 'static {
     // ── Infrastructure ───────────────────────────────────────────────
 
     /// Set thread pool queue depths.
-    fn set_pool_queue_depths(
-        &self,
-        consensus_crypto: usize,
-        crypto: usize,
-        tx_validation: usize,
-        execution: usize,
-    ) {
-    }
+    fn set_pool_queue_depths(&self, consensus: usize, throughput: usize) {}
 
     /// Record a completed pool task with its duration.
     ///
@@ -663,13 +656,8 @@ pub fn set_txs_with_commitment_proof(shard: u64, validator_id: u64, count: usize
 
 /// Set thread pool queue depths.
 #[inline]
-pub fn set_pool_queue_depths(
-    consensus_crypto: usize,
-    crypto: usize,
-    tx_validation: usize,
-    execution: usize,
-) {
-    recorder().set_pool_queue_depths(consensus_crypto, crypto, tx_validation, execution);
+pub fn set_pool_queue_depths(consensus: usize, throughput: usize) {
+    recorder().set_pool_queue_depths(consensus, throughput);
 }
 
 /// Record a completed pool task with its duration.

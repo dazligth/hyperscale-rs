@@ -720,7 +720,8 @@ impl Action {
     pub const fn dispatch_pool(&self) -> Option<DispatchPool> {
         use hyperscale_dispatch::DispatchPool;
         match self {
-            // Consensus-critical crypto + state root computation + sign-and-broadcast.
+            // Liveness-critical: QC verify/build, state root, proposal
+            // building, sign-and-broadcast for consensus.
             Self::VerifyAndBuildQuorumCertificate { .. }
             | Self::VerifyQcSignature { .. }
             | Self::VerifyRemoteHeaderQc { .. }
@@ -732,9 +733,10 @@ impl Action {
             | Self::BuildProposal { .. }
             | Self::BroadcastBlockHeader { .. }
             | Self::SignAndBroadcastBlockVote { .. }
-            | Self::BroadcastCommittedBlockHeader { .. } => Some(DispatchPool::ConsensusCrypto),
+            | Self::BroadcastCommittedBlockHeader { .. } => Some(DispatchPool::Consensus),
 
-            // General crypto (cert aggregation, provision proofs, exec vote/cert sign+send).
+            // Throughput-bound: provision/cert/wave verification,
+            // execution-vote crypto, and Radix Engine execution.
             Self::AggregateExecutionCertificate { .. }
             | Self::VerifyAndAggregateExecutionVotes { .. }
             | Self::VerifyExecutionCertificateSignature { .. }
@@ -742,12 +744,9 @@ impl Action {
             | Self::VerifyProvisions { .. }
             | Self::FetchAndBroadcastProvisions { .. }
             | Self::SignAndSendExecutionVote { .. }
-            | Self::BroadcastExecutionCertificate { .. } => Some(DispatchPool::Crypto),
-
-            // Transaction execution.
-            Self::ExecuteTransactions { .. } | Self::ExecuteCrossShardTransactions { .. } => {
-                Some(DispatchPool::Execution)
-            }
+            | Self::BroadcastExecutionCertificate { .. }
+            | Self::ExecuteTransactions { .. }
+            | Self::ExecuteCrossShardTransactions { .. } => Some(DispatchPool::Throughput),
 
             _ => None,
         }

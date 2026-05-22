@@ -213,7 +213,7 @@ where
         let par: Parallelism = self.process.dispatch.parallelism();
         self.process
             .dispatch
-            .spawn(DispatchPool::TxValidation, move || {
+            .spawn(DispatchPool::Throughput, move || {
                 let results: Vec<(Arc<RoutableTransaction>, bool)> = par.map(batch, |tx| {
                     let valid = validator.validate_transaction(&tx).is_ok();
                     (tx, valid)

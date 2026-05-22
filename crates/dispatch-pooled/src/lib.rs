@@ -1,12 +1,16 @@
 //! Rayon thread pool dispatch for production deployment.
 //!
-//! This module provides [`PooledDispatch`] which schedules work across
-//! priority-isolated rayon thread pools:
+//! [`PooledDispatch`] runs two rayon pools:
 //!
-//! - **Consensus Crypto**: Liveness-critical (block votes, QC verification, state root, proposal building)
-//! - **Crypto**: General signature verification (provisions, execution votes, cert aggregation)
-//! - **TX Validation**: Transaction signature verification (isolated from crypto)
-//! - **Execution**: Radix Engine transaction execution
+//! - **Consensus** — small dedicated pool for liveness-critical work
+//!   (block votes, QC verification, state root, proposal building). Never
+//!   blocked by execution batches.
+//! - **Throughput** — single shared work-stealing pool for general crypto
+//!   verification, transaction signature validation, and Radix Engine
+//!   execution. In-handler `par_iter` fans batches across this pool's
+//!   workers.
+//!
+//! [`DispatchPool::Io`] routes to tokio's blocking pool.
 //!
 //! # Example
 //!
@@ -14,10 +18,8 @@
 //! use hyperscale_dispatch_pooled::{PooledDispatch, ThreadPoolConfig};
 //!
 //! let config = ThreadPoolConfig::builder()
-//!     .consensus_crypto_threads(2)
-//!     .crypto_threads(4)
-//!     .execution_threads(6)
-//!     .tx_validation_threads(2)
+//!     .consensus_threads(2)
+//!     .throughput_threads(12)
 //!     .build()
 //!     .unwrap();
 //!
@@ -53,53 +55,47 @@ pub enum ThreadPoolError {
     CorePinningError(String),
 }
 
-/// Configuration for production rayon thread pools.
+/// Default stack size for consensus-pool workers (BLS verifies, JMT roots).
+const DEFAULT_CONSENSUS_STACK_SIZE: usize = 2 * 1024 * 1024;
+/// Default stack size for throughput-pool workers (Radix Engine needs more).
+const DEFAULT_THROUGHPUT_STACK_SIZE: usize = 8 * 1024 * 1024;
+
+/// Configuration for the two production rayon thread pools.
 ///
-/// Specifies how many threads are allocated to each rayon pool.
-/// All thread counts are mandatory — the caller is responsible for
-/// computing appropriate values (e.g. based on available cores).
-///
-/// This config does **not** include I/O (tokio) thread counts — those are
-/// a runtime concern owned by the binary that constructs the tokio runtime.
+/// The caller computes appropriate thread counts (typically via the
+/// validator binary's vnode-aware sizer). I/O thread count is not part of
+/// this config — it's a tokio runtime concern owned by the binary.
 #[derive(Debug, Clone)]
 pub struct ThreadPoolConfig {
-    /// Number of threads for consensus-critical crypto operations (block votes, QC verification).
-    /// This is a dedicated high-priority pool that is never blocked by execution-layer
-    /// crypto work (provisions, execution votes). Keeping this pool responsive is critical
-    /// for consensus liveness - block vote verification delays cause view changes.
-    pub consensus_crypto_threads: usize,
+    /// Threads in the consensus pool. Liveness-critical work — block
+    /// votes, QC verification, state root, proposal building. Kept small
+    /// and dedicated so a long execution batch can never queue ahead of
+    /// it.
+    pub consensus_threads: usize,
 
-    /// Number of threads for general crypto operations (provisions, execution votes).
-    /// These are CPU-bound but not consensus-critical. They can queue without affecting liveness.
-    pub crypto_threads: usize,
-
-    /// Number of threads for transaction signature validation.
-    /// This is a dedicated pool to prevent transaction floods from blocking
-    /// provision/execution vote verification which are needed for execution progress.
-    pub tx_validation_threads: usize,
-
-    /// Number of threads for transaction execution.
-    /// These run the Radix Engine and are CPU/memory intensive.
-    pub execution_threads: usize,
+    /// Threads in the throughput pool. General crypto verification,
+    /// transaction signature validation, and Radix Engine execution share
+    /// this pool; rayon's work-stealing interleaves them automatically and
+    /// in-handler `par_iter` calls fan batches across the same workers.
+    pub throughput_threads: usize,
 
     /// Whether to pin threads to specific CPU cores.
     /// Improves cache locality but reduces flexibility.
     pub pin_cores: bool,
 
-    /// Starting core index for consensus crypto pool (if pinning enabled).
-    pub consensus_crypto_core_start: Option<usize>,
+    /// Starting core index for the consensus pool (if pinning enabled).
+    pub consensus_core_start: Option<usize>,
 
-    /// Starting core index for crypto pool (if pinning enabled).
-    pub crypto_core_start: Option<usize>,
+    /// Starting core index for the throughput pool (if pinning enabled).
+    pub throughput_core_start: Option<usize>,
 
-    /// Starting core index for execution pool (if pinning enabled).
-    pub execution_core_start: Option<usize>,
+    /// Stack size for consensus pool threads (bytes).
+    pub consensus_stack_size: usize,
 
-    /// Stack size for crypto threads (bytes). Default: 2MB.
-    pub crypto_stack_size: usize,
-
-    /// Stack size for execution threads (bytes). Default: 8MB (Radix Engine needs more).
-    pub execution_stack_size: usize,
+    /// Stack size for throughput pool threads (bytes). Radix Engine
+    /// execution lives here, so this is sized larger than the consensus
+    /// pool's stack.
+    pub throughput_stack_size: usize,
 }
 
 impl ThreadPoolConfig {
@@ -109,73 +105,49 @@ impl ThreadPoolConfig {
         ThreadPoolConfigBuilder::new()
     }
 
-    /// Create a minimal configuration for testing (1 thread per pool).
+    /// Minimal configuration for tests (2 consensus + 2 throughput).
     #[must_use]
     pub const fn minimal() -> Self {
         Self {
-            consensus_crypto_threads: 2,
-            crypto_threads: 2,
-            tx_validation_threads: 1,
-            execution_threads: 1,
+            consensus_threads: 2,
+            throughput_threads: 2,
             pin_cores: false,
-            consensus_crypto_core_start: None,
-            crypto_core_start: None,
-            execution_core_start: None,
-            crypto_stack_size: 2 * 1024 * 1024,
-            execution_stack_size: 8 * 1024 * 1024,
+            consensus_core_start: None,
+            throughput_core_start: None,
+            consensus_stack_size: DEFAULT_CONSENSUS_STACK_SIZE,
+            throughput_stack_size: DEFAULT_THROUGHPUT_STACK_SIZE,
         }
     }
 
     /// Total number of rayon pool threads (excluding state machine and I/O).
     #[must_use]
     pub const fn total_threads(&self) -> usize {
-        self.consensus_crypto_threads
-            + self.crypto_threads
-            + self.tx_validation_threads
-            + self.execution_threads
+        self.consensus_threads + self.throughput_threads
     }
 
     /// Validate the configuration.
     ///
     /// # Errors
     ///
-    /// Returns [`ThreadPoolError::InvalidConfig`] when any pool's thread count
-    /// is below its minimum (consensus and crypto pools require at least 2
-    /// threads; the others require at least 1) or when core pinning is enabled
-    /// but the configured cores exceed `available_parallelism()`.
+    /// Returns [`ThreadPoolError::InvalidConfig`] when either pool's thread
+    /// count is below its minimum (consensus ≥ 2, throughput ≥ 1) or when
+    /// core pinning is enabled but the configured pools exceed
+    /// `available_parallelism()`.
     pub fn validate(&self) -> Result<(), ThreadPoolError> {
-        if self.consensus_crypto_threads < 2 {
+        if self.consensus_threads < 2 {
             return Err(ThreadPoolError::InvalidConfig(
-                "consensus_crypto_threads must be at least 2 (verify + build concurrently)"
-                    .to_string(),
+                "consensus_threads must be at least 2 (verify + build concurrently)".to_string(),
             ));
         }
-        if self.crypto_threads < 2 {
+        if self.throughput_threads == 0 {
             return Err(ThreadPoolError::InvalidConfig(
-                "crypto_threads must be at least 2 (cert aggregation + provision proofs)"
-                    .to_string(),
-            ));
-        }
-        if self.tx_validation_threads == 0 {
-            return Err(ThreadPoolError::InvalidConfig(
-                "tx_validation_threads must be at least 1".to_string(),
-            ));
-        }
-        if self.execution_threads == 0 {
-            return Err(ThreadPoolError::InvalidConfig(
-                "execution_threads must be at least 1".to_string(),
+                "throughput_threads must be at least 1".to_string(),
             ));
         }
 
-        // If pinning is enabled, check that the dispatch-pool thread counts
-        // don't oversubscribe the available cores.
         if self.pin_cores {
             let available = std::thread::available_parallelism().map_or(4, NonZeroUsize::get);
-
-            let total_needed = self.consensus_crypto_threads
-                + self.crypto_threads
-                + self.tx_validation_threads
-                + self.execution_threads;
+            let total_needed = self.consensus_threads + self.throughput_threads;
             if total_needed > available {
                 return Err(ThreadPoolError::InvalidConfig(format!(
                     "Configuration requires {total_needed} cores but only {available} are available"
@@ -194,7 +166,7 @@ pub struct ThreadPoolConfigBuilder {
 }
 
 impl ThreadPoolConfigBuilder {
-    /// Create a new builder starting from minimal defaults (1 thread per pool).
+    /// Create a new builder starting from minimal defaults.
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -202,32 +174,17 @@ impl ThreadPoolConfigBuilder {
         }
     }
 
-    /// Set the number of consensus crypto threads (block votes, QC verification).
-    /// These are liveness-critical and should not be set too low.
+    /// Set the number of consensus-pool threads.
     #[must_use]
-    pub const fn consensus_crypto_threads(mut self, count: usize) -> Self {
-        self.config.consensus_crypto_threads = count;
+    pub const fn consensus_threads(mut self, count: usize) -> Self {
+        self.config.consensus_threads = count;
         self
     }
 
-    /// Set the number of general crypto verification threads (provisions, execution votes).
+    /// Set the number of throughput-pool threads.
     #[must_use]
-    pub const fn crypto_threads(mut self, count: usize) -> Self {
-        self.config.crypto_threads = count;
-        self
-    }
-
-    /// Set the number of transaction validation threads.
-    #[must_use]
-    pub const fn tx_validation_threads(mut self, count: usize) -> Self {
-        self.config.tx_validation_threads = count;
-        self
-    }
-
-    /// Set the number of execution threads.
-    #[must_use]
-    pub const fn execution_threads(mut self, count: usize) -> Self {
-        self.config.execution_threads = count;
+    pub const fn throughput_threads(mut self, count: usize) -> Self {
+        self.config.throughput_threads = count;
         self
     }
 
@@ -238,41 +195,33 @@ impl ThreadPoolConfigBuilder {
         self
     }
 
-    /// Set the starting core for the consensus crypto pool.
+    /// Set the starting core for the consensus pool.
     #[must_use]
-    pub const fn consensus_crypto_core_start(mut self, core: usize) -> Self {
-        self.config.consensus_crypto_core_start = Some(core);
+    pub const fn consensus_core_start(mut self, core: usize) -> Self {
+        self.config.consensus_core_start = Some(core);
         self.config.pin_cores = true;
         self
     }
 
-    /// Set the starting core for the crypto pool.
+    /// Set the starting core for the throughput pool.
     #[must_use]
-    pub const fn crypto_core_start(mut self, core: usize) -> Self {
-        self.config.crypto_core_start = Some(core);
+    pub const fn throughput_core_start(mut self, core: usize) -> Self {
+        self.config.throughput_core_start = Some(core);
         self.config.pin_cores = true;
         self
     }
 
-    /// Set the starting core for the execution pool.
+    /// Set stack size for consensus pool threads.
     #[must_use]
-    pub const fn execution_core_start(mut self, core: usize) -> Self {
-        self.config.execution_core_start = Some(core);
-        self.config.pin_cores = true;
+    pub const fn consensus_stack_size(mut self, size: usize) -> Self {
+        self.config.consensus_stack_size = size;
         self
     }
 
-    /// Set stack size for crypto threads.
+    /// Set stack size for throughput pool threads.
     #[must_use]
-    pub const fn crypto_stack_size(mut self, size: usize) -> Self {
-        self.config.crypto_stack_size = size;
-        self
-    }
-
-    /// Set stack size for execution threads.
-    #[must_use]
-    pub const fn execution_stack_size(mut self, size: usize) -> Self {
-        self.config.execution_stack_size = size;
+    pub const fn throughput_stack_size(mut self, size: usize) -> Self {
+        self.config.throughput_stack_size = size;
         self
     }
 
@@ -301,29 +250,20 @@ impl Default for ThreadPoolConfigBuilder {
 
 /// Rayon thread pool dispatch for production deployment.
 ///
-/// Creates and owns priority-isolated rayon thread pools:
-/// - Consensus crypto pool (block votes, QC verification) — liveness-critical
-/// - General crypto pool (provisions, execution votes)
-/// - TX validation pool (transaction signatures) — isolated from crypto
-/// - Execution pool (Radix Engine)
-///
+/// Two rayon pools (consensus + throughput) plus a tokio handle for I/O.
 /// Spawned closures are automatically wrapped in `rayon::ThreadPool::install()`,
-/// ensuring that `par_iter` and other parallel primitives use the correct pool.
+/// ensuring `par_iter` and other parallel primitives use the correct pool.
 #[derive(Clone)]
 pub struct PooledDispatch {
     config: ThreadPoolConfig,
-    consensus_crypto_pool: Arc<ThreadPool>,
-    crypto_pool: Arc<ThreadPool>,
-    tx_validation_pool: Arc<ThreadPool>,
-    execution_pool: Arc<ThreadPool>,
+    consensus_pool: Arc<ThreadPool>,
+    throughput_pool: Arc<ThreadPool>,
     /// Tokio handle for [`DispatchPool::Io`] tasks. Captured at construction
     /// time, so [`PooledDispatch::new`] must be called from inside a tokio
     /// runtime context.
     tokio_handle: Handle,
-    consensus_crypto_pending: Arc<AtomicUsize>,
-    crypto_pending: Arc<AtomicUsize>,
-    tx_validation_pending: Arc<AtomicUsize>,
-    execution_pending: Arc<AtomicUsize>,
+    consensus_pending: Arc<AtomicUsize>,
+    throughput_pending: Arc<AtomicUsize>,
     io_pending: Arc<AtomicUsize>,
 }
 
@@ -336,36 +276,28 @@ impl PooledDispatch {
     ///
     /// # Errors
     ///
-    /// Returns a [`ThreadPoolError`] when validation fails or when any of the
-    /// underlying rayon thread pools cannot be built.
+    /// Returns a [`ThreadPoolError`] when validation fails or when either
+    /// underlying rayon thread pool cannot be built.
     pub fn new(config: ThreadPoolConfig, tokio_handle: Handle) -> Result<Self, ThreadPoolError> {
         config.validate()?;
 
-        let consensus_crypto_pool = Arc::new(Self::build_consensus_crypto_pool(&config)?);
-        let crypto_pool = Arc::new(Self::build_crypto_pool(&config)?);
-        let tx_validation_pool = Arc::new(Self::build_tx_validation_pool(&config)?);
-        let execution_pool = Arc::new(Self::build_execution_pool(&config)?);
+        let consensus_pool = Arc::new(Self::build_consensus_pool(&config)?);
+        let throughput_pool = Arc::new(Self::build_throughput_pool(&config)?);
 
         tracing::info!(
-            consensus_crypto_threads = config.consensus_crypto_threads,
-            crypto_threads = config.crypto_threads,
-            tx_validation_threads = config.tx_validation_threads,
-            execution_threads = config.execution_threads,
+            consensus_threads = config.consensus_threads,
+            throughput_threads = config.throughput_threads,
             pin_cores = config.pin_cores,
             "Thread pools initialized"
         );
 
         Ok(Self {
             config,
-            consensus_crypto_pool,
-            crypto_pool,
-            tx_validation_pool,
-            execution_pool,
+            consensus_pool,
+            throughput_pool,
             tokio_handle,
-            consensus_crypto_pending: Arc::new(AtomicUsize::new(0)),
-            crypto_pending: Arc::new(AtomicUsize::new(0)),
-            tx_validation_pending: Arc::new(AtomicUsize::new(0)),
-            execution_pending: Arc::new(AtomicUsize::new(0)),
+            consensus_pending: Arc::new(AtomicUsize::new(0)),
+            throughput_pending: Arc::new(AtomicUsize::new(0)),
             io_pending: Arc::new(AtomicUsize::new(0)),
         })
     }
@@ -376,22 +308,20 @@ impl PooledDispatch {
         &self.config
     }
 
-    fn build_consensus_crypto_pool(
-        config: &ThreadPoolConfig,
-    ) -> Result<ThreadPool, ThreadPoolError> {
+    fn build_consensus_pool(config: &ThreadPoolConfig) -> Result<ThreadPool, ThreadPoolError> {
         let mut builder = ThreadPoolBuilder::new()
-            .num_threads(config.consensus_crypto_threads)
-            .stack_size(config.crypto_stack_size)
-            .thread_name(|i| format!("consensus-crypto-{i}"));
+            .num_threads(config.consensus_threads)
+            .stack_size(config.consensus_stack_size)
+            .thread_name(|i| format!("consensus-{i}"));
 
         if config.pin_cores {
-            let start_core = config.consensus_crypto_core_start.unwrap_or(1);
+            let start_core = config.consensus_core_start.unwrap_or(1);
             builder = builder.start_handler(move |i| {
                 let core_id = start_core + i;
                 if let Err(e) = pin_thread_to_core(core_id) {
-                    tracing::warn!(core = core_id, error = ?e, "Failed to pin consensus crypto thread");
+                    tracing::warn!(core = core_id, error = ?e, "Failed to pin consensus thread");
                 } else {
-                    tracing::debug!(core = core_id, thread = i, "Pinned consensus crypto thread");
+                    tracing::debug!(core = core_id, thread = i, "Pinned consensus thread");
                 }
             });
         }
@@ -401,56 +331,22 @@ impl PooledDispatch {
             .map_err(|e| ThreadPoolError::RayonBuildError(e.to_string()))
     }
 
-    fn build_crypto_pool(config: &ThreadPoolConfig) -> Result<ThreadPool, ThreadPoolError> {
+    fn build_throughput_pool(config: &ThreadPoolConfig) -> Result<ThreadPool, ThreadPoolError> {
         let mut builder = ThreadPoolBuilder::new()
-            .num_threads(config.crypto_threads)
-            .stack_size(config.crypto_stack_size)
-            .thread_name(|i| format!("crypto-{i}"));
+            .num_threads(config.throughput_threads)
+            .stack_size(config.throughput_stack_size)
+            .thread_name(|i| format!("throughput-{i}"));
 
         if config.pin_cores {
             let start_core = config
-                .crypto_core_start
-                .unwrap_or(1 + config.consensus_crypto_threads);
+                .throughput_core_start
+                .unwrap_or(1 + config.consensus_threads);
             builder = builder.start_handler(move |i| {
                 let core_id = start_core + i;
                 if let Err(e) = pin_thread_to_core(core_id) {
-                    tracing::warn!(core = core_id, error = ?e, "Failed to pin crypto thread");
+                    tracing::warn!(core = core_id, error = ?e, "Failed to pin throughput thread");
                 } else {
-                    tracing::debug!(core = core_id, thread = i, "Pinned crypto thread");
-                }
-            });
-        }
-
-        builder
-            .build()
-            .map_err(|e| ThreadPoolError::RayonBuildError(e.to_string()))
-    }
-
-    fn build_tx_validation_pool(config: &ThreadPoolConfig) -> Result<ThreadPool, ThreadPoolError> {
-        ThreadPoolBuilder::new()
-            .num_threads(config.tx_validation_threads)
-            .stack_size(config.crypto_stack_size)
-            .thread_name(|i| format!("tx-val-{i}"))
-            .build()
-            .map_err(|e| ThreadPoolError::RayonBuildError(e.to_string()))
-    }
-
-    fn build_execution_pool(config: &ThreadPoolConfig) -> Result<ThreadPool, ThreadPoolError> {
-        let mut builder = ThreadPoolBuilder::new()
-            .num_threads(config.execution_threads)
-            .stack_size(config.execution_stack_size)
-            .thread_name(|i| format!("exec-{i}"));
-
-        if config.pin_cores {
-            let start_core = config
-                .execution_core_start
-                .unwrap_or(1 + config.consensus_crypto_threads + config.crypto_threads);
-            builder = builder.start_handler(move |i| {
-                let core_id = start_core + i;
-                if let Err(e) = pin_thread_to_core(core_id) {
-                    tracing::warn!(core = core_id, error = ?e, "Failed to pin execution thread");
-                } else {
-                    tracing::debug!(core = core_id, thread = i, "Pinned execution thread");
+                    tracing::debug!(core = core_id, thread = i, "Pinned throughput thread");
                 }
             });
         }
@@ -469,30 +365,22 @@ impl PooledDispatch {
         pool: DispatchPool,
     ) -> Option<(&Arc<ThreadPool>, &Arc<AtomicUsize>, &'static str)> {
         match pool {
-            DispatchPool::ConsensusCrypto => Some((
-                &self.consensus_crypto_pool,
-                &self.consensus_crypto_pending,
-                "consensus_crypto",
-            )),
-            DispatchPool::Crypto => Some((&self.crypto_pool, &self.crypto_pending, "crypto")),
-            DispatchPool::TxValidation => Some((
-                &self.tx_validation_pool,
-                &self.tx_validation_pending,
-                "tx_validation",
-            )),
-            DispatchPool::Execution => {
-                Some((&self.execution_pool, &self.execution_pending, "execution"))
+            DispatchPool::Consensus => {
+                Some((&self.consensus_pool, &self.consensus_pending, "consensus"))
             }
+            DispatchPool::Throughput => Some((
+                &self.throughput_pool,
+                &self.throughput_pending,
+                "throughput",
+            )),
             DispatchPool::Io => None,
         }
     }
 
     const fn pending_counter(&self, pool: DispatchPool) -> &Arc<AtomicUsize> {
         match pool {
-            DispatchPool::ConsensusCrypto => &self.consensus_crypto_pending,
-            DispatchPool::Crypto => &self.crypto_pending,
-            DispatchPool::TxValidation => &self.tx_validation_pending,
-            DispatchPool::Execution => &self.execution_pending,
+            DispatchPool::Consensus => &self.consensus_pending,
+            DispatchPool::Throughput => &self.throughput_pending,
             DispatchPool::Io => &self.io_pending,
         }
     }
@@ -570,47 +458,43 @@ mod tests {
     #[test]
     fn test_minimal_config() {
         let config = ThreadPoolConfig::minimal();
-        assert_eq!(config.consensus_crypto_threads, 2);
-        assert_eq!(config.crypto_threads, 2);
-        assert_eq!(config.tx_validation_threads, 1);
-        assert_eq!(config.execution_threads, 1);
+        assert_eq!(config.consensus_threads, 2);
+        assert_eq!(config.throughput_threads, 2);
         config.validate().unwrap();
     }
 
     #[test]
     fn test_builder() {
         let config = ThreadPoolConfig::builder()
-            .crypto_threads(4)
-            .execution_threads(8)
+            .consensus_threads(2)
+            .throughput_threads(12)
             .build()
             .unwrap();
 
-        assert_eq!(config.crypto_threads, 4);
-        assert_eq!(config.execution_threads, 8);
+        assert_eq!(config.consensus_threads, 2);
+        assert_eq!(config.throughput_threads, 12);
     }
 
     #[test]
     fn test_builder_with_pinning() {
         let config = ThreadPoolConfig::builder()
-            .crypto_threads(2)
-            .execution_threads(4)
-            .consensus_crypto_core_start(1)
-            .crypto_core_start(3)
-            .execution_core_start(5)
+            .consensus_threads(2)
+            .throughput_threads(4)
+            .consensus_core_start(1)
+            .throughput_core_start(3)
             .build_unchecked();
 
         assert!(config.pin_cores);
-        assert_eq!(config.consensus_crypto_core_start, Some(1));
-        assert_eq!(config.crypto_core_start, Some(3));
-        assert_eq!(config.execution_core_start, Some(5));
+        assert_eq!(config.consensus_core_start, Some(1));
+        assert_eq!(config.throughput_core_start, Some(3));
     }
 
     #[test]
     fn test_invalid_config() {
-        let result = ThreadPoolConfig::builder().crypto_threads(0).build();
+        let result = ThreadPoolConfig::builder().consensus_threads(1).build();
         assert!(result.is_err());
 
-        let result = ThreadPoolConfig::builder().execution_threads(0).build();
+        let result = ThreadPoolConfig::builder().throughput_threads(0).build();
         assert!(result.is_err());
     }
 
@@ -624,9 +508,8 @@ mod tests {
         let config = ThreadPoolConfig::minimal();
         let dispatch = PooledDispatch::new(config, rt.handle().clone()).unwrap();
 
-        assert_eq!(dispatch.config().consensus_crypto_threads, 2);
-        assert_eq!(dispatch.config().crypto_threads, 2);
-        assert_eq!(dispatch.config().execution_threads, 1);
+        assert_eq!(dispatch.config().consensus_threads, 2);
+        assert_eq!(dispatch.config().throughput_threads, 2);
     }
 
     #[test]
@@ -637,49 +520,33 @@ mod tests {
         let config = ThreadPoolConfig::minimal();
         let dispatch = PooledDispatch::new(config, rt.handle().clone()).unwrap();
 
-        let consensus_crypto_counter = Arc::new(AtomicUsize::new(0));
-        let crypto_counter = Arc::new(AtomicUsize::new(0));
-        let tx_validation_counter = Arc::new(AtomicUsize::new(0));
-        let exec_counter = Arc::new(AtomicUsize::new(0));
+        let consensus_counter = Arc::new(AtomicUsize::new(0));
+        let throughput_counter = Arc::new(AtomicUsize::new(0));
 
-        let counter = consensus_crypto_counter.clone();
-        dispatch.spawn(DispatchPool::ConsensusCrypto, move || {
+        let counter = consensus_counter.clone();
+        dispatch.spawn(DispatchPool::Consensus, move || {
             counter.fetch_add(1, Ordering::SeqCst);
         });
 
-        let counter = crypto_counter.clone();
-        dispatch.spawn(DispatchPool::Crypto, move || {
-            counter.fetch_add(1, Ordering::SeqCst);
-        });
-
-        let counter = tx_validation_counter.clone();
-        dispatch.spawn(DispatchPool::TxValidation, move || {
-            counter.fetch_add(1, Ordering::SeqCst);
-        });
-
-        let counter = exec_counter.clone();
-        dispatch.spawn(DispatchPool::Execution, move || {
+        let counter = throughput_counter.clone();
+        dispatch.spawn(DispatchPool::Throughput, move || {
             counter.fetch_add(1, Ordering::SeqCst);
         });
 
         // Wait for tasks to complete
         std::thread::sleep(std::time::Duration::from_millis(100));
 
-        assert_eq!(consensus_crypto_counter.load(Ordering::SeqCst), 1);
-        assert_eq!(crypto_counter.load(Ordering::SeqCst), 1);
-        assert_eq!(tx_validation_counter.load(Ordering::SeqCst), 1);
-        assert_eq!(exec_counter.load(Ordering::SeqCst), 1);
+        assert_eq!(consensus_counter.load(Ordering::SeqCst), 1);
+        assert_eq!(throughput_counter.load(Ordering::SeqCst), 1);
     }
 
     #[test]
     fn test_total_threads() {
         let config = ThreadPoolConfig::builder()
-            .consensus_crypto_threads(2)
-            .crypto_threads(4)
-            .tx_validation_threads(3)
-            .execution_threads(6)
+            .consensus_threads(2)
+            .throughput_threads(12)
             .build_unchecked();
 
-        assert_eq!(config.total_threads(), 15); // 2 + 4 + 3 + 6
+        assert_eq!(config.total_threads(), 14);
     }
 }
