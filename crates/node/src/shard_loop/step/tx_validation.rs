@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use hyperscale_core::ProtocolEvent;
-use hyperscale_dispatch::{Dispatch, DispatchPool};
+use hyperscale_dispatch::{Dispatch, DispatchPool, Parallelism};
 use hyperscale_network::Network;
 use hyperscale_storage::Storage;
 use hyperscale_types::network::gossip::TransactionGossip;
@@ -210,16 +210,17 @@ where
         let validator = self.process.tx_validator.clone();
         let event_tx = self.event_sender().clone();
         let local_shard = self.shard;
+        let par: Parallelism = self.process.dispatch.parallelism();
         self.process
             .dispatch
             .spawn(DispatchPool::TxValidation, move || {
-                let results: Vec<bool> = batch
-                    .iter()
-                    .map(|tx| validator.validate_transaction(tx).is_ok())
-                    .collect();
+                let results: Vec<(Arc<RoutableTransaction>, bool)> = par.map(batch, |tx| {
+                    let valid = validator.validate_transaction(&tx).is_ok();
+                    (tx, valid)
+                });
 
                 let mut failed_hashes = Vec::new();
-                for (tx, valid) in batch.into_iter().zip(results) {
+                for (tx, valid) in results {
                     if valid {
                         push_shard_input(
                             &event_tx,
