@@ -30,7 +30,9 @@ mod topology;
 mod transaction;
 mod wave;
 
-pub use beacon::{BeaconBlockHeader, RecoveryCertificate, RecoveryRequest, recovery_cert_hash};
+pub use beacon::{
+    BeaconBlock, BeaconBlockHeader, RecoveryCertificate, RecoveryRequest, recovery_cert_hash,
+};
 pub use crypto::batch_verify::{
     batch_verify_bls_different_messages, batch_verify_bls_different_messages_all_or_nothing,
     batch_verify_bls_same_message, batch_verify_ed25519,
