@@ -19,7 +19,7 @@ use hyperscale_types::{
 };
 
 fn no_witness() -> BeaconWitnessCommit {
-    BeaconWitnessCommit::empty(ShardGroupId::new(0), BeaconWitnessLeafCount::ZERO)
+    BeaconWitnessCommit::empty(BeaconWitnessLeafCount::ZERO)
 }
 
 /// Build a placeholder EC whose `wave_id` matches the WC the caller is about

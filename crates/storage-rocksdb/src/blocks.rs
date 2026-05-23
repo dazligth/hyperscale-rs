@@ -20,8 +20,8 @@ use std::time::Instant;
 use hyperscale_metrics::{record_storage_operation, record_storage_read};
 use hyperscale_types::{
     BeaconWitnessLeafCount, Block, BlockHeight, BlockMetadata, CertifiedBlock, FinalizedWave, Hash,
-    ProvisionHash, QuorumCertificate, RoutableTransaction, ShardGroupId, ShardWitnessPayload,
-    TxHash, WaveCertificate, WaveId,
+    ProvisionHash, QuorumCertificate, RoutableTransaction, ShardWitnessPayload, TxHash,
+    WaveCertificate, WaveId,
 };
 use rocksdb::{ColumnFamily, WriteBatch};
 
@@ -159,7 +159,7 @@ impl RocksDbStorage {
 
     /// Append per-block beacon-witness leaves into an existing
     /// `WriteBatch`. Each leaf at position `i` lands at key
-    /// `(shard, starting_leaf_index + i)` in
+    /// `starting_leaf_index + i` in
     /// [`BeaconWitnessesCf`](crate::column_families::BeaconWitnessesCf).
     ///
     /// No-op when `leaves` is empty. Called from `commit_prepared_blocks`
@@ -168,7 +168,6 @@ impl RocksDbStorage {
     pub(crate) fn append_beacon_witnesses_to_batch(
         &self,
         batch: &mut WriteBatch,
-        shard: ShardGroupId,
         starting_leaf_index: BeaconWitnessLeafCount,
         leaves: &[ShardWitnessPayload],
     ) {
@@ -180,12 +179,7 @@ impl RocksDbStorage {
         let start = starting_leaf_index.inner();
         for (offset, payload) in leaves.iter().enumerate() {
             let leaf_index = start + offset as u64;
-            batch_put::<BeaconWitnessesCf>(
-                batch,
-                beacon_witnesses_cf,
-                &(shard, leaf_index),
-                payload,
-            );
+            batch_put::<BeaconWitnessesCf>(batch, beacon_witnesses_cf, &leaf_index, payload);
         }
     }
 

@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use hyperscale_types::{
-    BeaconWitnessLeafCount, Block, BlockHeight, FinalizedWave, QuorumCertificate, ShardGroupId,
+    BeaconWitnessLeafCount, Block, BlockHeight, FinalizedWave, QuorumCertificate,
     ShardWitnessPayload, StateRoot,
 };
 
@@ -16,24 +16,18 @@ use crate::{BaseReadCache, JmtSnapshot};
 /// Beacon-witness data committed alongside a block.
 ///
 /// Threaded into the block-commit path so the storage backend can write
-/// the appended leaves into the per-shard `beacon_witnesses` column
-/// family in the **same `WriteBatch`** as the block, atomically
-/// stamping `BlockMetadata::beacon_witness_leaf_count_at_block_end` so
-/// post-restart recovery sees a self-consistent tip. Producer-side
-/// derivation lives in the shard coordinator
-/// ([`crate::beacon_witnesses::derive_leaves`](../../crates/shard/src/beacon_witnesses.rs));
-/// this struct is the persistence-side carrier.
+/// the appended leaves into its `beacon_witnesses` column family in the
+/// **same `WriteBatch`** as the block, atomically stamping
+/// `BlockMetadata::beacon_witness_leaf_count_at_block_end` so
+/// post-restart recovery sees a self-consistent tip. Storage instances
+/// are scoped per-shard, so the shard tag is implicit in the storage
+/// handle and absent from this struct.
 #[derive(Debug, Clone)]
 pub struct BeaconWitnessCommit {
-    /// Shard the leaves belong to. Used as the key prefix in the
-    /// `beacon_witnesses` CF.
-    pub shard: ShardGroupId,
     /// Accumulator index of the first leaf in `leaves`. The leaf at
-    /// position `i` in `leaves` writes to key
-    /// `(shard, starting_leaf_index + i)`.
+    /// position `i` in `leaves` writes to key `starting_leaf_index + i`.
     pub starting_leaf_index: BeaconWitnessLeafCount,
-    /// Witness payloads appended by this block. Encoded by the
-    /// `beacon_witnesses` CF's typed-CF accessor.
+    /// Witness payloads appended by this block.
     pub leaves: Vec<ShardWitnessPayload>,
     /// Total accumulator leaves after this block — i.e.
     /// `starting_leaf_index + leaves.len()`. Stamped into the block's
@@ -48,9 +42,8 @@ impl BeaconWitnessCommit {
     /// when witness reconstruction lives elsewhere, by tests that
     /// haven't wired the shard producer, and by genesis.
     #[must_use]
-    pub const fn empty(shard: ShardGroupId, starting_leaf_index: BeaconWitnessLeafCount) -> Self {
+    pub const fn empty(starting_leaf_index: BeaconWitnessLeafCount) -> Self {
         Self {
-            shard,
             starting_leaf_index,
             leaves: Vec::new(),
             leaf_count_at_block_end: starting_leaf_index,

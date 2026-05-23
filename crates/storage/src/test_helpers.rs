@@ -276,7 +276,7 @@ fn commit_empty_blocks_up_to(storage: &(impl ChainReader + ChainWriter), target:
 }
 
 const fn empty_witness() -> BeaconWitnessCommit {
-    BeaconWitnessCommit::empty(ShardGroupId::new(0), BeaconWitnessLeafCount::ZERO)
+    BeaconWitnessCommit::empty(BeaconWitnessLeafCount::ZERO)
 }
 
 /// Shared EC roundtrip test: commit a block carrying an EC, then read it

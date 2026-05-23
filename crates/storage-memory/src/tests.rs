@@ -19,7 +19,7 @@ use hyperscale_types::{
 };
 
 fn no_witness() -> BeaconWitnessCommit {
-    BeaconWitnessCommit::empty(ShardGroupId::new(0), BeaconWitnessLeafCount::ZERO)
+    BeaconWitnessCommit::empty(BeaconWitnessLeafCount::ZERO)
 }
 use indexmap::IndexMap;
 

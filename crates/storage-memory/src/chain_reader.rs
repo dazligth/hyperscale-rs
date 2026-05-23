@@ -5,8 +5,9 @@ use std::sync::Arc;
 use hyperscale_storage::lock_recover::read_or_recover;
 use hyperscale_storage::{BlockForSync, ChainReader};
 use hyperscale_types::{
-    BlockHash, BlockHeight, BlockManifest, CertifiedBlock, CommittedBlockHeader, ConsensusReceipt,
-    ExecutionCertificate, QuorumCertificate, RoutableTransaction, TxHash, WaveCertificate, WaveId,
+    BeaconWitnessLeafCount, BlockHash, BlockHeight, BlockManifest, CertifiedBlock,
+    CommittedBlockHeader, ConsensusReceipt, ExecutionCertificate, QuorumCertificate,
+    RoutableTransaction, ShardWitnessPayload, TxHash, WaveCertificate, WaveId,
 };
 
 use crate::core::SimStorage;
@@ -96,6 +97,18 @@ impl ChainReader for SimStorage {
         wave_ids
             .iter()
             .filter_map(|wid| c.execution_certs.get(wid).cloned())
+            .collect()
+    }
+
+    fn get_beacon_witness_payloads(&self, end: BeaconWitnessLeafCount) -> Vec<ShardWitnessPayload> {
+        let end_raw = end.inner();
+        if end_raw == 0 {
+            return Vec::new();
+        }
+        let c = read_or_recover(&self.consensus);
+        c.beacon_witnesses
+            .range(0u64..end_raw)
+            .map(|(_, payload)| payload.clone())
             .collect()
     }
 }

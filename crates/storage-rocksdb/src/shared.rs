@@ -18,9 +18,10 @@ use hyperscale_storage::{
     PreparedCommitBatchEntry, SubstateDatabase, SubstateStore, VersionedStore,
 };
 use hyperscale_types::{
-    Block, BlockHash, BlockHeight, CertifiedBlock, CommittedBlockHeader, ConsensusReceipt,
-    ExecutionCertificate, FinalizedWave, MerkleInclusionProof, NodeId, QuorumCertificate,
-    RoutableTransaction, StateRoot, TxHash, WaveCertificate, WaveId,
+    BeaconWitnessLeafCount, Block, BlockHash, BlockHeight, CertifiedBlock, CommittedBlockHeader,
+    ConsensusReceipt, ExecutionCertificate, FinalizedWave, MerkleInclusionProof, NodeId,
+    QuorumCertificate, RoutableTransaction, ShardWitnessPayload, StateRoot, TxHash,
+    WaveCertificate, WaveId,
 };
 
 use crate::chain_writer::RocksDbPreparedCommit;
@@ -229,6 +230,10 @@ impl ChainReader for SharedStorage {
 
     fn get_execution_certificates_batch(&self, wave_ids: &[WaveId]) -> Vec<ExecutionCertificate> {
         self.0.get_execution_certificates_batch(wave_ids)
+    }
+
+    fn get_beacon_witness_payloads(&self, end: BeaconWitnessLeafCount) -> Vec<ShardWitnessPayload> {
+        self.0.get_beacon_witness_payloads(end)
     }
 }
 

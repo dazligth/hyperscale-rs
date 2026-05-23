@@ -10,9 +10,10 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use hyperscale_jmt::{Node as JmtNode, NodeKey as JmtNodeKey, TreeReader};
 use hyperscale_types::{
-    Block, BlockHash, BlockHeight, CertifiedBlock, CommittedBlockHeader, ConsensusReceipt,
-    ExecutionCertificate, FinalizedWave, MerkleInclusionProof, NodeId, QuorumCertificate,
-    RoutableTransaction, StateRoot, TxHash, WaveCertificate, WaveId,
+    BeaconWitnessLeafCount, Block, BlockHash, BlockHeight, CertifiedBlock, CommittedBlockHeader,
+    ConsensusReceipt, ExecutionCertificate, FinalizedWave, MerkleInclusionProof, NodeId,
+    QuorumCertificate, RoutableTransaction, ShardWitnessPayload, StateRoot, TxHash,
+    WaveCertificate, WaveId,
 };
 use radix_common::prelude::DatabaseUpdate;
 use radix_substate_store_interface::interface::SubstateDatabase;
@@ -265,6 +266,15 @@ where
     /// base storage.
     pub fn execution_certificates_batch(&self, ids: &[WaveId]) -> Vec<ExecutionCertificate> {
         self.base.get_execution_certificates_batch(ids)
+    }
+
+    /// Beacon-witness payloads in leaf-index order up to (but not
+    /// including) `end`. Pass-through to base storage.
+    pub fn get_beacon_witness_payloads(
+        &self,
+        end: BeaconWitnessLeafCount,
+    ) -> Vec<ShardWitnessPayload> {
+        self.base.get_beacon_witness_payloads(end)
     }
 
     /// Look up the pending entry at `height` that has a `certified_block`
@@ -975,6 +985,12 @@ mod tests {
             &self,
             _wave_ids: &[WaveId],
         ) -> Vec<ExecutionCertificate> {
+            Vec::new()
+        }
+        fn get_beacon_witness_payloads(
+            &self,
+            _end: BeaconWitnessLeafCount,
+        ) -> Vec<ShardWitnessPayload> {
             Vec::new()
         }
     }

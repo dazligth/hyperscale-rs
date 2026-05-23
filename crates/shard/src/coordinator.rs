@@ -2431,7 +2431,6 @@ impl ShardCoordinator {
         self.beacon_witness_accumulator.commit_append(&new_leaves);
         let leaf_count_at_block_end = self.beacon_witness_accumulator.leaf_count();
         let witness = BeaconWitnessCommit {
-            shard: topology_snapshot.local_shard(),
             starting_leaf_index,
             leaves: new_leaves,
             leaf_count_at_block_end,

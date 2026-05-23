@@ -10,6 +10,7 @@ use hyperscale_types::network::notification::{
     BlockHeaderNotification, BlockVoteNotification, ExecutionCertificatesNotification,
     ExecutionVotesNotification, ProvisionsNotification, ReadySignalNotification,
 };
+use hyperscale_types::network::request::beacon::GetShardWitnessesRequest;
 use hyperscale_types::network::request::{
     GetExecutionCertsRequest, GetFinalizedWavesRequest, GetLocalProvisionsRequest,
 };
@@ -48,6 +49,7 @@ where
         use crate::shard_io::fetch::exec_cert_serve::serve_execution_certs_request;
         use crate::shard_io::fetch::finalized_wave_serve::serve_finalized_waves_request;
         use crate::shard_io::fetch::provision_serve::serve_provision_request;
+        use crate::shard_io::fetch::shard_witness_serve::serve_shard_witnesses_request;
         use crate::shard_io::fetch::transaction_serve::serve_transaction_request;
         use crate::shard_io::sync::block_serve::serve_block_request;
         use crate::shard_io::sync::remote_header_serve::serve_remote_headers_request;
@@ -330,6 +332,20 @@ where
                 .network
                 .register_request_handler::<GetRemoteHeadersRequest>(shard, move |req| {
                     serve_remote_headers_request(&pending_chain, shard, &req)
+                });
+
+            // ── beacon.shard_witnesses.request → witness proof serve ────────
+            //
+            // Beacon validators outside this shard's committee pull
+            // accumulator leaves + inclusion proofs anchored at a
+            // specific committed block. Pure CPU + storage read; no
+            // dedup until traffic profiling shows it's worth it.
+
+            let pending_chain = Arc::clone(&self.shard_io(shard).pending_chain);
+            self.process
+                .network
+                .register_request_handler::<GetShardWitnessesRequest>(shard, move |req| {
+                    serve_shard_witnesses_request(&pending_chain, &req)
                 });
         } // end for shard in hosted_shards
     }

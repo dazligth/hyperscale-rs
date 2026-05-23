@@ -169,7 +169,6 @@ impl ChainWriter for RocksDbStorage {
             );
             self.append_beacon_witnesses_to_batch(
                 &mut write_batch,
-                witness.shard,
                 witness.starting_leaf_index,
                 &witness.leaves,
             );
@@ -313,7 +312,6 @@ impl RocksDbStorage {
         self.append_block_to_batch(&mut batch, block, qc, witness.leaf_count_at_block_end);
         self.append_beacon_witnesses_to_batch(
             &mut batch,
-            witness.shard,
             witness.starting_leaf_index,
             &witness.leaves,
         );

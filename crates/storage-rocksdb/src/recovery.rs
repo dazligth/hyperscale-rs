@@ -70,15 +70,13 @@ impl RocksDbStorage {
     /// in key order and hash each payload through
     /// [`ShardWitnessPayload::leaf_hash`]. The result feeds
     /// [`BeaconWitnessAccumulator::from_leaves`](../../crates/shard/src/beacon_witnesses.rs)
-    /// at coordinator startup.
-    ///
-    /// Single-shard storage: the CF holds only the local shard's leaves.
-    /// Per-shard ordering is preserved because the key codec is BE.
+    /// at coordinator startup. Storage is scoped per-shard, so the
+    /// full-scan order is the accumulator's monotonic leaf order.
     fn load_beacon_witness_leaf_hashes(&self) -> Vec<Hash> {
         let cf = self.cf();
         let beacon_witnesses_cf = BeaconWitnessesCf::handle(&cf);
         iter_all::<BeaconWitnessesCf>(&self.db, beacon_witnesses_cf)
-            .map(|(_key, payload): (_, ShardWitnessPayload)| payload.leaf_hash())
+            .map(|(_leaf_index, payload): (_, ShardWitnessPayload)| payload.leaf_hash())
             .collect()
     }
 }

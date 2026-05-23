@@ -875,7 +875,7 @@ mod tests {
             qc: Arc::new(qc),
             source,
             committed_notified: false,
-            witness: BeaconWitnessCommit::empty(ShardGroupId::new(0), BeaconWitnessLeafCount::ZERO),
+            witness: BeaconWitnessCommit::empty(BeaconWitnessLeafCount::ZERO),
         };
         let prepared = MockPrepared {
             snapshot: empty_snapshot(height),

@@ -6,9 +6,9 @@
 use std::sync::Arc;
 
 use hyperscale_types::{
-    Block, BlockHash, BlockHeight, CertifiedBlock, CommittedBlockHeader, ConsensusReceipt,
-    ExecutionCertificate, ProvisionHash, QuorumCertificate, RoutableTransaction, TxHash,
-    WaveCertificate, WaveId,
+    BeaconWitnessLeafCount, Block, BlockHash, BlockHeight, CertifiedBlock, CommittedBlockHeader,
+    ConsensusReceipt, ExecutionCertificate, ProvisionHash, QuorumCertificate, RoutableTransaction,
+    ShardWitnessPayload, TxHash, WaveCertificate, WaveId,
 };
 
 /// A sync-ready block retrieved from storage.
@@ -83,12 +83,8 @@ pub trait ChainReader: Send + Sync + 'static {
     /// Returns only certificates that were found (missing ids are skipped).
     fn get_certificates_batch(&self, ids: &[WaveId]) -> Vec<WaveCertificate>;
 
-    // ─── Receipt Storage ──────────────────────────────────────────────────
-
     /// Retrieve the consensus-bound receipt portion for a transaction.
     fn get_consensus_receipt(&self, tx_hash: &TxHash) -> Option<Arc<ConsensusReceipt>>;
-
-    // ─── Execution Certificate Reads ────────────────────────────────────
 
     /// Retrieve a single execution certificate by [`WaveId`].
     fn get_execution_certificate(&self, wave_id: &WaveId) -> Option<ExecutionCertificate>;
@@ -97,4 +93,13 @@ pub trait ChainReader: Send + Sync + 'static {
     ///
     /// Returns only certificates that were found (missing ids are skipped).
     fn get_execution_certificates_batch(&self, wave_ids: &[WaveId]) -> Vec<ExecutionCertificate>;
+
+    /// Read retained beacon-witness payloads in leaf-index order, up to
+    /// (but not including) `end`. Storage is scoped per-shard, so the
+    /// shard tag is implicit in the storage handle.
+    ///
+    /// Reconstructs the per-block accumulator at the requested anchor;
+    /// an empty result signals that the anchor's leaves have all been
+    /// pruned past the retention horizon.
+    fn get_beacon_witness_payloads(&self, end: BeaconWitnessLeafCount) -> Vec<ShardWitnessPayload>;
 }

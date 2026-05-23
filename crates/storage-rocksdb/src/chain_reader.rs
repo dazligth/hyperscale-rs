@@ -4,13 +4,14 @@ use std::sync::Arc;
 
 use hyperscale_storage::{BlockForSync, ChainReader};
 use hyperscale_types::{
-    BlockHash, BlockHeight, CertifiedBlock, CommittedBlockHeader, ConsensusReceipt,
-    ExecutionCertificate, QuorumCertificate, RoutableTransaction, TxHash, WaveCertificate, WaveId,
+    BeaconWitnessLeafCount, BlockHash, BlockHeight, CertifiedBlock, CommittedBlockHeader,
+    ConsensusReceipt, ExecutionCertificate, QuorumCertificate, RoutableTransaction,
+    ShardWitnessPayload, TxHash, WaveCertificate, WaveId,
 };
 
-use crate::column_families::ExecutionCertsCf;
+use crate::column_families::{BeaconWitnessesCf, ExecutionCertsCf};
 use crate::core::RocksDbStorage;
-use crate::typed_cf::{TypedCf, get};
+use crate::typed_cf::{TypedCf, get, iter_all};
 
 impl ChainReader for RocksDbStorage {
     fn get_block(&self, height: BlockHeight) -> Option<CertifiedBlock> {
@@ -68,5 +69,24 @@ impl ChainReader for RocksDbStorage {
             .iter()
             .filter_map(|wid| get::<ExecutionCertsCf>(&*self.db, certs_cf, wid))
             .collect()
+    }
+
+    fn get_beacon_witness_payloads(&self, end: BeaconWitnessLeafCount) -> Vec<ShardWitnessPayload> {
+        let end_raw = end.inner();
+        if end_raw == 0 {
+            return Vec::new();
+        }
+        let cfs = self.cf();
+        let beacon_witnesses_cf = BeaconWitnessesCf::handle(&cfs);
+        // Big-endian leaf-index keys: a full scan yields leaves in
+        // ascending index order; stop once we pass the requested end.
+        let mut out = Vec::with_capacity(usize::try_from(end_raw).unwrap_or(usize::MAX));
+        for (leaf_index, payload) in iter_all::<BeaconWitnessesCf>(&self.db, beacon_witnesses_cf) {
+            if leaf_index >= end_raw {
+                break;
+            }
+            out.push(payload);
+        }
+        out
     }
 }

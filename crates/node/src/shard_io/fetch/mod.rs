@@ -27,6 +27,7 @@ pub mod exec_cert_serve;
 pub mod finalized_wave_serve;
 pub mod host;
 pub mod provision_serve;
+pub mod shard_witness_serve;
 pub mod transaction_serve;
 
 pub use host::FetchHost;

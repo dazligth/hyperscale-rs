@@ -211,8 +211,8 @@ impl SimStorage {
         let mut c = write_or_recover(&self.consensus);
         let start = witness.starting_leaf_index.inner();
         for (offset, payload) in witness.leaves.iter().enumerate() {
-            let key = (witness.shard, start + offset as u64);
-            c.beacon_witnesses.insert(key, payload.clone());
+            c.beacon_witnesses
+                .insert(start + offset as u64, payload.clone());
         }
     }
 }

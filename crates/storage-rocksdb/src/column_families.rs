@@ -5,7 +5,7 @@
 
 use hyperscale_types::{
     BlockMetadata, ConsensusReceipt, ExecutionCertificate, ExecutionMetadata, Hash,
-    RoutableTransaction, ShardGroupId, ShardWitnessPayload, WaveCertificate, WaveId,
+    RoutableTransaction, ShardWitnessPayload, WaveCertificate, WaveId,
 };
 use radix_substate_store_interface::interface::{DbPartitionKey, DbSortKey};
 use rocksdb::{ColumnFamily, DB};
@@ -348,32 +348,30 @@ impl TypedCf for ExecutionCertsCf {
 
 // Beacon witnesses.
 
-/// Key codec for the [`BeaconWitnessesCf`] CF: a `(shard, leaf_index)`
-/// pair encoded as two big-endian `u64`s. BE preserves lexicographic
-/// order so a per-shard scan returns leaves in monotonic index order.
+/// Key codec for the [`BeaconWitnessesCf`] CF: a `u64` leaf index
+/// encoded big-endian. BE preserves lexicographic order so a full scan
+/// returns leaves in monotonic index order. The shard is implicit —
+/// storage is scoped per-shard.
 #[derive(Default)]
 pub struct BeaconWitnessKeyCodec;
 
-impl DbEncode<(ShardGroupId, u64)> for BeaconWitnessKeyCodec {
-    fn encode_to(&self, value: &(ShardGroupId, u64), buf: &mut Vec<u8>) {
-        buf.extend_from_slice(&value.0.inner().to_be_bytes());
-        buf.extend_from_slice(&value.1.to_be_bytes());
+impl DbEncode<u64> for BeaconWitnessKeyCodec {
+    fn encode_to(&self, value: &u64, buf: &mut Vec<u8>) {
+        buf.extend_from_slice(&value.to_be_bytes());
     }
 }
 
-impl DbCodec<(ShardGroupId, u64)> for BeaconWitnessKeyCodec {
-    fn decode(&self, bytes: &[u8]) -> (ShardGroupId, u64) {
-        assert_eq!(bytes.len(), 16, "beacon-witness key must be 16 bytes");
-        let shard = u64::from_be_bytes(bytes[..8].try_into().expect("split bounds checked"));
-        let leaf_index = u64::from_be_bytes(bytes[8..].try_into().expect("split bounds checked"));
-        (ShardGroupId::new(shard), leaf_index)
+impl DbCodec<u64> for BeaconWitnessKeyCodec {
+    fn decode(&self, bytes: &[u8]) -> u64 {
+        assert_eq!(bytes.len(), 8, "beacon-witness key must be 8 bytes");
+        u64::from_be_bytes(bytes.try_into().expect("length checked above"))
     }
 }
 
 pub struct BeaconWitnessesCf;
 impl TypedCf for BeaconWitnessesCf {
     const NAME: &'static str = BEACON_WITNESSES_CF;
-    type Key = (ShardGroupId, u64);
+    type Key = u64;
     type Value = ShardWitnessPayload;
     type KeyCodec = BeaconWitnessKeyCodec;
     type ValueCodec = SborCodec<ShardWitnessPayload>;
@@ -389,50 +387,30 @@ mod tests {
     #[test]
     fn beacon_witness_key_codec_round_trip() {
         let codec = BeaconWitnessKeyCodec;
-        let cases = [
-            (ShardGroupId::new(0), 0u64),
-            (ShardGroupId::new(7), 42u64),
-            (ShardGroupId::new(u64::MAX), u64::MAX),
-        ];
-        for (shard, leaf) in cases {
+        for leaf in [0u64, 42, u64::MAX] {
             let mut buf = Vec::new();
-            codec.encode_to(&(shard, leaf), &mut buf);
-            assert_eq!(buf.len(), 16);
-            assert_eq!(codec.decode(&buf), (shard, leaf));
+            codec.encode_to(&leaf, &mut buf);
+            assert_eq!(buf.len(), 8);
+            assert_eq!(codec.decode(&buf), leaf);
         }
     }
 
-    /// Per-shard scan order must match monotonic leaf order — that's
-    /// why the key is BE-encoded. Sorting encoded keys lexicographically
-    /// must yield ascending `(shard, leaf_index)`.
+    /// BE encoding so sorting encoded keys lexicographically matches
+    /// ascending leaf-index order — the responder's prefix scan relies
+    /// on this for monotonic iteration.
     #[test]
-    fn beacon_witness_key_codec_preserves_per_shard_order() {
+    fn beacon_witness_key_codec_preserves_monotonic_order() {
         let codec = BeaconWitnessKeyCodec;
-        let mut encoded: Vec<Vec<u8>> = [
-            (ShardGroupId::new(1), 10u64),
-            (ShardGroupId::new(1), 0u64),
-            (ShardGroupId::new(0), 5u64),
-            (ShardGroupId::new(1), 1u64),
-            (ShardGroupId::new(0), 1u64),
-        ]
-        .iter()
-        .map(|kv| {
-            let mut buf = Vec::new();
-            codec.encode_to(kv, &mut buf);
-            buf
-        })
-        .collect();
+        let mut encoded: Vec<Vec<u8>> = [10u64, 0, 5, 1, 256]
+            .iter()
+            .map(|leaf| {
+                let mut buf = Vec::new();
+                codec.encode_to(leaf, &mut buf);
+                buf
+            })
+            .collect();
         encoded.sort();
-        let decoded: Vec<(ShardGroupId, u64)> = encoded.iter().map(|b| codec.decode(b)).collect();
-        assert_eq!(
-            decoded,
-            vec![
-                (ShardGroupId::new(0), 1),
-                (ShardGroupId::new(0), 5),
-                (ShardGroupId::new(1), 0),
-                (ShardGroupId::new(1), 1),
-                (ShardGroupId::new(1), 10),
-            ]
-        );
+        let decoded: Vec<u64> = encoded.iter().map(|b| codec.decode(b)).collect();
+        assert_eq!(decoded, vec![0, 1, 5, 10, 256]);
     }
 }
