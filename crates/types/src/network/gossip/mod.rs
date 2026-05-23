@@ -3,6 +3,8 @@
 //! These messages use gossipsub for one-to-many broadcast and are
 //! forwarded by the mesh to all subscribed peers.
 
+pub mod beacon;
+
 mod committed_block_header;
 mod transaction;
 
