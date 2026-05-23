@@ -15,7 +15,7 @@
 use hyperscale_core::{Action, CommitSource, FetchAbandon, ProtocolEvent, TimerId};
 use hyperscale_types::{
     BlockHash, LocalTimestamp, MAX_FINALIZED_TX_PER_BLOCK, MAX_PROGRESS_WAIT, MAX_TXS_PER_BLOCK,
-    ProposerTimestamp, ProvisionHash, ShardGroupId, WaveId, WeightedTimestamp,
+    ProposerTimestamp, ProvisionHash, ReadySignal, ShardGroupId, WaveId, WeightedTimestamp,
 };
 
 /// Shard consensus statistics for monitoring.
@@ -100,6 +100,7 @@ use crate::proposal::{
     ProposalKind, ProposalTracker, TakeResult, assemble_build_action, dispatch_or_defer,
     select_finalized_waves, select_provisions, select_transactions,
 };
+use crate::ready_signal_pool::ReadySignalPool;
 use crate::validation::{qc_has_local_quorum_power, validate_block_for_vote, validate_header};
 use crate::verification::{InFlightCheck, ReadyStateRootVerification, VerificationPipeline};
 use crate::view_change::ViewChangeController;
@@ -174,6 +175,11 @@ pub struct ShardCoordinator {
     /// provides a bounded retention window for historical dedup.
     dedup_index: CommitDedupIndex,
 
+    /// Validator "ready on shard" signals waiting for inclusion in the
+    /// next proposed block. Drained at proposal time; the wiring lands
+    /// alongside the proposer hook in a follow-up commit.
+    ready_signal_pool: ReadySignalPool,
+
     // ═══════════════════════════════════════════════════════════════════════════
     // Configuration
     // ═══════════════════════════════════════════════════════════════════════════
@@ -227,6 +233,7 @@ impl ShardCoordinator {
             block_sync: BlockSyncManager::new(),
             proposal: ProposalTracker::new(),
             dedup_index: CommitDedupIndex::new(),
+            ready_signal_pool: ReadySignalPool::new(),
             config,
             now: LocalTimestamp::ZERO,
         }
@@ -1526,6 +1533,30 @@ impl ShardCoordinator {
         );
 
         self.on_block_vote_internal(topology_snapshot, vote)
+    }
+
+    /// Admit a validator's "ready on shard" signal into the local pool.
+    ///
+    /// `IoLoop` has already BLS-verified the signal against the sender's
+    /// pubkey. This call gates on local-shard membership (a multi-shard
+    /// host's `IoLoop` fans the notification out to every hosted shard;
+    /// the wrong shard's pool drops here) and on the signal's window
+    /// being in the future — past-window signals are stale on arrival.
+    /// Re-emissions from the same validator overwrite the prior pool
+    /// entry and reset the dwell clock.
+    pub fn on_ready_signal_received(
+        &mut self,
+        topology_snapshot: &TopologySnapshot,
+        signal: ReadySignal,
+    ) -> Vec<Action> {
+        if !topology_snapshot.is_committee_member(signal.validator_id()) {
+            return Vec::new();
+        }
+        if signal.height_window_end() < self.committed_height {
+            return Vec::new();
+        }
+        self.ready_signal_pool.admit(signal, self.now);
+        Vec::new()
     }
 
     /// Internal vote processing. Delegates to [`VoteKeeper::accept_vote`]

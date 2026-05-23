@@ -10,8 +10,8 @@ use std::sync::Arc;
 use hyperscale_types::{
     Block, BlockHash, BlockHeader, BlockHeight, BlockManifest, BlockVote, CertifiedBlock,
     CommittedBlockHeader, ExecutionCertificate, ExecutionVote, FinalizedWave, Provisions,
-    QuorumCertificate, Round, RoutableTransaction, ShardGroupId, StoredReceipt, TxOutcome,
-    ValidatorId, VotePower, WaveId, WeightedTimestamp,
+    QuorumCertificate, ReadySignal, Round, RoutableTransaction, ShardGroupId, StoredReceipt,
+    TxOutcome, ValidatorId, VotePower, WaveId, WeightedTimestamp,
 };
 
 /// How a node learned about the certifying QC that commits a given block.
@@ -113,6 +113,19 @@ pub enum ProtocolEvent {
     BlockVoteReceived {
         /// Block vote received from a peer.
         vote: BlockVote,
+    },
+
+    /// Received a validator's "ready on shard" signal.
+    ///
+    /// The sender's BLS signature over the signal has already been
+    /// verified by `IoLoop` against their pubkey before this event is
+    /// pushed. Admission to the shard coordinator's `ReadySignalPool`
+    /// is a pure local-state update; the next proposer drains
+    /// dwell-eligible signals into the block's
+    /// [`BlockManifest::ready_signals`](hyperscale_types::BlockManifest::ready_signals).
+    ReadySignalReceived {
+        /// The signal received from `sender`.
+        signal: ReadySignal,
     },
 
     /// A quorum certificate was formed for a block.

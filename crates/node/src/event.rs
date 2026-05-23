@@ -322,7 +322,8 @@ impl ShardScopedInput {
                 | ProtocolEvent::ProvisionsReceived { .. }
                 | ProtocolEvent::ExecutionCertificatesReceived { .. }
                 | ProtocolEvent::FinalizedWavesReceived { .. }
-                | ProtocolEvent::TransactionsReceived { .. } => EventPriority::Network,
+                | ProtocolEvent::TransactionsReceived { .. }
+                | ProtocolEvent::ReadySignalReceived { .. } => EventPriority::Network,
                 // Fetch delivery events are processed callbacks from the
                 // fetch protocol, not raw network messages. They fall
                 // through to Internal.

@@ -5,11 +5,10 @@ use hyperscale_dispatch::Dispatch;
 use hyperscale_metrics::record_fetch_response_sent;
 use hyperscale_network::Network;
 use hyperscale_storage::Storage;
-use hyperscale_types::ShardGroupId;
 use hyperscale_types::network::gossip::{CommittedBlockHeaderGossip, TransactionGossip};
 use hyperscale_types::network::notification::{
     BlockHeaderNotification, BlockVoteNotification, ExecutionCertificatesNotification,
-    ExecutionVotesNotification, ProvisionsNotification,
+    ExecutionVotesNotification, ProvisionsNotification, ReadySignalNotification,
 };
 use hyperscale_types::network::request::{
     GetExecutionCertsRequest, GetFinalizedWavesRequest, GetLocalProvisionsRequest,
@@ -17,6 +16,7 @@ use hyperscale_types::network::request::{
 use hyperscale_types::network::response::{
     GetLocalProvisionsResponse, GetProvisionResponse, LocalProvisionEntry,
 };
+use hyperscale_types::{ChainId, ShardGroupId, ready_signal_message};
 use tracing::warn;
 
 use crate::event::ShardScopedInput;
@@ -650,6 +650,57 @@ where
                             *hosted_shard,
                             ProtocolEvent::ExecutionCertificatesReceived {
                                 certificates: certificates.clone(),
+                            },
+                        );
+                    }
+                },
+            );
+
+        // ── ready_signal → verify sender BLS sig, then ProtocolEvent::ReadySignalReceived ─
+        //
+        // The signal doesn't carry shard provenance — its only identity
+        // is the sender's `validator_id`. Fan out to every hosted shard
+        // and let each pool drop the signal if the sender isn't in that
+        // shard's committee.
+
+        let senders = self.process.shard_event_senders.clone();
+        let topology = self.process.topology_snapshot.clone();
+        self.process
+            .network
+            .register_notification_handler::<ReadySignalNotification>(
+                move |notification: ReadySignalNotification| {
+                    let topo = topology.load();
+                    let signal = notification.signal;
+                    let sender = signal.validator_id();
+                    let Some(public_key) = topo.public_key(sender) else {
+                        warn!(
+                            sender = sender.inner(),
+                            "Dropping ready signal: unknown sender"
+                        );
+                        return;
+                    };
+                    // TODO: thread the real chain_id through node config
+                    // once it lands. Until then a fixed `ChainId::new(0)`
+                    // matches the constant used at signing sites.
+                    let msg = ready_signal_message(
+                        ChainId::new(0),
+                        sender,
+                        signal.height_window_start(),
+                        signal.height_window_end(),
+                    );
+                    if !verify_bls_with_metrics(&msg, &public_key, &signal.sig(), "ready_signal") {
+                        warn!(
+                            sender = sender.inner(),
+                            "Ready signal BLS verify failed — dropping"
+                        );
+                        return;
+                    }
+                    for (hosted_shard, tx) in &senders {
+                        push_protocol_event(
+                            tx,
+                            *hosted_shard,
+                            ProtocolEvent::ReadySignalReceived {
+                                signal: signal.clone(),
                             },
                         );
                     }

@@ -96,6 +96,9 @@ impl NodeStateMachine {
             ProtocolEvent::BlockVoteReceived { vote } => self
                 .shard_coordinator
                 .on_block_vote(self.topology_coordinator.snapshot(), vote),
+            ProtocolEvent::ReadySignalReceived { signal } => self
+                .shard_coordinator
+                .on_ready_signal_received(self.topology_coordinator.snapshot(), signal),
             ProtocolEvent::BlockReadyToCommit {
                 block_hash,
                 qc,

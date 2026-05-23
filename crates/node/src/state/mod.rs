@@ -239,7 +239,8 @@ impl StateMachine for NodeStateMachine {
             | ProtocolEvent::ProposalBuilt { .. }
             | ProtocolEvent::BlockCommitted { .. }
             | ProtocolEvent::BlockPersisted { .. }
-            | ProtocolEvent::FinalizedWavesAdmitted { .. }) => self.handle_shard(evt),
+            | ProtocolEvent::FinalizedWavesAdmitted { .. }
+            | ProtocolEvent::ReadySignalReceived { .. }) => self.handle_shard(evt),
 
             // ── Provisions ───────────────────────────────────────────────
             evt @ (ProtocolEvent::ProvisionsReceived { .. }

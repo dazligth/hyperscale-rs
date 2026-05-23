@@ -58,6 +58,7 @@
 
 pub mod action_handlers;
 pub mod beacon_witnesses;
+pub mod ready_signal_pool;
 
 mod block_sync;
 mod chain_view;
