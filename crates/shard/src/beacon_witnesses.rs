@@ -145,7 +145,7 @@ pub fn missed_proposals_since_prev_commit(
 #[must_use]
 pub fn derive_leaves(
     receipts: &[StoredReceipt],
-    missed: Vec<ShardWitnessPayload>,
+    missed: &[ShardWitnessPayload],
     ready_signals: &[ReadySignal],
 ) -> Vec<ShardWitnessPayload> {
     let mut out = Vec::new();
@@ -160,7 +160,7 @@ pub fn derive_leaves(
             }
         }
     }
-    out.extend(missed);
+    out.extend_from_slice(missed);
     let mut sorted: Vec<&ReadySignal> = ready_signals.iter().collect();
     sorted.sort_by_key(|s| s.validator_id());
     for signal in sorted {
@@ -230,7 +230,7 @@ pub fn prospective_parent_witness_leaves(
         );
         let new_leaves = derive_leaves(
             &receipts,
-            missed,
+            &missed,
             pending.manifest().ready_signals().as_slice(),
         );
         chain_deltas.push(
@@ -270,7 +270,7 @@ pub fn derive_and_verify(
     topology: &TopologySnapshot,
 ) -> bool {
     let missed = missed_proposals_since_prev_commit(height, parent_round, round, topology);
-    let new_leaves = derive_leaves(receipts, missed, ready_signals);
+    let new_leaves = derive_leaves(receipts, &missed, ready_signals);
 
     let mut leaves = parent_witness_leaves;
     leaves.reserve(new_leaves.len());
@@ -429,7 +429,7 @@ mod tests {
         let ready = ready_signals(&[3, 1, 2]);
         let receipts: Vec<StoredReceipt> = Vec::new();
 
-        let leaves = derive_leaves(&receipts, missed, &ready);
+        let leaves = derive_leaves(&receipts, &missed, &ready);
         // 1 MissedProposal + 3 Ready (sorted ascending by validator id)
         assert_eq!(leaves.len(), 4);
         assert!(matches!(
@@ -456,8 +456,8 @@ mod tests {
         let ready = ready_signals(&[7, 2]);
         let receipts: Vec<StoredReceipt> = Vec::new();
 
-        let a = derive_leaves(&receipts, missed.clone(), &ready);
-        let b = derive_leaves(&receipts, missed, &ready);
+        let a = derive_leaves(&receipts, &missed, &ready);
+        let b = derive_leaves(&receipts, &missed, &ready);
         assert_eq!(a, b);
 
         let mut acc_a = BeaconWitnessAccumulator::new();

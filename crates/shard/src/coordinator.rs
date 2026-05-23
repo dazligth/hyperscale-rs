@@ -870,7 +870,7 @@ impl ShardCoordinator {
             MIN_READY_SIGNAL_DWELL,
             MAX_READY_SIGNALS_PER_BLOCK,
         );
-        let new_leaves = beacon_witnesses::derive_leaves(&receipts, missed, &ready_signals);
+        let new_leaves = beacon_witnesses::derive_leaves(&receipts, &missed, &ready_signals);
         let (beacon_witness_root, beacon_witness_leaf_count) =
             self.beacon_witness_accumulator.preview_append(&new_leaves);
 
@@ -2324,8 +2324,11 @@ impl ShardCoordinator {
             block.header().round(),
             topology_snapshot,
         );
-        let new_leaves =
-            beacon_witnesses::derive_leaves(&receipts, missed, manifest.ready_signals().as_slice());
+        let new_leaves = beacon_witnesses::derive_leaves(
+            &receipts,
+            &missed,
+            manifest.ready_signals().as_slice(),
+        );
         let starting_leaf_index = self.beacon_witness_accumulator.leaf_count();
         self.beacon_witness_accumulator.commit_append(&new_leaves);
         let leaf_count_at_block_end = self.beacon_witness_accumulator.leaf_count();
