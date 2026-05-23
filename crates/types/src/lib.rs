@@ -65,7 +65,7 @@ pub use primitives::hash_kinds::{
     TxHash, WaveReceiptHash, WritesRoot,
 };
 pub use primitives::identifiers::{
-    Attempt, BeaconWitnessLeafCount, BlockHeight, ChainId, Epoch, HeaderFetchCount, InFlightCount,
+    Attempt, BeaconWitnessLeafCount, BlockHeight, Epoch, HeaderFetchCount, InFlightCount,
     LeafIndex, NodeId, PartitionNumber, RecoveryRound, Round, ShardGroupId, Slot, SpcView, Stake,
     StakePoolId, ValidatorId, VotePower,
 };

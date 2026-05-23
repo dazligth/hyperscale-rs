@@ -18,8 +18,8 @@ use crate::{BlockHeight, Bls12381G2Signature, ValidatorId};
 /// Validator-emitted attestation that they're synced and ready to sign
 /// on their shard.
 ///
-/// The signed message binds `(chain_id, validator_id, height_window)`
-/// so the signal can't be replayed across chains and can't be hoarded
+/// The signed message binds `(network.id, validator_id, height_window)`
+/// so the signal can't be replayed across networks and can't be hoarded
 /// past its `[start, end]` window. Window enforcement is the
 /// proposer/voter's job; the type itself just carries the parameters.
 #[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]

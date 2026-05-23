@@ -1,7 +1,7 @@
 //! Verifiable Random Function (VRF) outputs and proofs.
 //!
 //! Beacon-chain proposals carry per-slot VRF reveals: every committee
-//! member's `(secret_key, slot, chain_id)` triple deterministically
+//! member's `(secret_key, slot, network.id)` triple deterministically
 //! produces a `(VrfOutput, VrfProof)` pair, and the proof is verifiable
 //! by anyone holding the signer's pubkey. The outputs are mixed into
 //! the beacon's randomness for committee resampling.
@@ -25,7 +25,7 @@ pub const VRF_PROOF_BYTES: usize = 96;
 ///
 /// Distinct from [`Hash`](crate::Hash) at the type level — a VRF output
 /// is the digest of a specific VRF signature under a specific
-/// `(secret_key, slot, chain_id)` binding, not a free-floating 32-byte
+/// `(secret_key, slot, network.id)` binding, not a free-floating 32-byte
 /// hash. Type confusion between the two would silently break randomness
 /// derivation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BasicSbor)]
@@ -46,7 +46,7 @@ impl VrfOutput {
 }
 
 /// 96-byte VRF proof — a compressed BLS12-381 signature over the
-/// `(chain_id, slot)` VRF message under the signer's secret key.
+/// `(network.id, slot)` VRF message under the signer's secret key.
 ///
 /// Verifiable by anyone holding the signer's compressed pubkey. The
 /// proof's digest is the corresponding [`VrfOutput`]; the

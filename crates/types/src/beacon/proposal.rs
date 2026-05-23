@@ -13,7 +13,7 @@ use crate::{BoundedVec, MAX_WITNESSES_PER_PROPOSER, VrfOutput, VrfProof, Witness
 /// One committee member's slot submission.
 ///
 /// Field-level validation (VRF proof verifies under the signer's
-/// pubkey against the `(chain_id, slot)` message, witnesses dedup
+/// pubkey against the `(network.id, slot)` message, witnesses dedup
 /// against the per-shard high-water marks, etc.) is the beacon
 /// crate's job — this is a pure data container.
 #[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
@@ -63,7 +63,7 @@ impl BeaconProposal {
     }
 
     /// VRF proof — verifiable under the proposer's pubkey against the
-    /// `(chain_id, slot)` message.
+    /// `(network.id, slot)` message.
     #[must_use]
     pub const fn vrf_proof(&self) -> VrfProof {
         self.vrf_proof

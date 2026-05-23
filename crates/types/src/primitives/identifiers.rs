@@ -375,43 +375,6 @@ impl Display for RecoveryRound {
     }
 }
 
-/// Beacon chain instance identifier.
-///
-/// Bound into VRF reveals so the same `(secret_key, slot)` pair produces
-/// different outputs on different chains — cross-chain replay of a VRF
-/// reveal fails verification if BLS keys are ever reused across genesis
-/// epochs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, BasicSbor)]
-#[sbor(transparent)]
-pub struct ChainId(u64);
-
-impl ChainId {
-    /// Construct a chain id from a raw `u64`.
-    #[must_use]
-    pub const fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    /// Inner `u64`. Use sparingly — at boundaries (display, VRF message
-    /// construction, structured log fields) only.
-    #[must_use]
-    pub const fn inner(self) -> u64 {
-        self.0
-    }
-
-    /// Little-endian byte representation of the inner value.
-    #[must_use]
-    pub const fn to_le_bytes(self) -> [u8; 8] {
-        self.0.to_le_bytes()
-    }
-}
-
-impl Display for ChainId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Chain({})", self.0)
-    }
-}
-
 /// Aggregate stake committed to a beacon-chain validator pool.
 ///
 /// Beacon-side accounting only — delegator-level deposits and withdrawals
