@@ -82,8 +82,7 @@ pub enum ConsensusReceipt {
         /// Beacon-witness events the engine surfaced for this tx. Folded
         /// into the shard's beacon-witness accumulator at block-assembly
         /// time; the root of those events is bound into `receipt_hash`
-        /// via [`GlobalReceipt::beacon_witness_root`]. Empty until the
-        /// engine wiring lands.
+        /// via [`GlobalReceipt::beacon_witness_root`].
         beacon_witness_events: Vec<BeaconWitnessEvent>,
     },
     /// All failures collapse to one variant — the canonical

@@ -176,9 +176,6 @@ pub fn compute_vm_output(
         .map(ApplicationEvent::hash)
         .collect();
     let event_root = EventRoot::from_raw(compute_merkle_root(&event_hashes));
-    // Engine wiring for beacon-witness events is pending; until it lands the
-    // root is the canonical empty-tree zero, which makes `receipt_hash`
-    // identical to the pre-witness-channel hash.
     let receipt_hash =
         GlobalReceipt::new(true, event_root, BeaconWitnessRoot::ZERO, writes_root).receipt_hash();
 

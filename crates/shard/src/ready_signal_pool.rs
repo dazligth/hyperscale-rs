@@ -117,13 +117,14 @@ impl ReadySignalPool {
     /// Drain dwell-eligible signals up to `max` entries.
     ///
     /// A signal is dwell-eligible when `now - received_at >=
-    /// min_dwell`. Drained entries are removed from the pool;
-    /// `proposal_height` must fall within each returned signal's
-    /// `[start, end]` window, otherwise the entry is left in place
-    /// (the proposer can't include a signal whose window hasn't
-    /// opened yet, but it stays valid for a future proposal). Returns
-    /// signals in ascending `validator_id` order — matching the
-    /// canonical leaf-derivation order downstream.
+    /// min_dwell`. Drained entries are removed from the pool. Signals
+    /// whose `[start, end]` window does not cover `proposal_height`
+    /// stay in the pool unchanged — a not-yet-open window may still
+    /// be drained at a later height, and an expired one is reaped by
+    /// [`Self::evict_expired`] on the next commit rather than being
+    /// dropped mid-drain. Returns signals in ascending `validator_id`
+    /// order — matching the canonical leaf-derivation order
+    /// downstream.
     pub fn drain_eligible(
         &mut self,
         proposal_height: BlockHeight,

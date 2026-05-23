@@ -480,8 +480,7 @@ impl Display for LeafIndex {
 pub struct BeaconWitnessLeafCount(u64);
 
 impl BeaconWitnessLeafCount {
-    /// Empty accumulator — the value carried on every header until the
-    /// shard runtime appends its first witness.
+    /// Empty accumulator.
     pub const ZERO: Self = Self(0);
 
     /// Construct a leaf count from a raw `u64`.

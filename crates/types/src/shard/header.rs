@@ -286,9 +286,7 @@ impl BlockHeader {
     /// this root via the Merkle path in its
     /// [`ShardWitnessProof`](crate::ShardWitnessProof).
     ///
-    /// `BeaconWitnessRoot::ZERO` for blocks that produced no witnesses,
-    /// and for blocks built before the shard runtime computes the
-    /// accumulator.
+    /// `BeaconWitnessRoot::ZERO` for blocks that produced no witnesses.
     #[must_use]
     pub const fn beacon_witness_root(&self) -> BeaconWitnessRoot {
         self.beacon_witness_root
@@ -299,9 +297,8 @@ impl BlockHeader {
     ///
     /// Paired with [`Self::beacon_witness_root`] so a verifier holding
     /// only the header can check any inclusion proof anchored at this
-    /// block without consulting a side channel for the tree size.
-    /// `0` for blocks that produced no witnesses, and for blocks built
-    /// before the shard runtime computes the accumulator.
+    /// block without consulting a side channel for the tree size. `0`
+    /// for blocks that produced no witnesses.
     #[must_use]
     pub const fn beacon_witness_leaf_count(&self) -> BeaconWitnessLeafCount {
         self.beacon_witness_leaf_count
