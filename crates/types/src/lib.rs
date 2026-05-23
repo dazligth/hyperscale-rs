@@ -38,9 +38,9 @@ pub use beacon::{
     MAX_WITNESSES_PER_PROPOSER, MscEmptyLowAccusation, MscSlotProposal, PC_VALUE_ELEMENT_BYTES,
     PcCompactLenSigner, PcCompactVote, PcDivergingProof, PcQc1, PcQc2, PcQc3, PcValueElement,
     PcVector, PcVote1, PcVote2, PcVote3, PcVoteEquivocation, PcVoteRound, PcXpProof, ReadySignal,
-    RecoveryCertificate, RecoveryEquivocation, RecoveryRequest, ShardWitness, ShardWitnessPayload,
-    ShardWitnessProof, SpcCert, SpcEmptyLowEvidence, SpcEmptyViewMsg, SpcHighTriple,
-    SpcProposalObject, SpcSkipSig, Witness, recovery_cert_hash,
+    RecoveryCertificate, RecoveryEquivocation, RecoveryRequest, SHARD_WITNESS_LEAF_DOMAIN_TAG,
+    ShardWitness, ShardWitnessPayload, ShardWitnessProof, SpcCert, SpcEmptyLowEvidence,
+    SpcEmptyViewMsg, SpcHighTriple, SpcProposalObject, SpcSkipSig, Witness, recovery_cert_hash,
 };
 pub use crypto::batch_verify::{
     batch_verify_bls_different_messages, batch_verify_bls_different_messages_all_or_nothing,

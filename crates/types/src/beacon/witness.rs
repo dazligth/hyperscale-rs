@@ -21,6 +21,15 @@ use crate::{
     StakePoolId, ValidatorId,
 };
 
+/// Domain tag for accumulator leaf hashing.
+///
+/// Tag-prefixing the SBOR encoding of the payload prevents the leaf
+/// hash from colliding with an internal merkle node (the merkle helpers
+/// pad with [`Hash::ZERO`] and combine sibling pairs without per-level
+/// domain separation, so every leaf encoder in this codebase must
+/// domain-tag its input).
+pub const SHARD_WITNESS_LEAF_DOMAIN_TAG: &[u8] = b"hyperscale-shard-witness-leaf-v1";
+
 /// What the shard observed and reported to the beacon.
 ///
 /// Split by source: receipt-emitted variants are the engine's projection
@@ -106,6 +115,27 @@ pub enum ShardWitnessPayload {
         /// Round the missed proposer was scheduled for.
         round: Round,
     },
+}
+
+impl ShardWitnessPayload {
+    /// Canonical accumulator leaf hash for this payload.
+    ///
+    /// Produces `BLAKE3(SHARD_WITNESS_LEAF_DOMAIN_TAG ‖ sbor_encode(self))`.
+    /// Both the shard runtime (when computing
+    /// [`BeaconWitnessRoot`](crate::BeaconWitnessRoot)) and the fetch
+    /// responder (when constructing inclusion proofs) call this — the
+    /// hash is the protocol-defined leaf format, not an
+    /// implementation detail of either site.
+    ///
+    /// # Panics
+    ///
+    /// Panics if SBOR encoding fails. `ShardWitnessPayload` is a
+    /// closed SBOR type and encoding is infallible in practice.
+    #[must_use]
+    pub fn leaf_hash(&self) -> Hash {
+        let encoded = basic_encode(self).expect("ShardWitnessPayload SBOR encode is infallible");
+        Hash::from_parts(&[SHARD_WITNESS_LEAF_DOMAIN_TAG, &encoded])
+    }
 }
 
 /// Receipt-emittable subset of [`ShardWitnessPayload`].

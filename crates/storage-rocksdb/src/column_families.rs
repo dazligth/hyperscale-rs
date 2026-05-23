@@ -5,14 +5,16 @@
 
 use hyperscale_types::{
     BlockMetadata, ConsensusReceipt, ExecutionCertificate, ExecutionMetadata, Hash,
-    RoutableTransaction, WaveCertificate, WaveId,
+    RoutableTransaction, ShardGroupId, ShardWitnessPayload, WaveCertificate, WaveId,
 };
 use radix_substate_store_interface::interface::{DbPartitionKey, DbSortKey};
 use rocksdb::{ColumnFamily, DB};
 
 use crate::jmt_stored::{StaleTreePart, StoredNodeKey, VersionedStoredNode};
 use crate::substate_key::SubstateKeyCodec;
-use crate::typed_cf::{BeU64Codec, HashCodec, JmtKeyCodec, RawCodec, SborCodec, TypedCf};
+use crate::typed_cf::{
+    BeU64Codec, DbCodec, DbEncode, HashCodec, JmtKeyCodec, RawCodec, SborCodec, TypedCf,
+};
 use crate::versioned_key::VersionedSubstateKeyCodec;
 
 // ─── CF name constants ───────────────────────────────────────────────────────
@@ -81,6 +83,15 @@ pub const EXECUTION_METADATA_CF: &str = "execution_metadata";
 /// Column family for execution certificates keyed by [`WaveId`].
 pub const EXECUTION_CERTS_CF: &str = "execution_certs";
 
+/// Column family for per-shard beacon-witness leaves.
+///
+/// Key: `(shard_id, leaf_index)` as two big-endian `u64`s — within a
+/// shard, lex order matches monotonic leaf order so the fetch responder
+/// can range-scan to reconstruct an accumulator at any committed block.
+/// Value: SBOR-encoded [`ShardWitnessPayload`]. Append-only; pruning
+/// follows the retention horizon configured at the runtime layer.
+pub const BEACON_WITNESSES_CF: &str = "beacon_witnesses";
+
 // Default-CF metadata keys are defined as MetadataEntry types in typed_cf.rs.
 // See CommittedHeightEntry, CommittedHashEntry, CommittedQcEntry, JmtMetadataEntry.
 
@@ -102,6 +113,7 @@ pub const ALL_COLUMN_FAMILIES: &[&str] = &[
     CONSENSUS_RECEIPTS_CF,
     EXECUTION_METADATA_CF,
     EXECUTION_CERTS_CF,
+    BEACON_WITNESSES_CF,
 ];
 
 // ─── CfHandles ───────────────────────────────────────────────────────────────
@@ -124,6 +136,10 @@ pub struct CfHandles<'a> {
     consensus_receipts: &'a ColumnFamily,
     execution_metadata: &'a ColumnFamily,
     execution_certs: &'a ColumnFamily,
+    // Read by `BeaconWitnessesCf::handle`; the typed-CF accessor lands
+    // alongside the per-block accumulator wiring in a follow-up commit.
+    #[allow(dead_code)]
+    beacon_witnesses: &'a ColumnFamily,
 }
 
 impl<'a> CfHandles<'a> {
@@ -148,6 +164,7 @@ impl<'a> CfHandles<'a> {
             consensus_receipts: resolve(CONSENSUS_RECEIPTS_CF),
             execution_metadata: resolve(EXECUTION_METADATA_CF),
             execution_certs: resolve(EXECUTION_CERTS_CF),
+            beacon_witnesses: resolve(BEACON_WITNESSES_CF),
         }
     }
 }
@@ -329,5 +346,101 @@ impl TypedCf for ExecutionCertsCf {
     type ValueCodec = SborCodec<ExecutionCertificate>;
     fn handle<'a>(cf: &CfHandles<'a>) -> &'a ColumnFamily {
         cf.execution_certs
+    }
+}
+
+// Beacon witnesses. Reads/writes land with the per-block accumulator
+// wiring in a follow-up commit; the CF + codecs are declared here so
+// `ALL_COLUMN_FAMILIES` and `CfHandles::resolve` know about it from
+// the start.
+
+/// Key codec for the [`BeaconWitnessesCf`] CF: a `(shard, leaf_index)`
+/// pair encoded as two big-endian `u64`s. BE preserves lexicographic
+/// order so a per-shard scan returns leaves in monotonic index order.
+#[allow(dead_code)] // yet to be wired
+#[derive(Default)]
+pub struct BeaconWitnessKeyCodec;
+
+impl DbEncode<(ShardGroupId, u64)> for BeaconWitnessKeyCodec {
+    fn encode_to(&self, value: &(ShardGroupId, u64), buf: &mut Vec<u8>) {
+        buf.extend_from_slice(&value.0.inner().to_be_bytes());
+        buf.extend_from_slice(&value.1.to_be_bytes());
+    }
+}
+
+impl DbCodec<(ShardGroupId, u64)> for BeaconWitnessKeyCodec {
+    fn decode(&self, bytes: &[u8]) -> (ShardGroupId, u64) {
+        assert_eq!(bytes.len(), 16, "beacon-witness key must be 16 bytes");
+        let shard = u64::from_be_bytes(bytes[..8].try_into().expect("split bounds checked"));
+        let leaf_index = u64::from_be_bytes(bytes[8..].try_into().expect("split bounds checked"));
+        (ShardGroupId::new(shard), leaf_index)
+    }
+}
+
+#[allow(dead_code)] // wired in a follow-up commit
+pub struct BeaconWitnessesCf;
+impl TypedCf for BeaconWitnessesCf {
+    const NAME: &'static str = BEACON_WITNESSES_CF;
+    type Key = (ShardGroupId, u64);
+    type Value = ShardWitnessPayload;
+    type KeyCodec = BeaconWitnessKeyCodec;
+    type ValueCodec = SborCodec<ShardWitnessPayload>;
+    fn handle<'a>(cf: &CfHandles<'a>) -> &'a ColumnFamily {
+        cf.beacon_witnesses
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn beacon_witness_key_codec_round_trip() {
+        let codec = BeaconWitnessKeyCodec;
+        let cases = [
+            (ShardGroupId::new(0), 0u64),
+            (ShardGroupId::new(7), 42u64),
+            (ShardGroupId::new(u64::MAX), u64::MAX),
+        ];
+        for (shard, leaf) in cases {
+            let mut buf = Vec::new();
+            codec.encode_to(&(shard, leaf), &mut buf);
+            assert_eq!(buf.len(), 16);
+            assert_eq!(codec.decode(&buf), (shard, leaf));
+        }
+    }
+
+    /// Per-shard scan order must match monotonic leaf order — that's
+    /// why the key is BE-encoded. Sorting encoded keys lexicographically
+    /// must yield ascending `(shard, leaf_index)`.
+    #[test]
+    fn beacon_witness_key_codec_preserves_per_shard_order() {
+        let codec = BeaconWitnessKeyCodec;
+        let mut encoded: Vec<Vec<u8>> = [
+            (ShardGroupId::new(1), 10u64),
+            (ShardGroupId::new(1), 0u64),
+            (ShardGroupId::new(0), 5u64),
+            (ShardGroupId::new(1), 1u64),
+            (ShardGroupId::new(0), 1u64),
+        ]
+        .iter()
+        .map(|kv| {
+            let mut buf = Vec::new();
+            codec.encode_to(kv, &mut buf);
+            buf
+        })
+        .collect();
+        encoded.sort();
+        let decoded: Vec<(ShardGroupId, u64)> = encoded.iter().map(|b| codec.decode(b)).collect();
+        assert_eq!(
+            decoded,
+            vec![
+                (ShardGroupId::new(0), 1),
+                (ShardGroupId::new(0), 5),
+                (ShardGroupId::new(1), 0),
+                (ShardGroupId::new(1), 1),
+                (ShardGroupId::new(1), 10),
+            ]
+        );
     }
 }

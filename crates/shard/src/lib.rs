@@ -57,6 +57,7 @@
 //!   progress and prevents view divergence.
 
 pub mod action_handlers;
+pub mod beacon_witnesses;
 
 mod block_sync;
 mod chain_view;

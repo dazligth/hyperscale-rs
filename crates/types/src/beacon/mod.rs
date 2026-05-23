@@ -52,6 +52,6 @@ pub use spc::{
     SpcCert, SpcEmptyLowEvidence, SpcEmptyViewMsg, SpcHighTriple, SpcProposalObject, SpcSkipSig,
 };
 pub use witness::{
-    BeaconWitness, BeaconWitnessEvent, EquivocationEvidence, ShardWitness, ShardWitnessPayload,
-    ShardWitnessProof, Witness,
+    BeaconWitness, BeaconWitnessEvent, EquivocationEvidence, SHARD_WITNESS_LEAF_DOMAIN_TAG,
+    ShardWitness, ShardWitnessPayload, ShardWitnessProof, Witness,
 };
