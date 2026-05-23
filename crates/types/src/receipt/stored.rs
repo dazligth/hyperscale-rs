@@ -65,6 +65,7 @@ mod tests {
                 receipt_hash: GlobalReceiptHash::ZERO,
                 database_updates: DatabaseUpdates::default(),
                 application_events: vec![make_event(1)],
+                beacon_witness_events: Vec::new(),
             }),
         );
         assert!(synced.metadata.is_none());

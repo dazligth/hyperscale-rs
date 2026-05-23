@@ -529,6 +529,7 @@ mod tests {
                     #[allow(clippy::default_trait_access)]
                     database_updates: Default::default(),
                     application_events: vec![],
+                    beacon_witness_events: Vec::new(),
                 }
             } else {
                 ConsensusReceipt::Failed

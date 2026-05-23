@@ -578,6 +578,7 @@ mod tests {
             receipt_hash: GlobalReceiptHash::ZERO,
             database_updates: DatabaseUpdates::default(),
             application_events: vec![],
+            beacon_witness_events: Vec::new(),
         })
     }
 
@@ -720,6 +721,7 @@ mod tests {
                         receipt_hash: GlobalReceiptHash::ZERO,
                         database_updates: DatabaseUpdates::default(),
                         application_events: vec![],
+                        beacon_witness_events: Vec::new(),
                     }),
                     metadata: None,
                 },
@@ -778,6 +780,7 @@ mod tests {
                     receipt_hash: GlobalReceiptHash::ZERO,
                     database_updates: DatabaseUpdates::default(),
                     application_events: vec![],
+                    beacon_witness_events: Vec::new(),
                 }),
                 metadata: None,
             }],
@@ -812,6 +815,7 @@ mod tests {
                     receipt_hash,
                     database_updates: DatabaseUpdates::default(),
                     application_events: vec![],
+                    beacon_witness_events: Vec::new(),
                 }),
                 metadata: None,
             }],
@@ -862,6 +866,7 @@ mod tests {
                     receipt_hash: GlobalReceiptHash::ZERO,
                     database_updates: DatabaseUpdates::default(),
                     application_events: vec![],
+                    beacon_witness_events: Vec::new(),
                 }),
                 metadata: None,
             }],
@@ -894,6 +899,7 @@ mod tests {
                     receipt_hash: GlobalReceiptHash::ZERO,
                     database_updates: DatabaseUpdates::default(),
                     application_events: vec![],
+                    beacon_witness_events: Vec::new(),
                 }),
                 metadata: None,
             }],

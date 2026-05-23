@@ -114,6 +114,7 @@ fn commit_with(
                 receipt_hash: GlobalReceiptHash::ZERO,
                 database_updates: updates.clone(),
                 application_events: vec![],
+                beacon_witness_events: Vec::new(),
             }),
             metadata: None,
         };

@@ -70,3 +70,14 @@ pub const MAX_WITNESS_PROOF_DEPTH: usize = 64;
 /// (committee turnover, jails); larger batches degrade to multiple
 /// round-trips rather than ballooning a single request.
 pub const MAX_WITNESSES_PER_FETCH: usize = 128;
+
+/// Per-transaction cap on
+/// [`BeaconWitnessEvent`](crate::BeaconWitnessEvent) entries in a
+/// [`ConsensusReceipt::Succeeded`](crate::ConsensusReceipt::Succeeded)
+/// at decode time.
+///
+/// Bounds allocator pressure from peer-shipped receipts before any
+/// per-event work runs. A single transaction's staking-contract
+/// emissions stay well below this in any realistic workload; the cap
+/// rejects obviously oversized arrivals.
+pub const MAX_BEACON_WITNESS_EVENTS_PER_TX: usize = 32;

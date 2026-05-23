@@ -2,8 +2,8 @@
 //!
 //! | Tier | Type | Contents | Cross-shard identical? |
 //! |------|------|----------|------------------------|
-//! | **Global**    | [`GlobalReceipt`](global::GlobalReceipt)         | success bit + `event_root` + `writes_root` | Yes |
-//! | **Consensus** | [`ConsensusReceipt`](consensus::ConsensusReceipt) | variant tag + (Succeeded:) shard-filtered writes + events + precomputed `receipt_hash` | No |
+//! | **Global**    | [`GlobalReceipt`](global::GlobalReceipt)         | success bit + `event_root` + `beacon_witness_root` + `writes_root` | Yes |
+//! | **Consensus** | [`ConsensusReceipt`](consensus::ConsensusReceipt) | variant tag + (Succeeded:) shard-filtered writes + events + beacon-witness events + precomputed `receipt_hash` | No |
 //! | **Metadata**  | [`ExecutionMetadata`](metadata::ExecutionMetadata) | fees, logs, errors | No (local-only) |
 //! | **Stored**    | [`StoredReceipt`](stored::StoredReceipt)         | `tx_hash` + consensus + optional metadata | n/a (storage shape) |
 //!
@@ -20,8 +20,8 @@ pub mod stored;
 mod tests {
     use crate::test_utils::test_event_type_identifier;
     use crate::{
-        ApplicationEvent, ConsensusReceipt, DatabaseUpdates, EventData, EventRoot, GlobalReceipt,
-        GlobalReceiptHash, Hash, WritesRoot,
+        ApplicationEvent, BeaconWitnessRoot, ConsensusReceipt, DatabaseUpdates, EventData,
+        EventRoot, GlobalReceipt, GlobalReceiptHash, Hash, WritesRoot,
     };
 
     fn make_event(seed: u8) -> ApplicationEvent {
@@ -36,23 +36,57 @@ mod tests {
             receipt_hash: GlobalReceiptHash::ZERO,
             database_updates: DatabaseUpdates::default(),
             application_events: events,
+            beacon_witness_events: Vec::new(),
         }
     }
 
     #[test]
     fn test_global_receipt_hash_changes_with_outcome() {
-        let success = GlobalReceipt::new(true, EventRoot::ZERO, WritesRoot::ZERO);
-        let failure = GlobalReceipt::new(false, EventRoot::ZERO, WritesRoot::ZERO);
+        let success = GlobalReceipt::new(
+            true,
+            EventRoot::ZERO,
+            BeaconWitnessRoot::ZERO,
+            WritesRoot::ZERO,
+        );
+        let failure = GlobalReceipt::new(
+            false,
+            EventRoot::ZERO,
+            BeaconWitnessRoot::ZERO,
+            WritesRoot::ZERO,
+        );
         assert_ne!(success.receipt_hash(), failure.receipt_hash());
     }
 
     #[test]
     fn test_global_receipt_hash_changes_with_writes_root() {
-        let a = GlobalReceipt::new(true, EventRoot::ZERO, WritesRoot::ZERO);
+        let a = GlobalReceipt::new(
+            true,
+            EventRoot::ZERO,
+            BeaconWitnessRoot::ZERO,
+            WritesRoot::ZERO,
+        );
         let b = GlobalReceipt::new(
             true,
             EventRoot::ZERO,
+            BeaconWitnessRoot::ZERO,
             WritesRoot::from_raw(Hash::from_bytes(b"different")),
+        );
+        assert_ne!(a.receipt_hash(), b.receipt_hash());
+    }
+
+    #[test]
+    fn test_global_receipt_hash_changes_with_beacon_witness_root() {
+        let a = GlobalReceipt::new(
+            true,
+            EventRoot::ZERO,
+            BeaconWitnessRoot::ZERO,
+            WritesRoot::ZERO,
+        );
+        let b = GlobalReceipt::new(
+            true,
+            EventRoot::ZERO,
+            BeaconWitnessRoot::from_raw(Hash::from_bytes(b"witness")),
+            WritesRoot::ZERO,
         );
         assert_ne!(a.receipt_hash(), b.receipt_hash());
     }

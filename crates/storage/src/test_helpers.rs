@@ -166,6 +166,7 @@ pub fn make_test_receipt(seed: u8) -> StoredReceipt {
             type_id: test_event_type_identifier(seed),
             data: EventData(vec![seed, seed + 1]),
         }],
+        beacon_witness_events: Vec::new(),
     };
     let metadata = Some(ExecutionMetadata::new(
         FeeSummary {

@@ -997,6 +997,7 @@ mod tests {
             receipt_hash: GlobalReceiptHash::ZERO,
             database_updates: updates,
             application_events: vec![],
+            beacon_witness_events: Vec::new(),
         })
     }
 

@@ -15,9 +15,9 @@
 use std::collections::{HashMap, HashSet};
 
 use hyperscale_types::{
-    ApplicationEvent, ConsensusReceipt, EventData, EventRoot, ExecutionMetadata, FeeSummary,
-    GlobalReceipt, GlobalReceiptHash, Hash, LogLevel, NodeId, RoutableTransaction, ShardGroupId,
-    TxHash, compute_merkle_root,
+    ApplicationEvent, BeaconWitnessRoot, ConsensusReceipt, EventData, EventRoot, ExecutionMetadata,
+    FeeSummary, GlobalReceipt, GlobalReceiptHash, Hash, LogLevel, NodeId, RoutableTransaction,
+    ShardGroupId, TxHash, compute_merkle_root,
 };
 use radix_engine::transaction::{
     CommitResult, TransactionOutcome, TransactionReceipt, TransactionResult,
@@ -176,7 +176,11 @@ pub fn compute_vm_output(
         .map(ApplicationEvent::hash)
         .collect();
     let event_root = EventRoot::from_raw(compute_merkle_root(&event_hashes));
-    let receipt_hash = GlobalReceipt::new(true, event_root, writes_root).receipt_hash();
+    // Engine wiring for beacon-witness events is pending; until it lands the
+    // root is the canonical empty-tree zero, which makes `receipt_hash`
+    // identical to the pre-witness-channel hash.
+    let receipt_hash =
+        GlobalReceipt::new(true, event_root, BeaconWitnessRoot::ZERO, writes_root).receipt_hash();
 
     CachedVmOutput {
         metadata,
@@ -232,6 +236,7 @@ pub fn project_to_shard(
                 receipt_hash: *receipt_hash,
                 database_updates,
                 application_events: application_events.clone(),
+                beacon_witness_events: Vec::new(),
             };
             ExecutedTx::new(tx_hash, consensus, cached.metadata.clone())
         }

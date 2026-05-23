@@ -21,8 +21,9 @@ use sbor::{
 
 use crate::sbor_codec::decode_bounded_vec;
 use crate::{
-    ApplicationEvent, DatabaseUpdates, EventRoot, GlobalReceipt, GlobalReceiptHash, Hash,
-    WritesRoot, compute_merkle_root,
+    ApplicationEvent, BeaconWitnessEvent, BeaconWitnessRoot, DatabaseUpdates, EventRoot,
+    GlobalReceipt, GlobalReceiptHash, Hash, MAX_BEACON_WITNESS_EVENTS_PER_TX, WritesRoot,
+    compute_merkle_root,
 };
 
 /// Cap on `ConsensusReceipt::Succeeded.application_events` count at decode
@@ -40,19 +41,27 @@ const RECEIPT_VARIANT_FAILED: u8 = 1;
 
 /// Canonical receipt hash for any failed transaction.
 ///
-/// All failed transactions hash to the same value — derived from the
-/// fixed `(success=false, EventRoot::ZERO, WritesRoot::ZERO)` triple.
-/// Cached to avoid recomputing per failure.
-pub static FAILED_RECEIPT_HASH: LazyLock<GlobalReceiptHash> =
-    LazyLock::new(|| GlobalReceipt::new(false, EventRoot::ZERO, WritesRoot::ZERO).receipt_hash());
+/// All failed transactions hash to the same value — derived from the fixed
+/// `(success=false, EventRoot::ZERO, BeaconWitnessRoot::ZERO, WritesRoot::ZERO)`
+/// tuple. Cached to avoid recomputing per failure.
+pub static FAILED_RECEIPT_HASH: LazyLock<GlobalReceiptHash> = LazyLock::new(|| {
+    GlobalReceipt::new(
+        false,
+        EventRoot::ZERO,
+        BeaconWitnessRoot::ZERO,
+        WritesRoot::ZERO,
+    )
+    .receipt_hash()
+});
 
 /// The consensus-bound portion of an execution result.
 ///
 /// `Succeeded` carries the shard-filtered database updates and events
-/// produced by the transaction, plus the precomputed `receipt_hash`
-/// (which depends on a `writes_root` derived from globally-filtered
-/// updates not stored here). `Failed` carries no payload — every
-/// failure is consensus-equivalent.
+/// produced by the transaction, the beacon-witness events the engine
+/// surfaced for the shard's accumulator, plus the precomputed
+/// `receipt_hash` (which depends on a `writes_root` derived from
+/// globally-filtered updates not stored here). `Failed` carries no
+/// payload — every failure is consensus-equivalent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConsensusReceipt {
     /// Engine committed the tx; carries the precomputed receipt hash and
@@ -70,6 +79,12 @@ pub enum ConsensusReceipt {
         /// Identical across shards for the same tx — events come from
         /// user logic, which sees the same merged state on every shard.
         application_events: Vec<ApplicationEvent>,
+        /// Beacon-witness events the engine surfaced for this tx. Folded
+        /// into the shard's beacon-witness accumulator at block-assembly
+        /// time; the root of those events is bound into `receipt_hash`
+        /// via [`GlobalReceipt::beacon_witness_root`]. Empty until the
+        /// engine wiring lands.
+        beacon_witness_events: Vec<BeaconWitnessEvent>,
     },
     /// All failures collapse to one variant — the canonical
     /// [`FAILED_RECEIPT_HASH`] is derived at hash time, no payload needed.
@@ -87,12 +102,14 @@ impl<E: Encoder<NoCustomValueKind>> Encode<NoCustomValueKind, E> for ConsensusRe
                 receipt_hash,
                 database_updates,
                 application_events,
+                beacon_witness_events,
             } => {
                 encoder.write_discriminator(RECEIPT_VARIANT_SUCCEEDED)?;
-                encoder.write_size(3)?;
+                encoder.write_size(4)?;
                 encoder.encode(receipt_hash)?;
                 encoder.encode(database_updates)?;
                 encoder.encode(application_events)?;
+                encoder.encode(beacon_witness_events)?;
             }
             Self::Failed => {
                 encoder.write_discriminator(RECEIPT_VARIANT_FAILED)?;
@@ -113,9 +130,9 @@ impl<D: Decoder<NoCustomValueKind>> Decode<NoCustomValueKind, D> for ConsensusRe
         let length = decoder.read_size()?;
         match discriminator {
             RECEIPT_VARIANT_SUCCEEDED => {
-                if length != 3 {
+                if length != 4 {
                     return Err(DecodeError::UnexpectedSize {
-                        expected: 3,
+                        expected: 4,
                         actual: length,
                     });
                 }
@@ -125,10 +142,15 @@ impl<D: Decoder<NoCustomValueKind>> Decode<NoCustomValueKind, D> for ConsensusRe
                     decoder,
                     MAX_APPLICATION_EVENTS_PER_TX,
                 )?;
+                let beacon_witness_events = decode_bounded_vec::<_, BeaconWitnessEvent>(
+                    decoder,
+                    MAX_BEACON_WITNESS_EVENTS_PER_TX,
+                )?;
                 Ok(Self::Succeeded {
                     receipt_hash,
                     database_updates,
                     application_events,
+                    beacon_witness_events,
                 })
             }
             RECEIPT_VARIANT_FAILED => {
@@ -241,6 +263,7 @@ mod tests {
                 type_id: test_event_type_identifier(1),
                 data: EventData(vec![4, 5, 6]),
             }],
+            beacon_witness_events: Vec::new(),
         }
     }
 
@@ -270,7 +293,7 @@ mod tests {
             .unwrap();
         enc.write_value_kind(ValueKind::Enum).unwrap();
         enc.write_discriminator(RECEIPT_VARIANT_SUCCEEDED).unwrap();
-        enc.write_size(3).unwrap();
+        enc.write_size(4).unwrap();
         enc.encode(&GlobalReceiptHash::from_raw(Hash::from_bytes(b"r")))
             .unwrap();
         enc.encode(&DatabaseUpdates::default()).unwrap();
@@ -285,6 +308,37 @@ mod tests {
                 expected: MAX_APPLICATION_EVENTS_PER_TX,
                 actual,
             } if actual == MAX_APPLICATION_EVENTS_PER_TX + 1
+        ));
+    }
+
+    /// Hand-roll a `Succeeded` payload whose `beacon_witness_events`
+    /// count exceeds the cap and verify decode rejects it before
+    /// iterating. Mirrors the application-events bound check.
+    #[test]
+    fn decode_rejects_oversized_beacon_witness_events() {
+        let mut buf = Vec::with_capacity(64);
+        let mut enc = VecEncoder::<NoCustomValueKind>::new(&mut buf, BASIC_SBOR_V1_MAX_DEPTH);
+        enc.write_payload_prefix(BASIC_SBOR_V1_PAYLOAD_PREFIX)
+            .unwrap();
+        enc.write_value_kind(ValueKind::Enum).unwrap();
+        enc.write_discriminator(RECEIPT_VARIANT_SUCCEEDED).unwrap();
+        enc.write_size(4).unwrap();
+        enc.encode(&GlobalReceiptHash::from_raw(Hash::from_bytes(b"r")))
+            .unwrap();
+        enc.encode(&DatabaseUpdates::default()).unwrap();
+        enc.encode(&Vec::<ApplicationEvent>::new()).unwrap();
+        enc.write_value_kind(ValueKind::Array).unwrap();
+        enc.write_value_kind(BeaconWitnessEvent::value_kind())
+            .unwrap();
+        enc.write_size(MAX_BEACON_WITNESS_EVENTS_PER_TX + 1)
+            .unwrap();
+        let err = basic_decode::<ConsensusReceipt>(&buf).unwrap_err();
+        assert!(matches!(
+            err,
+            DecodeError::UnexpectedSize {
+                expected: MAX_BEACON_WITNESS_EVENTS_PER_TX,
+                actual,
+            } if actual == MAX_BEACON_WITNESS_EVENTS_PER_TX + 1
         ));
     }
 

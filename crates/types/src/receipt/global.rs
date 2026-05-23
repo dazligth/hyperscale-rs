@@ -1,6 +1,6 @@
 //! Cross-shard agreement receipt (Tier 1).
 
-use crate::{EventRoot, GlobalReceiptHash, Hash, WritesRoot};
+use crate::{BeaconWitnessRoot, EventRoot, GlobalReceiptHash, Hash, WritesRoot};
 
 /// Cross-shard agreement receipt — ensures validators on different shards
 /// executing the same transaction reach the same outcome.
@@ -15,16 +15,23 @@ use crate::{EventRoot, GlobalReceiptHash, Hash, WritesRoot};
 pub struct GlobalReceipt {
     success: bool,
     event_root: EventRoot,
+    beacon_witness_root: BeaconWitnessRoot,
     writes_root: WritesRoot,
 }
 
 impl GlobalReceipt {
     /// Build a `GlobalReceipt` from its parts.
     #[must_use]
-    pub const fn new(success: bool, event_root: EventRoot, writes_root: WritesRoot) -> Self {
+    pub const fn new(
+        success: bool,
+        event_root: EventRoot,
+        beacon_witness_root: BeaconWitnessRoot,
+        writes_root: WritesRoot,
+    ) -> Self {
         Self {
             success,
             event_root,
+            beacon_witness_root,
             writes_root,
         }
     }
@@ -39,6 +46,16 @@ impl GlobalReceipt {
     #[must_use]
     pub const fn event_root(&self) -> EventRoot {
         self.event_root
+    }
+
+    /// Merkle root over the per-tx beacon-witness events.
+    ///
+    /// Folded into [`Self::receipt_hash`] so cross-shard agreement covers
+    /// the beacon-witness event stream too. `BeaconWitnessRoot::ZERO`
+    /// until the engine surfaces real events from execution.
+    #[must_use]
+    pub const fn beacon_witness_root(&self) -> BeaconWitnessRoot {
+        self.beacon_witness_root
     }
 
     /// Merkle root of declared-only, system-filtered global database writes.
@@ -61,6 +78,7 @@ impl GlobalReceipt {
         GlobalReceiptHash::from_raw(Hash::from_parts(&[
             &outcome_byte,
             self.event_root.as_raw().as_bytes(),
+            self.beacon_witness_root.as_raw().as_bytes(),
             self.writes_root.as_raw().as_bytes(),
         ]))
     }
