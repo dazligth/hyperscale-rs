@@ -39,7 +39,7 @@ impl BeaconBlock {
     /// Field-level validation (signer count vs quorum, header
     /// `recovery_cert_hash` matching the cert's content hash, aggregate
     /// verifying under the committee) is the responsibility of the
-    /// beacon consensus crate — this is a pure data constructor.
+    /// beacon crate — this is a pure data constructor.
     #[must_use]
     pub const fn new(
         header: BeaconBlockHeader,
@@ -225,7 +225,7 @@ mod tests {
     }
 
     /// Constructor accepts mismatched header / body; binding-correctness
-    /// is the consensus crate's job. This pin documents the type-level
+    /// is the beacon crate's job. This pin documents the type-level
     /// contract.
     #[test]
     fn constructor_does_not_check_header_body_binding() {

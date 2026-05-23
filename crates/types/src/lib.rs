@@ -31,7 +31,9 @@ mod transaction;
 mod wave;
 
 pub use beacon::{
-    BeaconBlock, BeaconBlockHeader, RecoveryCertificate, RecoveryRequest, recovery_cert_hash,
+    BeaconBlock, BeaconBlockHeader, BeaconProposal, JailReason, MAX_WITNESSES_PER_PROPOSER,
+    RecoveryCertificate, RecoveryRequest, ShardWitness, ShardWitnessPayload, ShardWitnessProof,
+    Witness, recovery_cert_hash,
 };
 pub use crypto::batch_verify::{
     batch_verify_bls_different_messages, batch_verify_bls_different_messages_all_or_nothing,
@@ -41,6 +43,7 @@ pub use crypto::keys::{
     bls_keypair_from_seed, ed25519_keypair_from_seed, generate_bls_keypair,
     generate_ed25519_keypair, zero_bls_signature, zero_ed25519_signature,
 };
+pub use crypto::vrf::{VRF_OUTPUT_BYTES, VRF_PROOF_BYTES, VrfOutput, VrfProof};
 pub use crypto::{
     Bls12381G1PrivateKey, Bls12381G1PublicKey, Bls12381G2Signature, Ed25519PrivateKey,
     Ed25519PublicKey, Ed25519Signature, verify_bls12381_v1, verify_ed25519,
@@ -55,8 +58,9 @@ pub use primitives::hash_kinds::{
     WritesRoot,
 };
 pub use primitives::identifiers::{
-    Attempt, BlockHeight, Epoch, HeaderFetchCount, InFlightCount, NodeId, PartitionNumber,
-    RecoveryRound, Round, ShardGroupId, Slot, ValidatorId, VotePower,
+    Attempt, BlockHeight, ChainId, Epoch, HeaderFetchCount, InFlightCount, LeafIndex, NodeId,
+    PartitionNumber, RecoveryRound, Round, ShardGroupId, Slot, Stake, StakePoolId, ValidatorId,
+    VotePower,
 };
 pub use primitives::merkle::{
     compute_merkle_root, compute_merkle_root_with_proof, verify_merkle_inclusion,

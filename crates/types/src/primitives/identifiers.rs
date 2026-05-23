@@ -375,6 +375,135 @@ impl Display for RecoveryRound {
     }
 }
 
+/// Beacon chain instance identifier.
+///
+/// Bound into VRF reveals so the same `(secret_key, slot)` pair produces
+/// different outputs on different chains — cross-chain replay of a VRF
+/// reveal fails verification if BLS keys are ever reused across genesis
+/// epochs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, BasicSbor)]
+#[sbor(transparent)]
+pub struct ChainId(u64);
+
+impl ChainId {
+    /// Construct a chain id from a raw `u64`.
+    #[must_use]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Inner `u64`. Use sparingly — at boundaries (display, VRF message
+    /// construction, structured log fields) only.
+    #[must_use]
+    pub const fn inner(self) -> u64 {
+        self.0
+    }
+
+    /// Little-endian byte representation of the inner value.
+    #[must_use]
+    pub const fn to_le_bytes(self) -> [u8; 8] {
+        self.0.to_le_bytes()
+    }
+}
+
+impl Display for ChainId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Chain({})", self.0)
+    }
+}
+
+/// Aggregate stake committed to a beacon-chain validator pool.
+///
+/// Beacon-side accounting only — delegator-level deposits and withdrawals
+/// live in the staking contract on the shard layer; the beacon tracks
+/// per-pool aggregate `Stake` deltas via `ShardWitnessPayload::StakeDeposit`
+/// / `StakeWithdraw`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, BasicSbor)]
+#[sbor(transparent)]
+pub struct Stake(u64);
+
+impl Stake {
+    /// Zero stake.
+    pub const ZERO: Self = Self(0);
+
+    /// Construct a stake amount from a raw `u64`.
+    #[must_use]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Inner `u64`. Use sparingly — at boundaries (display, threshold
+    /// arithmetic that needs `u128` widening, structured log fields)
+    /// only.
+    #[must_use]
+    pub const fn inner(self) -> u64 {
+        self.0
+    }
+}
+
+impl Display for Stake {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Identifier for a beacon-chain stake pool — a dPoS-style aggregation
+/// of delegator stake that operates one or more validator nodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, BasicSbor)]
+#[sbor(transparent)]
+pub struct StakePoolId(u32);
+
+impl StakePoolId {
+    /// Construct a stake-pool id from a raw `u32`.
+    #[must_use]
+    pub const fn new(value: u32) -> Self {
+        Self(value)
+    }
+
+    /// Inner `u32`. Use sparingly — at boundaries (display, structured
+    /// log fields) only.
+    #[must_use]
+    pub const fn inner(self) -> u32 {
+        self.0
+    }
+}
+
+impl Display for StakePoolId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Pool({})", self.0)
+    }
+}
+
+/// Position in a shard's monotonic beacon-witness accumulator.
+///
+/// Stable across the shard's lifetime — leaf `N` is leaf `N` forever.
+/// Used by the beacon's per-shard high-water mark for witness replay
+/// protection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, BasicSbor)]
+#[sbor(transparent)]
+pub struct LeafIndex(u64);
+
+impl LeafIndex {
+    /// Construct a leaf index from a raw `u64`.
+    #[must_use]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Inner `u64`. Use sparingly — at boundaries (display, accumulator
+    /// arithmetic, structured log fields) only.
+    #[must_use]
+    pub const fn inner(self) -> u64 {
+        self.0
+    }
+}
+
+impl Display for LeafIndex {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Leaf({})", self.0)
+    }
+}
+
 /// shard round / view number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, BasicSbor)]
 #[sbor(transparent)]
