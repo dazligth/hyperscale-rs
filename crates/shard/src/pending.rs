@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use hyperscale_core::{Action, FetchRequest};
 #[cfg(test)]
-use hyperscale_types::BeaconWitnessRoot;
+use hyperscale_types::{BeaconWitnessLeafCount, BeaconWitnessRoot};
 use hyperscale_types::{
     Block, BlockHash, BlockHeader, BlockHeight, BlockManifest, FinalizedWave, LocalTimestamp,
     ProvisionHash, Provisions, RoutableTransaction, TopologySnapshot, TxHash, WaveId,
@@ -688,6 +688,7 @@ mod tests {
             BTreeMap::new(),
             InFlightCount::ZERO,
             BeaconWitnessRoot::ZERO,
+            BeaconWitnessLeafCount::ZERO,
         )
     }
 

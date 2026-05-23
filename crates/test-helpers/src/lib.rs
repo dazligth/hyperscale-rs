@@ -20,13 +20,14 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use hyperscale_types::{
-    BeaconWitnessRoot, Block, BlockHash, BlockHeader, BlockHeight, Bls12381G1PrivateKey,
-    Bls12381G1PublicKey, Bls12381G2Signature, BoundedVec, CertificateRoot, CertifiedBlock,
-    ExecutionCertificate, ExecutionOutcome, FinalizedWave, GlobalReceiptHash, GlobalReceiptRoot,
-    InFlightCount, LocalReceiptRoot, ProposerTimestamp, ProvisionsRoot, QuorumCertificate, Round,
-    RoutableTransaction, ShardGroupId, SignerBitfield, StateRoot, TopologySnapshot,
-    TransactionDecision, TransactionRoot, TxHash, TxOutcome, ValidatorId, ValidatorInfo,
-    ValidatorSet, VotePower, WaveCertificate, WaveId, WeightedTimestamp, bls_keypair_from_seed,
+    BeaconWitnessLeafCount, BeaconWitnessRoot, Block, BlockHash, BlockHeader, BlockHeight,
+    Bls12381G1PrivateKey, Bls12381G1PublicKey, Bls12381G2Signature, BoundedVec, CertificateRoot,
+    CertifiedBlock, ExecutionCertificate, ExecutionOutcome, FinalizedWave, GlobalReceiptHash,
+    GlobalReceiptRoot, InFlightCount, LocalReceiptRoot, ProposerTimestamp, ProvisionsRoot,
+    QuorumCertificate, Round, RoutableTransaction, ShardGroupId, SignerBitfield, StateRoot,
+    TopologySnapshot, TransactionDecision, TransactionRoot, TxHash, TxOutcome, ValidatorId,
+    ValidatorInfo, ValidatorSet, VotePower, WaveCertificate, WaveId, WeightedTimestamp,
+    bls_keypair_from_seed,
 };
 
 /// A test committee of validators with deterministic BLS keypairs.
@@ -237,6 +238,7 @@ pub fn make_live_block(
         std::collections::BTreeMap::new(),
         InFlightCount::ZERO,
         BeaconWitnessRoot::ZERO,
+        BeaconWitnessLeafCount::ZERO,
     );
     Block::Live {
         header,

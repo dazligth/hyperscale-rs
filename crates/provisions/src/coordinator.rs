@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use hyperscale_core::{Action, FetchAbandon, ProtocolEvent};
 #[cfg(test)]
-use hyperscale_types::BeaconWitnessRoot;
+use hyperscale_types::{BeaconWitnessLeafCount, BeaconWitnessRoot};
 use hyperscale_types::{
     BlockHeight, BlockManifest, CertifiedBlock, CommittedBlockHeader, LocalTimestamp,
     ProvisionHash, Provisions, RETENTION_HORIZON, ShardGroupId, TopologySnapshot,
@@ -763,6 +763,7 @@ mod tests {
             roots,
             header.in_flight(),
             BeaconWitnessRoot::ZERO,
+            BeaconWitnessLeafCount::ZERO,
         );
         Arc::new(CommittedBlockHeader::new(header, qc))
     }
@@ -1349,6 +1350,7 @@ mod tests {
             std::collections::BTreeMap::new(),
             InFlightCount::ZERO,
             BeaconWitnessRoot::ZERO,
+            BeaconWitnessLeafCount::ZERO,
         );
         let header_hash = header.hash();
         let qc = QuorumCertificate::new(
@@ -1390,6 +1392,7 @@ mod tests {
             std::collections::BTreeMap::new(),
             InFlightCount::ZERO,
             BeaconWitnessRoot::ZERO,
+            BeaconWitnessLeafCount::ZERO,
         );
         let block = Block::Live {
             header,
@@ -1696,6 +1699,7 @@ mod tests {
             std::collections::BTreeMap::new(),
             InFlightCount::ZERO,
             BeaconWitnessRoot::ZERO,
+            BeaconWitnessLeafCount::ZERO,
         );
         let block = Block::Live {
             header,

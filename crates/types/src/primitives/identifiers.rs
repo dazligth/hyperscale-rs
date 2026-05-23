@@ -504,6 +504,43 @@ impl Display for LeafIndex {
     }
 }
 
+/// Total leaves in a shard's beacon-witness accumulator at a given
+/// committed block.
+///
+/// Paired with [`BeaconWitnessRoot`](crate::BeaconWitnessRoot) on
+/// [`BlockHeader`](crate::BlockHeader) so a verifier holding only the
+/// header can check any inclusion proof anchored at that block — the
+/// padded-perfect-tree shape that the accumulator produces is fully
+/// determined by the count, so no side-channel hint is needed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, BasicSbor)]
+#[sbor(transparent)]
+pub struct BeaconWitnessLeafCount(u64);
+
+impl BeaconWitnessLeafCount {
+    /// Empty accumulator — the value carried on every header until the
+    /// shard runtime appends its first witness.
+    pub const ZERO: Self = Self(0);
+
+    /// Construct a leaf count from a raw `u64`.
+    #[must_use]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Inner `u64`. Use sparingly — at boundaries (display, accumulator
+    /// arithmetic against `Vec<_>::len()`, structured log fields) only.
+    #[must_use]
+    pub const fn inner(self) -> u64 {
+        self.0
+    }
+}
+
+impl Display for BeaconWitnessLeafCount {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "BeaconWitnessLeafCount({})", self.0)
+    }
+}
+
 /// Strong Prefix Consensus view counter.
 ///
 /// SPC drives one slot through a sequence of views. Each view runs an

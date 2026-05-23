@@ -5,10 +5,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use sbor::prelude::*;
 
 use crate::{
-    BeaconWitnessRoot, BlockHash, BlockHeight, BoundedBTreeMap, BoundedVec, CertificateRoot, Hash,
-    InFlightCount, LocalReceiptRoot, MAX_REMOTE_SHARDS_PER_WAVE, MAX_TXS_PER_BLOCK,
-    ProposerTimestamp, ProvisionTxRoot, ProvisionsRoot, QuorumCertificate, Round, ShardGroupId,
-    StateRoot, TransactionRoot, ValidatorId, WaveId,
+    BeaconWitnessLeafCount, BeaconWitnessRoot, BlockHash, BlockHeight, BoundedBTreeMap, BoundedVec,
+    CertificateRoot, Hash, InFlightCount, LocalReceiptRoot, MAX_REMOTE_SHARDS_PER_WAVE,
+    MAX_TXS_PER_BLOCK, ProposerTimestamp, ProvisionTxRoot, ProvisionsRoot, QuorumCertificate,
+    Round, ShardGroupId, StateRoot, TransactionRoot, ValidatorId, WaveId,
 };
 
 /// Block header containing consensus metadata.
@@ -38,6 +38,7 @@ pub struct BlockHeader {
     provision_tx_roots: BoundedBTreeMap<ShardGroupId, ProvisionTxRoot, MAX_REMOTE_SHARDS_PER_WAVE>,
     in_flight: InFlightCount,
     beacon_witness_root: BeaconWitnessRoot,
+    beacon_witness_leaf_count: BeaconWitnessLeafCount,
 }
 
 impl BlockHeader {
@@ -47,7 +48,7 @@ impl BlockHeader {
     ///
     /// Panics if `waves.len() > MAX_TXS_PER_BLOCK` or
     /// `provision_tx_roots.len() > MAX_REMOTE_SHARDS_PER_WAVE`.
-    #[allow(clippy::too_many_arguments)] // mirrors the 17 stored fields
+    #[allow(clippy::too_many_arguments)] // mirrors the 18 stored fields
     #[must_use]
     pub fn new(
         shard_group_id: ShardGroupId,
@@ -67,6 +68,7 @@ impl BlockHeader {
         provision_tx_roots: BTreeMap<ShardGroupId, ProvisionTxRoot>,
         in_flight: InFlightCount,
         beacon_witness_root: BeaconWitnessRoot,
+        beacon_witness_leaf_count: BeaconWitnessLeafCount,
     ) -> Self {
         Self {
             shard_group_id,
@@ -86,6 +88,7 @@ impl BlockHeader {
             provision_tx_roots: provision_tx_roots.into(),
             in_flight,
             beacon_witness_root,
+            beacon_witness_leaf_count,
         }
     }
 
@@ -114,6 +117,7 @@ impl BlockHeader {
             provision_tx_roots: BoundedBTreeMap::new(),
             in_flight: InFlightCount::ZERO,
             beacon_witness_root: BeaconWitnessRoot::ZERO,
+            beacon_witness_leaf_count: BeaconWitnessLeafCount::ZERO,
         }
     }
 
@@ -290,8 +294,21 @@ impl BlockHeader {
         self.beacon_witness_root
     }
 
+    /// Total leaves in this shard's beacon-witness accumulator as of
+    /// this block.
+    ///
+    /// Paired with [`Self::beacon_witness_root`] so a verifier holding
+    /// only the header can check any inclusion proof anchored at this
+    /// block without consulting a side channel for the tree size.
+    /// `0` for blocks that produced no witnesses, and for blocks built
+    /// before the shard runtime computes the accumulator.
+    #[must_use]
+    pub const fn beacon_witness_leaf_count(&self) -> BeaconWitnessLeafCount {
+        self.beacon_witness_leaf_count
+    }
+
     /// Decompose into the raw fields, in struct-declaration order.
-    #[allow(clippy::type_complexity)] // mirrors the 17 stored fields
+    #[allow(clippy::type_complexity)] // mirrors the 18 stored fields
     #[must_use]
     pub fn into_parts(
         self,
@@ -313,6 +330,7 @@ impl BlockHeader {
         BoundedBTreeMap<ShardGroupId, ProvisionTxRoot, MAX_REMOTE_SHARDS_PER_WAVE>,
         InFlightCount,
         BeaconWitnessRoot,
+        BeaconWitnessLeafCount,
     ) {
         (
             self.shard_group_id,
@@ -332,6 +350,7 @@ impl BlockHeader {
             self.provision_tx_roots,
             self.in_flight,
             self.beacon_witness_root,
+            self.beacon_witness_leaf_count,
         )
     }
 
@@ -396,8 +415,8 @@ mod tests {
             enc.write_payload_prefix(BASIC_SBOR_V1_PAYLOAD_PREFIX)
                 .unwrap();
             enc.write_value_kind(ValueKind::Tuple).unwrap();
-            // BlockHeader has 17 fields.
-            enc.write_size(17).unwrap();
+            // BlockHeader has 18 fields.
+            enc.write_size(18).unwrap();
             enc.encode(&h.shard_group_id).unwrap();
             enc.encode(&h.height).unwrap();
             enc.encode(&h.parent_block_hash).unwrap();
@@ -436,7 +455,7 @@ mod tests {
             enc.write_payload_prefix(BASIC_SBOR_V1_PAYLOAD_PREFIX)
                 .unwrap();
             enc.write_value_kind(ValueKind::Tuple).unwrap();
-            enc.write_size(17).unwrap();
+            enc.write_size(18).unwrap();
             enc.encode(&h.shard_group_id).unwrap();
             enc.encode(&h.height).unwrap();
             enc.encode(&h.parent_block_hash).unwrap();

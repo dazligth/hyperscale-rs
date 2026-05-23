@@ -17,7 +17,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 #[cfg(test)]
-use hyperscale_types::BeaconWitnessRoot;
+use hyperscale_types::{BeaconWitnessLeafCount, BeaconWitnessRoot};
 use hyperscale_types::{
     Block, BlockHeader, BlockHeight, LocalTimestamp, MAX_TIMESTAMP_DELAY, MAX_TIMESTAMP_RUSH,
     ProvisionHash, QuorumCertificate, RoutableTransaction, TopologySnapshot, TxHash, VotePower,
@@ -349,6 +349,7 @@ mod tests {
             std::collections::BTreeMap::new(),
             InFlightCount::ZERO,
             BeaconWitnessRoot::ZERO,
+            BeaconWitnessLeafCount::ZERO,
         )
     }
 
@@ -377,6 +378,7 @@ mod tests {
             base.provision_tx_roots().clone().into_inner(),
             base.in_flight(),
             BeaconWitnessRoot::ZERO,
+            BeaconWitnessLeafCount::ZERO,
         )
     }
 
@@ -399,6 +401,7 @@ mod tests {
             std::collections::BTreeMap::new(),
             InFlightCount::ZERO,
             BeaconWitnessRoot::ZERO,
+            BeaconWitnessLeafCount::ZERO,
         );
         Block::Live {
             header,

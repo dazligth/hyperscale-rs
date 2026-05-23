@@ -44,9 +44,9 @@ use hyperscale_metrics::{
 };
 use hyperscale_network::{Network, ResponseVerdict};
 use hyperscale_storage::Storage;
-#[cfg(test)]
-use hyperscale_types::BeaconWitnessRoot;
 use hyperscale_types::network::response::GetBlockResponse;
+#[cfg(test)]
+use hyperscale_types::{BeaconWitnessLeafCount, BeaconWitnessRoot};
 use hyperscale_types::{
     BlockHeight, CertifiedBlock, ElidedCertifiedBlock, Hash, Inventory, RehydrateError,
     StoredReceipt, compute_certificate_root, compute_local_receipt_root, compute_provision_root,
@@ -448,6 +448,7 @@ mod tests {
             std::collections::BTreeMap::new(),
             InFlightCount::ZERO,
             BeaconWitnessRoot::ZERO,
+            BeaconWitnessLeafCount::ZERO,
         )
     }
 
@@ -476,6 +477,7 @@ mod tests {
             h.provision_tx_roots().clone().into_inner(),
             h.in_flight(),
             BeaconWitnessRoot::ZERO,
+            BeaconWitnessLeafCount::ZERO,
         )
     }
 

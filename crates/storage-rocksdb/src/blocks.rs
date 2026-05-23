@@ -169,7 +169,7 @@ impl RocksDbStorage {
         // 1. Get block metadata
         let metadata: BlockMetadata = get::<BlocksCf>(&*self.db, blocks_cf, &height.inner())?;
 
-        let (header, manifest, qc) = metadata.into_parts();
+        let (header, manifest, qc, _) = metadata.into_parts();
 
         // 2. Batch-fetch transactions (preserving order)
         let transactions =
@@ -291,7 +291,7 @@ impl RocksDbStorage {
 
         // 1. Get block metadata
         let metadata: BlockMetadata = get::<BlocksCf>(&*self.db, blocks_cf, &height.inner())?;
-        let (header, manifest, qc) = metadata.into_parts();
+        let (header, manifest, qc, _) = metadata.into_parts();
 
         // 2. Try to batch-fetch transactions (preserving order)
         let transactions =

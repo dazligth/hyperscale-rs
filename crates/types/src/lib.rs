@@ -64,9 +64,9 @@ pub use primitives::hash_kinds::{
     TxHash, WaveReceiptHash, WritesRoot,
 };
 pub use primitives::identifiers::{
-    Attempt, BlockHeight, ChainId, Epoch, HeaderFetchCount, InFlightCount, LeafIndex, NodeId,
-    PartitionNumber, RecoveryRound, Round, ShardGroupId, Slot, SpcView, Stake, StakePoolId,
-    ValidatorId, VotePower,
+    Attempt, BeaconWitnessLeafCount, BlockHeight, ChainId, Epoch, HeaderFetchCount, InFlightCount,
+    LeafIndex, NodeId, PartitionNumber, RecoveryRound, Round, ShardGroupId, Slot, SpcView, Stake,
+    StakePoolId, ValidatorId, VotePower,
 };
 pub use primitives::merkle::{
     compute_merkle_root, compute_merkle_root_with_proof, verify_merkle_inclusion,

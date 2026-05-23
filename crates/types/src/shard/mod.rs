@@ -32,11 +32,11 @@ mod tests {
     use super::*;
     use crate::test_utils::test_validity_range;
     use crate::{
-        BeaconWitnessRoot, BlockHash, BlockHeader, BlockHeight, Bls12381G2Signature, BoundedVec,
-        CertificateRoot, ExecutionCertificate, ExecutionOutcome, FinalizedWave, GlobalReceiptHash,
-        GlobalReceiptRoot, Hash, InFlightCount, LocalReceiptRoot, ProposerTimestamp,
-        ProvisionsRoot, QuorumCertificate, Round, ShardGroupId, SignerBitfield, StateRoot,
-        TransactionRoot, TxHash, TxOutcome, ValidatorId, WaveCertificate, WaveId,
+        BeaconWitnessLeafCount, BeaconWitnessRoot, BlockHash, BlockHeader, BlockHeight,
+        Bls12381G2Signature, BoundedVec, CertificateRoot, ExecutionCertificate, ExecutionOutcome,
+        FinalizedWave, GlobalReceiptHash, GlobalReceiptRoot, Hash, InFlightCount, LocalReceiptRoot,
+        ProposerTimestamp, ProvisionsRoot, QuorumCertificate, Round, ShardGroupId, SignerBitfield,
+        StateRoot, TransactionRoot, TxHash, TxOutcome, ValidatorId, WaveCertificate, WaveId,
         WeightedTimestamp, compute_certificate_root, compute_transaction_root,
         generate_ed25519_keypair, routable_from_notarized_v1, sign_and_notarize,
     };
@@ -61,6 +61,7 @@ mod tests {
             std::collections::BTreeMap::new(),
             InFlightCount::ZERO,
             BeaconWitnessRoot::ZERO,
+            BeaconWitnessLeafCount::ZERO,
         );
 
         let hash1 = header.hash();
@@ -219,6 +220,7 @@ mod tests {
                 header.provision_tx_roots().clone().into_inner(),
                 header.in_flight(),
                 header.beacon_witness_root(),
+                header.beacon_witness_leaf_count(),
             );
         }
         let genesis_qc = QuorumCertificate::genesis(ShardGroupId::new(0));

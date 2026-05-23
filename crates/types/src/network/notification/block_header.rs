@@ -77,9 +77,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        BeaconWitnessRoot, BlockHash, BlockHeight, CertificateRoot, Hash, InFlightCount,
-        LocalReceiptRoot, ProposerTimestamp, ProvisionsRoot, QuorumCertificate, Round,
-        ShardGroupId, StateRoot, TransactionRoot, TxHash, ValidatorId,
+        BeaconWitnessLeafCount, BeaconWitnessRoot, BlockHash, BlockHeight, CertificateRoot, Hash,
+        InFlightCount, LocalReceiptRoot, ProposerTimestamp, ProvisionsRoot, QuorumCertificate,
+        Round, ShardGroupId, StateRoot, TransactionRoot, TxHash, ValidatorId,
     };
 
     fn make_header(height: BlockHeight) -> BlockHeader {
@@ -101,6 +101,7 @@ mod tests {
             BTreeMap::new(),
             InFlightCount::ZERO,
             BeaconWitnessRoot::ZERO,
+            BeaconWitnessLeafCount::ZERO,
         )
     }
 

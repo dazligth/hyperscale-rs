@@ -13,7 +13,7 @@
 use std::collections::HashSet;
 
 #[cfg(test)]
-use hyperscale_types::BeaconWitnessRoot;
+use hyperscale_types::{BeaconWitnessLeafCount, BeaconWitnessRoot};
 use hyperscale_types::{
     Block, BlockHash, BlockHeader, BlockHeight, InFlightCount, ProvisionHash, QuorumCertificate,
     ShardGroupId, StateRoot, TxHash, WaveId,
@@ -201,6 +201,7 @@ mod tests {
             std::collections::BTreeMap::new(),
             InFlightCount::new(u32::from(height)),
             BeaconWitnessRoot::ZERO,
+            BeaconWitnessLeafCount::ZERO,
         )
     }
 

@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use hyperscale_types::test_utils::test_event_type_identifier;
 use hyperscale_types::{
-    ApplicationEvent, BeaconWitnessRoot, Block, BlockHash, BlockHeader, BlockHeight,
-    Bls12381G2Signature, BoundedVec, CertificateRoot, ConsensusReceipt, EventData,
+    ApplicationEvent, BeaconWitnessLeafCount, BeaconWitnessRoot, Block, BlockHash, BlockHeader,
+    BlockHeight, Bls12381G2Signature, BoundedVec, CertificateRoot, ConsensusReceipt, EventData,
     ExecutionCertificate, ExecutionMetadata, ExecutionOutcome, FeeSummary, FinalizedWave,
     GlobalReceiptHash, GlobalReceiptRoot, Hash, InFlightCount, LocalReceiptRoot, LogLevel, NodeId,
     ProposerTimestamp, ProvisionsRoot, QuorumCertificate, Round, ShardGroupId, SignerBitfield,
@@ -131,6 +131,7 @@ pub fn make_test_block(height: BlockHeight) -> Block {
             std::collections::BTreeMap::new(),
             InFlightCount::ZERO,
             BeaconWitnessRoot::ZERO,
+            BeaconWitnessLeafCount::ZERO,
         ),
         transactions: Arc::new(BoundedVec::new()),
         certificates: Arc::new(BoundedVec::new()),

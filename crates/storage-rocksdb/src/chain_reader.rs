@@ -19,7 +19,7 @@ impl ChainReader for RocksDbStorage {
 
     fn get_committed_header(&self, height: BlockHeight) -> Option<CommittedBlockHeader> {
         let metadata = self.get_block_metadata(height)?;
-        let (header, _, qc) = metadata.into_parts();
+        let (header, _, qc, _) = metadata.into_parts();
         Some(CommittedBlockHeader::new(header, qc))
     }
 

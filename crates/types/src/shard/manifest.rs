@@ -4,8 +4,9 @@
 use sbor::prelude::*;
 
 use crate::{
-    Block, BlockHash, BlockHeader, BlockHeight, BoundedVec, MAX_FINALIZED_TX_PER_BLOCK,
-    MAX_PROVISIONS_PER_BLOCK, MAX_TXS_PER_BLOCK, ProvisionHash, QuorumCertificate, TxHash, WaveId,
+    BeaconWitnessLeafCount, Block, BlockHash, BlockHeader, BlockHeight, BoundedVec,
+    MAX_FINALIZED_TX_PER_BLOCK, MAX_PROVISIONS_PER_BLOCK, MAX_TXS_PER_BLOCK, ProvisionHash,
+    QuorumCertificate, TxHash, WaveId,
 };
 
 /// Hash-level description of a block's contents (transactions and certificates).
@@ -110,6 +111,7 @@ pub struct BlockMetadata {
     header: BlockHeader,
     manifest: BlockManifest,
     qc: QuorumCertificate,
+    beacon_witness_leaf_count_at_block_end: BeaconWitnessLeafCount,
 }
 
 impl BlockMetadata {
@@ -120,6 +122,7 @@ impl BlockMetadata {
             header: block.header().clone(),
             manifest: BlockManifest::from_block(block),
             qc,
+            beacon_witness_leaf_count_at_block_end: BeaconWitnessLeafCount::ZERO,
         }
     }
 
@@ -141,10 +144,29 @@ impl BlockMetadata {
         &self.qc
     }
 
+    /// Total leaves in the shard's beacon-witness accumulator after
+    /// this block. See the field doc.
+    #[must_use]
+    pub const fn beacon_witness_leaf_count_at_block_end(&self) -> BeaconWitnessLeafCount {
+        self.beacon_witness_leaf_count_at_block_end
+    }
+
     /// Consume the metadata and return its parts.
     #[must_use]
-    pub fn into_parts(self) -> (BlockHeader, BlockManifest, QuorumCertificate) {
-        (self.header, self.manifest, self.qc)
+    pub fn into_parts(
+        self,
+    ) -> (
+        BlockHeader,
+        BlockManifest,
+        QuorumCertificate,
+        BeaconWitnessLeafCount,
+    ) {
+        (
+            self.header,
+            self.manifest,
+            self.qc,
+            self.beacon_witness_leaf_count_at_block_end,
+        )
     }
 
     /// Get block height.

@@ -374,9 +374,10 @@ mod tests {
     use hyperscale_test_helpers::{certify, make_live_block};
     use hyperscale_types::test_utils::test_transaction;
     use hyperscale_types::{
-        BeaconWitnessRoot, Block, BlockHeader, BlockHeight, BlockManifest, CommittedBlockHeader,
-        Hash, LocalTimestamp, MerkleInclusionProof, ProvisionEntry, Provisions, QuorumCertificate,
-        RETENTION_HORIZON, Round, ShardGroupId, TransactionStatus, TxHash, ValidatorId, WaveId,
+        BeaconWitnessLeafCount, BeaconWitnessRoot, Block, BlockHeader, BlockHeight, BlockManifest,
+        CommittedBlockHeader, Hash, LocalTimestamp, MerkleInclusionProof, ProvisionEntry,
+        Provisions, QuorumCertificate, RETENTION_HORIZON, Round, ShardGroupId, TransactionStatus,
+        TxHash, ValidatorId, WaveId,
     };
 
     use super::super::test_support::TestNode;
@@ -423,6 +424,7 @@ mod tests {
                 header.provision_tx_roots().clone().into_inner(),
                 header.in_flight(),
                 BeaconWitnessRoot::ZERO,
+                BeaconWitnessLeafCount::ZERO,
             );
         }
         let committed_header = Arc::new(CommittedBlockHeader::new(
