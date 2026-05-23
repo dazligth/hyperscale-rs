@@ -12,6 +12,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use hyperscale_core::{Action, VerificationKind};
+#[cfg(test)]
+use hyperscale_types::BeaconWitnessRoot;
 use hyperscale_types::{
     Block, BlockHash, BlockHeader, BlockHeight, BlockManifest, FinalizedWave, InFlightCount,
     LocalReceiptRoot, ProvisionsRoot, QuorumCertificate, StateRoot, TopologySnapshot,
@@ -1151,6 +1153,7 @@ mod tests {
             Vec::new(),
             std::collections::BTreeMap::new(),
             InFlightCount::new(in_flight),
+            BeaconWitnessRoot::ZERO,
         )
     }
 
@@ -1177,6 +1180,7 @@ mod tests {
             Vec::new(),
             std::collections::BTreeMap::new(),
             InFlightCount::new(in_flight),
+            BeaconWitnessRoot::ZERO,
         )
     }
 

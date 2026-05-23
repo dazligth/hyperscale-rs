@@ -90,9 +90,9 @@ mod tests {
     #[test]
     fn test_sbor_roundtrip() {
         use crate::{
-            BlockHeader, BlockHeight, CertificateRoot, Hash, LocalReceiptRoot, ProvisionsRoot,
-            QuorumCertificate, Round, ShardGroupId, StateRoot, TransactionRoot, ValidatorId,
-            zero_bls_signature,
+            BeaconWitnessRoot, BlockHeader, BlockHeight, CertificateRoot, Hash, LocalReceiptRoot,
+            ProvisionsRoot, QuorumCertificate, Round, ShardGroupId, StateRoot, TransactionRoot,
+            ValidatorId, zero_bls_signature,
         };
 
         let header = BlockHeader::new(
@@ -112,6 +112,7 @@ mod tests {
             Vec::new(),
             BTreeMap::new(),
             InFlightCount::ZERO,
+            BeaconWitnessRoot::ZERO,
         );
         let qc = QuorumCertificate::genesis(ShardGroupId::new(0));
 

@@ -7,6 +7,8 @@
 use std::collections::{BTreeMap, HashMap};
 
 use hyperscale_core::Action;
+#[cfg(test)]
+use hyperscale_types::BeaconWitnessRoot;
 use hyperscale_types::{
     BlockHash, BlockHeight, Bls12381G1PublicKey, CertifiedBlock, QuorumCertificate,
     TopologySnapshot,
@@ -771,6 +773,7 @@ mod tests {
             Vec::new(),
             BTreeMap::new(),
             InFlightCount::ZERO,
+            BeaconWitnessRoot::ZERO,
         )
     }
 

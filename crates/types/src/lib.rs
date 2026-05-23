@@ -33,12 +33,12 @@ mod wave;
 pub use beacon::{
     BeaconBlock, BeaconBlockHeader, BeaconProposal, BeaconWitness, EquivocationEvidence,
     JailReason, MAX_ACCUSATIONS_PER_PROPOSAL, MAX_PREFIX_SIGS, MAX_SKIP_SIGS, MAX_VOTE_VECTOR_LEN,
-    MAX_WITNESSES_PER_PROPOSER, MscEmptyLowAccusation, MscSlotProposal, PC_VALUE_ELEMENT_BYTES,
-    PcCompactLenSigner, PcCompactVote, PcDivergingProof, PcQc1, PcQc2, PcQc3, PcValueElement,
-    PcVector, PcVote1, PcVote2, PcVote3, PcVoteEquivocation, PcVoteRound, PcXpProof,
-    RecoveryCertificate, RecoveryEquivocation, RecoveryRequest, ShardWitness, ShardWitnessPayload,
-    ShardWitnessProof, SpcCert, SpcEmptyLowEvidence, SpcEmptyViewMsg, SpcHighTriple,
-    SpcProposalObject, SpcSkipSig, Witness, recovery_cert_hash,
+    MAX_WITNESS_PROOF_DEPTH, MAX_WITNESSES_PER_PROPOSER, MscEmptyLowAccusation, MscSlotProposal,
+    PC_VALUE_ELEMENT_BYTES, PcCompactLenSigner, PcCompactVote, PcDivergingProof, PcQc1, PcQc2,
+    PcQc3, PcValueElement, PcVector, PcVote1, PcVote2, PcVote3, PcVoteEquivocation, PcVoteRound,
+    PcXpProof, RecoveryCertificate, RecoveryEquivocation, RecoveryRequest, ShardWitness,
+    ShardWitnessPayload, ShardWitnessProof, SpcCert, SpcEmptyLowEvidence, SpcEmptyViewMsg,
+    SpcHighTriple, SpcProposalObject, SpcSkipSig, Witness, recovery_cert_hash,
 };
 pub use crypto::batch_verify::{
     batch_verify_bls_different_messages, batch_verify_bls_different_messages_all_or_nothing,
@@ -57,10 +57,10 @@ pub use network::{GossipMessage, MessageClass, NetworkMessage, Request, TopicSco
 pub use primitives::bloom::{BloomFilter, BloomKey, DEFAULT_FPR, MAX_BITS};
 pub use primitives::hash::{Hash, TypedHash};
 pub use primitives::hash_kinds::{
-    BeaconBlockHash, BeaconProposalsRoot, BeaconStateRoot, BlockHash, CertificateRoot, EventRoot,
-    GlobalReceiptHash, GlobalReceiptRoot, LocalReceiptRoot, ProvisionHash, ProvisionTxRoot,
-    ProvisionsRoot, RecoveryCertHash, StateRoot, TransactionRoot, TxHash, WaveReceiptHash,
-    WritesRoot,
+    BeaconBlockHash, BeaconProposalsRoot, BeaconStateRoot, BeaconWitnessRoot, BlockHash,
+    CertificateRoot, EventRoot, GlobalReceiptHash, GlobalReceiptRoot, LocalReceiptRoot,
+    ProvisionHash, ProvisionTxRoot, ProvisionsRoot, RecoveryCertHash, StateRoot, TransactionRoot,
+    TxHash, WaveReceiptHash, WritesRoot,
 };
 pub use primitives::identifiers::{
     Attempt, BlockHeight, ChainId, Epoch, HeaderFetchCount, InFlightCount, LeafIndex, NodeId,

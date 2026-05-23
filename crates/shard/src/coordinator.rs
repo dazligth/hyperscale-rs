@@ -3178,10 +3178,10 @@ mod tests {
 
     use hyperscale_core::Action;
     use hyperscale_types::{
-        Bls12381G1PrivateKey, BoundedVec, CertificateRoot, Hash, InFlightCount, LocalReceiptRoot,
-        ProvisionsRoot, RoutableTransaction, ShardGroupId, SignerBitfield, TopologySnapshot,
-        TransactionRoot, ValidatorId, ValidatorInfo, ValidatorSet, VotePower, WeightedTimestamp,
-        generate_bls_keypair, test_utils, zero_bls_signature,
+        BeaconWitnessRoot, Bls12381G1PrivateKey, BoundedVec, CertificateRoot, Hash, InFlightCount,
+        LocalReceiptRoot, ProvisionsRoot, RoutableTransaction, ShardGroupId, SignerBitfield,
+        TopologySnapshot, TransactionRoot, ValidatorId, ValidatorInfo, ValidatorSet, VotePower,
+        WeightedTimestamp, generate_bls_keypair, test_utils, zero_bls_signature,
     };
 
     use super::*;
@@ -3275,6 +3275,7 @@ mod tests {
             Vec::new(),
             std::collections::BTreeMap::new(),
             InFlightCount::ZERO,
+            BeaconWitnessRoot::ZERO,
         )
     }
 
@@ -3341,6 +3342,7 @@ mod tests {
                 __h.waves().clone().into_inner(),
                 __h.provision_tx_roots().clone().into_inner(),
                 __h.in_flight(),
+                BeaconWitnessRoot::ZERO,
             )
         };
 
@@ -3410,6 +3412,7 @@ mod tests {
                 __h.waves().clone().into_inner(),
                 __h.provision_tx_roots().clone().into_inner(),
                 __h.in_flight(),
+                BeaconWitnessRoot::ZERO,
             )
         };
 
@@ -3479,6 +3482,7 @@ mod tests {
                 __h.waves().clone().into_inner(),
                 __h.provision_tx_roots().clone().into_inner(),
                 __h.in_flight(),
+                BeaconWitnessRoot::ZERO,
             )
         };
         let block_hash = header.hash();
@@ -3557,6 +3561,7 @@ mod tests {
                 __h.waves().clone().into_inner(),
                 __h.provision_tx_roots().clone().into_inner(),
                 __h.in_flight(),
+                BeaconWitnessRoot::ZERO,
             )
         };
         let block_hash = header.hash();
@@ -3633,6 +3638,7 @@ mod tests {
                 __h.waves().clone().into_inner(),
                 __h.provision_tx_roots().clone().into_inner(),
                 __h.in_flight(),
+                BeaconWitnessRoot::ZERO,
             )
         };
         let block_hash = header.hash();
@@ -3678,6 +3684,7 @@ mod tests {
                 __h.waves().clone().into_inner(),
                 __h.provision_tx_roots().clone().into_inner(),
                 __h.in_flight(),
+                BeaconWitnessRoot::ZERO,
             )
         };
         let actions = state.on_block_header(
@@ -3848,6 +3855,7 @@ mod tests {
                 __h.waves().clone().into_inner(),
                 __h.provision_tx_roots().clone().into_inner(),
                 __h.in_flight(),
+                BeaconWitnessRoot::ZERO,
             )
         };
         let second_hash = second_block.hash();
@@ -3985,6 +3993,7 @@ mod tests {
                 __h.waves().clone().into_inner(),
                 __h.provision_tx_roots().clone().into_inner(),
                 __h.in_flight(),
+                BeaconWitnessRoot::ZERO,
             )
         };
 
@@ -4197,6 +4206,7 @@ mod tests {
             child_header.waves().clone().into_inner(),
             child_header.provision_tx_roots().clone().into_inner(),
             child_header.in_flight(),
+            BeaconWitnessRoot::ZERO,
         );
         let child_hash = child_header.hash();
         state.pending_blocks.insert(PendingBlock::from_manifest(
@@ -4364,6 +4374,7 @@ mod tests {
                 __h.waves().clone().into_inner(),
                 __h.provision_tx_roots().clone().into_inner(),
                 __h.in_flight(),
+                BeaconWitnessRoot::ZERO,
             )
         };
         let actions1 = state.on_block_header(
@@ -4404,6 +4415,7 @@ mod tests {
                 __h.waves().clone().into_inner(),
                 __h.provision_tx_roots().clone().into_inner(),
                 __h.in_flight(),
+                BeaconWitnessRoot::ZERO,
             )
         };
         let actions2 = state.on_block_header(
@@ -4494,6 +4506,7 @@ mod tests {
                 __h.waves().clone().into_inner(),
                 __h.provision_tx_roots().clone().into_inner(),
                 __h.in_flight(),
+                BeaconWitnessRoot::ZERO,
             )
         };
 
@@ -4788,6 +4801,7 @@ mod tests {
                     __h.waves().clone().into_inner(),
                     __h.provision_tx_roots().clone().into_inner(),
                     __h.in_flight(),
+                    BeaconWitnessRoot::ZERO,
                 )
             },
             transactions: Arc::new(BoundedVec::new()),
@@ -4852,6 +4866,7 @@ mod tests {
                     __h.waves().clone().into_inner(),
                     __h.provision_tx_roots().clone().into_inner(),
                     __h.in_flight(),
+                    BeaconWitnessRoot::ZERO,
                 )
             },
             transactions: Arc::new(BoundedVec::new()),
@@ -5038,6 +5053,7 @@ mod tests {
                     __h.waves().clone().into_inner(),
                     __h.provision_tx_roots().clone().into_inner(),
                     __h.in_flight(),
+                    BeaconWitnessRoot::ZERO,
                 )
             },
             transactions: Arc::new(vec![tx1.clone()].into()),
@@ -5070,6 +5086,7 @@ mod tests {
                     __h.waves().clone().into_inner(),
                     __h.provision_tx_roots().clone().into_inner(),
                     __h.in_flight(),
+                    BeaconWitnessRoot::ZERO,
                 )
             },
             transactions: Arc::new(txs.into()),
@@ -5114,6 +5131,7 @@ mod tests {
                     __h.waves().clone().into_inner(),
                     __h.provision_tx_roots().clone().into_inner(),
                     __h.in_flight(),
+                    BeaconWitnessRoot::ZERO,
                 )
             },
             transactions: Arc::new(vec![tx1.clone()].into()),
@@ -5144,6 +5162,7 @@ mod tests {
                     __h.waves().clone().into_inner(),
                     __h.provision_tx_roots().clone().into_inner(),
                     __h.in_flight(),
+                    BeaconWitnessRoot::ZERO,
                 )
             },
             transactions: Arc::new(vec![tx1].into()),

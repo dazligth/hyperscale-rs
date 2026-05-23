@@ -21,6 +21,8 @@
 use std::collections::HashMap;
 
 use hyperscale_core::Action;
+#[cfg(test)]
+use hyperscale_types::BeaconWitnessRoot;
 use hyperscale_types::{
     BlockHash, BlockHeader, BlockHeight, BlockVote, Round, TopologySnapshot, ValidatorId, VotePower,
 };
@@ -490,6 +492,7 @@ mod tests {
             Vec::new(),
             std::collections::BTreeMap::new(),
             InFlightCount::ZERO,
+            BeaconWitnessRoot::ZERO,
         )
     }
 

@@ -55,8 +55,8 @@ mod tests {
     use hyperscale_core::{Action, FetchRequest, ProtocolEvent, StateMachine};
     use hyperscale_test_helpers::make_live_block;
     use hyperscale_types::{
-        Block, BlockHash, BlockHeader, BlockHeight, CommittedBlockHeader, LocalTimestamp,
-        QuorumCertificate, ShardGroupId, ValidatorId, WaveId,
+        BeaconWitnessRoot, Block, BlockHash, BlockHeader, BlockHeight, CommittedBlockHeader,
+        LocalTimestamp, QuorumCertificate, ShardGroupId, ValidatorId, WaveId,
     };
 
     use super::super::test_support::TestNode;
@@ -104,6 +104,7 @@ mod tests {
                 vec![wave],
                 header.provision_tx_roots().clone().into_inner(),
                 header.in_flight(),
+                BeaconWitnessRoot::ZERO,
             );
         }
         let committed_header = Arc::new(CommittedBlockHeader::new(

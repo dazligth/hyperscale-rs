@@ -10,11 +10,11 @@ use std::sync::Arc;
 use hyperscale_provisions::{ProvisionConfig, ProvisionCoordinator, ProvisionMemoryStats};
 use hyperscale_test_helpers::TestCommittee;
 use hyperscale_types::{
-    Block, BlockHash, BlockHeader, BlockHeight, BoundedVec, CertificateRoot, CertifiedBlock,
-    CommittedBlockHeader, Hash, InFlightCount, LocalReceiptRoot, LocalTimestamp, ProposerTimestamp,
-    ProvisionHash, ProvisionsRoot, QuorumCertificate, Round, ShardGroupId, SignerBitfield,
-    StateRoot, TopologySnapshot, TransactionRoot, ValidatorId, WaveId, WeightedTimestamp,
-    zero_bls_signature,
+    BeaconWitnessRoot, Block, BlockHash, BlockHeader, BlockHeight, BoundedVec, CertificateRoot,
+    CertifiedBlock, CommittedBlockHeader, Hash, InFlightCount, LocalReceiptRoot, LocalTimestamp,
+    ProposerTimestamp, ProvisionHash, ProvisionsRoot, QuorumCertificate, Round, ShardGroupId,
+    SignerBitfield, StateRoot, TopologySnapshot, TransactionRoot, ValidatorId, WaveId,
+    WeightedTimestamp, zero_bls_signature,
 };
 
 const TEST_BLOCK_INTERVAL_MS: u64 = 500;
@@ -46,6 +46,7 @@ fn make_block(height: BlockHeight) -> CertifiedBlock {
         Vec::new(),
         std::collections::BTreeMap::new(),
         InFlightCount::ZERO,
+        BeaconWitnessRoot::ZERO,
     );
     let block = Block::Live {
         header,
@@ -99,6 +100,7 @@ fn make_remote_header_targeting(
         waves,
         std::collections::BTreeMap::new(),
         InFlightCount::ZERO,
+        BeaconWitnessRoot::ZERO,
     );
     let header_hash = header.hash();
     let qc = QuorumCertificate::new(

@@ -32,8 +32,8 @@ mod tests {
     use super::*;
     use crate::test_utils::test_validity_range;
     use crate::{
-        BlockHash, BlockHeader, BlockHeight, Bls12381G2Signature, BoundedVec, CertificateRoot,
-        ExecutionCertificate, ExecutionOutcome, FinalizedWave, GlobalReceiptHash,
+        BeaconWitnessRoot, BlockHash, BlockHeader, BlockHeight, Bls12381G2Signature, BoundedVec,
+        CertificateRoot, ExecutionCertificate, ExecutionOutcome, FinalizedWave, GlobalReceiptHash,
         GlobalReceiptRoot, Hash, InFlightCount, LocalReceiptRoot, ProposerTimestamp,
         ProvisionsRoot, QuorumCertificate, Round, ShardGroupId, SignerBitfield, StateRoot,
         TransactionRoot, TxHash, TxOutcome, ValidatorId, WaveCertificate, WaveId,
@@ -60,6 +60,7 @@ mod tests {
             Vec::new(),
             std::collections::BTreeMap::new(),
             InFlightCount::ZERO,
+            BeaconWitnessRoot::ZERO,
         );
 
         let hash1 = header.hash();
@@ -217,6 +218,7 @@ mod tests {
                 header.waves().clone().into_inner(),
                 header.provision_tx_roots().clone().into_inner(),
                 header.in_flight(),
+                header.beacon_witness_root(),
             );
         }
         let genesis_qc = QuorumCertificate::genesis(ShardGroupId::new(0));

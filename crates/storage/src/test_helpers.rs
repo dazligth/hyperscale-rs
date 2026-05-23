@@ -9,13 +9,13 @@ use std::sync::Arc;
 
 use hyperscale_types::test_utils::test_event_type_identifier;
 use hyperscale_types::{
-    ApplicationEvent, Block, BlockHash, BlockHeader, BlockHeight, Bls12381G2Signature, BoundedVec,
-    CertificateRoot, ConsensusReceipt, EventData, ExecutionCertificate, ExecutionMetadata,
-    ExecutionOutcome, FeeSummary, FinalizedWave, GlobalReceiptHash, GlobalReceiptRoot, Hash,
-    InFlightCount, LocalReceiptRoot, LogLevel, NodeId, ProposerTimestamp, ProvisionsRoot,
-    QuorumCertificate, Round, ShardGroupId, SignerBitfield, StateRoot, StoredReceipt,
-    TransactionRoot, TxHash, TxOutcome, ValidatorId, WaveCertificate, WaveId, WeightedTimestamp,
-    compute_global_receipt_root, zero_bls_signature,
+    ApplicationEvent, BeaconWitnessRoot, Block, BlockHash, BlockHeader, BlockHeight,
+    Bls12381G2Signature, BoundedVec, CertificateRoot, ConsensusReceipt, EventData,
+    ExecutionCertificate, ExecutionMetadata, ExecutionOutcome, FeeSummary, FinalizedWave,
+    GlobalReceiptHash, GlobalReceiptRoot, Hash, InFlightCount, LocalReceiptRoot, LogLevel, NodeId,
+    ProposerTimestamp, ProvisionsRoot, QuorumCertificate, Round, ShardGroupId, SignerBitfield,
+    StateRoot, StoredReceipt, TransactionRoot, TxHash, TxOutcome, ValidatorId, WaveCertificate,
+    WaveId, WeightedTimestamp, compute_global_receipt_root, zero_bls_signature,
 };
 use indexmap::IndexMap;
 use radix_common::math::Decimal;
@@ -130,6 +130,7 @@ pub fn make_test_block(height: BlockHeight) -> Block {
             Vec::new(),
             std::collections::BTreeMap::new(),
             InFlightCount::ZERO,
+            BeaconWitnessRoot::ZERO,
         ),
         transactions: Arc::new(BoundedVec::new()),
         certificates: Arc::new(BoundedVec::new()),

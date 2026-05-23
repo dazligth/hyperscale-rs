@@ -9,6 +9,8 @@
 //! Own votes are recorded as already-verified via
 //! [`VoteSet::add_verified_vote`] since we just signed them.
 
+#[cfg(test)]
+use hyperscale_types::BeaconWitnessRoot;
 use hyperscale_types::{
     BlockHash, BlockHeader, BlockHeight, BlockVote, Bls12381G1PublicKey, Round, VotePower,
     WeightedTimestamp,
@@ -453,6 +455,7 @@ mod tests {
             Vec::new(),
             BTreeMap::new(),
             InFlightCount::ZERO,
+            BeaconWitnessRoot::ZERO,
         )
     }
 

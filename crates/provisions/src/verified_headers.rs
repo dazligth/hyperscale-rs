@@ -22,6 +22,8 @@
 
 use std::sync::Arc;
 
+#[cfg(test)]
+use hyperscale_types::BeaconWitnessRoot;
 use hyperscale_types::{BlockHeight, CommittedBlockHeader, ShardGroupId};
 use papaya::HashMap;
 
@@ -101,6 +103,7 @@ mod tests {
             Vec::new(),
             std::collections::BTreeMap::new(),
             InFlightCount::ZERO,
+            BeaconWitnessRoot::ZERO,
         );
         let header_hash = header.hash();
         let qc = QuorumCertificate::new(

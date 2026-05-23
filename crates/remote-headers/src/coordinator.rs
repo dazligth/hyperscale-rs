@@ -15,6 +15,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hyperscale_core::{Action, ProtocolEvent};
+#[cfg(test)]
+use hyperscale_types::BeaconWitnessRoot;
 use hyperscale_types::{
     BlockHeight, Bls12381G1PublicKey, CertifiedBlock, CommittedBlockHeader, InFlightCount,
     REMOTE_HEADER_RETENTION, ShardGroupId, TopologySnapshot, ValidatorId, VotePower,
@@ -622,6 +624,7 @@ mod tests {
             Vec::new(),
             std::collections::BTreeMap::new(),
             InFlightCount::ZERO,
+            BeaconWitnessRoot::ZERO,
         );
         // Deliberately set wrong block_hash
         let qc = QuorumCertificate::new(

@@ -16,8 +16,8 @@
 use sbor::prelude::*;
 
 use crate::{
-    Bls12381G1PublicKey, LeafIndex, PcVoteEquivocation, RecoveryEquivocation, ShardGroupId, Stake,
-    StakePoolId, ValidatorId,
+    BlockHash, Bls12381G1PublicKey, BoundedVec, Hash, LeafIndex, MAX_WITNESS_PROOF_DEPTH,
+    PcVoteEquivocation, RecoveryEquivocation, ShardGroupId, Stake, StakePoolId, ValidatorId,
 };
 
 /// Why a validator was jailed.
@@ -119,19 +119,33 @@ pub enum ShardWitnessPayload {
     },
 }
 
-/// Provenance for a [`ShardWitness`].
+/// Provenance for a [`ShardWitness`] — a Merkle inclusion proof
+/// against the source shard's beacon-witness accumulator root, paired
+/// with the committed block whose header carries that root.
 ///
-/// Today: just the `(shard_id, leaf_index)` pair — enough for the
-/// watermark dedup of the per-shard high-water mark, and to render in
-/// logs. Trusted as-presented for now; later additions will include a
-/// Merkle inclusion path against the shard's beacon-witness accumulator
-/// root plus a pointer to the `CommittedBlockHeader` that committed it.
+/// Verifying:
+/// 1. Look up the shard's committed block at `committed_block_hash`
+///    (delivered via the existing `CommittedBlockHeaderGossip` path)
+///    and read its [`BeaconWitnessRoot`](crate::BeaconWitnessRoot).
+/// 2. Hash the witness payload to obtain the leaf.
+/// 3. Walk `siblings` from leaf to root using `leaf_index`'s bit
+///    decomposition to determine left/right at each level.
+/// 4. Compare against the committed root.
 #[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
 pub struct ShardWitnessProof {
     /// Shard that emitted the witness.
     pub shard_id: ShardGroupId,
-    /// Position in the shard's monotonic beacon-witness accumulator.
+    /// Hash of the source shard's committed block whose header carries
+    /// the accumulator root this proof verifies against.
+    pub committed_block_hash: BlockHash,
+    /// Position of the witness in the shard's monotonic
+    /// beacon-witness accumulator. Combined with `siblings`, recovers
+    /// the path from leaf to root.
     pub leaf_index: LeafIndex,
+    /// Sibling hashes along the path from leaf to root, leaf-side
+    /// first. Length equals the accumulator's depth at
+    /// `committed_block_hash`.
+    pub siblings: BoundedVec<Hash, MAX_WITNESS_PROOF_DEPTH>,
 }
 
 /// A shard-emitted observation paired with proof of origin.
@@ -213,7 +227,9 @@ mod tests {
             },
             proof: ShardWitnessProof {
                 shard_id: ShardGroupId::new(0),
+                committed_block_hash: BlockHash::ZERO,
                 leaf_index: LeafIndex::new(42),
+                siblings: Vec::new().into(),
             },
         }
     }

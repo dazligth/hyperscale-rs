@@ -410,9 +410,10 @@ mod tests {
     use super::*;
     use crate::test_utils::test_transaction;
     use crate::{
-        BlockHash, BlockHeight, BloomFilter, BoundedVec, CertificateRoot, Hash, InFlightCount,
-        LocalReceiptRoot, ProposerTimestamp, ProvisionsRoot, Round, ShardGroupId, SignerBitfield,
-        StateRoot, TransactionRoot, ValidatorId, WeightedTimestamp, zero_bls_signature,
+        BeaconWitnessRoot, BlockHash, BlockHeight, BloomFilter, BoundedVec, CertificateRoot, Hash,
+        InFlightCount, LocalReceiptRoot, ProposerTimestamp, ProvisionsRoot, Round, ShardGroupId,
+        SignerBitfield, StateRoot, TransactionRoot, ValidatorId, WeightedTimestamp,
+        zero_bls_signature,
     };
 
     fn create_test_block() -> Block {
@@ -436,6 +437,7 @@ mod tests {
                 Vec::new(),
                 BTreeMap::new(),
                 InFlightCount::ZERO,
+                BeaconWitnessRoot::ZERO,
             ),
             transactions: Arc::new(vec![Arc::new(tx)].into()),
             certificates: Arc::new(BoundedVec::new()),

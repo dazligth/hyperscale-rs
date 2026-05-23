@@ -13,7 +13,7 @@ use hyperscale_storage::{ChainWriter, JmtSnapshot, Storage, SubstateStore};
 use hyperscale_types::network::gossip::CommittedBlockHeaderGossip;
 use hyperscale_types::network::notification::{BlockHeaderNotification, BlockVoteNotification};
 use hyperscale_types::{
-    Block, BlockHash, BlockHeader, BlockHeight, BlockVote, Bls12381G1PublicKey,
+    BeaconWitnessRoot, Block, BlockHash, BlockHeader, BlockHeight, BlockVote, Bls12381G1PublicKey,
     Bls12381G2Signature, CertificateRoot, ConsensusReceipt, FinalizedWave, Hash, InFlightCount,
     LocalReceiptRoot, ProposerTimestamp, ProvisionHash, ProvisionTxRoot, Provisions,
     ProvisionsRoot, QuorumCertificate, Round, RoutableTransaction, ShardGroupId, SignerBitfield,
@@ -523,6 +523,9 @@ pub fn build_proposal<S: ChainWriter + SubstateStore>(
         waves,
         provision_tx_roots,
         in_flight,
+        // TODO(beacon): supply the shard's beacon-witness accumulator root
+        // once the shard runtime computes it.
+        BeaconWitnessRoot::ZERO,
     );
 
     let block = Block::Live {

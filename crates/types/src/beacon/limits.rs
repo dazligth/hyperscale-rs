@@ -51,3 +51,12 @@ pub const MAX_SKIP_SIGS: usize = 4096;
 /// accused validators. Steady-state count is near zero; cap sized for
 /// burst recovery after a partition or extended thrash window.
 pub const MAX_ACCUSATIONS_PER_PROPOSAL: usize = 256;
+
+/// Cap on the depth of a [`ShardWitnessProof`](crate::ShardWitnessProof)'s
+/// Merkle path.
+///
+/// Each level contributes one sibling hash. Sized to handle accumulators
+/// up to `2^64` leaves with headroom — overkill for any realistic
+/// shard-witness volume but cheap on the wire and safe against
+/// pathological inputs.
+pub const MAX_WITNESS_PROOF_DEPTH: usize = 64;

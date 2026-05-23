@@ -173,6 +173,19 @@ hash_newtype!(
     "RecoveryCertHash"
 );
 
+hash_newtype!(
+    /// Root of a shard's monotonic beacon-witness accumulator at a
+    /// given committed block.
+    ///
+    /// Carried in `BlockHeader::beacon_witness_root` and therefore
+    /// QC-attested. Beacon validators verify a fetched
+    /// [`ShardWitness`](crate::ShardWitness) against this root using
+    /// the Merkle path in its
+    /// [`ShardWitnessProof`](crate::ShardWitnessProof).
+    pub BeaconWitnessRoot,
+    "BeaconWitnessRoot"
+);
+
 #[cfg(test)]
 mod tests {
     use sbor::prelude::*;
