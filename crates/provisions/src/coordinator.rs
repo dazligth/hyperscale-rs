@@ -677,11 +677,11 @@ mod tests {
     use hyperscale_core::FetchRequest;
     use hyperscale_types::{
         Block, BlockHash, BlockHeader, Bls12381G1PrivateKey, BoundedVec, CertificateRoot, Hash,
-        InFlightCount, LocalReceiptRoot, MerkleInclusionProof, ProposerTimestamp, ProvisionEntry,
-        ProvisionTxRoot, ProvisionsRoot, QuorumCertificate, Round, ShardGroupId, SignerBitfield,
-        StateRoot, TopologySnapshot, TransactionRoot, TxHash, ValidatorId, ValidatorInfo,
-        ValidatorSet, VotePower, WaveId, WeightedTimestamp, bls_keypair_from_seed,
-        compute_merkle_root, zero_bls_signature,
+        InFlightCount, LocalReceiptRoot, MerkleInclusionProof, NetworkDefinition,
+        ProposerTimestamp, ProvisionEntry, ProvisionTxRoot, ProvisionsRoot, QuorumCertificate,
+        Round, ShardGroupId, SignerBitfield, StateRoot, TopologySnapshot, TransactionRoot, TxHash,
+        ValidatorId, ValidatorInfo, ValidatorSet, VotePower, WaveId, WeightedTimestamp,
+        bls_keypair_from_seed, compute_merkle_root, zero_bls_signature,
     };
     use proptest::bool::ANY as ANY_BOOL;
     use proptest::collection::vec as prop_vec;
@@ -710,6 +710,7 @@ mod tests {
             .collect();
 
         TopologySnapshot::with_local_shard(
+            NetworkDefinition::simulator(),
             ValidatorId::new(local_shard.inner() * 3), // First validator in shard
             local_shard,
             2,

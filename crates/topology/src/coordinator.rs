@@ -7,7 +7,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use hyperscale_types::{ShardGroupId, TopologySnapshot, ValidatorId, ValidatorSet};
+use hyperscale_types::{
+    NetworkDefinition, ShardGroupId, TopologySnapshot, ValidatorId, ValidatorSet,
+};
 
 /// Mutable topology state machine.
 ///
@@ -31,12 +33,14 @@ impl TopologyCoordinator {
     /// Validators are assigned to shards by `id % num_shards`.
     #[must_use]
     pub fn new(
+        network: NetworkDefinition,
         local_validator_id: ValidatorId,
         num_shards: u64,
         validator_set: ValidatorSet,
     ) -> Self {
         Self {
             snapshot: Arc::new(TopologySnapshot::new(
+                network,
                 local_validator_id,
                 num_shards,
                 validator_set,
@@ -50,6 +54,7 @@ impl TopologyCoordinator {
     /// Useful for tests where `validator_id % num_shards != desired_shard`.
     #[must_use]
     pub fn with_local_shard(
+        network: NetworkDefinition,
         local_validator_id: ValidatorId,
         local_shard: ShardGroupId,
         num_shards: u64,
@@ -57,6 +62,7 @@ impl TopologyCoordinator {
     ) -> Self {
         Self {
             snapshot: Arc::new(TopologySnapshot::with_local_shard(
+                network,
                 local_validator_id,
                 local_shard,
                 num_shards,
@@ -70,6 +76,7 @@ impl TopologyCoordinator {
     /// Shard membership is taken directly from the provided map.
     #[must_use]
     pub fn with_shard_committees(
+        network: NetworkDefinition,
         local_validator_id: ValidatorId,
         local_shard: ShardGroupId,
         num_shards: u64,
@@ -78,6 +85,7 @@ impl TopologyCoordinator {
     ) -> Self {
         Self {
             snapshot: Arc::new(TopologySnapshot::with_shard_committees(
+                network,
                 local_validator_id,
                 local_shard,
                 num_shards,
@@ -116,7 +124,12 @@ mod tests {
         let validators: Vec<_> = (0..num_validators)
             .map(|i| make_test_validator(i, 1))
             .collect();
-        TopologyCoordinator::new(ValidatorId::new(local_id), 1, ValidatorSet::new(validators))
+        TopologyCoordinator::new(
+            NetworkDefinition::simulator(),
+            ValidatorId::new(local_id),
+            1,
+            ValidatorSet::new(validators),
+        )
     }
 
     #[test]
@@ -134,6 +147,7 @@ mod tests {
         // with_local_shard
         let validators: Vec<_> = (0..4).map(|i| make_test_validator(i, 1)).collect();
         let topology = TopologyCoordinator::with_local_shard(
+            NetworkDefinition::simulator(),
             ValidatorId::new(0),
             ShardGroupId::new(1),
             2,
@@ -156,6 +170,7 @@ mod tests {
         );
 
         let topology = TopologyCoordinator::with_shard_committees(
+            NetworkDefinition::simulator(),
             ValidatorId::new(0),
             ShardGroupId::new(0),
             2,

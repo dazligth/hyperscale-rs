@@ -287,9 +287,9 @@ impl ConflictDetector {
 #[cfg(test)]
 mod tests {
     use hyperscale_types::{
-        BlockHeight, Hash, MerkleInclusionProof, NodeId, ProvisionEntry, ShardGroupId,
-        SubstateEntry, TopologySnapshot, ValidatorId, ValidatorInfo, ValidatorSet, VotePower,
-        bls_keypair_from_seed, shard_for_node,
+        BlockHeight, Hash, MerkleInclusionProof, NetworkDefinition, NodeId, ProvisionEntry,
+        ShardGroupId, SubstateEntry, TopologySnapshot, ValidatorId, ValidatorInfo, ValidatorSet,
+        VotePower, bls_keypair_from_seed, shard_for_node,
     };
 
     use super::*;
@@ -334,7 +334,13 @@ mod tests {
             voting_power: VotePower::new(1),
         }]);
         // Local shard = 0, 2 shards total
-        TopologySnapshot::with_local_shard(ValidatorId::new(0), ShardGroupId::new(0), 2, vs)
+        TopologySnapshot::with_local_shard(
+            NetworkDefinition::simulator(),
+            ValidatorId::new(0),
+            ShardGroupId::new(0),
+            2,
+            vs,
+        )
     }
 
     fn make_entry(node: NodeId) -> SubstateEntry {

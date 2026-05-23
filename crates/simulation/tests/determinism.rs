@@ -12,7 +12,8 @@ use hyperscale_network_memory::{HostingMode, NetworkConfig};
 use hyperscale_node::shard_loop::ShardEvent;
 use hyperscale_simulation::SimulationRunner;
 use hyperscale_types::{
-    BlockHeight, LocalTimestamp, QuorumCertificate, Round, ShardGroupId, TransactionStatus,
+    BlockHeight, LocalTimestamp, NetworkDefinition, QuorumCertificate, Round, ShardGroupId,
+    TransactionStatus,
 };
 use tracing_test::traced_test;
 
@@ -1611,6 +1612,7 @@ fn test_cross_shard_transaction_detection() {
     );
 
     let topology = TopologyCoordinator::with_shard_committees(
+        NetworkDefinition::simulator(),
         ValidatorId::new(0),
         ShardGroupId::new(0),
         2, // num_shards

@@ -23,11 +23,11 @@ use hyperscale_types::{
     BeaconWitnessLeafCount, BeaconWitnessRoot, Block, BlockHash, BlockHeader, BlockHeight,
     Bls12381G1PrivateKey, Bls12381G1PublicKey, Bls12381G2Signature, BoundedVec, CertificateRoot,
     CertifiedBlock, ExecutionCertificate, ExecutionOutcome, FinalizedWave, GlobalReceiptHash,
-    GlobalReceiptRoot, InFlightCount, LocalReceiptRoot, ProposerTimestamp, ProvisionsRoot,
-    QuorumCertificate, Round, RoutableTransaction, ShardGroupId, SignerBitfield, StateRoot,
-    TopologySnapshot, TransactionDecision, TransactionRoot, TxHash, TxOutcome, ValidatorId,
-    ValidatorInfo, ValidatorSet, VotePower, WaveCertificate, WaveId, WeightedTimestamp,
-    bls_keypair_from_seed,
+    GlobalReceiptRoot, InFlightCount, LocalReceiptRoot, NetworkDefinition, ProposerTimestamp,
+    ProvisionsRoot, QuorumCertificate, Round, RoutableTransaction, ShardGroupId, SignerBitfield,
+    StateRoot, TopologySnapshot, TransactionDecision, TransactionRoot, TxHash, TxOutcome,
+    ValidatorId, ValidatorInfo, ValidatorSet, VotePower, WaveCertificate, WaveId,
+    WeightedTimestamp, bls_keypair_from_seed,
 };
 
 /// A test committee of validators with deterministic BLS keypairs.
@@ -190,7 +190,8 @@ impl TestCommittee {
 
     /// Build a [`TopologySnapshot`] from this committee with uniform voting
     /// power. `local_idx` picks which validator the snapshot represents;
-    /// `num_shards` sets the shard count for tx routing.
+    /// `num_shards` sets the shard count for tx routing. Network defaults
+    /// to [`NetworkDefinition::simulator`].
     #[must_use]
     pub fn topology_snapshot(&self, local_idx: usize, num_shards: u64) -> TopologySnapshot {
         let validators: Vec<ValidatorInfo> = (0..self.size())
@@ -201,7 +202,12 @@ impl TestCommittee {
             })
             .collect();
         let validator_set = ValidatorSet::new(validators);
-        TopologySnapshot::new(self.validator_id(local_idx), num_shards, validator_set)
+        TopologySnapshot::new(
+            NetworkDefinition::simulator(),
+            self.validator_id(local_idx),
+            num_shards,
+            validator_set,
+        )
     }
 }
 

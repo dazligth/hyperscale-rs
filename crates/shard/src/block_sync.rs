@@ -736,9 +736,9 @@ mod tests {
     use hyperscale_test_helpers::TestCommittee;
     use hyperscale_types::{
         Block, BlockHeader, BoundedVec, CertificateRoot, Hash, InFlightCount, LocalReceiptRoot,
-        ProposerTimestamp, ProvisionsRoot, Round, ShardGroupId, SignerBitfield, StateRoot,
-        TransactionRoot, ValidatorId, ValidatorInfo, ValidatorSet, VotePower, WeightedTimestamp,
-        zero_bls_signature,
+        NetworkDefinition, ProposerTimestamp, ProvisionsRoot, Round, ShardGroupId, SignerBitfield,
+        StateRoot, TransactionRoot, ValidatorId, ValidatorInfo, ValidatorSet, VotePower,
+        WeightedTimestamp, zero_bls_signature,
     };
 
     use super::*;
@@ -752,7 +752,12 @@ mod tests {
                 voting_power: VotePower::new(1),
             })
             .collect();
-        TopologySnapshot::new(ValidatorId::new(0), 1, ValidatorSet::new(validators))
+        TopologySnapshot::new(
+            NetworkDefinition::simulator(),
+            ValidatorId::new(0),
+            1,
+            ValidatorSet::new(validators),
+        )
     }
 
     fn header(height: BlockHeight, tag: &[u8]) -> BlockHeader {

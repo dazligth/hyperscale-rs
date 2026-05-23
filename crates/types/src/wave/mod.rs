@@ -43,7 +43,7 @@ mod tests {
     use crate::{
         Attempt, BlockHeight, Bls12381G2Signature, ConsensusReceipt, DatabaseUpdates,
         ExecutionCertificate, ExecutionOutcome, FinalizedWave, GlobalReceiptHash,
-        GlobalReceiptRoot, Hash, NodeId, ProvisionTxRoot, RETENTION_HORIZON,
+        GlobalReceiptRoot, Hash, NetworkDefinition, NodeId, ProvisionTxRoot, RETENTION_HORIZON,
         ReceiptValidationError, ShardGroupId, SignerBitfield, StoredReceipt, TopologySnapshot,
         TxHash, TxOutcome, ValidatorId, ValidatorInfo, ValidatorSet, VotePower, WaveCertificate,
         WaveId, WaveReceiptHash, WeightedTimestamp, compute_global_receipt_root,
@@ -61,7 +61,12 @@ mod tests {
                 voting_power: VotePower::new(1),
             })
             .collect();
-        TopologySnapshot::new(ValidatorId::new(0), 2, ValidatorSet::new(validators))
+        TopologySnapshot::new(
+            NetworkDefinition::simulator(),
+            ValidatorId::new(0),
+            2,
+            ValidatorSet::new(validators),
+        )
     }
 
     /// Find a node seed that routes to `target_shard` under modulo-2 sharding.

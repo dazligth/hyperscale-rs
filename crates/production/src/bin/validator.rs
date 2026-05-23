@@ -187,6 +187,13 @@ pub struct ValidatorConfig {
 /// [`VnodeEntry`].
 #[derive(Debug, Clone, Deserialize)]
 pub struct NodeConfig {
+    /// Radix network this node is configured for. Bound into every
+    /// BLS-signed consensus message to prevent cross-network replay.
+    /// Parsed from a network name (`"mainnet"`, `"stokenet"`,
+    /// `"simulator"`, etc.) via [`NetworkDefinition::from_str`].
+    #[serde(default = "default_network", with = "network_serde")]
+    pub network: NetworkDefinition,
+
     /// Number of shards in the network
     #[serde(default = "default_num_shards")]
     pub num_shards: u64,
@@ -195,6 +202,35 @@ pub struct NodeConfig {
     /// opened at `data_dir/shard-{N}/db`.
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
+}
+
+const fn default_network() -> NetworkDefinition {
+    NetworkDefinition::simulator()
+}
+
+/// `serde` adapter that parses `NetworkDefinition` from its logical name.
+///
+/// `NetworkDefinition` doesn't impl `Deserialize` directly because its
+/// `logical_name` / `hrp_suffix` fields are derived from `id` — the
+/// canonical wire representation is the name string.
+mod network_serde {
+    use std::str::FromStr;
+
+    use radix_common::network::NetworkDefinition;
+    use serde::de::Error;
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<NetworkDefinition, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let name = String::deserialize(deserializer)?;
+        NetworkDefinition::from_str(&name).map_err(|_| {
+            D::Error::custom(format!(
+                "unknown network `{name}` (expected one of: mainnet, stokenet, simulator, ...)"
+            ))
+        })
+    }
 }
 
 /// One hosted validator's identity inputs.
@@ -622,6 +658,7 @@ fn load_or_generate_keypair(key_path: Option<&PathBuf>) -> Result<Bls12381G1Priv
 
 /// Build the topology from genesis configuration.
 fn build_topology(
+    network: NetworkDefinition,
     local_validator_id: ValidatorId,
     local_shard: ShardGroupId,
     num_shards: u64,
@@ -696,6 +733,7 @@ fn build_topology(
         }
 
         Ok(TopologyCoordinator::with_shard_committees(
+            network,
             local_validator_id,
             local_shard,
             num_shards,
@@ -713,6 +751,7 @@ fn build_topology(
         }
 
         Ok(TopologyCoordinator::with_local_shard(
+            network,
             local_validator_id,
             local_shard,
             num_shards,
@@ -1159,6 +1198,7 @@ async fn async_main(cli: Cli, config: ValidatorConfig) -> Result<()> {
         );
 
         let topology = build_topology(
+            config.node.network.clone(),
             ValidatorId::new(entry.validator_id),
             ShardGroupId::new(entry.shard),
             config.node.num_shards,

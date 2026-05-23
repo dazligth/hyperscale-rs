@@ -81,7 +81,7 @@ pub use provisioning::limits::{
 pub use provisioning::proof::MerkleInclusionProof;
 pub use provisioning::provisions::Provisions;
 pub use provisioning::substate::SubstateEntry;
-// Re-export DatabaseUpdates from radix for cross-crate use (execution cache, block commit)
+pub use radix_common::network::NetworkDefinition;
 pub use radix_substate_store_interface::interface::DatabaseUpdates;
 pub use receipt::consensus::{ConsensusReceipt, FAILED_RECEIPT_HASH};
 pub use receipt::global::GlobalReceipt;

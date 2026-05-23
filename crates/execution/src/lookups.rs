@@ -203,7 +203,7 @@ pub fn build_provision_requests(
 #[cfg(test)]
 mod tests {
     use hyperscale_test_helpers::TestCommittee;
-    use hyperscale_types::{ValidatorInfo, ValidatorSet, VotePower};
+    use hyperscale_types::{NetworkDefinition, ValidatorInfo, ValidatorSet, VotePower};
 
     use super::*;
 
@@ -216,7 +216,12 @@ mod tests {
             })
             .collect();
         let validator_set = ValidatorSet::new(validators);
-        TopologySnapshot::new(committee.validator_id(local_idx), 1, validator_set)
+        TopologySnapshot::new(
+            NetworkDefinition::simulator(),
+            committee.validator_id(local_idx),
+            1,
+            validator_set,
+        )
     }
 
     // ─── peers_excluding_self ───────────────────────────────────────────

@@ -1900,8 +1900,8 @@ mod tests {
     use hyperscale_types::test_utils::test_transaction;
     use hyperscale_types::{
         Bls12381G1PrivateKey, ConsensusReceipt, ExecutionOutcome, GlobalReceiptHash, Hash,
-        QuorumCertificate, SignerBitfield, ValidatorInfo, ValidatorSet, VotePower,
-        generate_bls_keypair, zero_bls_signature,
+        NetworkDefinition, QuorumCertificate, SignerBitfield, ValidatorInfo, ValidatorSet,
+        VotePower, generate_bls_keypair, zero_bls_signature,
     };
 
     use super::*;
@@ -1920,7 +1920,12 @@ mod tests {
             .collect();
         let validator_set = ValidatorSet::new(validators);
 
-        TopologySnapshot::new(ValidatorId::new(0), 1, validator_set)
+        TopologySnapshot::new(
+            NetworkDefinition::simulator(),
+            ValidatorId::new(0),
+            1,
+            validator_set,
+        )
     }
 
     fn make_test_state() -> ExecutionCoordinator {
@@ -1994,7 +1999,12 @@ mod tests {
             })
             .collect();
         let validator_set = ValidatorSet::new(validators);
-        TopologySnapshot::new(ValidatorId::new(local_vid), 1, validator_set)
+        TopologySnapshot::new(
+            NetworkDefinition::simulator(),
+            ValidatorId::new(local_vid),
+            1,
+            validator_set,
+        )
     }
 
     #[test]
@@ -2903,7 +2913,12 @@ mod tests {
                 voting_power: VotePower::new(1),
             })
             .collect();
-        TopologySnapshot::new(ValidatorId::new(0), 2, ValidatorSet::new(validators))
+        TopologySnapshot::new(
+            NetworkDefinition::simulator(),
+            ValidatorId::new(0),
+            2,
+            ValidatorSet::new(validators),
+        )
     }
 
     /// Expected-cert entries must be retained while any local `WaveState`

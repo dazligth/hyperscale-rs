@@ -3315,7 +3315,7 @@ mod tests {
     use hyperscale_core::Action;
     use hyperscale_types::{
         BeaconWitnessLeafCount, BeaconWitnessRoot, Bls12381G1PrivateKey, BoundedVec,
-        CertificateRoot, Hash, InFlightCount, LocalReceiptRoot, ProvisionsRoot,
+        CertificateRoot, Hash, InFlightCount, LocalReceiptRoot, NetworkDefinition, ProvisionsRoot,
         RoutableTransaction, ShardGroupId, SignerBitfield, TopologySnapshot, TransactionRoot,
         ValidatorId, ValidatorInfo, ValidatorSet, VotePower, WeightedTimestamp,
         generate_bls_keypair, test_utils, zero_bls_signature,
@@ -3357,7 +3357,12 @@ mod tests {
             })
             .collect();
         let validator_set = ValidatorSet::new(validators);
-        let topology = TopologySnapshot::new(ValidatorId::new(0), 1, validator_set);
+        let topology = TopologySnapshot::new(
+            NetworkDefinition::simulator(),
+            ValidatorId::new(0),
+            1,
+            validator_set,
+        );
 
         let state = ShardCoordinator::new(config, RecoveredState::default());
         (state, topology)
@@ -3964,8 +3969,12 @@ mod tests {
             })
             .collect();
         let validator_set = ValidatorSet::new(validators);
-        let topology =
-            TopologySnapshot::new(ValidatorId::new(u64::from(local_idx)), 1, validator_set);
+        let topology = TopologySnapshot::new(
+            NetworkDefinition::simulator(),
+            ValidatorId::new(u64::from(local_idx)),
+            1,
+            validator_set,
+        );
         let state =
             ShardCoordinator::new(ShardConsensusConfig::default(), RecoveredState::default());
         (state, topology, keys)

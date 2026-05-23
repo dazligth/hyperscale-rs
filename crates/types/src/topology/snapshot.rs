@@ -11,8 +11,8 @@ use std::sync::Arc;
 use blake3::hash as blake3_hash;
 
 use crate::{
-    BlockHeight, Bls12381G1PublicKey, NodeId, Round, RoutableTransaction, ShardGroupId,
-    ValidatorId, ValidatorSet, VotePower,
+    BlockHeight, Bls12381G1PublicKey, NetworkDefinition, NodeId, Round, RoutableTransaction,
+    ShardGroupId, ValidatorId, ValidatorSet, VotePower,
 };
 
 /// Per-shard committee membership.
@@ -61,6 +61,7 @@ struct ValidatorInfoEntry {
 /// and `public_key(committee_member)` with `expect` rather than fallback.
 #[derive(Clone)]
 pub struct TopologySnapshot {
+    network: NetworkDefinition,
     local_validator_id: ValidatorId,
     local_shard: ShardGroupId,
     num_shards: u64,
@@ -79,12 +80,19 @@ impl TopologySnapshot {
     /// Validators are assigned to shards by `id % num_shards`.
     #[must_use]
     pub fn new(
+        network: NetworkDefinition,
         local_validator_id: ValidatorId,
         num_shards: u64,
         validator_set: ValidatorSet,
     ) -> Self {
         let local_shard = ShardGroupId::new(local_validator_id.inner() % num_shards);
-        Self::build_modulo(local_validator_id, local_shard, num_shards, validator_set)
+        Self::build_modulo(
+            network,
+            local_validator_id,
+            local_shard,
+            num_shards,
+            validator_set,
+        )
     }
 
     /// Create a snapshot with an explicit local shard override.
@@ -97,6 +105,7 @@ impl TopologySnapshot {
     /// Panics if `local_shard` is not in range `[0, num_shards)`.
     #[must_use]
     pub fn with_local_shard(
+        network: NetworkDefinition,
         local_validator_id: ValidatorId,
         local_shard: ShardGroupId,
         num_shards: u64,
@@ -116,6 +125,7 @@ impl TopologySnapshot {
         }
 
         Self {
+            network,
             local_validator_id,
             local_shard,
             num_shards,
@@ -137,6 +147,7 @@ impl TopologySnapshot {
     /// committee member without a fallback.
     #[must_use]
     pub fn with_shard_committees(
+        network: NetworkDefinition,
         local_validator_id: ValidatorId,
         local_shard: ShardGroupId,
         num_shards: u64,
@@ -163,6 +174,7 @@ impl TopologySnapshot {
         }
 
         Self {
+            network,
             local_validator_id,
             local_shard,
             num_shards,
@@ -174,6 +186,7 @@ impl TopologySnapshot {
 
     /// Internal constructor for modulo-based assignment.
     fn build_modulo(
+        network: NetworkDefinition,
         local_validator_id: ValidatorId,
         local_shard: ShardGroupId,
         num_shards: u64,
@@ -192,6 +205,7 @@ impl TopologySnapshot {
         }
 
         Self {
+            network,
             local_validator_id,
             local_shard,
             num_shards,
@@ -207,6 +221,16 @@ impl TopologySnapshot {
 // ═══════════════════════════════════════════════════════════════════════════
 
 impl TopologySnapshot {
+    /// Get the Radix network this topology is operating on.
+    ///
+    /// Used by signing-message construction sites to bind `network.id`
+    /// into BLS-signed consensus messages, so signatures don't replay
+    /// across networks.
+    #[must_use]
+    pub const fn network(&self) -> &NetworkDefinition {
+        &self.network
+    }
+
     /// Get the local validator's ID.
     #[must_use]
     pub const fn local_validator_id(&self) -> ValidatorId {
@@ -486,7 +510,12 @@ mod tests {
         let validators: Vec<_> = (0..num_validators)
             .map(|i| make_test_validator(i, 1))
             .collect();
-        TopologySnapshot::new(ValidatorId::new(local_id), 1, ValidatorSet::new(validators))
+        TopologySnapshot::new(
+            NetworkDefinition::simulator(),
+            ValidatorId::new(local_id),
+            1,
+            ValidatorSet::new(validators),
+        )
     }
 
     #[test]
@@ -536,6 +565,7 @@ mod tests {
     fn test_with_local_shard() {
         let validators: Vec<_> = (0..4).map(|i| make_test_validator(i, 1)).collect();
         let snapshot = TopologySnapshot::with_local_shard(
+            NetworkDefinition::simulator(),
             ValidatorId::new(0),
             ShardGroupId::new(1),
             2,
@@ -563,6 +593,7 @@ mod tests {
         );
 
         let snapshot = TopologySnapshot::with_shard_committees(
+            NetworkDefinition::simulator(),
             ValidatorId::new(0),
             ShardGroupId::new(0),
             2,
@@ -589,6 +620,7 @@ mod tests {
             vec![ValidatorId::new(0), ValidatorId::new(99)],
         );
         let _ = TopologySnapshot::with_shard_committees(
+            NetworkDefinition::simulator(),
             ValidatorId::new(0),
             ShardGroupId::new(0),
             1,
@@ -616,6 +648,7 @@ mod tests {
             ],
         );
         let snapshot = TopologySnapshot::with_shard_committees(
+            NetworkDefinition::simulator(),
             ValidatorId::new(0),
             ShardGroupId::new(0),
             1,
@@ -631,7 +664,12 @@ mod tests {
     #[test]
     fn test_multi_shard_modulo_assignment() {
         let validators: Vec<_> = (0..8).map(|i| make_test_validator(i, 1)).collect();
-        let snapshot = TopologySnapshot::new(ValidatorId::new(0), 2, ValidatorSet::new(validators));
+        let snapshot = TopologySnapshot::new(
+            NetworkDefinition::simulator(),
+            ValidatorId::new(0),
+            2,
+            ValidatorSet::new(validators),
+        );
 
         // Shard 0: validators 0, 2, 4, 6
         let shard0 = snapshot.committee_for_shard(ShardGroupId::new(0));

@@ -244,6 +244,7 @@ impl SimulationRunner {
                     let validator_id = ValidatorId::new(u64::from(validator_idx));
 
                     let topology_state = TopologyCoordinator::with_shard_committees(
+                        NetworkDefinition::simulator(),
                         validator_id,
                         *shard,
                         u64::from(network_config.num_shards),

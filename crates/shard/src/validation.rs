@@ -310,10 +310,10 @@ mod tests {
     use hyperscale_test_helpers::{TestCommittee, make_finalized_wave};
     use hyperscale_types::{
         BlockHash, BlockHeader, BoundedVec, CertificateRoot, FinalizedWave, Hash, InFlightCount,
-        LocalReceiptRoot, MerkleInclusionProof, ProposerTimestamp, ProvisionEntry, Provisions,
-        ProvisionsRoot, QuorumCertificate, Round, RoutableTransaction, ShardGroupId, StateRoot,
-        TransactionDecision, TransactionRoot, ValidatorId, ValidatorInfo, ValidatorSet,
-        WeightedTimestamp, compute_waves, test_utils,
+        LocalReceiptRoot, MerkleInclusionProof, NetworkDefinition, ProposerTimestamp,
+        ProvisionEntry, Provisions, ProvisionsRoot, QuorumCertificate, Round, RoutableTransaction,
+        ShardGroupId, StateRoot, TransactionDecision, TransactionRoot, ValidatorId, ValidatorInfo,
+        ValidatorSet, WeightedTimestamp, compute_waves, test_utils,
     };
 
     use super::*;
@@ -327,7 +327,12 @@ mod tests {
                 voting_power: VotePower::new(1),
             })
             .collect();
-        TopologySnapshot::new(ValidatorId::new(0), 1, ValidatorSet::new(validators))
+        TopologySnapshot::new(
+            NetworkDefinition::simulator(),
+            ValidatorId::new(0),
+            1,
+            ValidatorSet::new(validators),
+        )
     }
 
     fn header_at_height(height: BlockHeight, timestamp_ms: u64) -> BlockHeader {

@@ -8,8 +8,8 @@ use std::sync::Arc;
 use hyperscale_network::ValidatorKeyMap;
 use hyperscale_topology::TopologyCoordinator;
 use hyperscale_types::{
-    Bls12381G1PrivateKey, Bls12381G1PublicKey, ShardGroupId, ValidatorId, ValidatorInfo,
-    ValidatorSet, VotePower, bls_keypair_from_seed,
+    Bls12381G1PrivateKey, Bls12381G1PublicKey, NetworkDefinition, ShardGroupId, ValidatorId,
+    ValidatorInfo, ValidatorSet, VotePower, bls_keypair_from_seed,
 };
 use libp2p::identity::Keypair;
 use libp2p::identity::ed25519::{Keypair as Ed25519Keypair, SecretKey};
@@ -120,6 +120,7 @@ impl TestFixtures {
                 let validator_id = ValidatorId::new(u64::from(i));
 
                 TopologyCoordinator::with_shard_committees(
+                    NetworkDefinition::simulator(),
                     validator_id,
                     shard,
                     num_shards,
