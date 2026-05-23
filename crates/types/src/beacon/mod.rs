@@ -29,7 +29,10 @@ pub mod witness;
 
 pub use block::BeaconBlock;
 pub use header::BeaconBlockHeader;
-pub use limits::{MAX_PREFIX_SIGS, MAX_SKIP_SIGS, MAX_VOTE_VECTOR_LEN, MAX_WITNESSES_PER_PROPOSER};
+pub use limits::{
+    MAX_ACCUSATIONS_PER_PROPOSAL, MAX_PREFIX_SIGS, MAX_SKIP_SIGS, MAX_VOTE_VECTOR_LEN,
+    MAX_WITNESSES_PER_PROPOSER,
+};
 pub use msc::{MscEmptyLowAccusation, MscSlotProposal};
 pub use pc::{
     PC_VALUE_ELEMENT_BYTES, PcCompactLenSigner, PcCompactVote, PcDivergingProof, PcQc1, PcQc2,

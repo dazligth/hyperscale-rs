@@ -3,6 +3,8 @@
 //! These messages use the notify protocol (fire-and-forget unicast) rather
 //! than gossip/pubsub. They are sent directly to specific validators.
 
+pub mod beacon;
+
 mod block_header;
 mod block_vote;
 mod execution_certificates;
