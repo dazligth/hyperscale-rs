@@ -15,7 +15,7 @@ use sbor::prelude::*;
 
 use crate::primitives::signer_bitfield::MAX_VALIDATORS;
 use crate::{
-    Bls12381G2Signature, BoundedVec, MAX_PREFIX_SIGS, MAX_VOTE_VECTOR_LEN, SignerBitfield,
+    Bls12381G2Signature, BoundedVec, MAX_PREFIX_SIGS, MAX_VOTE_VECTOR_LEN, SignerBitfield, Slot,
     ValidatorId,
 };
 
@@ -641,6 +641,61 @@ impl PcQc3 {
     }
 }
 
+// ── Equivocation ─────────────────────────────────────────────────────────────
+
+/// Which PC round a [`PcVoteEquivocation`] references.
+///
+/// Determines the BLS signing tag the verifier uses to reconstruct the
+/// canonical message bytes for each side of the evidence.
+///
+/// No `Vote2Length` variant: the length attestation signs a length-1
+/// vector whose single element is `x.len()`, and is emitted alongside
+/// each [`PcVote2`]. Equivocating on the length therefore implies
+/// equivocating on the [`PcVote2`] value (different lengths ⇒ different
+/// vectors), so any length-attestation double-sign is already captured
+/// by the [`Self::Vote2`] flavor's value-inequality check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, BasicSbor)]
+pub enum PcVoteRound {
+    /// Equivocation on a [`PcVote1`].
+    Vote1,
+    /// Equivocation on a [`PcVote2`].
+    Vote2,
+    /// Equivocation on a [`PcVote3`].
+    Vote3,
+}
+
+/// Self-authenticating evidence that a single validator double-signed
+/// at the same `(slot, view, round)` of the inner Prefix Consensus.
+///
+/// Carries two `(value, sig)` pairs the equivocator signed at the same
+/// round. The slim wire form — fat votes don't need to ride into the
+/// beacon's jail mechanism, just the cryptographic minimum that
+/// reconstructs the canonical signing bytes and runs BLS verify under
+/// the equivocator's pubkey. Both sides must verify and the values
+/// must differ.
+#[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
+pub struct PcVoteEquivocation {
+    /// Validator that double-signed.
+    pub validator: ValidatorId,
+    /// Slot the inner Prefix Consensus instance belongs to.
+    pub slot: Slot,
+    /// SPC view at which the instance was running.
+    pub view: u32,
+    /// Round of the inner Prefix Consensus at which the double-sign
+    /// occurred — selects the BLS signing tag.
+    pub round: PcVoteRound,
+    /// First side's signed value.
+    pub value_a: PcVector,
+    /// First side's BLS signature over the canonical signing bytes
+    /// for `value_a` under the tag implied by `round`.
+    pub sig_a: Bls12381G2Signature,
+    /// Second side's signed value (must differ from `value_a`).
+    pub value_b: PcVector,
+    /// Second side's BLS signature over the canonical signing bytes
+    /// for `value_b` under the tag implied by `round`.
+    pub sig_b: Bls12381G2Signature,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -871,5 +926,33 @@ mod tests {
         let inner_bytes = basic_encode(&inner).unwrap();
         let wrapped_bytes = basic_encode(&wrapped).unwrap();
         assert_eq!(inner_bytes, wrapped_bytes);
+    }
+
+    #[test]
+    fn pc_vote_equivocation_sbor_round_trip_all_rounds() {
+        for round in [PcVoteRound::Vote1, PcVoteRound::Vote2, PcVoteRound::Vote3] {
+            let e = PcVoteEquivocation {
+                validator: ValidatorId::new(7),
+                slot: Slot::new(42),
+                view: 3,
+                round,
+                value_a: sample_vector(2),
+                sig_a: sample_sig(0x11),
+                value_b: sample_vector(3),
+                sig_b: sample_sig(0x22),
+            };
+            let bytes = basic_encode(&e).unwrap();
+            let decoded: PcVoteEquivocation = basic_decode(&bytes).unwrap();
+            assert_eq!(e, decoded);
+        }
+    }
+
+    #[test]
+    fn pc_vote_round_sbor_round_trip_all_variants() {
+        for r in [PcVoteRound::Vote1, PcVoteRound::Vote2, PcVoteRound::Vote3] {
+            let bytes = basic_encode(&r).unwrap();
+            let decoded: PcVoteRound = basic_decode(&bytes).unwrap();
+            assert_eq!(r, decoded);
+        }
     }
 }

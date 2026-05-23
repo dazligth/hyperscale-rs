@@ -9,15 +9,16 @@
 //! - [`Witness::Shard`] — lifted from a shard's VM via that shard's
 //!   monotonic beacon-witness accumulator. Carries a
 //!   [`ShardWitnessProof`] for provenance.
-//!
-//! Beacon-internal witnesses (cryptographic equivocation evidence)
-//! aren't yet in this module — they depend on the prefix-consensus
-//! vote/QC types, which land in a later round. The
-//! [`Witness`] enum will gain a second variant then.
+//! - [`Witness::Beacon`] — beacon-internal evidence (cryptographic
+//!   equivocation). Self-authenticating from the embedded BLS sigs —
+//!   no shard proof, no replay set.
 
 use sbor::prelude::*;
 
-use crate::{Bls12381G1PublicKey, LeafIndex, ShardGroupId, Stake, StakePoolId, ValidatorId};
+use crate::{
+    Bls12381G1PublicKey, LeafIndex, PcVoteEquivocation, RecoveryEquivocation, ShardGroupId, Stake,
+    StakePoolId, ValidatorId,
+};
 
 /// Why a validator was jailed.
 ///
@@ -145,15 +146,59 @@ pub struct ShardWitness {
     pub proof: ShardWitnessProof,
 }
 
-/// Observation submitted in a [`BeaconProposal`](crate::BeaconProposal).
+/// Self-authenticating equivocation evidence — the cryptographic basis
+/// for a [`BeaconWitness::Equivocation`].
 ///
-/// Currently only [`Self::Shard`]; beacon-internal evidence (cryptographic
-/// equivocation) will land as a second variant once the prefix-consensus
-/// vote/QC types it depends on are in place.
+/// Two flavors:
+///
+/// - [`Self::Recovery`] — a committee member signed both a recovery
+///   request and a finalized block past the request's anchor slot.
+/// - [`Self::Vote`] — a single validator double-signed at the same
+///   `(slot, view, round)` of an inner Prefix Consensus instance.
+///
+/// Both variants jail the equivocator permanently under
+/// [`JailReason::Equivocation`]. Each is boxed so the enum's stack
+/// size stays balanced.
+#[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
+pub enum EquivocationEvidence {
+    /// Recovery-request / finalized-block contradiction.
+    Recovery(Box<RecoveryEquivocation>),
+    /// PC double-sign at the same round.
+    Vote(Box<PcVoteEquivocation>),
+}
+
+impl EquivocationEvidence {
+    /// The equivocator's `ValidatorId`. Same field across variants;
+    /// downstream callers (jailing, dedup) just want the id.
+    #[must_use]
+    pub const fn validator(&self) -> ValidatorId {
+        match self {
+            Self::Recovery(r) => r.validator,
+            Self::Vote(v) => v.validator,
+        }
+    }
+}
+
+/// Beacon-internal observation. Self-authenticating — the evidence
+/// itself is the proof, no shard accumulator needed.
+#[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
+pub enum BeaconWitness {
+    /// Cryptographic equivocation evidence. `apply_slot` re-runs
+    /// verification and jails the equivocator permanently on success.
+    Equivocation {
+        /// The underlying evidence — recovery contradiction or PC
+        /// double-sign.
+        evidence: Box<EquivocationEvidence>,
+    },
+}
+
+/// Observation submitted in a [`BeaconProposal`](crate::BeaconProposal).
 #[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
 pub enum Witness {
     /// Lifted from a shard's VM.
     Shard(ShardWitness),
+    /// Beacon-internal evidence (today: cryptographic equivocation).
+    Beacon(BeaconWitness),
 }
 
 #[cfg(test)]
@@ -238,5 +283,95 @@ mod tests {
             let decoded: JailReason = basic_decode(&bytes).unwrap();
             assert_eq!(r, decoded);
         }
+    }
+
+    fn sample_pc_vote_equivocation() -> PcVoteEquivocation {
+        use crate::{Bls12381G2Signature, PcVector, PcVoteRound, Slot};
+        PcVoteEquivocation {
+            validator: ValidatorId::new(5),
+            slot: Slot::new(10),
+            view: 1,
+            round: PcVoteRound::Vote1,
+            value_a: PcVector::empty(),
+            sig_a: Bls12381G2Signature([0xAA; 96]),
+            value_b: PcVector::empty(),
+            sig_b: Bls12381G2Signature([0xBB; 96]),
+        }
+    }
+
+    fn sample_recovery_equivocation() -> RecoveryEquivocation {
+        use crate::{
+            BeaconBlockHash, BeaconBlockHeader, BeaconProposalsRoot, BeaconStateRoot,
+            Bls12381G2Signature, Hash, RecoveryCertHash, RecoveryRequest, RecoveryRound,
+            SignerBitfield, Slot,
+        };
+        let mut block_signers = SignerBitfield::new(4);
+        block_signers.set(0);
+        block_signers.set(1);
+        RecoveryEquivocation {
+            validator: ValidatorId::new(6),
+            request: RecoveryRequest::new(
+                BeaconBlockHash::from_raw(Hash::from_bytes(b"anchor")),
+                Slot::new(7),
+                RecoveryRound::new(1),
+                ValidatorId::new(6),
+                Bls12381G2Signature([0x11; 96]),
+            ),
+            block_header: BeaconBlockHeader::new(
+                Slot::new(8),
+                BeaconBlockHash::from_raw(Hash::from_bytes(b"prev")),
+                BeaconProposalsRoot::from_raw(Hash::from_bytes(b"proposals")),
+                BeaconStateRoot::from_raw(Hash::from_bytes(b"state")),
+                RecoveryCertHash::ZERO,
+            ),
+            block_signers,
+            block_aggregate_sig: Bls12381G2Signature([0x44; 96]),
+        }
+    }
+
+    #[test]
+    fn equivocation_evidence_sbor_round_trip_both_variants() {
+        let variants = vec![
+            EquivocationEvidence::Recovery(Box::new(sample_recovery_equivocation())),
+            EquivocationEvidence::Vote(Box::new(sample_pc_vote_equivocation())),
+        ];
+        for e in variants {
+            let bytes = basic_encode(&e).unwrap();
+            let decoded: EquivocationEvidence = basic_decode(&bytes).unwrap();
+            assert_eq!(e, decoded);
+        }
+    }
+
+    #[test]
+    fn equivocation_evidence_validator_accessor_returns_inner_validator() {
+        let rec = EquivocationEvidence::Recovery(Box::new(sample_recovery_equivocation()));
+        assert_eq!(rec.validator(), ValidatorId::new(6));
+
+        let vote = EquivocationEvidence::Vote(Box::new(sample_pc_vote_equivocation()));
+        assert_eq!(vote.validator(), ValidatorId::new(5));
+    }
+
+    #[test]
+    fn beacon_witness_sbor_round_trip() {
+        let w = BeaconWitness::Equivocation {
+            evidence: Box::new(EquivocationEvidence::Vote(Box::new(
+                sample_pc_vote_equivocation(),
+            ))),
+        };
+        let bytes = basic_encode(&w).unwrap();
+        let decoded: BeaconWitness = basic_decode(&bytes).unwrap();
+        assert_eq!(w, decoded);
+    }
+
+    #[test]
+    fn witness_beacon_variant_sbor_round_trip() {
+        let w = Witness::Beacon(BeaconWitness::Equivocation {
+            evidence: Box::new(EquivocationEvidence::Recovery(Box::new(
+                sample_recovery_equivocation(),
+            ))),
+        });
+        let bytes = basic_encode(&w).unwrap();
+        let decoded: Witness = basic_decode(&bytes).unwrap();
+        assert_eq!(w, decoded);
     }
 }

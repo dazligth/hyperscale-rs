@@ -16,8 +16,8 @@
 use sbor::prelude::*;
 
 use crate::{
-    BeaconBlockHash, Bls12381G2Signature, Hash, RecoveryCertHash, RecoveryRound, SignerBitfield,
-    Slot, ValidatorId,
+    BeaconBlockHash, BeaconBlockHeader, Bls12381G2Signature, Hash, RecoveryCertHash, RecoveryRound,
+    SignerBitfield, Slot, ValidatorId,
 };
 
 /// One active validator's signed attestation that the beacon chain has
@@ -198,6 +198,36 @@ pub fn recovery_cert_hash(cert: Option<&RecoveryCertificate>) -> RecoveryCertHas
     })
 }
 
+/// Self-authenticating evidence that a single validator signed both:
+///   1. a [`RecoveryRequest`] claiming `request.last_block_hash` was their
+///      latest finalized view, AND
+///   2. a finalized [`BeaconBlock`](crate::BeaconBlock) at a slot
+///      strictly greater than `request.last_block_slot`.
+///
+/// The two attestations are semantically contradictory. The recovery
+/// request is carried verbatim; the finalized block is collapsed to
+/// just the header plus its committee aggregate (`block_signers` +
+/// `block_aggregate_sig`) — enough for the verifier to confirm the
+/// equivocator's BLS sig contributed to the aggregate without
+/// shipping the full block body.
+#[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
+pub struct RecoveryEquivocation {
+    /// Validator whose double-attestation is the evidence.
+    pub validator: ValidatorId,
+    /// Recovery request claiming the anchor was the validator's latest view.
+    pub request: RecoveryRequest,
+    /// Header of a beacon block finalized strictly past
+    /// `request.last_block_slot`.
+    pub block_header: BeaconBlockHeader,
+    /// Committee bitfield from the finalized block. The equivocator's
+    /// position is set; the verifier confirms membership and reruns the
+    /// aggregate-sig check.
+    pub block_signers: SignerBitfield,
+    /// Aggregate signature over `block_header`'s canonical bytes from
+    /// the bits in `block_signers`.
+    pub block_aggregate_sig: Bls12381G2Signature,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,5 +309,34 @@ mod tests {
             recovery_cert_hash(Some(&cert)),
             recovery_cert_hash(Some(&cert))
         );
+    }
+
+    fn sample_recovery_equivocation() -> RecoveryEquivocation {
+        use crate::{BeaconProposalsRoot, BeaconStateRoot};
+        let mut block_signers = SignerBitfield::new(4);
+        block_signers.set(0);
+        block_signers.set(1);
+        block_signers.set(2);
+        RecoveryEquivocation {
+            validator: ValidatorId::new(2),
+            request: sample_request(),
+            block_header: BeaconBlockHeader::new(
+                Slot::new(8),
+                BeaconBlockHash::from_raw(Hash::from_bytes(b"prev")),
+                BeaconProposalsRoot::from_raw(Hash::from_bytes(b"proposals")),
+                BeaconStateRoot::from_raw(Hash::from_bytes(b"state")),
+                RecoveryCertHash::ZERO,
+            ),
+            block_signers,
+            block_aggregate_sig: Bls12381G2Signature([0x44; 96]),
+        }
+    }
+
+    #[test]
+    fn recovery_equivocation_sbor_round_trip() {
+        let e = sample_recovery_equivocation();
+        let bytes = basic_encode(&e).unwrap();
+        let decoded: RecoveryEquivocation = basic_decode(&bytes).unwrap();
+        assert_eq!(e, decoded);
     }
 }

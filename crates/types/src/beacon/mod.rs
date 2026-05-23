@@ -26,8 +26,14 @@ pub use header::BeaconBlockHeader;
 pub use limits::{MAX_PREFIX_SIGS, MAX_VOTE_VECTOR_LEN, MAX_WITNESSES_PER_PROPOSER};
 pub use pc::{
     PC_VALUE_ELEMENT_BYTES, PcCompactLenSigner, PcCompactVote, PcDivergingProof, PcQc1, PcQc2,
-    PcQc3, PcValueElement, PcVector, PcVote1, PcVote2, PcVote3, PcXpProof,
+    PcQc3, PcValueElement, PcVector, PcVote1, PcVote2, PcVote3, PcVoteEquivocation, PcVoteRound,
+    PcXpProof,
 };
 pub use proposal::BeaconProposal;
-pub use recovery::{RecoveryCertificate, RecoveryRequest, recovery_cert_hash};
-pub use witness::{JailReason, ShardWitness, ShardWitnessPayload, ShardWitnessProof, Witness};
+pub use recovery::{
+    RecoveryCertificate, RecoveryEquivocation, RecoveryRequest, recovery_cert_hash,
+};
+pub use witness::{
+    BeaconWitness, EquivocationEvidence, JailReason, ShardWitness, ShardWitnessPayload,
+    ShardWitnessProof, Witness,
+};
