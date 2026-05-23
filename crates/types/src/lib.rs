@@ -31,9 +31,11 @@ mod transaction;
 mod wave;
 
 pub use beacon::{
-    BeaconBlock, BeaconBlockHeader, BeaconProposal, JailReason, MAX_WITNESSES_PER_PROPOSER,
-    RecoveryCertificate, RecoveryRequest, ShardWitness, ShardWitnessPayload, ShardWitnessProof,
-    Witness, recovery_cert_hash,
+    BeaconBlock, BeaconBlockHeader, BeaconProposal, JailReason, MAX_PREFIX_SIGS,
+    MAX_VOTE_VECTOR_LEN, MAX_WITNESSES_PER_PROPOSER, PC_VALUE_ELEMENT_BYTES, PcCompactLenSigner,
+    PcCompactVote, PcDivergingProof, PcQc1, PcQc2, PcQc3, PcValueElement, PcVector, PcVote1,
+    PcVote2, PcVote3, PcXpProof, RecoveryCertificate, RecoveryRequest, ShardWitness,
+    ShardWitnessPayload, ShardWitnessProof, Witness, recovery_cert_hash,
 };
 pub use crypto::batch_verify::{
     batch_verify_bls_different_messages, batch_verify_bls_different_messages_all_or_nothing,
