@@ -167,6 +167,15 @@ pub struct VerificationPipeline {
     /// `(block_hash, kind)` pairs whose merkle root has been verified.
     verified_roots: HashSet<(BlockHash, VerificationKind)>,
 
+    /// Beacon-witness verifications waiting for a missing/unassembled
+    /// ancestor to become available. Keyed by the blocking ancestor's
+    /// hash; values are the deferred child block hashes. A retry runs
+    /// when [`Self::take_deferred_beacon_witness_children`] is drained
+    /// after the ancestor's beacon-witness verification completes (or
+    /// when the ancestor commits past `committed_hash`, see
+    /// [`Self::take_committed_beacon_witness_children`]).
+    deferred_beacon_witness_verifications: HashMap<BlockHash, Vec<BlockHash>>,
+
     // === In-flight count verification ===
     /// Blocks with verified in-flight counts (synchronous tolerance check).
     verified_in_flight: HashSet<BlockHash>,
@@ -187,6 +196,7 @@ impl VerificationPipeline {
             last_persisted_height: persisted_height,
             in_flight_roots: HashSet::new(),
             verified_roots: HashSet::new(),
+            deferred_beacon_witness_verifications: HashMap::new(),
             verified_in_flight: HashSet::new(),
         }
     }
@@ -240,6 +250,8 @@ impl VerificationPipeline {
         if valid {
             self.verified_roots.insert((block_hash, kind));
             debug!(?kind, ?block_hash, "Merkle root verified successfully");
+        } else if kind == VerificationKind::BeaconWitnessRoot {
+            self.discard_deferred_beacon_witness_children(block_hash);
         }
         valid
     }
@@ -302,6 +314,7 @@ impl VerificationPipeline {
     pub fn has_verification_in_flight(&self) -> bool {
         !self.state_root_verifications_in_flight.is_empty()
             || !self.deferred_state_root_verifications.is_empty()
+            || !self.deferred_beacon_witness_verifications.is_empty()
             || self.deferred_proposal.is_some()
             || !self.in_flight_roots.is_empty()
             || !self.pending_qc_verifications.is_empty()
@@ -417,8 +430,11 @@ impl VerificationPipeline {
             "skipped(no_provision_targets)",
             !h.provision_tx_roots().is_empty(),
         );
-        let beacon_witness_root_status =
-            root_status(VerificationKind::BeaconWitnessRoot, "skipped", true);
+        let beacon_witness_root_status = if self.is_beacon_witness_deferred(block_hash) {
+            "deferred(ancestor)"
+        } else {
+            root_status(VerificationKind::BeaconWitnessRoot, "skipped", true)
+        };
 
         let in_flight_status = if self.verified_in_flight.contains(&block_hash) {
             "verified"
@@ -709,7 +725,9 @@ impl VerificationPipeline {
         }]
     }
 
-    /// Initiate beacon-witness root verification for a block.
+    /// Initiate beacon-witness root verification for a block, or defer
+    /// it if the prospective-parent walk hits a missing/unassembled
+    /// ancestor.
     ///
     /// Pure CPU check that runs in parallel with the other per-root
     /// verifiers. Pulls the deterministic inputs (`parent_witness_leaves`
@@ -718,7 +736,15 @@ impl VerificationPipeline {
     /// own certificates) so callers only thread the parts they own.
     /// The handler re-derives the leaf list and emits
     /// `BlockRootVerified { kind: BeaconWitnessRoot, valid }`.
-    fn initiate_beacon_witness_root_verification(
+    ///
+    /// When [`prospective_parent_witness_leaves`] returns `Err`, the
+    /// verification is parked on the blocking ancestor's hash and the
+    /// returned action list is empty. The coordinator drives the retry
+    /// via [`Self::take_deferred_beacon_witness_children`] when that
+    /// ancestor's own beacon-witness verification completes, or via
+    /// [`Self::take_committed_beacon_witness_children`] when it
+    /// commits.
+    pub(crate) fn initiate_beacon_witness_root_verification(
         &mut self,
         block_hash: BlockHash,
         block: &Block,
@@ -728,13 +754,27 @@ impl VerificationPipeline {
         topology: &TopologySnapshot,
     ) -> Vec<Action> {
         let header = block.header();
-        let parent_witness_leaves = prospective_parent_witness_leaves(
+        let parent_witness_leaves = match prospective_parent_witness_leaves(
             accumulator,
             committed_hash,
             header.parent_block_hash(),
             pending_blocks,
             topology,
-        );
+        ) {
+            Ok(leaves) => leaves,
+            Err(blocking_hash) => {
+                debug!(
+                    ?block_hash,
+                    ?blocking_hash,
+                    "Deferring beacon-witness verification — ancestor not yet available"
+                );
+                self.deferred_beacon_witness_verifications
+                    .entry(blocking_hash)
+                    .or_default()
+                    .push(block_hash);
+                return Vec::new();
+            }
+        };
         let ready_signals = pending_blocks
             .get(block_hash)
             .map_or_else(Vec::new, |pending| {
@@ -760,6 +800,49 @@ impl VerificationPipeline {
             finalized_waves,
             topology_snapshot: topology.clone(),
         }]
+    }
+
+    /// Drain children deferred on `parent_hash`. Caller re-initiates
+    /// verification for each (typically via
+    /// [`Self::initiate_beacon_witness_root_verification`]).
+    ///
+    /// Two upstream triggers drain this queue: a successful
+    /// [`VerificationKind::BeaconWitnessRoot`] for `parent_hash`
+    /// (its leaves are now derivable, so the child's walk can pass
+    /// through it), and a commit advancing `committed_hash` to
+    /// `parent_hash` (the walk now terminates at it).
+    pub(crate) fn take_deferred_beacon_witness_children(
+        &mut self,
+        parent_hash: BlockHash,
+    ) -> Vec<BlockHash> {
+        self.deferred_beacon_witness_verifications
+            .remove(&parent_hash)
+            .unwrap_or_default()
+    }
+
+    /// Drop deferred beacon-witness verifications keyed on a
+    /// `parent_hash` whose own beacon-witness verification failed.
+    /// Children waiting on a failed parent can never produce a matching
+    /// root, so they're orphaned with a single warn-level log.
+    fn discard_deferred_beacon_witness_children(&mut self, parent_hash: BlockHash) {
+        if let Some(orphans) = self
+            .deferred_beacon_witness_verifications
+            .remove(&parent_hash)
+        {
+            warn!(
+                ?parent_hash,
+                orphaned_count = orphans.len(),
+                "Clearing deferred beacon-witness verifications — parent failed"
+            );
+        }
+    }
+
+    /// Whether a block's beacon-witness verification is currently
+    /// parked on a missing/unassembled ancestor.
+    fn is_beacon_witness_deferred(&self, block_hash: BlockHash) -> bool {
+        self.deferred_beacon_witness_verifications
+            .values()
+            .any(|children| children.contains(&block_hash))
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -832,7 +915,9 @@ impl VerificationPipeline {
                 .extend(self.initiate_provision_tx_root_verification(block_hash, block, topology));
         }
 
-        if self.needs_root(block_hash, VerificationKind::BeaconWitnessRoot, true) {
+        if self.needs_root(block_hash, VerificationKind::BeaconWitnessRoot, true)
+            && !self.is_beacon_witness_deferred(block_hash)
+        {
             actions.extend(self.initiate_beacon_witness_root_verification(
                 block_hash,
                 block,
@@ -1169,6 +1254,14 @@ impl VerificationPipeline {
         self.verified_roots
             .retain(|(hash, _)| pending_blocks.contains_key(*hash));
 
+        // Drop deferred beacon-witness entries whose child has been
+        // pruned. Parent keys whose values empty out are removed too.
+        for children in self.deferred_beacon_witness_verifications.values_mut() {
+            children.retain(|child| pending_blocks.contains_key(*child));
+        }
+        self.deferred_beacon_witness_verifications
+            .retain(|_, children| !children.is_empty());
+
         self.verified_in_flight
             .retain(|hash| pending_blocks.contains_key(*hash));
 
@@ -1435,6 +1528,127 @@ mod tests {
         assert!(
             out.is_empty(),
             "entry must be skipped when its pending block was removed"
+        );
+    }
+
+    // ─── beacon-witness deferral ────────────────────────────────────────
+
+    /// A block whose parent is missing from `pending_blocks` must defer
+    /// beacon-witness verification (no `VerifyBeaconWitnessRoot` action
+    /// emitted) and park itself on the missing ancestor's hash.
+    #[test]
+    fn beacon_witness_verification_defers_on_missing_ancestor() {
+        use hyperscale_test_helpers::TestCommittee;
+
+        use crate::beacon_witnesses::BeaconWitnessAccumulator;
+
+        let mut vp = VerificationPipeline::new(BlockHeight::GENESIS);
+        let topology = TestCommittee::new(4, 7).topology_snapshot(0, 1);
+        let accumulator = BeaconWitnessAccumulator::new();
+        let pending = PendingBlocks::new();
+
+        // Parent block hash isn't in `pending` — walk will fail at it.
+        let parent_block_hash = bh(b"missing-parent");
+        let block = block_with(BlockHeight::new(5), parent_block_hash, 0, vec![]);
+        let block_hash = block.hash();
+
+        let actions = vp.initiate_beacon_witness_root_verification(
+            block_hash,
+            &block,
+            &pending,
+            &accumulator,
+            BlockHash::ZERO,
+            &topology,
+        );
+
+        assert!(
+            actions.is_empty(),
+            "deferral must not emit a VerifyBeaconWitnessRoot action"
+        );
+        assert!(vp.is_beacon_witness_deferred(block_hash));
+        assert!(!vp.is_root_in_flight(block_hash, VerificationKind::BeaconWitnessRoot));
+    }
+
+    /// Draining the deferred queue keyed on the blocking ancestor's
+    /// hash yields the child hashes that had been parked on it.
+    /// Re-running the verification once the ancestor is committed (or
+    /// otherwise resolved) is the caller's responsibility.
+    #[test]
+    fn deferred_beacon_witness_children_drain_by_parent_hash() {
+        use hyperscale_test_helpers::TestCommittee;
+
+        use crate::beacon_witnesses::BeaconWitnessAccumulator;
+
+        let mut vp = VerificationPipeline::new(BlockHeight::GENESIS);
+        let topology = TestCommittee::new(4, 7).topology_snapshot(0, 1);
+        let accumulator = BeaconWitnessAccumulator::new();
+        let pending = PendingBlocks::new();
+        let parent_block_hash = bh(b"missing-parent");
+
+        let block_a = block_with(BlockHeight::new(5), parent_block_hash, 0, vec![]);
+        let hash_a = block_a.hash();
+        let block_b = block_with(BlockHeight::new(5), parent_block_hash, 1, vec![]);
+        let hash_b = block_b.hash();
+
+        for (h, b) in [(hash_a, &block_a), (hash_b, &block_b)] {
+            let _ = vp.initiate_beacon_witness_root_verification(
+                h,
+                b,
+                &pending,
+                &accumulator,
+                BlockHash::ZERO,
+                &topology,
+            );
+        }
+
+        let drained = vp.take_deferred_beacon_witness_children(parent_block_hash);
+        assert_eq!(drained.len(), 2);
+        assert!(drained.contains(&hash_a));
+        assert!(drained.contains(&hash_b));
+
+        // Second drain yields nothing.
+        assert!(
+            vp.take_deferred_beacon_witness_children(parent_block_hash)
+                .is_empty()
+        );
+    }
+
+    /// A failed beacon-witness verification orphans any children that
+    /// were parked on the failed block: the chain can't reconstruct
+    /// matching leaves through a parent whose own root was wrong.
+    #[test]
+    fn failed_beacon_witness_clears_dependent_children() {
+        use hyperscale_test_helpers::TestCommittee;
+
+        use crate::beacon_witnesses::BeaconWitnessAccumulator;
+
+        let mut vp = VerificationPipeline::new(BlockHeight::GENESIS);
+        let topology = TestCommittee::new(4, 7).topology_snapshot(0, 1);
+        let accumulator = BeaconWitnessAccumulator::new();
+        let pending = PendingBlocks::new();
+        let parent_block_hash = bh(b"to-fail");
+
+        let child = block_with(BlockHeight::new(5), parent_block_hash, 0, vec![]);
+        let child_hash = child.hash();
+        let _ = vp.initiate_beacon_witness_root_verification(
+            child_hash,
+            &child,
+            &pending,
+            &accumulator,
+            BlockHash::ZERO,
+            &topology,
+        );
+        assert!(vp.is_beacon_witness_deferred(child_hash));
+
+        vp.on_root_verified(
+            parent_block_hash,
+            VerificationKind::BeaconWitnessRoot,
+            false,
+        );
+        assert!(!vp.is_beacon_witness_deferred(child_hash));
+        assert!(
+            vp.take_deferred_beacon_witness_children(parent_block_hash)
+                .is_empty()
         );
     }
 }

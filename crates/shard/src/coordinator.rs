@@ -1791,6 +1791,11 @@ impl ShardCoordinator {
             return self.remove_pending_block(block_hash).into_iter().collect();
         }
 
+        let mut actions = Vec::new();
+        if kind == VerificationKind::BeaconWitnessRoot {
+            actions.extend(self.retry_deferred_beacon_witness(topology_snapshot, block_hash));
+        }
+
         let Some(pending_block) = self.pending_blocks.get(block_hash) else {
             // Block not in pending — likely already committed or evicted.
             debug!(
@@ -1798,11 +1803,11 @@ impl ShardCoordinator {
                 ?kind,
                 "Verification complete but block not found in pending or synced"
             );
-            return vec![];
+            return actions;
         };
 
         let Some(block) = pending_block.block() else {
-            return vec![];
+            return actions;
         };
 
         if !self.verification.is_block_verified(block) {
@@ -1811,13 +1816,45 @@ impl ShardCoordinator {
                 ?kind,
                 "Verification done, waiting for other verifications"
             );
-            return vec![];
+            return actions;
         }
 
         let height = pending_block.header().height();
         let round = pending_block.header().round();
 
-        self.create_vote(topology_snapshot, block_hash, height, round)
+        actions.extend(self.create_vote(topology_snapshot, block_hash, height, round));
+        actions
+    }
+
+    /// Retry beacon-witness verification for any children that deferred
+    /// on `parent_hash`. Called after `parent_hash` either successfully
+    /// verified its own beacon-witness root or committed past the tip
+    /// — in both cases the child's prospective-leaf walk can now make
+    /// progress past `parent_hash`.
+    fn retry_deferred_beacon_witness(
+        &mut self,
+        topology_snapshot: &TopologySnapshot,
+        parent_hash: BlockHash,
+    ) -> Vec<Action> {
+        let children = self
+            .verification
+            .take_deferred_beacon_witness_children(parent_hash);
+        let mut actions = Vec::new();
+        for child_hash in children {
+            let Some(child_block) = self.pending_blocks.get_block(child_hash).map(Arc::clone)
+            else {
+                continue;
+            };
+            actions.extend(self.verification.initiate_beacon_witness_root_verification(
+                child_hash,
+                &child_block,
+                &self.pending_blocks,
+                &self.beacon_witness_accumulator,
+                self.committed_hash,
+                topology_snapshot,
+            ));
+        }
+        actions
     }
 
     /// Handle proposal built by the runner.
@@ -2453,6 +2490,11 @@ impl ShardCoordinator {
         if let Some(action) = abandon {
             actions.push(action);
         }
+        // The just-committed block's leaves are now folded into the
+        // committed accumulator and `committed_hash` advanced to it,
+        // so any beacon-witness verifications previously parked on
+        // this hash can re-walk past it.
+        actions.extend(self.retry_deferred_beacon_witness(topology_snapshot, block_hash));
         self.record_leader_activity();
 
         actions.push(if state_root_verified {

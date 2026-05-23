@@ -182,39 +182,35 @@ pub fn derive_leaves(
 /// exactly the input the verifier must apply the block's own new
 /// leaves to.
 ///
-/// Returns the committed accumulator's leaves unchanged when
-/// `parent_block_hash` IS the committed tip, or when the walk
-/// encounters a missing/unassembled ancestor (the verifier handler
-/// will reject the block on the resulting root mismatch — same
-/// failure mode as any other inconsistent input).
-#[must_use]
+/// Returns `Err(blocking_hash)` when the walk hits an ancestor that
+/// is either absent from `pending_blocks` or present but not yet
+/// assembled — the verifier can't compute a meaningful parent-leaf
+/// snapshot until that ancestor's data arrives. Callers defer the
+/// verification keyed on `blocking_hash` and retry once it becomes
+/// available.
+///
+/// # Errors
+///
+/// `Err(blocking_hash)` for a missing or unassembled ancestor.
 pub fn prospective_parent_witness_leaves(
     accumulator: &BeaconWitnessAccumulator,
     committed_hash: BlockHash,
     parent_block_hash: BlockHash,
     pending_blocks: &PendingBlocks,
     topology: &TopologySnapshot,
-) -> Vec<Hash> {
+) -> Result<Vec<Hash>, BlockHash> {
     let committed_leaves = accumulator.leaves();
     if parent_block_hash == committed_hash {
-        return committed_leaves.to_vec();
+        return Ok(committed_leaves.to_vec());
     }
     let mut chain_deltas: Vec<Vec<Hash>> = Vec::new();
     let mut current = parent_block_hash;
     while current != committed_hash {
         let Some(pending) = pending_blocks.get(current) else {
-            tracing::warn!(
-                block_hash = ?current,
-                "Prospective witness-leaf walk: missing pending ancestor"
-            );
-            return committed_leaves.to_vec();
+            return Err(current);
         };
         let Some(block) = pending.block() else {
-            tracing::warn!(
-                block_hash = ?current,
-                "Prospective witness-leaf walk: ancestor not assembled"
-            );
-            return committed_leaves.to_vec();
+            return Err(current);
         };
         let header = block.header();
         let receipts: Vec<StoredReceipt> = block
@@ -245,7 +241,7 @@ pub fn prospective_parent_witness_leaves(
     for delta in chain_deltas.iter().rev() {
         leaves.extend_from_slice(delta);
     }
-    leaves
+    Ok(leaves)
 }
 
 /// Post-execution verifier for the block's beacon-witness commitment.
