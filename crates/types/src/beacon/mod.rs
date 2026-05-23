@@ -14,8 +14,8 @@
 //! - [`spc`]: Strong Prefix Consensus wire types (high triples, empty-view
 //!   messages, view-entry certificates).
 //! - [`witness`]: [`Witness`] / [`ShardWitness`] / [`ShardWitnessPayload`] /
-//!   [`ShardWitnessProof`] / [`JailReason`] (observations the beacon
-//!   applies per slot).
+//!   [`ShardWitnessProof`] / [`BeaconWitnessEvent`] (observations the
+//!   beacon applies per slot).
 
 pub mod block;
 pub mod header;
@@ -47,6 +47,6 @@ pub use spc::{
     SpcCert, SpcEmptyLowEvidence, SpcEmptyViewMsg, SpcHighTriple, SpcProposalObject, SpcSkipSig,
 };
 pub use witness::{
-    BeaconWitness, EquivocationEvidence, JailReason, ShardWitness, ShardWitnessPayload,
+    BeaconWitness, BeaconWitnessEvent, EquivocationEvidence, ShardWitness, ShardWitnessPayload,
     ShardWitnessProof, Witness,
 };

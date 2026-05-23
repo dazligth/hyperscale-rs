@@ -1,8 +1,8 @@
 //! Beacon-chain witness types.
 //!
 //! Every event the beacon applies — validator registrations, stake
-//! adjustments, jail/unjail decisions, equivocation evidence — flows
-//! through a [`Witness`] carried inside a
+//! adjustments, missed-proposal observations, equivocation evidence —
+//! flows through a [`Witness`] carried inside a
 //! [`BeaconProposal`](crate::BeaconProposal). Witnesses split by *who
 //! emitted them*:
 //!
@@ -16,35 +16,20 @@
 use sbor::prelude::*;
 
 use crate::{
-    BlockHash, Bls12381G1PublicKey, BoundedVec, Hash, LeafIndex, MAX_WITNESS_PROOF_DEPTH,
-    PcVoteEquivocation, RecoveryEquivocation, ShardGroupId, Stake, StakePoolId, ValidatorId,
+    BlockHash, BlockHeight, Bls12381G1PublicKey, BoundedVec, Hash, LeafIndex,
+    MAX_WITNESS_PROOF_DEPTH, PcVoteEquivocation, RecoveryEquivocation, Round, ShardGroupId, Stake,
+    StakePoolId, ValidatorId,
 };
 
-/// Why a validator was jailed.
+/// What the shard observed and reported to the beacon.
 ///
-/// Determines unjail eligibility — performance and recovery jails
-/// unjail after a cooldown when an `Unjail` witness arrives;
-/// equivocation jails are permanent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, BasicSbor)]
-pub enum JailReason {
-    /// Performance failure: a shard's local miss-counter tripped, or
-    /// the validator's own beacon proposal was rejected for a
-    /// malformed VRF reveal. Unjails after a cooldown when an
-    /// `Unjail` witness is lifted from a shard.
-    Performance,
-    /// Validator was on the dead committee at the time
-    /// `apply_recovery_cert` ran. Unjails after a cooldown — a
-    /// committee that fails to make progress isn't permanently
-    /// hostile; the participants may have been honest-but-partitioned.
-    Recovery,
-    /// Cryptographic proof of byzantine signing. Permanent: the key
-    /// is provably hostile, and no cooldown unjails it.
-    Equivocation,
-}
-
-/// What the shard's VM observed. Beacon-relevant payload only —
-/// provenance fields (shard, leaf-index, eventual Merkle path) live
-/// in [`ShardWitnessProof`].
+/// Split by source: receipt-emitted variants are the engine's projection
+/// of executing a transaction; consensus-derived variants are produced by
+/// the shard runtime from its own BFT state; included variants come from
+/// system inputs the proposer pulled into the block.
+///
+/// Provenance fields (shard, leaf-index, Merkle path) live in
+/// [`ShardWitnessProof`].
 #[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
 pub enum ShardWitnessPayload {
     /// A net deposit landed for `pool_id`. Increases the pool's
@@ -88,18 +73,6 @@ pub enum ShardWitnessPayload {
         /// Validator being deactivated.
         validator_id: ValidatorId,
     },
-    /// Shard's local performance tracking decided to jail `id`. The
-    /// shard owns the policy (miss threshold, observed shard-level
-    /// equivocation, etc.) and emits a single witness when it
-    /// concludes the validator should be out. `reason` is recorded
-    /// onto the resulting jailed status and determines unjail
-    /// eligibility.
-    Jail {
-        /// Validator being jailed.
-        id: ValidatorId,
-        /// Cause; determines whether and when the jail can be lifted.
-        reason: JailReason,
-    },
     /// Validator took an unjail action on the staking contract.
     /// Beacon-side: if currently jailed under a fault-cause reason,
     /// the cooldown has elapsed, and the pool can still support the
@@ -117,6 +90,96 @@ pub enum ShardWitnessPayload {
         /// Validator marking themselves ready.
         id: ValidatorId,
     },
+    /// The proposer scheduled for `(height, round)` failed to deliver a
+    /// valid block within the view-change timeout; the round was skipped
+    /// and a later round committed `height`. Emitted by the shard runtime
+    /// at every fallback commit — one witness per skipped round, derived
+    /// deterministically from `(parent_round, header.round)` and the
+    /// shard's leader schedule. Beacon side aggregates these into a
+    /// per-validator sliding-window counter and jails the validator under
+    /// a Performance reason once the threshold is crossed.
+    MissedProposal {
+        /// Validator who was the expected proposer at `(height, round)`.
+        proposer_id: ValidatorId,
+        /// Height the missed round was attempting.
+        height: BlockHeight,
+        /// Round the missed proposer was scheduled for.
+        round: Round,
+    },
+}
+
+/// Receipt-emittable subset of [`ShardWitnessPayload`].
+///
+/// Covers only the variants the engine surfaces from executing a
+/// transaction. The two consensus-derived variants
+/// ([`ShardWitnessPayload::MissedProposal`], [`ShardWitnessPayload::Ready`])
+/// are deliberately absent: the receipt path can't observe them, and
+/// admitting them in this enum would invite a type-level bug where a
+/// receipt synthesised a witness that belongs to a different source.
+///
+/// Conversion to [`ShardWitnessPayload`] is total; see the `From` impl.
+#[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
+pub enum BeaconWitnessEvent {
+    /// Mirrors [`ShardWitnessPayload::StakeDeposit`].
+    StakeDeposit {
+        /// Pool receiving the deposit.
+        pool_id: StakePoolId,
+        /// Aggregate amount added.
+        amount: Stake,
+    },
+    /// Mirrors [`ShardWitnessPayload::StakeWithdraw`].
+    StakeWithdraw {
+        /// Pool the withdrawal targets.
+        pool_id: StakePoolId,
+        /// Amount the withdrawal removes from effective stake immediately
+        /// and from total stake on unbonding completion.
+        amount: Stake,
+    },
+    /// Mirrors [`ShardWitnessPayload::RegisterValidator`].
+    RegisterValidator {
+        /// Pool that operates this validator.
+        pool_id: StakePoolId,
+        /// Identifier the validator will be known by.
+        validator_id: ValidatorId,
+        /// 48-byte compressed BLS pubkey.
+        pubkey: Bls12381G1PublicKey,
+    },
+    /// Mirrors [`ShardWitnessPayload::DeactivateValidator`].
+    DeactivateValidator {
+        /// Validator being deactivated.
+        validator_id: ValidatorId,
+    },
+    /// Mirrors [`ShardWitnessPayload::Unjail`].
+    Unjail {
+        /// Validator requesting unjail.
+        id: ValidatorId,
+    },
+}
+
+impl From<BeaconWitnessEvent> for ShardWitnessPayload {
+    fn from(event: BeaconWitnessEvent) -> Self {
+        match event {
+            BeaconWitnessEvent::StakeDeposit { pool_id, amount } => {
+                Self::StakeDeposit { pool_id, amount }
+            }
+            BeaconWitnessEvent::StakeWithdraw { pool_id, amount } => {
+                Self::StakeWithdraw { pool_id, amount }
+            }
+            BeaconWitnessEvent::RegisterValidator {
+                pool_id,
+                validator_id,
+                pubkey,
+            } => Self::RegisterValidator {
+                pool_id,
+                validator_id,
+                pubkey,
+            },
+            BeaconWitnessEvent::DeactivateValidator { validator_id } => {
+                Self::DeactivateValidator { validator_id }
+            }
+            BeaconWitnessEvent::Unjail { id } => Self::Unjail { id },
+        }
+    }
 }
 
 /// Provenance for a [`ShardWitness`] — a Merkle inclusion proof
@@ -170,9 +233,8 @@ pub struct ShardWitness {
 /// - [`Self::Vote`] — a single validator double-signed at the same
 ///   `(slot, view, round)` of an inner Prefix Consensus instance.
 ///
-/// Both variants jail the equivocator permanently under
-/// [`JailReason::Equivocation`]. Each is boxed so the enum's stack
-/// size stays balanced.
+/// Both variants jail the equivocator permanently. Each is boxed so
+/// the enum's stack size stays balanced.
 #[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
 pub enum EquivocationEvidence {
     /// Recovery-request / finalized-block contradiction.
@@ -254,15 +316,16 @@ mod tests {
             ShardWitnessPayload::DeactivateValidator {
                 validator_id: ValidatorId::new(8),
             },
-            ShardWitnessPayload::Jail {
-                id: ValidatorId::new(9),
-                reason: JailReason::Performance,
-            },
             ShardWitnessPayload::Unjail {
                 id: ValidatorId::new(10),
             },
             ShardWitnessPayload::Ready {
                 id: ValidatorId::new(11),
+            },
+            ShardWitnessPayload::MissedProposal {
+                proposer_id: ValidatorId::new(12),
+                height: BlockHeight::new(99),
+                round: Round::new(3),
             },
         ];
         for p in payloads {
@@ -289,15 +352,91 @@ mod tests {
     }
 
     #[test]
-    fn jail_reason_sbor_round_trip_all_variants() {
-        for r in [
-            JailReason::Performance,
-            JailReason::Recovery,
-            JailReason::Equivocation,
-        ] {
-            let bytes = basic_encode(&r).unwrap();
-            let decoded: JailReason = basic_decode(&bytes).unwrap();
-            assert_eq!(r, decoded);
+    fn beacon_witness_event_sbor_round_trip_all_variants() {
+        let pubkey = Bls12381G1PublicKey([0xCD; 48]);
+        let events = vec![
+            BeaconWitnessEvent::StakeDeposit {
+                pool_id: StakePoolId::new(1),
+                amount: Stake::new(100),
+            },
+            BeaconWitnessEvent::StakeWithdraw {
+                pool_id: StakePoolId::new(2),
+                amount: Stake::new(50),
+            },
+            BeaconWitnessEvent::RegisterValidator {
+                pool_id: StakePoolId::new(3),
+                validator_id: ValidatorId::new(7),
+                pubkey,
+            },
+            BeaconWitnessEvent::DeactivateValidator {
+                validator_id: ValidatorId::new(8),
+            },
+            BeaconWitnessEvent::Unjail {
+                id: ValidatorId::new(10),
+            },
+        ];
+        for e in events {
+            let bytes = basic_encode(&e).unwrap();
+            let decoded: BeaconWitnessEvent = basic_decode(&bytes).unwrap();
+            assert_eq!(e, decoded);
+        }
+    }
+
+    #[test]
+    fn beacon_witness_event_converts_to_shard_witness_payload() {
+        let pubkey = Bls12381G1PublicKey([0xEF; 48]);
+        let cases: Vec<(BeaconWitnessEvent, ShardWitnessPayload)> = vec![
+            (
+                BeaconWitnessEvent::StakeDeposit {
+                    pool_id: StakePoolId::new(1),
+                    amount: Stake::new(100),
+                },
+                ShardWitnessPayload::StakeDeposit {
+                    pool_id: StakePoolId::new(1),
+                    amount: Stake::new(100),
+                },
+            ),
+            (
+                BeaconWitnessEvent::StakeWithdraw {
+                    pool_id: StakePoolId::new(2),
+                    amount: Stake::new(50),
+                },
+                ShardWitnessPayload::StakeWithdraw {
+                    pool_id: StakePoolId::new(2),
+                    amount: Stake::new(50),
+                },
+            ),
+            (
+                BeaconWitnessEvent::RegisterValidator {
+                    pool_id: StakePoolId::new(3),
+                    validator_id: ValidatorId::new(7),
+                    pubkey,
+                },
+                ShardWitnessPayload::RegisterValidator {
+                    pool_id: StakePoolId::new(3),
+                    validator_id: ValidatorId::new(7),
+                    pubkey,
+                },
+            ),
+            (
+                BeaconWitnessEvent::DeactivateValidator {
+                    validator_id: ValidatorId::new(8),
+                },
+                ShardWitnessPayload::DeactivateValidator {
+                    validator_id: ValidatorId::new(8),
+                },
+            ),
+            (
+                BeaconWitnessEvent::Unjail {
+                    id: ValidatorId::new(10),
+                },
+                ShardWitnessPayload::Unjail {
+                    id: ValidatorId::new(10),
+                },
+            ),
+        ];
+        for (event, expected) in cases {
+            assert_eq!(ShardWitnessPayload::from(event), expected);
         }
     }
 
