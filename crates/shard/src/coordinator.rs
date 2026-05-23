@@ -1696,15 +1696,14 @@ impl ShardCoordinator {
         &mut self,
         topology_snapshot: &TopologySnapshot,
         signal: ReadySignal,
-    ) -> Vec<Action> {
+    ) {
         if !topology_snapshot.is_committee_member(signal.validator_id()) {
-            return Vec::new();
+            return;
         }
         if signal.height_window_end() < self.committed_height {
-            return Vec::new();
+            return;
         }
         self.ready_signal_pool.admit(signal, self.now);
-        Vec::new()
     }
 
     /// Internal vote processing. Delegates to [`VoteKeeper::accept_vote`]
