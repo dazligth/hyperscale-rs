@@ -101,7 +101,7 @@ impl ReadySignalPool {
     /// reflects the readiness transition, holding the signal is
     /// redundant and another proposer could re-include it. The
     /// predicate stays caller-supplied so this module doesn't have to
-    /// reach into beacon state directly (a Phase B concern).
+    /// reach into beacon state directly.
     pub fn evict_ready(&mut self, is_already_ready: impl Fn(ValidatorId) -> bool) {
         self.pending.retain(|id, _| !is_already_ready(*id));
     }

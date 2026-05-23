@@ -83,11 +83,12 @@ pub const EXECUTION_METADATA_CF: &str = "execution_metadata";
 /// Column family for execution certificates keyed by [`WaveId`].
 pub const EXECUTION_CERTS_CF: &str = "execution_certs";
 
-/// Column family for per-shard beacon-witness leaves.
+/// Column family for beacon-witness leaves on this shard.
 ///
-/// Key: `(shard_id, leaf_index)` as two big-endian `u64`s — within a
-/// shard, lex order matches monotonic leaf order so the fetch responder
-/// can range-scan to reconstruct an accumulator at any committed block.
+/// Key: `leaf_index` as a big-endian `u64` — lex order matches
+/// monotonic leaf order so the fetch responder can range-scan to
+/// reconstruct an accumulator at any committed block. Storage is
+/// scoped per-shard, so the shard id is implicit in the key.
 /// Value: SBOR-encoded [`ShardWitnessPayload`]. Append-only; pruning
 /// follows the retention horizon configured at the runtime layer.
 pub const BEACON_WITNESSES_CF: &str = "beacon_witnesses";

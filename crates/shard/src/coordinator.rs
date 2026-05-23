@@ -289,14 +289,14 @@ impl ShardCoordinator {
         let mut current = parent_block_hash;
         while current != self.committed_hash {
             let Some(pending) = self.pending_blocks.get(current) else {
-                trace!(
+                warn!(
                     block_hash = ?current,
                     "Prospective witness-leaf walk: missing pending ancestor"
                 );
                 return committed_leaves.to_vec();
             };
             let Some(block) = pending.block() else {
-                trace!(
+                warn!(
                     block_hash = ?current,
                     "Prospective witness-leaf walk: ancestor not assembled"
                 );
