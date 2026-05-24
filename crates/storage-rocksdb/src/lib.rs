@@ -12,10 +12,12 @@
 //! column families (`jmt_nodes`, `jmt_meta`). On each commit, the JMT is
 //! updated and a new state root hash is computed.
 
+pub mod beacon;
 pub(crate) mod config;
 pub mod shard;
 pub(crate) mod typed_cf;
 
+pub use beacon::core::{BeaconStorageError, RocksDbBeaconStorage};
 pub use config::{CompressionType, RocksDbConfig};
 pub use shard::core::{RocksDbStorage, StorageError};
 // Re-export the public module at its original path so external callers

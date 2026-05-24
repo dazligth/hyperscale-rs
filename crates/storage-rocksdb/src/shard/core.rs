@@ -243,9 +243,16 @@ impl RocksDbStorage {
     //
     // Thin wrappers over the free functions in typed_cf.rs.
     // These resolve CfHandles and pass &self.db as the ReadableStore.
+    //
+    // Constrained to CFs whose `Handles<'_>` is the shard tier's
+    // `CfHandles<'_>` — the beacon RocksDB instance has its own
+    // handles struct and its own helper layer.
 
     /// Get a typed value from a column family.
-    pub(crate) fn cf_get<CF: TypedCf>(&self, key: &CF::Key) -> Option<CF::Value> {
+    pub(crate) fn cf_get<CF>(&self, key: &CF::Key) -> Option<CF::Value>
+    where
+        for<'a> CF: TypedCf<Handles<'a> = CfHandles<'a>>,
+    {
         get::<CF>(&*self.db, CF::handle(&self.cf()), key)
     }
 
@@ -254,28 +261,35 @@ impl RocksDbStorage {
     /// [`batch_put`] directly; this method is the right shape for one-shot
     /// writes where re-resolving handles per call doesn't matter.
     #[allow(dead_code)]
-    pub(crate) fn cf_put<CF: TypedCf>(
-        &self,
-        batch: &mut WriteBatch,
-        key: &CF::Key,
-        value: &CF::Value,
-    ) {
+    pub(crate) fn cf_put<CF>(&self, batch: &mut WriteBatch, key: &CF::Key, value: &CF::Value)
+    where
+        for<'a> CF: TypedCf<Handles<'a> = CfHandles<'a>>,
+    {
         batch_put::<CF>(batch, CF::handle(&self.cf()), key, value);
     }
 
     /// Batch get typed values (`RocksDB` `multi_get_cf`).
-    pub(crate) fn cf_multi_get<CF: TypedCf>(&self, keys: &[CF::Key]) -> Vec<Option<CF::Value>> {
+    pub(crate) fn cf_multi_get<CF>(&self, keys: &[CF::Key]) -> Vec<Option<CF::Value>>
+    where
+        for<'a> CF: TypedCf<Handles<'a> = CfHandles<'a>>,
+    {
         multi_get::<CF>(&*self.db, CF::handle(&self.cf()), keys)
     }
 
     /// Delete a typed key in a `WriteBatch`.
     #[allow(dead_code)]
-    pub(crate) fn cf_delete<CF: TypedCf>(&self, batch: &mut WriteBatch, key: &CF::Key) {
+    pub(crate) fn cf_delete<CF>(&self, batch: &mut WriteBatch, key: &CF::Key)
+    where
+        for<'a> CF: TypedCf<Handles<'a> = CfHandles<'a>>,
+    {
         batch_delete::<CF>(batch, CF::handle(&self.cf()), key);
     }
 
     /// Typed single put (immediate write, no batch).
-    pub(crate) fn cf_put_sync<CF: TypedCf>(&self, key: &CF::Key, value: &CF::Value) {
+    pub(crate) fn cf_put_sync<CF>(&self, key: &CF::Key, value: &CF::Value)
+    where
+        for<'a> CF: TypedCf<Handles<'a> = CfHandles<'a>>,
+    {
         let cf = CF::handle(&self.cf());
         let key_bytes = CF::KeyCodec::default().encode(key);
         let value_bytes = CF::ValueCodec::default().encode(value);

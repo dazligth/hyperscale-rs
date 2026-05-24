@@ -178,7 +178,8 @@ impl TypedCf for BlocksCf {
     type Value = BlockMetadata;
     type KeyCodec = BeU64Codec;
     type ValueCodec = SborCodec<BlockMetadata>;
-    fn handle<'a>(cf: &CfHandles<'a>) -> &'a ColumnFamily {
+    type Handles<'a> = CfHandles<'a>;
+    fn handle<'a>(cf: &Self::Handles<'a>) -> &'a ColumnFamily {
         cf.blocks
     }
 }
@@ -190,7 +191,8 @@ impl TypedCf for TransactionsCf {
     type Value = RoutableTransaction;
     type KeyCodec = HashCodec;
     type ValueCodec = SborCodec<RoutableTransaction>;
-    fn handle<'a>(cf: &CfHandles<'a>) -> &'a ColumnFamily {
+    type Handles<'a> = CfHandles<'a>;
+    fn handle<'a>(cf: &Self::Handles<'a>) -> &'a ColumnFamily {
         cf.transactions
     }
 }
@@ -202,7 +204,8 @@ impl TypedCf for CertificatesCf {
     type Value = WaveCertificate;
     type KeyCodec = SborCodec<WaveId>;
     type ValueCodec = SborCodec<WaveCertificate>;
-    fn handle<'a>(cf: &CfHandles<'a>) -> &'a ColumnFamily {
+    type Handles<'a> = CfHandles<'a>;
+    fn handle<'a>(cf: &Self::Handles<'a>) -> &'a ColumnFamily {
         cf.certificates
     }
 }
@@ -216,7 +219,8 @@ impl TypedCf for JmtNodesCf {
     type Value = VersionedStoredNode;
     type KeyCodec = JmtKeyCodec;
     type ValueCodec = SborCodec<VersionedStoredNode>;
-    fn handle<'a>(cf: &CfHandles<'a>) -> &'a ColumnFamily {
+    type Handles<'a> = CfHandles<'a>;
+    fn handle<'a>(cf: &Self::Handles<'a>) -> &'a ColumnFamily {
         cf.jmt_nodes
     }
 }
@@ -228,7 +232,8 @@ impl TypedCf for StaleJmtNodesCf {
     type Value = Vec<StaleTreePart>;
     type KeyCodec = BeU64Codec;
     type ValueCodec = SborCodec<Vec<StaleTreePart>>;
-    fn handle<'a>(cf: &CfHandles<'a>) -> &'a ColumnFamily {
+    type Handles<'a> = CfHandles<'a>;
+    fn handle<'a>(cf: &Self::Handles<'a>) -> &'a ColumnFamily {
         cf.stale_jmt_nodes
     }
 }
@@ -244,7 +249,8 @@ impl TypedCf for StaleStateHistoryCf {
     type Value = Vec<Vec<u8>>; // raw `state_history` keys (storage_key ++ BE8(version))
     type KeyCodec = BeU64Codec;
     type ValueCodec = SborCodec<Vec<Vec<u8>>>;
-    fn handle<'a>(cf: &CfHandles<'a>) -> &'a ColumnFamily {
+    type Handles<'a> = CfHandles<'a>;
+    fn handle<'a>(cf: &Self::Handles<'a>) -> &'a ColumnFamily {
         cf.stale_state_history
     }
 }
@@ -274,7 +280,8 @@ impl TypedCf for StateCf {
     type Value = Vec<u8>;
     type KeyCodec = SubstateKeyCodec;
     type ValueCodec = RawCodec;
-    fn handle<'a>(cf: &CfHandles<'a>) -> &'a ColumnFamily {
+    type Handles<'a> = CfHandles<'a>;
+    fn handle<'a>(cf: &Self::Handles<'a>) -> &'a ColumnFamily {
         cf.state
     }
 }
@@ -302,7 +309,8 @@ impl TypedCf for StateHistoryCf {
     type Value = Option<Vec<u8>>;
     type KeyCodec = VersionedSubstateKeyCodec;
     type ValueCodec = SborCodec<Option<Vec<u8>>>;
-    fn handle<'a>(cf: &CfHandles<'a>) -> &'a ColumnFamily {
+    type Handles<'a> = CfHandles<'a>;
+    fn handle<'a>(cf: &Self::Handles<'a>) -> &'a ColumnFamily {
         cf.state_history
     }
 }
@@ -316,7 +324,8 @@ impl TypedCf for ConsensusReceiptsCf {
     type Value = ConsensusReceipt;
     type KeyCodec = HashCodec;
     type ValueCodec = SborCodec<ConsensusReceipt>;
-    fn handle<'a>(cf: &CfHandles<'a>) -> &'a ColumnFamily {
+    type Handles<'a> = CfHandles<'a>;
+    fn handle<'a>(cf: &Self::Handles<'a>) -> &'a ColumnFamily {
         cf.consensus_receipts
     }
 }
@@ -328,7 +337,8 @@ impl TypedCf for ExecutionMetadataCf {
     type Value = ExecutionMetadata;
     type KeyCodec = HashCodec;
     type ValueCodec = SborCodec<ExecutionMetadata>;
-    fn handle<'a>(cf: &CfHandles<'a>) -> &'a ColumnFamily {
+    type Handles<'a> = CfHandles<'a>;
+    fn handle<'a>(cf: &Self::Handles<'a>) -> &'a ColumnFamily {
         cf.execution_metadata
     }
 }
@@ -342,7 +352,8 @@ impl TypedCf for ExecutionCertsCf {
     type Value = ExecutionCertificate;
     type KeyCodec = SborCodec<WaveId>;
     type ValueCodec = SborCodec<ExecutionCertificate>;
-    fn handle<'a>(cf: &CfHandles<'a>) -> &'a ColumnFamily {
+    type Handles<'a> = CfHandles<'a>;
+    fn handle<'a>(cf: &Self::Handles<'a>) -> &'a ColumnFamily {
         cf.execution_certs
     }
 }
@@ -376,7 +387,8 @@ impl TypedCf for BeaconWitnessesCf {
     type Value = ShardWitnessPayload;
     type KeyCodec = BeaconWitnessKeyCodec;
     type ValueCodec = SborCodec<ShardWitnessPayload>;
-    fn handle<'a>(cf: &CfHandles<'a>) -> &'a ColumnFamily {
+    type Handles<'a> = CfHandles<'a>;
+    fn handle<'a>(cf: &Self::Handles<'a>) -> &'a ColumnFamily {
         cf.beacon_witnesses
     }
 }

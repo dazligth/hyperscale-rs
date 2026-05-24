@@ -13,7 +13,6 @@ use rocksdb::{ColumnFamily, DB, DBRawIteratorWithThreadMode, Snapshot, WriteBatc
 use sbor::prelude::{BasicDecode, BasicEncode};
 use sbor::{basic_decode, basic_encode};
 
-use crate::shard::column_families::CfHandles;
 use crate::shard::jmt_stored::{StoredNodeKey, encode_key};
 
 // ─── Codec traits ─────────────────────────────────────────────────────────────
@@ -157,11 +156,15 @@ pub trait TypedCf {
     /// Codec for encoding/decoding values.
     type ValueCodec: DbCodec<Self::Value> + Default + 'static;
 
+    /// Domain-specific handles struct this CF belongs to. Each backend
+    /// (shard, beacon) defines its own; CFs declare which they live in.
+    type Handles<'a>;
+
     /// Extract this CF's handle from the resolved handles struct.
     ///
     /// Each implementation is a single field access — the compiler verifies
     /// the mapping at build time, so there's no runtime string dispatch.
-    fn handle<'a>(cf: &CfHandles<'a>) -> &'a ColumnFamily;
+    fn handle<'a>(cf: &Self::Handles<'a>) -> &'a ColumnFamily;
 }
 
 // ─── ReadableStore trait ─────────────────────────────────────────────────────
