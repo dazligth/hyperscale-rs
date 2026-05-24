@@ -24,9 +24,9 @@ use hyperscale_types::{
     WaveCertificate, WaveId,
 };
 
-use crate::chain_writer::RocksDbPreparedCommit;
-use crate::core::RocksDbStorage;
-use crate::snapshot::RocksDbSnapshot;
+use super::chain_writer::RocksDbPreparedCommit;
+use super::core::RocksDbStorage;
+use super::snapshot::RocksDbSnapshot;
 
 /// Shared `RocksDB` storage handle with full storage trait implementations.
 ///

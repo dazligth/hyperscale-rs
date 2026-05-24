@@ -4,8 +4,8 @@ use hyperscale_metrics::record_storage_operation;
 use hyperscale_storage::{RecoveredState, SubstateStore};
 use hyperscale_types::{BlockHash, BlockHeight, Hash, ShardWitnessPayload};
 
-use crate::column_families::BeaconWitnessesCf;
-use crate::core::RocksDbStorage;
+use super::column_families::BeaconWitnessesCf;
+use super::core::RocksDbStorage;
 use crate::typed_cf::{TypedCf, iter_all};
 
 impl RocksDbStorage {

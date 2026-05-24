@@ -39,9 +39,9 @@ fn placeholder_local_ec(shard: ShardGroupId, height: BlockHeight) -> Arc<Executi
 use sbor::prelude::IndexMap;
 use tempfile::TempDir;
 
-use crate::column_families::STATE_HISTORY_CF;
+use super::column_families::STATE_HISTORY_CF;
+use super::core::RocksDbStorage;
 use crate::config::RocksDbConfig;
-use crate::core::RocksDbStorage;
 
 /// Helper: wrap `DatabaseUpdates` into a single `StoredReceipt` for test commit calls.
 fn updates_to_receipts(updates: &DatabaseUpdates) -> Vec<StoredReceipt> {

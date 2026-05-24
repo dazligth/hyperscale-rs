@@ -9,7 +9,7 @@
 
 use radix_substate_store_interface::interface::{DbPartitionKey, DbSortKey};
 
-use crate::substate_key::SubstateKeyCodec;
+use super::substate_key::SubstateKeyCodec;
 use crate::typed_cf::{DbCodec, DbEncode};
 
 const VERSION_LEN: usize = 8;

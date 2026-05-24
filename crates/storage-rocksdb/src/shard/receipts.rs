@@ -5,8 +5,8 @@ use std::sync::Arc;
 use hyperscale_types::{ConsensusReceipt, ExecutionMetadata, StoredReceipt, TxHash};
 use rocksdb::{ColumnFamily, WriteBatch};
 
-use crate::column_families::{ConsensusReceiptsCf, ExecutionMetadataCf};
-use crate::core::RocksDbStorage;
+use super::column_families::{ConsensusReceiptsCf, ExecutionMetadataCf};
+use super::core::RocksDbStorage;
 use crate::typed_cf::{TypedCf, batch_put};
 
 impl RocksDbStorage {

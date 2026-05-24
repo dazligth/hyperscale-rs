@@ -9,9 +9,9 @@
 
 use rocksdb::WriteBatch;
 
-use crate::column_families::{JmtNodesCf, StaleJmtNodesCf, StaleStateHistoryCf, StateHistoryCf};
-use crate::core::RocksDbStorage;
-use crate::jmt_stored::StaleTreePart;
+use super::column_families::{JmtNodesCf, StaleJmtNodesCf, StaleStateHistoryCf, StateHistoryCf};
+use super::core::RocksDbStorage;
+use super::jmt_stored::StaleTreePart;
 use crate::typed_cf::{self, TypedCf};
 
 impl RocksDbStorage {
@@ -236,8 +236,8 @@ mod tests {
     };
     use tempfile::TempDir;
 
+    use super::super::core::RocksDbStorage;
     use crate::config::RocksDbConfig;
-    use crate::core::RocksDbStorage;
 
     /// Aggressive state-history GC must not affect current-tip reads.
     /// `StateCf` holds the authoritative current value per key; deleting

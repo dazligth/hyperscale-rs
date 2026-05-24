@@ -18,7 +18,7 @@ use hyperscale_storage::{
 };
 use hyperscale_types::{BlockHeight, StateRoot};
 
-use crate::state::{ConsensusState, SharedState, apply_updates};
+use super::state::{ConsensusState, SharedState, apply_updates};
 
 /// In-memory storage for simulation and testing.
 ///

@@ -10,7 +10,7 @@ use hyperscale_types::{
     RoutableTransaction, ShardWitnessPayload, TxHash, WaveCertificate, WaveId,
 };
 
-use crate::core::SimStorage;
+use super::core::SimStorage;
 
 impl ChainReader for SimStorage {
     fn get_block(&self, height: BlockHeight) -> Option<CertifiedBlock> {

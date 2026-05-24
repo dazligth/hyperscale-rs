@@ -5,7 +5,7 @@
 
 use rocksdb::DBCompressionType;
 
-use crate::column_families::ALL_COLUMN_FAMILIES;
+use crate::shard::column_families::ALL_COLUMN_FAMILIES;
 
 /// Compression type for `RocksDB`. Each variant maps 1:1 to the
 /// same-named [`rocksdb::DBCompressionType`].

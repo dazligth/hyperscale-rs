@@ -13,8 +13,8 @@ use rocksdb::{ColumnFamily, DB, DBRawIteratorWithThreadMode, Snapshot, WriteBatc
 use sbor::prelude::{BasicDecode, BasicEncode};
 use sbor::{basic_decode, basic_encode};
 
-use crate::column_families::CfHandles;
-use crate::jmt_stored::{StoredNodeKey, encode_key};
+use crate::shard::column_families::CfHandles;
+use crate::shard::jmt_stored::{StoredNodeKey, encode_key};
 
 // ─── Codec traits ─────────────────────────────────────────────────────────────
 

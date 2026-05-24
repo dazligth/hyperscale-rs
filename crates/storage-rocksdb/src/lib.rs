@@ -12,31 +12,14 @@
 //! column families (`jmt_nodes`, `jmt_meta`). On each commit, the JMT is
 //! updated and a new state root hash is computed.
 
-mod blocks;
-mod chain_reader;
-mod chain_writer;
-pub(crate) mod column_families;
 pub(crate) mod config;
-pub(crate) mod core;
-mod execution_certs;
-mod gc;
-pub(crate) mod jmt_snapshot_store;
-pub mod jmt_stored;
-pub(crate) mod metadata;
-mod receipts;
-mod recovery;
-mod shared;
-pub(crate) mod snapshot;
-mod store;
-pub(crate) mod substate_key;
+pub mod shard;
 pub(crate) mod typed_cf;
-pub(crate) mod versioned_key;
-
-#[cfg(test)]
-mod tests;
-
-pub use core::{RocksDbStorage, StorageError};
 
 pub use config::{CompressionType, RocksDbConfig};
-pub use shared::SharedStorage;
-pub use snapshot::RocksDbSnapshot;
+pub use shard::core::{RocksDbStorage, StorageError};
+// Re-export the public module at its original path so external callers
+// using `hyperscale_storage_rocksdb::jmt_stored` keep compiling.
+pub use shard::jmt_stored;
+pub use shard::shared::SharedStorage;
+pub use shard::snapshot::RocksDbSnapshot;

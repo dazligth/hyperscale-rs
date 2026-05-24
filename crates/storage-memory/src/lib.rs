@@ -12,17 +12,7 @@
 //! `jmt_height()` and `state_root()` for state commitment. This ensures
 //! simulation has identical JMT behavior to production.
 
-mod chain_reader;
-mod chain_writer;
-pub(crate) mod core;
-mod snapshot;
-mod state;
-mod store;
-mod tree_store;
+pub mod shard;
 
-#[cfg(test)]
-mod tests;
-
-pub use core::SimStorage;
-
-pub use snapshot::SimSnapshot;
+pub use shard::core::SimStorage;
+pub use shard::snapshot::SimSnapshot;

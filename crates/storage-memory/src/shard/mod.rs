@@ -1,0 +1,17 @@
+//! Shard-side in-memory storage backend — `SimStorage`, its snapshot,
+//! and the tree-store adapter that mirrors the `RocksDB` JMT semantics
+//! for deterministic simulation.
+//!
+//! Sibling [`crate::beacon`](crate::beacon) hosts the parallel
+//! beacon-chain in-memory backend.
+
+pub(crate) mod chain_reader;
+pub(crate) mod chain_writer;
+pub(crate) mod core;
+pub(crate) mod snapshot;
+pub(crate) mod state;
+pub(crate) mod store;
+pub(crate) mod tree_store;
+
+#[cfg(test)]
+mod tests;

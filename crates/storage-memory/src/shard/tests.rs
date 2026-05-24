@@ -23,8 +23,8 @@ fn no_witness() -> BeaconWitnessCommit {
 }
 use indexmap::IndexMap;
 
-use crate::core::SimStorage;
-use crate::state::apply_updates;
+use super::core::SimStorage;
+use super::state::apply_updates;
 
 impl SimStorage {
     /// Atomically commit a certificate and its state writes.

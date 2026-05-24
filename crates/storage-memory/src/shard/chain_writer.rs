@@ -14,8 +14,8 @@ use hyperscale_types::{
     Block, BlockHeight, CertifiedBlock, FinalizedWave, QuorumCertificate, StateRoot, StoredReceipt,
 };
 
-use crate::core::SimStorage;
-use crate::state::apply_updates;
+use super::core::SimStorage;
+use super::state::apply_updates;
 
 /// Precomputed commit work for a `SimStorage` block commit.
 ///

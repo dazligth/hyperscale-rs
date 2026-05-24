@@ -9,8 +9,8 @@ use hyperscale_types::{
     ShardWitnessPayload, TxHash, WaveCertificate, WaveId,
 };
 
-use crate::column_families::{BeaconWitnessesCf, ExecutionCertsCf};
-use crate::core::RocksDbStorage;
+use super::column_families::{BeaconWitnessesCf, ExecutionCertsCf};
+use super::core::RocksDbStorage;
 use crate::typed_cf::{TypedCf, get, iter_all};
 
 impl ChainReader for RocksDbStorage {

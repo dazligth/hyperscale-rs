@@ -8,8 +8,8 @@ use hyperscale_storage::tree::proofs::generate_proof;
 use hyperscale_storage::{DbSortKey, SubstateStore, VersionedStore};
 use hyperscale_types::{BlockHeight, MerkleInclusionProof, NodeId, StateRoot};
 
-use crate::core::SimStorage;
-use crate::snapshot::SimSnapshot;
+use super::core::SimStorage;
+use super::snapshot::SimSnapshot;
 
 impl SubstateStore for SimStorage {
     type Snapshot<'a> = SimSnapshot;

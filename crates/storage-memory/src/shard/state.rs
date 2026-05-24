@@ -15,7 +15,7 @@ use hyperscale_types::{
     StoredReceipt, TxHash, WaveCertificate, WaveId,
 };
 
-use crate::tree_store::SimTreeStore;
+use super::tree_store::SimTreeStore;
 
 // ═══════════════════════════════════════════════════════════════════════
 // Shared substate + JMT state (single RwLock)

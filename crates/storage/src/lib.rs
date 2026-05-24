@@ -22,31 +22,25 @@
 
 #![warn(missing_docs)]
 
-mod chain_reader;
-mod chain_writer;
-mod genesis;
-pub mod keys;
-pub mod lock_recover;
-mod overlay;
-pub mod pending_chain;
-mod recovered_state;
-mod store;
-pub mod tree;
-mod writes;
+pub mod shard;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_helpers;
 
-pub use chain_reader::{BlockForSync, ChainReader};
-pub use chain_writer::{BeaconWitnessCommit, ChainWriter, PreparedCommitBatchEntry};
-pub use genesis::GenesisCommit;
 use hyperscale_jmt::TreeReader;
-pub use overlay::{SubstateDbLookup, SubstateLookup};
-pub use pending_chain::{BaseReadCache, ChainEntry, PendingChain, SubstateView};
-pub use recovered_state::RecoveredState;
-pub use store::{SubstateStore, VersionedStore};
-pub use tree::{CollectedWrites, JmtSnapshot, LeafSubstateKeyAssociation};
-pub use writes::{merge_database_updates, merge_into, merge_updates_from_receipts};
+pub use shard::chain_reader::{BlockForSync, ChainReader};
+pub use shard::chain_writer::{BeaconWitnessCommit, ChainWriter, PreparedCommitBatchEntry};
+pub use shard::genesis::GenesisCommit;
+pub use shard::overlay::{SubstateDbLookup, SubstateLookup};
+pub use shard::pending_chain::{BaseReadCache, ChainEntry, PendingChain, SubstateView};
+pub use shard::recovered_state::RecoveredState;
+pub use shard::store::{SubstateStore, VersionedStore};
+pub use shard::tree::{CollectedWrites, JmtSnapshot, LeafSubstateKeyAssociation};
+pub use shard::writes::{merge_database_updates, merge_into, merge_updates_from_receipts};
+// Re-export the public modules at the original paths so consumers using
+// `hyperscale_storage::{keys, lock_recover, pending_chain, tree}` continue
+// to compile unchanged.
+pub use shard::{keys, lock_recover, pending_chain, tree};
 
 /// Umbrella bound for storage backends threaded as a generic `S` through
 /// node-side machinery (the `IoLoop` and its delegated action handler).

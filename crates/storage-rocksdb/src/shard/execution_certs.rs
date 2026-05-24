@@ -7,8 +7,8 @@ use std::sync::Arc;
 use hyperscale_types::{Block, ExecutionCertificate};
 use rocksdb::{ColumnFamily, WriteBatch};
 
-use crate::column_families::ExecutionCertsCf;
-use crate::core::RocksDbStorage;
+use super::column_families::ExecutionCertsCf;
+use super::core::RocksDbStorage;
 use crate::typed_cf::{TypedCf, batch_put_raw};
 
 /// Append execution certificate writes for a block to an existing `WriteBatch`.
