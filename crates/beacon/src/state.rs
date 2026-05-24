@@ -1,12 +1,11 @@
-//! Global beacon state and the derived helpers that gate validator
-//! lifecycle decisions.
+//! Global beacon state and the slot pipeline that drives it.
 //!
-//! `apply_slot` (landing in subsequent sub-commits) mutates this state
-//! deterministically from each slot's committed `BeaconProposal` set.
-//! The helpers here (`min_stake`, `effective_stake`,
-//! `current_active_count`, `max_active_count`, `pooled_validators`) are
-//! pure functions of state — every call site re-derives the value
-//! rather than caching, so there's no two-piece state to keep in sync.
+//! [`apply_slot`] mutates this state deterministically from each slot's
+//! committed `BeaconProposal` set; the derived helpers
+//! ([`min_stake`], [`effective_stake`], [`current_active_count`],
+//! [`max_active_count`], [`pooled_validators`]) are pure functions of
+//! state — every call site re-derives the value rather than caching,
+//! so there's no two-piece state to keep in sync.
 //!
 //! # Slot-time vs epoch-time
 //!
@@ -22,13 +21,21 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use blake3::Hasher;
 use hyperscale_types::{
-    Bls12381G1PublicKey, Epoch, LeafIndex, Randomness, RecoveryCertificate, ShardGroupId, Slot,
-    Stake, StakePoolId, ValidatorId,
+    BeaconProposal, Bls12381G1PublicKey, Epoch, LeafIndex, NetworkDefinition, Randomness,
+    RecoveryCertificate, ShardGroupId, Slot, Stake, StakePoolId, ValidatorId, VrfOutput,
+    vrf_verify,
 };
 
 use crate::constants::{MIN_STAKE_FLOOR, POOL_BUFFER_TARGET, SHARD_CAPACITY};
 use crate::sampling::draw_from_pool;
+
+/// Domain tag for the beacon-randomness mixer. Binds the BLAKE3 input
+/// to "beacon randomness v1" so the digest can't collide with any
+/// other 32-byte BLAKE3 hash in the codebase (committee draw seed,
+/// pool draw seed, etc.).
+const DOMAIN_BEACON_RANDOMNESS: &[u8] = b"hyperscale-beacon-randomness-v1";
 
 // ─── pool types ─────────────────────────────────────────────────────────────
 
@@ -567,18 +574,199 @@ pub fn pool_draw(state: &mut BeaconState, shard: ShardGroupId) -> Option<Validat
     Some(chosen)
 }
 
+// ─── slot pipeline ─────────────────────────────────────────────────────────
+
+/// Apply one slot's MSC commit to `state`.
+///
+/// `committed` is the per-slot proposals MSC's Agreement layer has
+/// agreed on. Pure deterministic function of `(state, network, slot,
+/// committed)` — every honest party with byte-identical inputs lands
+/// at byte-identical state.
+///
+/// # Panics
+///
+/// Panics if `slot <= state.current_slot`. The slot watermark must
+/// strictly advance: a regressed or repeated slot from the runner
+/// would silently corrupt slot-difference math (cooldowns, unbonding,
+/// ready timeout) and replay witnesses against a watermark that
+/// already accounts for them. Genesis sits at `current_slot =
+/// GENESIS` and the first apply is `slot > GENESIS`, so strict `>` is
+/// the right bound. Tests sometimes skip slots, so we don't require
+/// strict-linear `slot == current_slot + 1`.
+pub fn apply_slot(
+    state: &mut BeaconState,
+    network: &NetworkDefinition,
+    slot: Slot,
+    committed: &[(ValidatorId, BeaconProposal)],
+) -> SlotEffects {
+    assert!(
+        slot > state.current_slot,
+        "apply_slot regression: slot {slot} <= state.current_slot {}",
+        state.current_slot,
+    );
+    // Set `current_slot` before the pipeline runs so every downstream
+    // helper (including `pool_draw`'s seed binding) reads "the slot
+    // I'm in," not "the slot before mine."
+    state.current_slot = slot;
+
+    let vrf = filter_and_roll_randomness(state, network, slot, committed);
+
+    SlotEffects {
+        rejected_reveals: vrf.rejected_reveals,
+        jailed: vrf.jailed,
+        ..SlotEffects::default()
+    }
+}
+
+/// Outcome of [`filter_and_roll_randomness`].
+struct VrfStageOutcome {
+    /// Validators in `state.committee` whose VRF reveal failed to
+    /// verify. Their entire proposal — including any witnesses — was
+    /// dropped on the same grounds.
+    rejected_reveals: Vec<ValidatorId>,
+    /// Validators jailed during the cascade triggered by malformed VRF
+    /// reveals. Subset of `rejected_reveals` (only `OnShard` rejected
+    /// proposers cascade through to jail).
+    jailed: Vec<ValidatorId>,
+}
+
+/// Filter `committed` to proposals whose proposer is in
+/// `state.committee` and whose VRF reveal verifies under their
+/// pubkey, roll `state.randomness` over the accepted VRF outputs, and
+/// jail proposers whose reveals were rejected.
+///
+/// `state.randomness` advances *always* — even when no proposal is
+/// accepted, the BLAKE3 mix runs against the prior randomness alone.
+/// An "all-rejected" slot still advances randomness as a
+/// deterministic function of `prev_randomness`. An adversary who can
+/// suppress every VRF reveal can therefore predict the next slot's
+/// randomness from the previous one; the mitigation is the
+/// jail-on-first-sighting cascade here plus committee resampling at
+/// epoch boundaries.
+///
+/// A malformed VRF reveal under the proposer's own key is a
+/// self-inflicted cryptographic fault — an unmodified honest binary
+/// can't produce one. Jail on first sighting under
+/// `JailReason::Performance`; the freed shard slot refills via
+/// `pool_draw` in the same step as the status transition. Operators
+/// restart with a fixed binary and lift via `Unjail` once cooldown
+/// elapses. Non-`OnShard` rejected proposers (shouldn't normally
+/// happen — non-committee filter already ran) silently fail the cascade
+/// gate without jailing.
+fn filter_and_roll_randomness(
+    state: &mut BeaconState,
+    network: &NetworkDefinition,
+    slot: Slot,
+    committed: &[(ValidatorId, BeaconProposal)],
+) -> VrfStageOutcome {
+    let committee_set: BTreeSet<ValidatorId> = state.committee.iter().copied().collect();
+
+    let mut rejected_reveals = Vec::new();
+    let mut accepted_outputs: Vec<VrfOutput> = Vec::new();
+    for (party, prop) in committed {
+        if !committee_set.contains(party) {
+            continue;
+        }
+        // Defensive: committee membership should imply a validator
+        // record. If a runner bug or future refactor breaks that
+        // invariant, treat the proposer as rejected rather than
+        // panic.
+        let Some(pk) = state.validators.get(party).map(|r| r.pubkey) else {
+            rejected_reveals.push(*party);
+            continue;
+        };
+        let output = prop.vrf_output();
+        let proof = prop.vrf_proof();
+        if vrf_verify(&pk, network, slot, &output, &proof) {
+            accepted_outputs.push(output);
+        } else {
+            rejected_reveals.push(*party);
+        }
+    }
+
+    // Roll randomness from accepted VRF outputs. Always runs — see
+    // function-level doc for the "all-rejected" semantics.
+    let mut h = Hasher::new();
+    h.update(DOMAIN_BEACON_RANDOMNESS);
+    h.update(state.randomness.as_bytes());
+    for o in &accepted_outputs {
+        h.update(o.as_bytes());
+    }
+    state.randomness = Randomness(*h.finalize().as_bytes());
+
+    // Cascade jail for rejected proposers currently `OnShard`. Removed
+    // from the shard committee; freed slot refills via `pool_draw`.
+    let mut jailed = Vec::new();
+    for party in &rejected_reveals {
+        let prior_status = state.validators.get(party).map(|r| r.status);
+        let Some(ValidatorStatus::OnShard { shard, .. }) = prior_status else {
+            continue;
+        };
+        state
+            .validators
+            .get_mut(party)
+            .expect("just matched on Some")
+            .status = ValidatorStatus::Jailed {
+            since_epoch: state.current_epoch,
+            reason: JailReason::Performance,
+        };
+        if let Some(committee) = state.shard_committees.get_mut(&shard) {
+            committee.members.retain(|v| v != party);
+        }
+        pool_draw(state, shard);
+        jailed.push(*party);
+    }
+
+    VrfStageOutcome {
+        rejected_reveals,
+        jailed,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use hyperscale_types::bls_keypair_from_seed;
+    use hyperscale_types::{
+        Bls12381G1PrivateKey, bls_keypair_from_seed, vrf_output_from_proof, vrf_sign,
+    };
 
     use super::*;
 
     // ─── fixture helpers ──────────────────────────────────────────────────
 
-    fn pubkey(seed: u64) -> Bls12381G1PublicKey {
+    fn keypair(seed: u64) -> Bls12381G1PrivateKey {
         let mut s = [0u8; 32];
         s[..8].copy_from_slice(&seed.to_le_bytes());
-        bls_keypair_from_seed(&s).public_key()
+        bls_keypair_from_seed(&s)
+    }
+
+    fn pubkey(seed: u64) -> Bls12381G1PublicKey {
+        keypair(seed).public_key()
+    }
+
+    fn net() -> NetworkDefinition {
+        NetworkDefinition::simulator()
+    }
+
+    /// Build an honest VRF-signed empty `BeaconProposal` for validator
+    /// `id` at `slot`. No witnesses (witness ingestion is a later
+    /// stage); just a deterministic VRF reveal.
+    fn vrf_proposal(id: u64, slot: Slot) -> BeaconProposal {
+        let sk = keypair(id);
+        let (output, proof) = vrf_sign(&sk, &net(), slot);
+        BeaconProposal::new(Vec::new(), output, proof)
+    }
+
+    /// Build a `BeaconProposal` whose VRF proof has been tampered with
+    /// so verification fails. The (output, proof) pair is internally
+    /// consistent by hash binding, but the BLS sig is broken.
+    fn malformed_vrf_proposal(id: u64, slot: Slot) -> BeaconProposal {
+        let p = vrf_proposal(id, slot);
+        let mut proof = p.vrf_proof();
+        proof.0[0] ^= 1;
+        // Output binding still matches the tampered proof (so we get
+        // past the binding check); only the BLS verify fails.
+        let output = vrf_output_from_proof(&proof);
+        BeaconProposal::new(Vec::new(), output, proof)
     }
 
     fn validator_record(id: u64, pool: u32, status: ValidatorStatus) -> ValidatorRecord {
@@ -926,5 +1114,189 @@ mod tests {
             pick_a != pick_b
         });
         assert!(any_differ);
+    }
+
+    // ─── apply_slot regression check + slot advance ──────────────────────
+
+    /// `apply_slot` rejects a slot that doesn't strictly advance
+    /// `state.current_slot`. Catches runner bugs that replay or
+    /// re-order MSC commits before the chain-difference math
+    /// (cooldown, unbonding, ready-timeout) silently underflows.
+    #[test]
+    #[should_panic(expected = "apply_slot regression")]
+    fn apply_slot_panics_on_slot_replay() {
+        let mut state = single_pool_state(4);
+        state.committee = (0u64..4).map(ValidatorId::new).collect();
+        apply_slot(&mut state, &net(), Slot::new(5), &[]);
+        // Replay of slot 5: current_slot is now 5, so slot=5 is
+        // neither advance nor regression — must panic.
+        apply_slot(&mut state, &net(), Slot::new(5), &[]);
+    }
+
+    #[test]
+    #[should_panic(expected = "apply_slot regression")]
+    fn apply_slot_panics_on_slot_going_backwards() {
+        let mut state = single_pool_state(4);
+        state.committee = (0u64..4).map(ValidatorId::new).collect();
+        apply_slot(&mut state, &net(), Slot::new(5), &[]);
+        apply_slot(&mut state, &net(), Slot::new(3), &[]);
+    }
+
+    #[test]
+    fn apply_slot_advances_current_slot() {
+        let mut state = single_pool_state(4);
+        state.committee = (0u64..4).map(ValidatorId::new).collect();
+        apply_slot(&mut state, &net(), Slot::new(7), &[]);
+        assert_eq!(state.current_slot, Slot::new(7));
+    }
+
+    // ─── filter_and_roll_randomness ──────────────────────────────────────
+
+    /// Randomness rolls even on an all-empty slot. The mixer runs over
+    /// `prev_randomness` alone — needed so the "all rejected" path is
+    /// well-defined and the chain doesn't stall on a silent slot.
+    #[test]
+    fn randomness_rolls_with_empty_committed() {
+        let mut state = single_pool_state(4);
+        state.committee = (0u64..4).map(ValidatorId::new).collect();
+        let prior = state.randomness;
+        apply_slot(&mut state, &net(), Slot::new(1), &[]);
+        assert_ne!(state.randomness, prior);
+    }
+
+    /// A proposal from a non-committee party is silently dropped — no
+    /// jail, no randomness contribution, no `rejected_reveals` entry.
+    /// Defends against runner-level bugs that pass a stray proposal in.
+    #[test]
+    fn non_committee_proposal_is_silently_dropped() {
+        let mut state = single_pool_state(4);
+        state.committee = (0u64..4).map(ValidatorId::new).collect();
+        // Insert validator 5 with a record but NOT in the committee.
+        state.validators.insert(
+            ValidatorId::new(5),
+            validator_record(5, 0, ValidatorStatus::Pooled),
+        );
+        let prior = state.randomness;
+        let bad = vec![(ValidatorId::new(5), vrf_proposal(5, Slot::new(1)))];
+        let effects = apply_slot(&mut state, &net(), Slot::new(1), &bad);
+        // Randomness rolled (over prev alone), but no contribution
+        // from the dropped proposal — and no rejected_reveals entry.
+        assert_ne!(state.randomness, prior);
+        assert!(effects.rejected_reveals.is_empty());
+        assert!(effects.jailed.is_empty());
+    }
+
+    /// Honest VRF reveal verifies and contributes to randomness;
+    /// `rejected_reveals` stays empty.
+    #[test]
+    fn honest_proposal_advances_randomness_without_rejection() {
+        let mut state = single_pool_state(4);
+        state.committee = (0u64..4).map(ValidatorId::new).collect();
+        let committed = vec![
+            (ValidatorId::new(0), vrf_proposal(0, Slot::new(1))),
+            (ValidatorId::new(1), vrf_proposal(1, Slot::new(1))),
+        ];
+        let prior = state.randomness;
+        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+        assert_ne!(state.randomness, prior);
+        assert!(effects.rejected_reveals.is_empty());
+        assert!(effects.jailed.is_empty());
+    }
+
+    /// Two states fed byte-identical inputs land on byte-identical
+    /// randomness — pins the determinism the chain relies on.
+    #[test]
+    fn randomness_roll_is_deterministic_across_replicas() {
+        let mut a = single_pool_state(4);
+        let mut b = single_pool_state(4);
+        a.committee = (0u64..4).map(ValidatorId::new).collect();
+        b.committee = a.committee.clone();
+        let committed = vec![
+            (ValidatorId::new(0), vrf_proposal(0, Slot::new(1))),
+            (ValidatorId::new(1), vrf_proposal(1, Slot::new(1))),
+        ];
+        apply_slot(&mut a, &net(), Slot::new(1), &committed);
+        apply_slot(&mut b, &net(), Slot::new(1), &committed);
+        assert_eq!(a.randomness, b.randomness);
+    }
+
+    /// Malformed VRF reveal jails the proposer under
+    /// `JailReason::Performance` and cascades: removal from the shard
+    /// committee + `pool_draw` refill from any remaining pooled
+    /// validators.
+    #[test]
+    fn malformed_vrf_jails_proposer_and_refills_via_pool_draw() {
+        let mut state = single_pool_state(4);
+        state.committee = (0u64..4).map(ValidatorId::new).collect();
+        // Add a fifth validator sitting in the pool; pool stake bumped
+        // to support them.
+        let pool_id = StakePoolId::new(0);
+        state.pools.get_mut(&pool_id).unwrap().total_stake =
+            Stake::from_attos(5 * MIN_STAKE_FLOOR.attos());
+        state
+            .pools
+            .get_mut(&pool_id)
+            .unwrap()
+            .validators
+            .insert(ValidatorId::new(4));
+        state.validators.insert(
+            ValidatorId::new(4),
+            validator_record(4, 0, ValidatorStatus::Pooled),
+        );
+
+        let committed = vec![(ValidatorId::new(0), malformed_vrf_proposal(0, Slot::new(1)))];
+        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+
+        // Proposer 0 in rejected_reveals AND jailed.
+        assert_eq!(effects.rejected_reveals, vec![ValidatorId::new(0)]);
+        assert_eq!(effects.jailed, vec![ValidatorId::new(0)]);
+        // Status flipped to Jailed { Performance, since_epoch = GENESIS }.
+        assert_eq!(
+            state.validators.get(&ValidatorId::new(0)).unwrap().status,
+            ValidatorStatus::Jailed {
+                since_epoch: Epoch::GENESIS,
+                reason: JailReason::Performance,
+            },
+        );
+        // Shard committee size stays at 4 — validator 4 drawn from
+        // pool to refill the freed slot.
+        let members = &state.shard_committees[&ShardGroupId::new(0)].members;
+        assert_eq!(members.len(), 4);
+        assert!(!members.contains(&ValidatorId::new(0)));
+        assert!(members.contains(&ValidatorId::new(4)));
+        // Validator 4 is now OnShard (refill from pool).
+        let refill_status = state.validators.get(&ValidatorId::new(4)).unwrap().status;
+        assert!(matches!(
+            refill_status,
+            ValidatorStatus::OnShard { shard, ready: false, .. } if shard == ShardGroupId::new(0),
+        ));
+    }
+
+    /// Malformed VRF still rejects the proposal's randomness
+    /// contribution even though it jails the proposer — the rejected
+    /// reveal's output is NOT mixed in. Pinning this prevents a
+    /// regression where a "rejected but contributes anyway" bug would
+    /// let a byzantine proposer grind randomness while accepting the
+    /// jail.
+    #[test]
+    fn malformed_vrf_does_not_contribute_to_randomness() {
+        let mut state_a = single_pool_state(4);
+        let mut state_b = single_pool_state(4);
+        state_a.committee = (0u64..4).map(ValidatorId::new).collect();
+        state_b.committee = state_a.committee.clone();
+
+        // A: one honest proposer at slot 1.
+        let honest_only = vec![(ValidatorId::new(1), vrf_proposal(1, Slot::new(1)))];
+        apply_slot(&mut state_a, &net(), Slot::new(1), &honest_only);
+
+        // B: same honest proposer + one malformed reveal from proposer 0.
+        let mixed = vec![
+            (ValidatorId::new(0), malformed_vrf_proposal(0, Slot::new(1))),
+            (ValidatorId::new(1), vrf_proposal(1, Slot::new(1))),
+        ];
+        apply_slot(&mut state_b, &net(), Slot::new(1), &mixed);
+
+        // Randomness identical — the malformed reveal contributed nothing.
+        assert_eq!(state_a.randomness, state_b.randomness);
     }
 }
