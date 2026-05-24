@@ -676,7 +676,16 @@ pub enum SpcEvent {
     /// An inner-PC vote arrived, tagged with the SPC view.
     VpcMsg(Box<VpcMsgPayload>),
     /// `new-view` from a peer entering `view` under `cert`.
+    ///
+    /// `from` is the transport-level sender id. `NewView` isn't
+    /// sender-signed (the cert authenticates the parent claim
+    /// cryptographically), so `from` only determines which validator's
+    /// proposal-object slot this `NewView` fills. Two distinct valid
+    /// certs from the same `from` are valid relays, not equivocation —
+    /// last-write-wins.
     NewView {
+        /// Validator that relayed this notification.
+        from: ValidatorId,
         /// View the peer entered.
         view: SpcView,
         /// Cert backing the entry.
@@ -855,7 +864,7 @@ impl SpcInstance {
         match event {
             SpcEvent::Input(v) => self.on_input(v),
             SpcEvent::VpcMsg(payload) => self.on_vpc_msg(*payload),
-            SpcEvent::NewView { view, cert } => self.on_new_view(view, *cert),
+            SpcEvent::NewView { from, view, cert } => self.on_new_view(from, view, *cert),
             SpcEvent::NewCommit { view, value, proof } => self.on_new_commit(view, &value, *proof),
             SpcEvent::EmptyView(msg) => self.on_empty_view(*msg),
             SpcEvent::TimerExpired { view } => self.on_timer_expired(view),
@@ -976,8 +985,9 @@ impl SpcInstance {
                 value: high,
                 proof,
             };
-            // Self-process: enter view+1 and broadcast.
-            out.extend(self.enter_view(next, cert.clone()));
+            // Self-process: enter view+1 and broadcast. `from = me`
+            // because we're the relay for our own proposal-object.
+            out.extend(self.enter_view(self.me, next, cert.clone()));
             out.push(SpcEffect::BroadcastNewView {
                 view: next,
                 cert: Box::new(cert),
@@ -1013,7 +1023,7 @@ impl SpcInstance {
         out
     }
 
-    fn on_new_view(&mut self, view: SpcView, cert: SpcCert) -> Vec<SpcEffect> {
+    fn on_new_view(&mut self, from: ValidatorId, view: SpcView, cert: SpcCert) -> Vec<SpcEffect> {
         if !verify_cert(&cert, view, &self.network, &self.spc_ctx, &self.committee) {
             return vec![];
         }
@@ -1035,7 +1045,7 @@ impl SpcInstance {
         if !has_parent(prev_view, &parent_value, &self.proposals_by_hash) {
             return vec![];
         }
-        self.enter_view(view, cert)
+        self.enter_view(from, view, cert)
     }
 
     fn on_new_commit(&mut self, view: SpcView, value: &PcVector, proof: PcQc3) -> Vec<SpcEffect> {
@@ -1061,7 +1071,7 @@ impl SpcInstance {
         out
     }
 
-    fn enter_view(&mut self, view: SpcView, cert: SpcCert) -> Vec<SpcEffect> {
+    fn enter_view(&mut self, from: ValidatorId, view: SpcView, cert: SpcCert) -> Vec<SpcEffect> {
         if self.high_output.is_some() {
             return vec![];
         }
@@ -1103,7 +1113,7 @@ impl SpcInstance {
         // The cert authenticates the parent claim, so two distinct
         // valid certs from the "same sender" are valid relays, not
         // equivocation.
-        view_state.proposal_objects.insert(self.me, po);
+        view_state.proposal_objects.insert(from, po);
 
         // Kick the inner PC once we have all `n` proposal objects
         // (view ≥ 2; view 1 takes the application input directly).
@@ -1212,7 +1222,9 @@ impl SpcInstance {
             return vec![];
         };
         let next = SpcView::new(next_raw);
-        let mut out = self.enter_view(next, cert.clone());
+        // `from = me` because we're the relay for this indirect-cert
+        // assembly we just built ourselves.
+        let mut out = self.enter_view(self.me, next, cert.clone());
         out.push(SpcEffect::BroadcastNewView {
             view: next,
             cert: Box::new(cert),

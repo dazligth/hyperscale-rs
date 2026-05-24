@@ -6,7 +6,9 @@
 
 mod common;
 
-use common::PcSim;
+use std::time::Duration;
+
+use common::{PcSim, SpcSim};
 use hyperscale_beacon::spc::{
     build_indirect_cert, sign_empty_view_msg, verify_cert, verify_empty_view_msg,
     verify_proposal_object,
@@ -185,4 +187,46 @@ fn indirect_cert_with_swapped_target_value_rejected() {
         !verify_cert(&forged, entering_view, &network, &spc_ctx, &sim.members),
         "cert with swapped target_value must fail the value-hash binding gate",
     );
+}
+
+// ─── SpcSim — multi-party FSM convergence ─────────────────────────────────
+
+/// Drive a 4-party `SpcSim` with every party feeding the same input
+/// vector to view 1. All parties' view 1 PC converges, they all
+/// enter view 2 via direct cert, view 2's PC converges, and the
+/// commit walk back to view 1 latches `OutputHigh` on every party.
+#[test]
+fn sim_n4_honest_path_converges_on_high() {
+    let mut sim = SpcSim::new(4, 0xA0, Slot::new(1), Duration::from_mins(1));
+    let v = PcVector::new([elem(1), elem(2)]);
+    for i in 0..4 {
+        sim.input(i, v.clone());
+    }
+    sim.run_until_quiescent(10_000);
+    assert!(
+        sim.all_decided(),
+        "all 4 parties should latch OutputHigh on the happy path",
+    );
+    // Agreement (Theorem A.9): every party's high output is identical.
+    let baseline = sim.output(0).unwrap().clone();
+    for i in 1..4 {
+        assert_eq!(*sim.output(i).unwrap(), baseline);
+    }
+}
+
+/// Same at n=7 (q=5, f=2) — catches sizing assumptions baked into
+/// n=4.
+#[test]
+fn sim_n7_honest_path_converges_on_high() {
+    let mut sim = SpcSim::new(7, 0xA1, Slot::new(2), Duration::from_mins(1));
+    let v = PcVector::new(std::iter::once(elem(0x5A)));
+    for i in 0..7 {
+        sim.input(i, v.clone());
+    }
+    sim.run_until_quiescent(20_000);
+    assert!(sim.all_decided());
+    let baseline = sim.output(0).unwrap().clone();
+    for i in 1..7 {
+        assert_eq!(*sim.output(i).unwrap(), baseline);
+    }
 }
