@@ -193,4 +193,134 @@ mod tests {
         let votes = vec![vector_of([1]), vector_of([1])];
         assert!(qc1_certify(&votes, 2).is_none());
     }
+
+    // ─── Property tests ────────────────────────────────────────────────
+
+    use proptest::prelude::*;
+
+    fn arb_value_element() -> impl Strategy<Value = PcValueElement> {
+        // Tiny alphabet so the prefix structure is meaningful. Two
+        // random 32-byte elements would almost never agree.
+        (0u8..5).prop_map(ve)
+    }
+
+    fn arb_vector(max_len: usize) -> impl Strategy<Value = PcVector> {
+        prop::collection::vec(arb_value_element(), 0..=max_len).prop_map(PcVector::new)
+    }
+
+    fn arb_vector_set(
+        min_size: usize,
+        max_size: usize,
+        max_len: usize,
+    ) -> impl Strategy<Value = Vec<PcVector>> {
+        prop::collection::vec(arb_vector(max_len), min_size..=max_size)
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        /// `mcp(S)` is a prefix of every member of `S`.
+        #[test]
+        fn mcp_is_prefix_of_every_input(set in arb_vector_set(1, 8, 8)) {
+            let m = mcp(&set).expect("non-empty set");
+            for v in &set {
+                prop_assert!(m.is_prefix_of(v), "mcp not prefix of an input");
+            }
+        }
+
+        /// `mcp` is order-independent.
+        #[test]
+        fn mcp_commutative_under_shuffle(
+            set in arb_vector_set(1, 8, 8),
+            seed in 0u64..1_000_000,
+        ) {
+            let mut shuffled = set.clone();
+            let n = shuffled.len();
+            for i in 0..n {
+                let j = usize::try_from(seed.wrapping_mul(i as u64 + 1) % n as u64)
+                    .expect("n fits in u64 ⇒ n - 1 fits in usize");
+                shuffled.swap(i, j);
+            }
+            prop_assert_eq!(mcp(&set), mcp(&shuffled));
+        }
+
+        /// `mcp(S ∪ S) = mcp(S)` — duplicates don't shift the prefix.
+        #[test]
+        fn mcp_idempotent_under_duplication(set in arb_vector_set(1, 6, 8)) {
+            let m1 = mcp(&set);
+            let mut doubled = set.clone();
+            doubled.extend(set.iter().cloned());
+            prop_assert_eq!(m1, mcp(&doubled));
+        }
+
+        /// `mce` is `Some` iff every pair is consistent.
+        #[test]
+        fn mce_some_iff_pairwise_consistent(set in arb_vector_set(1, 6, 8)) {
+            let all_consistent = set.iter().enumerate().all(|(i, a)| {
+                set.iter().skip(i + 1).all(|b| a.is_consistent_with(b))
+            });
+            let result = mce(&set);
+            prop_assert_eq!(result.is_some(), all_consistent);
+        }
+
+        /// When `mce(S)` is defined, every input is a prefix of it.
+        #[test]
+        fn mce_extends_every_input(set in arb_vector_set(1, 6, 8)) {
+            if let Some(extension) = mce(&set) {
+                for v in &set {
+                    prop_assert!(v.is_prefix_of(&extension));
+                }
+            }
+        }
+
+        /// When `mce(S)` is defined, `mcp(S) ⪯ mce(S)`.
+        #[test]
+        fn mcp_is_prefix_of_mce_when_defined(set in arb_vector_set(1, 6, 8)) {
+            if let Some(extension) = mce(&set) {
+                let lower = mcp(&set).expect("non-empty set");
+                prop_assert!(lower.is_prefix_of(&extension));
+            }
+        }
+
+        /// `qc1_certify` output is a prefix of at least `f + 1` votes.
+        #[test]
+        fn qc1_certify_witnessed_by_f_plus_one(
+            votes in arb_vector_set(3, 9, 8),
+            f in 0usize..3,
+        ) {
+            prop_assume!(votes.len() > f);
+            let x = qc1_certify(&votes, f).expect("votes.len() > f satisfies precondition");
+            let witnesses = votes.iter().filter(|v| x.is_prefix_of(v)).count();
+            prop_assert!(
+                witnesses > f,
+                "qc1_certify has {witnesses} witnesses but needs > f={f}",
+            );
+        }
+
+        /// `qc1_certify` returns the *longest* such prefix — no
+        /// strictly longer prefix is shared by `f + 1` votes.
+        #[test]
+        fn qc1_certify_maximal(
+            votes in arb_vector_set(3, 8, 6),
+            f in 0usize..3,
+        ) {
+            prop_assume!(votes.len() > f);
+            let x = qc1_certify(&votes, f).expect("votes.len() > f satisfies precondition");
+            for candidate in &votes {
+                if x.len() >= candidate.len() {
+                    continue;
+                }
+                // Extend x by one element toward this candidate; check
+                // the extension can't reach f+1 witnesses.
+                let mut extended: Vec<PcValueElement> = x.iter().copied().collect();
+                extended.push(candidate.as_slice()[x.len()]);
+                let extended = PcVector::new(extended);
+                let witnesses = votes.iter().filter(|v| extended.is_prefix_of(v)).count();
+                prop_assert!(
+                    witnesses <= f,
+                    "qc1_certify wasn't maximal: extension reached {witnesses} > f={f} witnesses",
+                );
+            }
+        }
+    }
 }
