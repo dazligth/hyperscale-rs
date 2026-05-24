@@ -616,6 +616,7 @@ pub fn apply_slot(
     let vrf = filter_and_roll_randomness(state, network, slot, committed);
     let witness = ingest_witnesses(state, network, &vrf.accepted);
     let withdrawal = complete_pending_withdrawals(state);
+    let reactivated = auto_reactivate(state);
 
     let mut jailed = vrf.jailed;
     jailed.extend(witness.jailed);
@@ -627,6 +628,7 @@ pub fn apply_slot(
         deactivated,
         jailed,
         unjailed: witness.unjailed,
+        reactivated,
         readied: witness.readied,
         rejected_reveals: vrf.rejected_reveals,
         ..SlotEffects::default()
@@ -1302,6 +1304,79 @@ fn complete_pending_withdrawals(state: &mut BeaconState) -> WithdrawalOutcome {
         }
     }
     outcome
+}
+
+// ─── auto reactivation ─────────────────────────────────────────────────────
+
+/// Promote `InsufficientStake` validators back to `Pooled` for every
+/// pool that has newly-available capacity, looping until no pool can
+/// reactivate further.
+///
+/// Capacity becomes available when a `StakeDeposit` arrives or when
+/// any pool's reactivation lowers network-wide `min_stake` (each
+/// reactivation drops the pool's contribution to `t_no_eject` from
+/// `e/cur` to `e/(cur + 1)`, weakly smaller). The downstream effect
+/// is that every pool's `max_active_count` is weakly non-decreasing
+/// through the loop, so reactivation in pool A can unlock further
+/// reactivations in pool B.
+///
+/// Per-iteration progress: each successful flip removes one validator
+/// from the `InsufficientStake` set, which monotonically shrinks
+/// since the only way to *enter* `InsufficientStake` is via
+/// withdrawal completion or an explicit deactivation — neither of
+/// which runs inside this loop. The loop terminates in O(N²) at
+/// worst, in practice O(N).
+///
+/// The "doesn't immediately re-promote a just-deactivated validator"
+/// property is provided by the gate: the pool that triggered the
+/// deactivation in `complete_pending_withdrawals` now has
+/// `cur >= max` (the deactivation was *because* of over-commitment),
+/// so this loop skips it.
+fn auto_reactivate(state: &mut BeaconState) -> Vec<ValidatorId> {
+    let mut reactivated = Vec::new();
+    loop {
+        let mut did_any = false;
+        let pool_ids: Vec<StakePoolId> = state.pools.keys().copied().collect();
+        for pool_id in pool_ids {
+            let (cur, max) = {
+                let pool = state.pools.get(&pool_id).expect("just iterated");
+                (
+                    current_active_count(pool, state),
+                    max_active_count(pool, state),
+                )
+            };
+            if cur >= max {
+                continue;
+            }
+            let candidate = {
+                let pool = state.pools.get(&pool_id).expect("present");
+                pool.validators
+                    .iter()
+                    .rev()
+                    .find(|id| {
+                        matches!(
+                            state.validators.get(id).map(|r| &r.status),
+                            Some(ValidatorStatus::InsufficientStake),
+                        )
+                    })
+                    .copied()
+            };
+            let Some(rev_id) = candidate else {
+                continue;
+            };
+            state
+                .validators
+                .get_mut(&rev_id)
+                .expect("just found via the pool's validator set")
+                .status = ValidatorStatus::Pooled;
+            reactivated.push(rev_id);
+            did_any = true;
+        }
+        if !did_any {
+            break;
+        }
+    }
+    reactivated
 }
 
 #[cfg(test)]
@@ -2269,12 +2344,13 @@ mod tests {
     /// validator, `pool_draw` refills from any remaining pooled.
     #[test]
     fn deactivate_validator_on_shard_cascades() {
+        // 4 actives + 1 pooled. Pool stake exactly covers 4
+        // (`max_active_count = 4`), so after the cascade refills the
+        // freed slot the pool sits at `cur = max` and `auto_reactivate`
+        // doesn't reverse the deactivation.
         let mut state = single_pool_state(4);
         state.committee = (0u64..4).map(ValidatorId::new).collect();
         let pool_id = StakePoolId::new(0);
-        // Add a 5th validator in the pool to fuel the refill draw.
-        state.pools.get_mut(&pool_id).unwrap().total_stake =
-            Stake::from_attos(5 * MIN_STAKE_FLOOR.attos());
         state
             .pools
             .get_mut(&pool_id)
@@ -3514,5 +3590,169 @@ mod tests {
             state.validators.get(&ValidatorId::new(0)).unwrap().status,
             ValidatorStatus::OnShard { .. },
         ));
+    }
+
+    // ─── auto_reactivate ─────────────────────────────────────────────────
+
+    /// Build a pool with `n_active` validators (`OnShard`) plus
+    /// `insufficient` `InsufficientStake` validators in the same pool.
+    /// Pool stake is `total_stake_attos` attos; caller picks it to
+    /// engineer specific `max_active_count` outcomes.
+    fn state_with_insufficient(
+        n_active: u64,
+        insufficient: &[u64],
+        total_stake_attos: u128,
+    ) -> BeaconState {
+        let mut state = empty_state();
+        let pool_id = StakePoolId::new(0);
+        let shard = ShardGroupId::new(0);
+        let mut pool_validators = BTreeSet::new();
+        let mut members = Vec::new();
+        for i in 0..n_active {
+            let id = ValidatorId::new(i);
+            pool_validators.insert(id);
+            members.push(id);
+            state.validators.insert(
+                id,
+                validator_record(
+                    i,
+                    0,
+                    ValidatorStatus::OnShard {
+                        shard,
+                        ready: true,
+                        placed_at_epoch: Epoch::GENESIS,
+                    },
+                ),
+            );
+        }
+        for &id in insufficient {
+            pool_validators.insert(ValidatorId::new(id));
+            state.validators.insert(
+                ValidatorId::new(id),
+                validator_record(id, 0, ValidatorStatus::InsufficientStake),
+            );
+        }
+        state.pools.insert(
+            pool_id,
+            StakePool {
+                id: pool_id,
+                total_stake: Stake::from_attos(total_stake_attos),
+                validators: pool_validators,
+                pending_withdrawals: Vec::new(),
+            },
+        );
+        state
+            .shard_committees
+            .insert(shard, ShardCommittee { members });
+        state.committee = (0..n_active).map(ValidatorId::new).collect();
+        state
+    }
+
+    /// Pool with capacity for one more active and an
+    /// `InsufficientStake` validator → that validator reactivates to
+    /// `Pooled`.
+    #[test]
+    fn auto_reactivate_promotes_insufficient_when_capacity_available() {
+        // 3 actives, 1 insufficient, stake covers 4. After
+        // reactivation cur=4 ≤ max=4.
+        let mut state = state_with_insufficient(3, &[5], 4 * MIN_STAKE_FLOOR.attos());
+
+        let effects = apply_slot(&mut state, &net(), Slot::new(1), &[]);
+
+        assert_eq!(effects.reactivated, vec![ValidatorId::new(5)]);
+        assert_eq!(
+            state.validators.get(&ValidatorId::new(5)).unwrap().status,
+            ValidatorStatus::Pooled,
+        );
+    }
+
+    /// Pool with `InsufficientStake` validator but no capacity
+    /// (cur >= max) → no reactivation.
+    #[test]
+    fn auto_reactivate_skips_pool_at_capacity() {
+        // 4 actives, 1 insufficient, stake covers 4 only. cur=4, max=4
+        // → no reactivation.
+        let mut state = state_with_insufficient(4, &[5], 4 * MIN_STAKE_FLOOR.attos());
+
+        let effects = apply_slot(&mut state, &net(), Slot::new(1), &[]);
+
+        assert!(effects.reactivated.is_empty());
+        assert_eq!(
+            state.validators.get(&ValidatorId::new(5)).unwrap().status,
+            ValidatorStatus::InsufficientStake,
+        );
+    }
+
+    /// Pool with capacity but no `InsufficientStake` validators → no
+    /// reactivation.
+    #[test]
+    fn auto_reactivate_noop_when_no_candidates() {
+        let mut state = state_with_insufficient(3, &[], 10 * MIN_STAKE_FLOOR.attos());
+
+        let effects = apply_slot(&mut state, &net(), Slot::new(1), &[]);
+
+        assert!(effects.reactivated.is_empty());
+    }
+
+    /// Multiple `InsufficientStake` candidates: highest-id picked
+    /// first; subsequent iterations pick next-highest if capacity
+    /// still allows.
+    #[test]
+    fn auto_reactivate_picks_highest_id_first() {
+        // 1 active, 3 insufficient (ids 5, 7, 9), stake covers 3.
+        // Each iteration adds one validator: iteration 1 adds 9
+        // (cur=2), iteration 2 adds 7 (cur=3), iteration 3 sees
+        // cur=3=max, no further picks.
+        let mut state = state_with_insufficient(1, &[5, 7, 9], 3 * MIN_STAKE_FLOOR.attos());
+
+        let effects = apply_slot(&mut state, &net(), Slot::new(1), &[]);
+
+        assert_eq!(
+            effects.reactivated,
+            vec![ValidatorId::new(9), ValidatorId::new(7)],
+        );
+        assert_eq!(
+            state.validators.get(&ValidatorId::new(9)).unwrap().status,
+            ValidatorStatus::Pooled,
+        );
+        assert_eq!(
+            state.validators.get(&ValidatorId::new(7)).unwrap().status,
+            ValidatorStatus::Pooled,
+        );
+        // Validator 5 stays insufficient — pool full.
+        assert_eq!(
+            state.validators.get(&ValidatorId::new(5)).unwrap().status,
+            ValidatorStatus::InsufficientStake,
+        );
+    }
+
+    /// A validator just deactivated by `complete_pending_withdrawals`
+    /// in the same slot is NOT re-promoted: the pool that deactivated
+    /// them has `cur = max` after the release, so the auto-reactivate
+    /// gate skips it.
+    #[test]
+    fn auto_reactivate_does_not_unwind_same_slot_withdrawal_deactivation() {
+        let initiated = Epoch::new(2);
+        let current = Epoch::new(initiated.inner() + UNBONDING_WINDOW_EPOCHS);
+        // 4 actives, stake covers 4 exactly. Release MIN_STAKE_FLOOR
+        // — deactivates validator 3, leaves cur=3 max=3.
+        let mut state = state_with_pending_withdrawal(
+            4,
+            Stake::from_attos(4 * MIN_STAKE_FLOOR.attos()),
+            MIN_STAKE_FLOOR,
+            initiated,
+            current,
+        );
+
+        let effects = apply_slot(&mut state, &net(), Slot::new(1), &[]);
+
+        // Validator 3 was deactivated this slot.
+        assert_eq!(effects.deactivated, vec![ValidatorId::new(3)]);
+        // …and NOT re-promoted.
+        assert!(effects.reactivated.is_empty());
+        assert_eq!(
+            state.validators.get(&ValidatorId::new(3)).unwrap().status,
+            ValidatorStatus::InsufficientStake,
+        );
     }
 }
