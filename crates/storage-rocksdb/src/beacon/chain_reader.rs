@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use hyperscale_storage::BeaconChainReader;
-use hyperscale_types::{BeaconBlock, BeaconBlockHash, Slot};
+use hyperscale_types::{BeaconBlock, BeaconBlockHash, Epoch};
 use rocksdb::{IteratorMode, ReadOptions};
 
 use super::column_families::{BeaconBlocksBySlotCf, BeaconHashToSlotCf};
@@ -11,17 +11,17 @@ use super::core::RocksDbBeaconStorage;
 use crate::typed_cf::{DbCodec, TypedCf};
 
 impl BeaconChainReader for RocksDbBeaconStorage {
-    fn get_beacon_block_by_slot(&self, slot: Slot) -> Option<Arc<BeaconBlock>> {
-        self.cf_get::<BeaconBlocksBySlotCf>(&slot.inner())
+    fn get_beacon_block_by_slot(&self, epoch: Epoch) -> Option<Arc<BeaconBlock>> {
+        self.cf_get::<BeaconBlocksBySlotCf>(&epoch.inner())
             .map(Arc::new)
     }
 
     fn get_beacon_block_by_hash(&self, hash: BeaconBlockHash) -> Option<Arc<BeaconBlock>> {
-        let slot = self.cf_get::<BeaconHashToSlotCf>(&hash.into_raw())?;
-        self.cf_get::<BeaconBlocksBySlotCf>(&slot).map(Arc::new)
+        let epoch = self.cf_get::<BeaconHashToSlotCf>(&hash.into_raw())?;
+        self.cf_get::<BeaconBlocksBySlotCf>(&epoch).map(Arc::new)
     }
 
-    fn latest_committed_slot(&self) -> Option<Slot> {
+    fn latest_committed_slot(&self) -> Option<Epoch> {
         // First entry in End-mode iteration is the largest key; keys
         // are big-endian u64 slots, so lex-max == numeric-max.
         let cf = BeaconBlocksBySlotCf::handle(&self.cf());
@@ -30,13 +30,13 @@ impl BeaconChainReader for RocksDbBeaconStorage {
         let bytes: [u8; 8] = key
             .as_ref()
             .try_into()
-            .expect("beacon slot key must be 8 bytes");
-        Some(Slot::new(u64::from_be_bytes(bytes)))
+            .expect("beacon epoch key must be 8 bytes");
+        Some(Epoch::new(u64::from_be_bytes(bytes)))
     }
 
     fn iter_beacon_blocks_from(
         &self,
-        from: Slot,
+        from: Epoch,
     ) -> Box<dyn Iterator<Item = Arc<BeaconBlock>> + Send + '_> {
         let start = from.inner().to_be_bytes();
         let mut read_opts = ReadOptions::default();

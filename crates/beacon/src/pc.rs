@@ -33,10 +33,10 @@ use std::sync::Arc;
 
 use hyperscale_types::{
     Bls12381G1PrivateKey, Bls12381G1PublicKey, Bls12381G2Signature, DOMAIN_PC_VOTE1,
-    DOMAIN_PC_VOTE2, DOMAIN_PC_VOTE2_LENGTH, DOMAIN_PC_VOTE3, MAX_VOTE_VECTOR_LEN,
+    DOMAIN_PC_VOTE2, DOMAIN_PC_VOTE2_LENGTH, DOMAIN_PC_VOTE3, Epoch, MAX_VOTE_VECTOR_LEN,
     NetworkDefinition, PC_VALUE_ELEMENT_BYTES, PcCompactLenSigner, PcCompactVote, PcDivergingProof,
     PcQc1, PcQc2, PcQc3, PcValueElement, PcVector, PcVote1, PcVote2, PcVote3, PcVoteEquivocation,
-    PcVoteRound, PcXpProof, SignerBitfield, Slot, SpcView, ValidatorId,
+    PcVoteRound, PcXpProof, SignerBitfield, SpcView, ValidatorId,
     aggregate_verify_bls_different_messages, pc_context, pc_vote_signing_message, spc_context,
 };
 
@@ -472,13 +472,13 @@ pub fn verify_qc3(
 // ─── Equivocation ──────────────────────────────────────────────────────────
 
 /// Verify that a [`PcVoteEquivocation`] is a genuine double-sign by
-/// the same validator at the same `(slot, view, round)`.
+/// the same validator at the same `(epoch, view, round)`.
 ///
 /// Returns `true` only when:
 /// 1. `value_a != value_b` (otherwise no contradiction).
 /// 2. Both signatures verify under the validator's committee pubkey
 ///    against the canonical signing message for `(network, round-tag,
-///    pc_context(slot, view), value)`.
+///    pc_context(epoch, view), value)`.
 ///
 /// The validator must be in `committee`; non-members are rejected
 /// before any pairing. Round-3 sigs are individual sigs over `x_p`
@@ -501,7 +501,7 @@ pub fn verify_vote_equivocation(
         PcVoteRound::Vote2 => DOMAIN_PC_VOTE2,
         PcVoteRound::Vote3 => DOMAIN_PC_VOTE3,
     };
-    let spc_ctx = spc_context(ev.slot);
+    let spc_ctx = spc_context(ev.epoch);
     let ctx = pc_context(&spc_ctx, ev.view);
     let msg_a = pc_vote_signing_message(network, domain, &ctx, &ev.value_a);
     let msg_b = pc_vote_signing_message(network, domain, &ctx, &ev.value_b);
@@ -813,7 +813,7 @@ pub enum PcEffect {
     /// Broadcast a freshly-signed round-3 vote.
     BroadcastVote3(Box<PcVote3>),
     /// Slim wire-form evidence that a peer double-signed at the same
-    /// `(slot, view, round)`. The parent assembles this into beacon
+    /// `(epoch, view, round)`. The parent assembles this into beacon
     /// witnesses for inclusion in a future beacon proposal.
     EquivocationObserved(Box<PcVoteEquivocation>),
     /// Round-3 quorum reached — terminal cert ready. The parent reads
@@ -837,7 +837,7 @@ pub enum PcEvent {
     Vote3Received(Box<PcVote3>),
 }
 
-/// One inner-PC FSM instance, scoped to a single `(slot, view)`.
+/// One inner-PC FSM instance, scoped to a single `(epoch, view)`.
 ///
 /// SPC owns one `PcInstance` per view it drives; the
 /// `BeaconCoordinator` owns one `SpcInstance` per epoch. The FSM is
@@ -845,7 +845,7 @@ pub enum PcEvent {
 /// of effects that follow, and the parent drains them.
 pub struct PcInstance {
     network: NetworkDefinition,
-    slot: Slot,
+    epoch: Epoch,
     view: SpcView,
     pc_ctx: Vec<u8>,
     committee: Vec<(ValidatorId, Bls12381G1PublicKey)>,
@@ -863,7 +863,7 @@ pub struct PcInstance {
 }
 
 impl PcInstance {
-    /// Construct a fresh PC instance for `(slot, view)`.
+    /// Construct a fresh PC instance for `(epoch, view)`.
     ///
     /// # Panics
     ///
@@ -872,7 +872,7 @@ impl PcInstance {
     #[must_use]
     pub fn new(
         network: NetworkDefinition,
-        slot: Slot,
+        epoch: Epoch,
         view: SpcView,
         committee: Vec<(ValidatorId, Bls12381G1PublicKey)>,
         me: ValidatorId,
@@ -883,10 +883,10 @@ impl PcInstance {
             "PC requires n >= 4 (3f + 1 with f = 1); got n = {}",
             committee.len()
         );
-        let pc_ctx = pc_context(&spc_context(slot), view);
+        let pc_ctx = pc_context(&spc_context(epoch), view);
         Self {
             network,
-            slot,
+            epoch,
             view,
             pc_ctx,
             committee,
@@ -1072,7 +1072,7 @@ impl PcInstance {
     ) -> PcVoteEquivocation {
         PcVoteEquivocation {
             validator: equivocator,
-            slot: self.slot,
+            epoch: self.epoch,
             view: self.view,
             round,
             value_a,
@@ -1122,7 +1122,7 @@ mod tests {
     }
 
     fn ctx() -> Vec<u8> {
-        // Standalone test context — real callers use `spc_context(slot)`
+        // Standalone test context — real callers use `spc_context(epoch)`
         // followed by `pc_context(spc_ctx, view)`, but the verifier
         // doesn't care about its internal shape so long as it agrees
         // with the signer.
@@ -1277,12 +1277,12 @@ mod tests {
     /// carry the same value — no actual contradiction.
     #[test]
     fn verify_vote_equivocation_rejects_same_value() {
-        use hyperscale_types::{PcVoteEquivocation, PcVoteRound, Slot, SpcView};
+        use hyperscale_types::{Epoch, PcVoteEquivocation, PcVoteRound, SpcView};
         let c = committee(4);
         let v = PcVector::new(std::iter::once(elem(1)));
         let ev = PcVoteEquivocation {
             validator: ValidatorId::new(0),
-            slot: Slot::new(1),
+            epoch: Epoch::new(1),
             view: SpcView::new(0),
             round: PcVoteRound::Vote1,
             value_a: v.clone(),
@@ -1297,11 +1297,11 @@ mod tests {
     /// committee validator before any pairing.
     #[test]
     fn verify_vote_equivocation_rejects_non_committee_validator() {
-        use hyperscale_types::{PcVoteEquivocation, PcVoteRound, Slot, SpcView};
+        use hyperscale_types::{Epoch, PcVoteEquivocation, PcVoteRound, SpcView};
         let c = committee(4);
         let ev = PcVoteEquivocation {
             validator: ValidatorId::new(999),
-            slot: Slot::new(1),
+            epoch: Epoch::new(1),
             view: SpcView::new(0),
             round: PcVoteRound::Vote1,
             value_a: PcVector::new(std::iter::once(elem(1))),
@@ -1337,7 +1337,7 @@ mod tests {
 
     // ─── FSM tests ─────────────────────────────────────────────────────
 
-    use hyperscale_types::{Slot, SpcView, bls_keypair_from_seed};
+    use hyperscale_types::{Epoch, SpcView, bls_keypair_from_seed};
 
     fn fsm_committee(
         n: usize,
@@ -1362,7 +1362,7 @@ mod tests {
         let (sks, members) = fsm_committee(4);
         PcInstance::new(
             net(),
-            Slot::new(1),
+            Epoch::new(1),
             SpcView::new(0),
             members.clone(),
             members[idx].0,
@@ -1380,7 +1380,7 @@ mod tests {
         let (sks, members) = fsm_committee(3);
         let _ = PcInstance::new(
             net(),
-            Slot::new(1),
+            Epoch::new(1),
             SpcView::new(0),
             members,
             ValidatorId::new(0),
@@ -1412,7 +1412,7 @@ mod tests {
         let (sks, members) = fsm_committee(4);
         let mut fsm = PcInstance::new(
             net(),
-            Slot::new(1),
+            Epoch::new(1),
             SpcView::new(0),
             members.clone(),
             members[0].0,
@@ -1420,7 +1420,7 @@ mod tests {
         );
 
         // Two distinct v_ins signed by validator 1 (the equivocator).
-        let pc_ctx_bytes = pc_context(&spc_context(Slot::new(1)), SpcView::new(0));
+        let pc_ctx_bytes = pc_context(&spc_context(Epoch::new(1)), SpcView::new(0));
         let v_a = PcVector::new(std::iter::once(elem(1)));
         let v_b = PcVector::new(std::iter::once(elem(2)));
         let vote_a = sign_vote1(&sks[1], members[1].0, &net(), &pc_ctx_bytes, v_a);

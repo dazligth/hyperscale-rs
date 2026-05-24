@@ -2,7 +2,7 @@
 //!
 //! Pure functions. Both operations are seeded from a 32-byte randomness
 //! digest (the running [`BeaconState`] randomness in production, mixed
-//! from VRF reveals each slot). The PRNG is `ChaCha20Rng` — a
+//! from VRF reveals each epoch). The PRNG is `ChaCha20Rng` — a
 //! cryptographically uniform 32-byte-seeded stream, so unbiased bounded
 //! draws need no hand-rolled rejection sampling.
 //!
@@ -12,7 +12,7 @@
 //! [`BeaconState`]: crate::state::BeaconState
 
 use blake3::Hasher;
-use hyperscale_types::{ShardGroupId, Slot, ValidatorId};
+use hyperscale_types::{Epoch, ShardGroupId, ValidatorId};
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 
@@ -63,22 +63,22 @@ pub fn sample_committee(
     shuffled
 }
 
-/// Pick one validator from `pool` for placement on `shard` at `slot`.
+/// Pick one validator from `pool` for placement on `shard` at `epoch`.
 ///
-/// Uses `randomness` blended with `(slot, shard)` so draws across
-/// shards-in-a-slot and across slots-on-a-shard don't share a PRNG
+/// Uses `randomness` blended with `(epoch, shard)` so draws across
+/// shards-in-a-epoch and across slots-on-a-shard don't share a PRNG
 /// stream. Returns `None` if the pool is empty.
 ///
 /// Pure: the caller mutates `BeaconState` based on the returned id.
-/// Re-calling on the same `(pool, randomness, slot, shard)` returns
+/// Re-calling on the same `(pool, randomness, epoch, shard)` returns
 /// the same validator; callers that need multiple distinct picks
-/// from the same `(slot, shard)` must remove each pick from the pool
+/// from the same `(epoch, shard)` must remove each pick from the pool
 /// before the next call.
 #[must_use]
 pub fn draw_from_pool(
     pool: &[ValidatorId],
     randomness: &[u8; 32],
-    slot: Slot,
+    epoch: Epoch,
     shard: ShardGroupId,
 ) -> Option<ValidatorId> {
     if pool.is_empty() {
@@ -88,7 +88,7 @@ pub fn draw_from_pool(
     let mut h = Hasher::new();
     h.update(POOL_DRAW_DOMAIN);
     h.update(randomness);
-    h.update(&slot.inner().to_le_bytes());
+    h.update(&epoch.inner().to_le_bytes());
     h.update(&shard.inner().to_le_bytes());
     let seed = *h.finalize().as_bytes();
 
@@ -148,7 +148,7 @@ mod tests {
     #[test]
     fn draw_from_pool_returns_none_when_empty() {
         assert_eq!(
-            draw_from_pool(&[], &[0u8; 32], Slot::new(1), ShardGroupId::new(0)),
+            draw_from_pool(&[], &[0u8; 32], Epoch::new(1), ShardGroupId::new(0)),
             None
         );
     }
@@ -156,13 +156,13 @@ mod tests {
     #[test]
     fn draw_from_pool_deterministic_for_same_inputs() {
         let pool = ids(0..8);
-        let a = draw_from_pool(&pool, &[0x5A; 32], Slot::new(7), ShardGroupId::new(0));
-        let b = draw_from_pool(&pool, &[0x5A; 32], Slot::new(7), ShardGroupId::new(0));
+        let a = draw_from_pool(&pool, &[0x5A; 32], Epoch::new(7), ShardGroupId::new(0));
+        let b = draw_from_pool(&pool, &[0x5A; 32], Epoch::new(7), ShardGroupId::new(0));
         assert_eq!(a, b);
         assert!(a.is_some());
     }
 
-    /// Same `(pool, randomness, slot)` but different shards must use
+    /// Same `(pool, randomness, epoch)` but different shards must use
     /// distinct PRNG streams. Across many randomness values at least
     /// one pair must differ — if the shard id were collapsed out of
     /// the seed, no pair would ever differ.
@@ -170,8 +170,8 @@ mod tests {
     fn draw_from_pool_across_shards_uses_distinct_seeds() {
         let pool = ids(0..8);
         let any_differ = (0u8..16).any(|i| {
-            let a = draw_from_pool(&pool, &[i; 32], Slot::new(5), ShardGroupId::new(0));
-            let b = draw_from_pool(&pool, &[i; 32], Slot::new(5), ShardGroupId::new(1));
+            let a = draw_from_pool(&pool, &[i; 32], Epoch::new(5), ShardGroupId::new(0));
+            let b = draw_from_pool(&pool, &[i; 32], Epoch::new(5), ShardGroupId::new(1));
             a != b
         });
         assert!(any_differ);
@@ -183,8 +183,8 @@ mod tests {
     fn draw_from_pool_across_slots_uses_distinct_seeds() {
         let pool = ids(0..8);
         let any_differ = (0u8..16).any(|i| {
-            let a = draw_from_pool(&pool, &[i; 32], Slot::new(5), ShardGroupId::new(0));
-            let b = draw_from_pool(&pool, &[i; 32], Slot::new(6), ShardGroupId::new(0));
+            let a = draw_from_pool(&pool, &[i; 32], Epoch::new(5), ShardGroupId::new(0));
+            let b = draw_from_pool(&pool, &[i; 32], Epoch::new(6), ShardGroupId::new(0));
             a != b
         });
         assert!(any_differ);

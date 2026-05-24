@@ -5,7 +5,7 @@
 //! a `BeaconConfig` struct) so that altering one is a visible source-level
 //! edit, not a runtime knob someone can tweak by accident.
 //!
-//! Consumed by `BeaconState::apply_slot` (Phase B.5) to drive shuffles,
+//! Consumed by `BeaconState::apply_epoch` (Phase B.5) to drive shuffles,
 //! jail cooldowns, unbonding windows, and reward emission. Workspace-wide
 //! timing constants ([`EPOCH_DURATION`](hyperscale_types::EPOCH_DURATION)
 //! and friends) live in [`hyperscale_types::time`].
@@ -102,7 +102,7 @@ pub const MISSED_PROPOSAL_JAIL_THRESHOLD: u32 = 16;
 
 // ─── Apply-slot caps ───────────────────────────────────────────────────────
 
-/// Aggregate cap on distinct witnesses `apply_slot` folds into state in
+/// Aggregate cap on distinct witnesses `apply_epoch` folds into state in
 /// one slot.
 ///
 /// Bounds the per-slot `consumed_witnesses` size and the dedup-set

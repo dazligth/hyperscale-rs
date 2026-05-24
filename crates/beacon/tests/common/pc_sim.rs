@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use hyperscale_beacon::pc::{PcEffect, PcEvent, PcInstance};
 use hyperscale_types::{
-    Bls12381G1PrivateKey, Bls12381G1PublicKey, NetworkDefinition, PcQc3, PcVector, Slot, SpcView,
+    Bls12381G1PrivateKey, Bls12381G1PublicKey, Epoch, NetworkDefinition, PcQc3, PcVector, SpcView,
     ValidatorId, bls_keypair_from_seed,
 };
 
@@ -34,9 +34,9 @@ pub struct PcSim {
 impl PcSim {
     /// Build an `n`-party sim. Each party gets a deterministic BLS
     /// keypair seeded from `(seed, validator_id)` and a fresh
-    /// [`PcInstance`] for `(slot, view)`.
+    /// [`PcInstance`] for `(epoch, view)`.
     #[must_use]
-    pub fn new(n: usize, seed: u64, slot: Slot, view: SpcView) -> Self {
+    pub fn new(n: usize, seed: u64, epoch: Epoch, view: SpcView) -> Self {
         let network = NetworkDefinition::simulator();
         let mut sks = Vec::with_capacity(n);
         let mut members = Vec::with_capacity(n);
@@ -52,7 +52,7 @@ impl PcSim {
             .map(|i| {
                 PcInstance::new(
                     network.clone(),
-                    slot,
+                    epoch,
                     view,
                     members.clone(),
                     members[i].0,

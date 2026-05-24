@@ -12,7 +12,7 @@ mod common;
 use common::{PcSim, pc_ctx};
 use hyperscale_beacon::pc::verify_qc3;
 use hyperscale_types::{
-    NetworkDefinition, PC_VALUE_ELEMENT_BYTES, PcQc3, PcValueElement, PcVector, Slot, SpcView,
+    Epoch, NetworkDefinition, PC_VALUE_ELEMENT_BYTES, PcQc3, PcValueElement, PcVector, SpcView,
 };
 
 const fn elem(byte: u8) -> PcValueElement {
@@ -21,8 +21,8 @@ const fn elem(byte: u8) -> PcValueElement {
 
 /// Drive a 4-party `PcSim` to consensus with every party voting
 /// `unanimous_input`, then return party 0's terminal QC3.
-fn harvest_real_qc3(seed: u64, slot: Slot, unanimous_input: &PcVector) -> (PcSim, PcQc3) {
-    let mut sim = PcSim::new(4, seed, slot, SpcView::new(0));
+fn harvest_real_qc3(seed: u64, epoch: Epoch, unanimous_input: &PcVector) -> (PcSim, PcQc3) {
+    let mut sim = PcSim::new(4, seed, epoch, SpcView::new(0));
     for i in 0..4 {
         sim.input(i, unanimous_input.clone());
     }
@@ -41,7 +41,7 @@ fn harvest_real_qc3(seed: u64, slot: Slot, unanimous_input: &PcVector) -> (PcSim
 fn forge_qc3_with_empty_xpp_is_rejected() {
     let network = NetworkDefinition::simulator();
     let real_input = PcVector::new([elem(42), elem(42), elem(42)]);
-    let (sim, real) = harvest_real_qc3(0xA1, Slot::new(1), &real_input);
+    let (sim, real) = harvest_real_qc3(0xA1, Epoch::new(1), &real_input);
 
     // Sanity: the real QC3 verifies and its x_pp matches the input.
     assert_eq!(real.x_pp().as_slice(), &[elem(42), elem(42), elem(42)]);
@@ -72,7 +72,7 @@ fn forge_qc3_with_empty_xpp_is_rejected() {
 fn forge_qc3_with_extended_xpe_is_rejected() {
     let network = NetworkDefinition::simulator();
     let real_input = PcVector::new([elem(7), elem(7)]);
-    let (sim, real) = harvest_real_qc3(0xA2, Slot::new(2), &real_input);
+    let (sim, real) = harvest_real_qc3(0xA2, Epoch::new(2), &real_input);
 
     // Forge: append a phantom element to x_pe.
     let real_x_pe = real.x_pe().clone();

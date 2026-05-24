@@ -16,15 +16,15 @@ use crate::typed_cf::{BeU64Codec, HashCodec, SborCodec, TypedCf};
 /// Default CF (presence required by `RocksDB`; unused by beacon today).
 pub const DEFAULT_CF: &str = "default";
 
-/// Primary store keyed by `Slot` (big-endian `u64` for lex ordering).
+/// Primary store keyed by `Epoch` (big-endian `u64` for lex ordering).
 /// Value: SBOR-encoded [`BeaconBlock`](hyperscale_types::BeaconBlock).
-/// Range scans naturally yield ascending-slot order — used by
+/// Range scans naturally yield ascending-epoch order — used by
 /// `iter_beacon_blocks_from` for startup replay.
 pub const BEACON_BLOCKS_BY_SLOT_CF: &str = "beacon_blocks_by_slot";
 
-/// Secondary index `BeaconBlockHash → Slot` so hash lookups stay O(1)
+/// Secondary index `BeaconBlockHash → Epoch` so hash lookups stay O(1)
 /// without duplicating the block payload. Value: big-endian `u64`
-/// slot.
+/// epoch.
 pub const BEACON_HASH_TO_SLOT_CF: &str = "beacon_hash_to_slot";
 
 /// Full CF set passed to `DB::open_cf_descriptors` when initialising the
@@ -63,7 +63,7 @@ impl<'a> CfHandles<'a> {
 
 // ─── Typed CF definitions ────────────────────────────────────────────────────
 
-/// Primary beacon-blocks-by-slot CF. Key: `u64` slot (BE-encoded for
+/// Primary beacon-blocks-by-epoch CF. Key: `u64` epoch (BE-encoded for
 /// lex ordering). Value: SBOR-encoded `BeaconBlock`.
 pub struct BeaconBlocksBySlotCf;
 impl TypedCf for BeaconBlocksBySlotCf {
@@ -78,8 +78,8 @@ impl TypedCf for BeaconBlocksBySlotCf {
     }
 }
 
-/// Secondary hash-to-slot index CF. Key: 32-byte block hash. Value:
-/// `u64` slot (BE-encoded for consistency with the primary CF).
+/// Secondary hash-to-epoch index CF. Key: 32-byte block hash. Value:
+/// `u64` epoch (BE-encoded for consistency with the primary CF).
 pub struct BeaconHashToSlotCf;
 impl TypedCf for BeaconHashToSlotCf {
     const NAME: &'static str = BEACON_HASH_TO_SLOT_CF;

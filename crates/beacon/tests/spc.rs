@@ -14,7 +14,7 @@ use hyperscale_beacon::spc::{
     verify_proposal_object,
 };
 use hyperscale_types::{
-    NetworkDefinition, PC_VALUE_ELEMENT_BYTES, PcQc3, PcValueElement, PcVector, Slot, SpcCert,
+    Epoch, NetworkDefinition, PC_VALUE_ELEMENT_BYTES, PcQc3, PcValueElement, PcVector, SpcCert,
     SpcEmptyViewMsg, SpcHighTriple, SpcProposalObject, SpcView, spc_context,
 };
 
@@ -25,9 +25,9 @@ const fn elem(byte: u8) -> PcValueElement {
 /// Drive a 4-party PC sim and return party 0's terminal QC3 along
 /// with the sim itself (caller borrows committee + keys from it).
 fn harvest_real_qc3(seed: u64, view: u32, value: &PcVector) -> (PcSim, PcQc3) {
-    // Run PC under the slot the SPC test will use; view here means the
+    // Run PC under the epoch the SPC test will use; view here means the
     // PC's `view`, which becomes the SpcHighTriple's `view`.
-    let mut sim = PcSim::new(4, seed, Slot::new(1), SpcView::new(view));
+    let mut sim = PcSim::new(4, seed, Epoch::new(1), SpcView::new(view));
     for i in 0..4 {
         sim.input(i, value.clone());
     }
@@ -41,8 +41,8 @@ fn harvest_real_qc3(seed: u64, view: u32, value: &PcVector) -> (PcSim, PcQc3) {
 #[test]
 fn direct_cert_round_trip() {
     let network = NetworkDefinition::simulator();
-    let slot = Slot::new(1);
-    let spc_ctx = spc_context(slot);
+    let epoch = Epoch::new(1);
+    let spc_ctx = spc_context(epoch);
     let value = PcVector::new([elem(1), elem(2)]);
     let (sim, qc3) = harvest_real_qc3(0xD1, 3, &value);
 
@@ -79,8 +79,8 @@ fn direct_cert_round_trip() {
 #[test]
 fn indirect_cert_round_trip() {
     let network = NetworkDefinition::simulator();
-    let slot = Slot::new(1);
-    let spc_ctx = spc_context(slot);
+    let epoch = Epoch::new(1);
+    let spc_ctx = spc_context(epoch);
     let value = PcVector::new([elem(7)]);
     let (sim, qc3) = harvest_real_qc3(0xD2, 3, &value);
 
@@ -130,8 +130,8 @@ fn indirect_cert_round_trip() {
 #[test]
 fn indirect_cert_with_swapped_target_value_rejected() {
     let network = NetworkDefinition::simulator();
-    let slot = Slot::new(1);
-    let spc_ctx = spc_context(slot);
+    let epoch = Epoch::new(1);
+    let spc_ctx = spc_context(epoch);
 
     // Two different high triples at the same SPC view 3 — two sim
     // runs with different inputs yield distinct QC3s.
@@ -197,7 +197,7 @@ fn indirect_cert_with_swapped_target_value_rejected() {
 /// commit walk back to view 1 latches `OutputHigh` on every party.
 #[test]
 fn sim_n4_honest_path_converges_on_high() {
-    let mut sim = SpcSim::new(4, 0xA0, Slot::new(1), Duration::from_mins(1));
+    let mut sim = SpcSim::new(4, 0xA0, Epoch::new(1), Duration::from_mins(1));
     let v = PcVector::new([elem(1), elem(2)]);
     for i in 0..4 {
         sim.input(i, v.clone());
@@ -218,7 +218,7 @@ fn sim_n4_honest_path_converges_on_high() {
 /// n=4.
 #[test]
 fn sim_n7_honest_path_converges_on_high() {
-    let mut sim = SpcSim::new(7, 0xA1, Slot::new(2), Duration::from_mins(1));
+    let mut sim = SpcSim::new(7, 0xA1, Epoch::new(2), Duration::from_mins(1));
     let v = PcVector::new(std::iter::once(elem(0x5A)));
     for i in 0..7 {
         sim.input(i, v.clone());

@@ -11,13 +11,13 @@ use hyperscale_types::test_utils::test_event_type_identifier;
 use hyperscale_types::{
     ApplicationEvent, BeaconBlock, BeaconBlockHash, BeaconBlockHeader, BeaconProposalsRoot,
     BeaconStateRoot, BeaconWitnessLeafCount, BeaconWitnessRoot, Block, BlockHash, BlockHeader,
-    BlockHeight, Bls12381G2Signature, BoundedVec, CertificateRoot, ConsensusReceipt, EventData,
-    ExecutionCertificate, ExecutionMetadata, ExecutionOutcome, FeeSummary, FinalizedWave,
-    GlobalReceiptHash, GlobalReceiptRoot, Hash, InFlightCount, LocalReceiptRoot, LogLevel, NodeId,
-    ProposerTimestamp, ProvisionsRoot, QuorumCertificate, RecoveryCertHash, Round, ShardGroupId,
-    SignerBitfield, Slot, StateRoot, StoredReceipt, TransactionRoot, TxHash, TxOutcome,
-    ValidatorId, WaveCertificate, WaveId, WeightedTimestamp, compute_global_receipt_root,
-    zero_bls_signature,
+    BlockHeight, Bls12381G2Signature, BoundedVec, CertificateRoot, ConsensusReceipt, Epoch,
+    EventData, ExecutionCertificate, ExecutionMetadata, ExecutionOutcome, FeeSummary,
+    FinalizedWave, GlobalReceiptHash, GlobalReceiptRoot, Hash, InFlightCount, LocalReceiptRoot,
+    LogLevel, NodeId, ProposerTimestamp, ProvisionsRoot, QuorumCertificate, RecoveryCertHash,
+    Round, ShardGroupId, SignerBitfield, StateRoot, StoredReceipt, TransactionRoot, TxHash,
+    TxOutcome, ValidatorId, WaveCertificate, WaveId, WeightedTimestamp,
+    compute_global_receipt_root, zero_bls_signature,
 };
 use indexmap::IndexMap;
 use radix_common::math::Decimal;
@@ -156,15 +156,15 @@ pub fn make_test_qc(block: &Block) -> QuorumCertificate {
     )
 }
 
-/// Build a beacon block at `slot` whose header hash is derived from `tag`.
+/// Build a beacon block at `epoch` whose header hash is derived from `tag`.
 ///
 /// All other header fields are filled with fixed test sentinels — the
-/// resulting block round-trips through SBOR and exercises slot/hash
+/// resulting block round-trips through SBOR and exercises epoch/hash
 /// lookups but is not a valid block under beacon-state verification.
 #[must_use]
-pub fn make_test_beacon_block(slot: u64, tag: &[u8]) -> Arc<BeaconBlock> {
+pub fn make_test_beacon_block(epoch: u64, tag: &[u8]) -> Arc<BeaconBlock> {
     let header = BeaconBlockHeader::new(
-        Slot::new(slot),
+        Epoch::new(epoch),
         BeaconBlockHash::from_raw(Hash::from_bytes(tag)),
         BeaconProposalsRoot::from_raw(Hash::from_bytes(b"proposals")),
         BeaconStateRoot::from_raw(Hash::from_bytes(b"state")),

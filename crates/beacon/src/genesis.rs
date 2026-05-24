@@ -4,18 +4,18 @@
 //! *supplied* rather than *derived*: there's no prior randomness to
 //! seed sampling from, so the operator's TOML config carries explicit
 //! initial committees. Every subsequent committee transition is
-//! VRF-derived inside `apply_slot`.
+//! VRF-derived inside `apply_epoch`.
 //!
 //! [`build_genesis_beacon_state`] is the pure constructor — it takes a
 //! validated [`BeaconGenesisConfig`] and produces the live
-//! `BeaconState` for `Slot::GENESIS`. The TOML-loading wrapper that
+//! `BeaconState` for `Epoch::GENESIS`. The TOML-loading wrapper that
 //! produces `BeaconGenesisConfig` from disk lives at the validator
 //! binary layer (Phase B.10).
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use hyperscale_types::{
-    Bls12381G1PublicKey, Epoch, Randomness, ShardGroupId, Slot, Stake, StakePoolId, ValidatorId,
+    Bls12381G1PublicKey, Epoch, Randomness, ShardGroupId, Stake, StakePoolId, ValidatorId,
 };
 
 use crate::constants::{BEACON_SIGNER_COUNT, MIN_STAKE_FLOOR, SHARD_CAPACITY};
@@ -53,7 +53,7 @@ pub struct GenesisPool {
 /// Loaded from TOML at the validator binary's startup; consumed once by
 /// [`build_genesis_beacon_state`]. Every field is consensus-critical —
 /// two validators with different `BeaconGenesisConfig`s produce
-/// divergent `BeaconState`s at slot 0 and never converge.
+/// divergent `BeaconState`s at epoch 0 and never converge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BeaconGenesisConfig {
     /// Initial validator set.
@@ -69,7 +69,7 @@ pub struct BeaconGenesisConfig {
     /// get `OnShard { ready: true, placed_at_epoch: GENESIS }` —
     /// presumed synced by construction at chain bootstrap.
     pub initial_shard_committees: BTreeMap<ShardGroupId, Vec<ValidatorId>>,
-    /// Seed for the very first slot's randomness. Mixed straight into
+    /// Seed for the very first epoch's randomness. Mixed straight into
     /// `state.randomness`; subsequent slots roll it through accepted
     /// VRF outputs.
     pub initial_randomness: Randomness,
@@ -168,7 +168,6 @@ pub fn build_genesis_beacon_state(config: &BeaconGenesisConfig) -> BeaconState {
     committee.sort();
 
     BeaconState {
-        current_slot: Slot::GENESIS,
         current_epoch: Epoch::GENESIS,
         validators,
         pools,
@@ -320,7 +319,7 @@ mod tests {
     fn builds_state_at_slot_genesis() {
         let cfg = sample_config(4, 4, 4);
         let state = build_genesis_beacon_state(&cfg);
-        assert_eq!(state.current_slot, Slot::GENESIS);
+        assert_eq!(state.current_epoch, Epoch::GENESIS);
         assert_eq!(state.current_epoch, Epoch::GENESIS);
         assert_eq!(state.randomness, cfg.initial_randomness);
         assert!(state.consumed_through.is_empty());

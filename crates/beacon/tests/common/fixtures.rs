@@ -2,7 +2,7 @@
 //! signing-context builders.
 
 use hyperscale_types::{
-    Bls12381G1PrivateKey, Bls12381G1PublicKey, Slot, SpcView, ValidatorId, bls_keypair_from_seed,
+    Bls12381G1PrivateKey, Bls12381G1PublicKey, Epoch, SpcView, ValidatorId, bls_keypair_from_seed,
     pc_context, spc_context,
 };
 
@@ -66,10 +66,10 @@ impl Committee {
     }
 }
 
-/// Build a PC signing context for `(slot, view)`. Matches the runtime
-/// path: SPC binds the slot, PC binds the view on top.
+/// Build a PC signing context for `(epoch, view)`. Matches the runtime
+/// path: SPC binds the epoch, PC binds the view on top.
 #[must_use]
-pub fn pc_ctx(slot: u64, view: u32) -> Vec<u8> {
-    let spc = spc_context(Slot::new(slot));
+pub fn pc_ctx(epoch: u64, view: u32) -> Vec<u8> {
+    let spc = spc_context(Epoch::new(epoch));
     pc_context(&spc, SpcView::new(view))
 }

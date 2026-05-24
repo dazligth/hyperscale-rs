@@ -12,18 +12,18 @@ use hyperscale_types::BeaconBlock;
 /// is the committee QC — so no separate certificate parameter is
 /// threaded through.
 pub trait BeaconChainWriter: Send + Sync {
-    /// Persist `block` at its `block.slot()`.
+    /// Persist `block` at its `block.epoch()`.
     ///
-    /// Idempotent on `(slot, block_hash)` — committing the same block
+    /// Idempotent on `(epoch, block_hash)` — committing the same block
     /// twice is a no-op. Multiple per-vnode `BeaconCoordinator`s
     /// converging on the same committed block independently emit
     /// `Action::CommitBeaconBlock`; this idempotency is the storage
     /// layer's contribution to the three-layer dedup pattern
     /// (state machine + `io_loop` `BeaconCommitCoordinator` + storage).
     ///
-    /// Behavior under slot-collision with a *different* block is
+    /// Behavior under epoch-collision with a *different* block is
     /// implementation-defined: a well-behaved consensus never
-    /// produces two distinct blocks at the same slot, so a collision
+    /// produces two distinct blocks at the same epoch, so a collision
     /// indicates either a programming bug or Byzantine activity.
     /// Implementations may panic, log, or overwrite — none of these
     /// is safety-critical because the BFT layer's dedup catches it

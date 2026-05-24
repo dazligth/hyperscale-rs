@@ -1,10 +1,10 @@
-//! Beacon block header — what the slot committee signs to finalize a slot.
+//! Beacon block header — what the epoch committee signs to finalize a epoch.
 
 use sbor::prelude::*;
 
-use crate::{BeaconBlockHash, BeaconProposalsRoot, BeaconStateRoot, Hash, RecoveryCertHash, Slot};
+use crate::{BeaconBlockHash, BeaconProposalsRoot, BeaconStateRoot, Epoch, Hash, RecoveryCertHash};
 
-/// Beacon block header — what the slot's committee signs to finalize a slot.
+/// Beacon block header — what the epoch's committee signs to finalize a epoch.
 ///
 /// Two roots pair input with outcome:
 ///
@@ -12,7 +12,7 @@ use crate::{BeaconBlockHash, BeaconProposalsRoot, BeaconStateRoot, Hash, Recover
 ///   the committee decided over (every committee member's encoded
 ///   proposal).
 /// - [`state_root`](Self::state_root) commits to the *outcome* — the
-///   beacon chain's state after the slot's deterministic application
+///   beacon chain's state after the epoch's deterministic application
 ///   logic runs.
 ///
 /// `prev_block_hash` chains slots; `recovery_cert_hash` binds an
@@ -20,7 +20,7 @@ use crate::{BeaconBlockHash, BeaconProposalsRoot, BeaconStateRoot, Hash, Recover
 /// the aggregate signature so the cert body cannot be swapped post-hoc.
 #[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
 pub struct BeaconBlockHeader {
-    slot: Slot,
+    epoch: Epoch,
     prev_block_hash: BeaconBlockHash,
     proposals_root: BeaconProposalsRoot,
     state_root: BeaconStateRoot,
@@ -31,14 +31,14 @@ impl BeaconBlockHeader {
     /// Build a `BeaconBlockHeader` from its parts.
     #[must_use]
     pub const fn new(
-        slot: Slot,
+        epoch: Epoch,
         prev_block_hash: BeaconBlockHash,
         proposals_root: BeaconProposalsRoot,
         state_root: BeaconStateRoot,
         recovery_cert_hash: RecoveryCertHash,
     ) -> Self {
         Self {
-            slot,
+            epoch,
             prev_block_hash,
             proposals_root,
             state_root,
@@ -46,12 +46,12 @@ impl BeaconBlockHeader {
         }
     }
 
-    /// Genesis header (slot 0): zero parent hash, no proposals, given
+    /// Genesis header (epoch 0): zero parent hash, no proposals, given
     /// state root, no recovery cert.
     #[must_use]
     pub const fn genesis(state_root: BeaconStateRoot) -> Self {
         Self {
-            slot: Slot::GENESIS,
+            epoch: Epoch::GENESIS,
             prev_block_hash: BeaconBlockHash::ZERO,
             proposals_root: BeaconProposalsRoot::ZERO,
             state_root,
@@ -59,10 +59,10 @@ impl BeaconBlockHeader {
         }
     }
 
-    /// Slot this header finalizes.
+    /// Epoch this header finalizes.
     #[must_use]
-    pub const fn slot(&self) -> Slot {
-        self.slot
+    pub const fn epoch(&self) -> Epoch {
+        self.epoch
     }
 
     /// Hash of the previous finalized beacon block.
@@ -73,7 +73,7 @@ impl BeaconBlockHeader {
         self.prev_block_hash
     }
 
-    /// Merkle root over the slot's committed proposals (each committee
+    /// Merkle root over the epoch's committed proposals (each committee
     /// member's `(validator_id, encoded_proposal)`, sorted by id).
     ///
     /// `BeaconProposalsRoot::ZERO` for the genesis header.
@@ -83,7 +83,7 @@ impl BeaconBlockHeader {
     }
 
     /// Merkle commitment to the beacon-chain state after applying this
-    /// slot's committed proposals.
+    /// epoch's committed proposals.
     #[must_use]
     pub const fn state_root(&self) -> BeaconStateRoot {
         self.state_root
@@ -98,7 +98,7 @@ impl BeaconBlockHeader {
 
     /// Content hash of the header — used as the next block's
     /// [`prev_block_hash`](Self::prev_block_hash) and as the message the
-    /// slot committee signs.
+    /// epoch committee signs.
     ///
     /// # Panics
     ///
@@ -110,10 +110,10 @@ impl BeaconBlockHeader {
         BeaconBlockHash::from_raw(Hash::from_bytes(&bytes))
     }
 
-    /// Whether this is the genesis header (slot 0).
+    /// Whether this is the genesis header (epoch 0).
     #[must_use]
     pub fn is_genesis(&self) -> bool {
-        self.slot == Slot::GENESIS
+        self.epoch == Epoch::GENESIS
     }
 }
 
@@ -123,7 +123,7 @@ mod tests {
 
     fn sample_header() -> BeaconBlockHeader {
         BeaconBlockHeader::new(
-            Slot::new(7),
+            Epoch::new(7),
             BeaconBlockHash::from_raw(Hash::from_bytes(b"prev")),
             BeaconProposalsRoot::from_raw(Hash::from_bytes(b"proposals")),
             BeaconStateRoot::from_raw(Hash::from_bytes(b"state")),
@@ -141,7 +141,7 @@ mod tests {
     fn hash_is_content_sensitive() {
         let a = sample_header();
         let b = BeaconBlockHeader::new(
-            a.slot().next(),
+            a.epoch().next(),
             a.prev_block_hash(),
             a.proposals_root(),
             a.state_root(),
@@ -162,7 +162,7 @@ mod tests {
     fn genesis_has_zero_predecessor_and_zero_proposals() {
         let g = BeaconBlockHeader::genesis(BeaconStateRoot::from_raw(Hash::from_bytes(b"s")));
         assert!(g.is_genesis());
-        assert_eq!(g.slot(), Slot::GENESIS);
+        assert_eq!(g.epoch(), Epoch::GENESIS);
         assert_eq!(g.prev_block_hash(), BeaconBlockHash::ZERO);
         assert_eq!(g.proposals_root(), BeaconProposalsRoot::ZERO);
         assert_eq!(g.recovery_cert_hash(), RecoveryCertHash::ZERO);

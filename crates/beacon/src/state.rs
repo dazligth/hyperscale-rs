@@ -1,13 +1,13 @@
-//! Global beacon state and the slot pipeline that drives it.
+//! Global beacon state and the epoch pipeline that drives it.
 //!
-//! [`apply_slot`] mutates this state deterministically from each slot's
+//! [`apply_epoch`] mutates this state deterministically from each epoch's
 //! committed `BeaconProposal` set; the derived helpers
 //! ([`min_stake`], [`effective_stake`], [`current_active_count`],
 //! [`max_active_count`], [`pooled_validators`]) are pure functions of
 //! state — every call site re-derives the value rather than caching,
 //! so there's no two-piece state to keep in sync.
 //!
-//! # Slot-time vs epoch-time
+//! # Epoch-time vs epoch-time
 //!
 //! Validator-lifecycle fields ([`PendingWithdrawal::initiated_at_epoch`],
 //! [`ValidatorStatus::Jailed::since_epoch`],
@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use blake3::Hasher;
 use hyperscale_types::{
     BeaconProposal, Bls12381G1PublicKey, Epoch, EquivocationEvidence, LeafIndex, NetworkDefinition,
-    Randomness, RecoveryCertificate, ShardGroupId, ShardWitnessPayload, Slot, Stake, StakePoolId,
+    Randomness, RecoveryCertificate, ShardGroupId, ShardWitnessPayload, Stake, StakePoolId,
     ValidatorId, VrfOutput, vrf_verify,
 };
 
@@ -114,19 +114,19 @@ pub enum JailReason {
 
 /// Operational status of one validator.
 ///
-/// Transitions are driven by `apply_slot` from witnesses, withdrawal
+/// Transitions are driven by `apply_epoch` from witnesses, withdrawal
 /// completion, jail cascades, and pool draws.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValidatorStatus {
     /// In the global pool. Registered, supported by stake, but not
     /// placed on any shard. Picked up by the next pool draw driven by
-    /// a shard slot opening.
+    /// a shard epoch opening.
     Pooled,
     /// Placed on `shard`. `ready: true` once a `Ready` witness from
     /// the shard has been applied or
     /// [`READY_TIMEOUT_EPOCHS`](crate::constants::READY_TIMEOUT_EPOCHS)
     /// has elapsed since `placed_at_epoch`. Until then the validator
-    /// occupies a committee slot but doesn't sign.
+    /// occupies a committee epoch but doesn't sign.
     OnShard {
         /// Shard the validator is on.
         shard: ShardGroupId,
@@ -137,7 +137,7 @@ pub enum ValidatorStatus {
     },
     /// Jailed and removed from any prior shard. `Unjail` (after
     /// cooldown) returns the validator to `Pooled` iff the pool can
-    /// still support the additional active slot; otherwise the unjail
+    /// still support the additional active epoch; otherwise the unjail
     /// is rejected. Equivocation jails are permanent regardless.
     Jailed {
         /// Epoch the jail entered.
@@ -187,8 +187,8 @@ pub struct ValidatorRecord {
 /// transitions remove the validator from `members` synchronously.
 /// Order is incidental — the active signer set is filtered from
 /// `members` by status, not by position. `members.len() ≤
-/// SHARD_CAPACITY` at every slot boundary; the list shrinks transiently
-/// when a slot opens, then refills via `pool_draw` within the same
+/// SHARD_CAPACITY` at every epoch boundary; the list shrinks transiently
+/// when a epoch opens, then refills via `pool_draw` within the same
 /// step.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ShardCommittee {
@@ -198,24 +198,23 @@ pub struct ShardCommittee {
 
 // ─── beacon state ───────────────────────────────────────────────────────────
 
-/// Global beacon state. Updated atomically per slot by `apply_slot`.
+/// Global beacon state. Updated atomically per epoch by `apply_epoch`.
 ///
-/// Cross-validator agreement on every field at every slot follows from
-/// `apply_slot` being a pure deterministic function of `(state, slot,
+/// Cross-validator agreement on every field at every epoch follows from
+/// `apply_epoch` being a pure deterministic function of `(state, epoch,
 /// committed)` and SPC's Agreement guaranteeing all honest parties see
 /// the same `committed` argument.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BeaconState {
-    /// Highest slot whose commit has been applied.
-    pub current_slot: Slot,
-    /// Highest epoch whose committee rotation has been applied.
+    /// Highest epoch whose block has been applied. Advances by 1 per
+    /// successful `apply_epoch`.
     pub current_epoch: Epoch,
     /// Per-id validator records.
     pub validators: BTreeMap<ValidatorId, ValidatorRecord>,
     /// Per-id stake pools.
     pub pools: BTreeMap<StakePoolId, StakePool>,
     /// Running beacon randomness — BLAKE3 mix of the prior value with
-    /// each slot's accepted VRF outputs.
+    /// each epoch's accepted VRF outputs.
     pub randomness: Randomness,
     /// Beacon committee for the current epoch — the validators running
     /// the SPC instance producing this epoch's block.
@@ -250,11 +249,11 @@ pub struct BeaconState {
     /// `OnShard { shard }`. Crossing
     /// [`MISSED_PROPOSAL_JAIL_THRESHOLD`](crate::constants::MISSED_PROPOSAL_JAIL_THRESHOLD)
     /// jails the validator under `JailReason::Performance` in the same
-    /// slot.
+    /// epoch.
     pub miss_counters: BTreeMap<ValidatorId, u32>,
 }
 
-// ─── slot effects ───────────────────────────────────────────────────────────
+// ─── epoch effects ───────────────────────────────────────────────────────────
 
 /// What caused a [`CommitteeTransition`].
 ///
@@ -290,7 +289,7 @@ pub enum TransitionCause {
 /// or shut down SPC participation cleanly (if `to` excludes them).
 ///
 /// Cross-validator agreement on `(from, to, cause, at_slot)` follows
-/// from `apply_slot` being deterministic; every honest party computes
+/// from `apply_epoch` being deterministic; every honest party computes
 /// the same transition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitteeTransition {
@@ -300,15 +299,15 @@ pub struct CommitteeTransition {
     pub to: Vec<ValidatorId>,
     /// Why the transition fired.
     pub cause: TransitionCause,
-    /// Slot the transition was applied at.
-    pub at_slot: Slot,
+    /// Epoch the transition was applied at.
+    pub at_slot: Epoch,
 }
 
-/// Effects of applying one slot, returned by `apply_slot`.
+/// Effects of applying one epoch, returned by `apply_epoch`.
 ///
 /// Surfaced for observability, runner-side wiring (committee handover
 /// detection), and tests. Empty defaults match "nothing happened" — a
-/// slot with no commits and no boundary crossings returns
+/// epoch with no commits and no boundary crossings returns
 /// [`SlotEffects::default()`].
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SlotEffects {
@@ -318,7 +317,7 @@ pub struct SlotEffects {
     /// `DeactivateValidator` witness or via withdrawal-completion
     /// auto-deactivation.
     pub deactivated: Vec<ValidatorId>,
-    /// Validators jailed this slot (`Jail` witness, malformed VRF
+    /// Validators jailed this epoch (`Jail` witness, malformed VRF
     /// reveal, beacon-side `MissedProposal` threshold crossing, or
     /// equivocation evidence).
     pub jailed: Vec<ValidatorId>,
@@ -332,12 +331,12 @@ pub struct SlotEffects {
     /// via `Ready` witness or auto-ready timeout.
     pub readied: Vec<ValidatorId>,
     /// True iff `state.committee` (beacon committee) was re-sampled
-    /// this slot.
+    /// this epoch.
     pub committee_changed: bool,
     /// Beacon-committee handover when `committee_changed`.
     pub beacon_committee_transition: Option<CommitteeTransition>,
     /// Per-shard transitions emitted for any shard whose `members`
-    /// list changed this slot.
+    /// list changed this epoch.
     pub shard_committee_transitions: BTreeMap<ShardGroupId, CommitteeTransition>,
     /// Committee members whose `vrf_reveal` failed verification —
     /// their reveal did not contribute to the new randomness and their
@@ -345,9 +344,9 @@ pub struct SlotEffects {
     /// malformed proposal).
     pub rejected_reveals: Vec<ValidatorId>,
     /// Per-pool emission credit applied to `pool.total_stake` this
-    /// slot. Sum equals one epoch's emission share minus the burned
+    /// epoch. Sum equals one epoch's emission share minus the burned
     /// integer-division remainder. Empty when no pool had a ready
-    /// `OnShard` validator (whole slot's share burned).
+    /// `OnShard` validator (whole epoch's share burned).
     pub rewards_credited: BTreeMap<StakePoolId, Stake>,
 }
 
@@ -370,12 +369,12 @@ pub fn effective_stake(pool: &StakePool) -> Stake {
 }
 
 /// How many of `pool`'s validators are currently consuming an
-/// activation slot.
+/// activation epoch.
 ///
-/// Counts `Pooled` and `OnShard`; excludes `Jailed` (slot may stay
+/// Counts `Pooled` and `OnShard`; excludes `Jailed` (epoch may stay
 /// jailed indefinitely; locking stake against an uncertain return is
 /// wrong) and `InsufficientStake` (already represents "not consuming a
-/// slot").
+/// epoch").
 #[must_use]
 pub fn current_active_count(pool: &StakePool, state: &BeaconState) -> usize {
     pool.validators
@@ -475,7 +474,7 @@ fn t_no_eject(state: &BeaconState) -> Stake {
         .map_or(Stake::MAX, Stake::from_attos)
 }
 
-/// Marginal price at which exactly the target slot count is offered
+/// Marginal price at which exactly the target epoch count is offered
 /// across all pools.
 ///
 /// Each pool offers a descending sequence (`effective_stake / 1, / 2,
@@ -532,15 +531,15 @@ fn admit_threshold(state: &BeaconState) -> Stake {
 /// as `OnShard { ready: false, placed_at_epoch: state.current_epoch }`.
 ///
 /// Returns the chosen validator id, or `None` when the pool is empty
-/// (the slot stays open and refills on the next pool draw against a
+/// (the epoch stays open and refills on the next pool draw against a
 /// non-empty pool).
 ///
 /// The pool is derived per-call via [`pooled_validators`] rather than
-/// stored. Seeding binds to `(state.randomness, state.current_slot,
-/// shard)` so draws across shards within one slot — and across slots
+/// stored. Seeding binds to `(state.randomness, state.current_epoch,
+/// shard)` so draws across shards within one epoch — and across slots
 /// on one shard — use distinct PRNG streams.
 ///
-/// Multiple draws on the same `(slot, shard)` re-seed with the same
+/// Multiple draws on the same `(epoch, shard)` re-seed with the same
 /// bytes, but each subsequent call sees a strictly smaller derived
 /// pool: the previously-chosen validator's status is now `OnShard`,
 /// excluding them from the next call's `pooled_validators`. Picks
@@ -557,7 +556,7 @@ pub fn pool_draw(state: &mut BeaconState, shard: ShardGroupId) -> Option<Validat
     let chosen = draw_from_pool(
         &pool,
         state.randomness.as_bytes(),
-        state.current_slot,
+        state.current_epoch,
         shard,
     )?;
     state
@@ -578,42 +577,42 @@ pub fn pool_draw(state: &mut BeaconState, shard: ShardGroupId) -> Option<Validat
     Some(chosen)
 }
 
-// ─── slot pipeline ─────────────────────────────────────────────────────────
+// ─── epoch pipeline ─────────────────────────────────────────────────────────
 
-/// Apply one slot's SPC commit to `state`.
+/// Apply one epoch's SPC commit to `state`.
 ///
-/// `committed` is the per-slot proposals SPC's Agreement layer has
-/// agreed on. Pure deterministic function of `(state, network, slot,
+/// `committed` is the per-epoch proposals SPC's Agreement layer has
+/// agreed on. Pure deterministic function of `(state, network, epoch,
 /// committed)` — every honest party with byte-identical inputs lands
 /// at byte-identical state.
 ///
 /// # Panics
 ///
-/// Panics if `slot <= state.current_slot`. The slot watermark must
-/// strictly advance: a regressed or repeated slot from the runner
-/// would silently corrupt slot-difference math (cooldowns, unbonding,
+/// Panics if `epoch <= state.current_epoch`. The epoch watermark must
+/// strictly advance: a regressed or repeated epoch from the runner
+/// would silently corrupt epoch-difference math (cooldowns, unbonding,
 /// ready timeout) and replay witnesses against a watermark that
-/// already accounts for them. Genesis sits at `current_slot =
-/// GENESIS` and the first apply is `slot > GENESIS`, so strict `>` is
+/// already accounts for them. Genesis sits at `current_epoch =
+/// GENESIS` and the first apply is `epoch > GENESIS`, so strict `>` is
 /// the right bound. Tests sometimes skip slots, so we don't require
-/// strict-linear `slot == current_slot + 1`.
-pub fn apply_slot(
+/// strict-linear `epoch == current_epoch + 1`.
+pub fn apply_epoch(
     state: &mut BeaconState,
     network: &NetworkDefinition,
-    slot: Slot,
+    epoch: Epoch,
     committed: &[(ValidatorId, BeaconProposal)],
 ) -> SlotEffects {
     assert!(
-        slot > state.current_slot,
-        "apply_slot regression: slot {slot} <= state.current_slot {}",
-        state.current_slot,
+        epoch > state.current_epoch,
+        "apply_epoch regression: epoch {epoch} <= state.current_epoch {}",
+        state.current_epoch,
     );
-    // Set `current_slot` before the pipeline runs so every downstream
-    // helper (including `pool_draw`'s seed binding) reads "the slot
-    // I'm in," not "the slot before mine."
-    state.current_slot = slot;
+    // Set `current_epoch` before the pipeline runs so every downstream
+    // helper (including `pool_draw`'s seed binding) reads "the epoch
+    // I'm in," not "the epoch before mine."
+    state.current_epoch = epoch;
 
-    let vrf = filter_and_roll_randomness(state, network, slot, committed);
+    let vrf = filter_and_roll_randomness(state, network, epoch, committed);
     let witness = ingest_witnesses(state, network, &vrf.accepted);
     let withdrawal = complete_pending_withdrawals(state);
     let reactivated = auto_reactivate(state);
@@ -644,7 +643,7 @@ pub fn apply_slot(
 struct VrfStageOutcome<'a> {
     /// Proposals from committee members whose VRF reveal verified.
     /// References into the `committed` slice supplied to
-    /// [`apply_slot`].
+    /// [`apply_epoch`].
     accepted: Vec<&'a (ValidatorId, BeaconProposal)>,
     /// Validators in `state.committee` whose VRF reveal failed to
     /// verify. Their entire proposal — including any witnesses — was
@@ -663,9 +662,9 @@ struct VrfStageOutcome<'a> {
 ///
 /// `state.randomness` advances *always* — even when no proposal is
 /// accepted, the BLAKE3 mix runs against the prior randomness alone.
-/// An "all-rejected" slot still advances randomness as a
+/// An "all-rejected" epoch still advances randomness as a
 /// deterministic function of `prev_randomness`. An adversary who can
-/// suppress every VRF reveal can therefore predict the next slot's
+/// suppress every VRF reveal can therefore predict the next epoch's
 /// randomness from the previous one; the mitigation is the
 /// jail-on-first-sighting cascade here plus committee resampling at
 /// epoch boundaries.
@@ -673,7 +672,7 @@ struct VrfStageOutcome<'a> {
 /// A malformed VRF reveal under the proposer's own key is a
 /// self-inflicted cryptographic fault — an unmodified honest binary
 /// can't produce one. Jail on first sighting under
-/// `JailReason::Performance`; the freed shard slot refills via
+/// `JailReason::Performance`; the freed shard epoch refills via
 /// `pool_draw` in the same step as the status transition. Operators
 /// restart with a fixed binary and lift via `Unjail` once cooldown
 /// elapses. Non-`OnShard` rejected proposers (shouldn't normally
@@ -682,7 +681,7 @@ struct VrfStageOutcome<'a> {
 fn filter_and_roll_randomness<'a>(
     state: &mut BeaconState,
     network: &NetworkDefinition,
-    slot: Slot,
+    epoch: Epoch,
     committed: &'a [(ValidatorId, BeaconProposal)],
 ) -> VrfStageOutcome<'a> {
     let committee_set: BTreeSet<ValidatorId> = state.committee.iter().copied().collect();
@@ -705,7 +704,7 @@ fn filter_and_roll_randomness<'a>(
         };
         let output = prop.vrf_output();
         let proof = prop.vrf_proof();
-        if vrf_verify(&pk, network, slot, &output, &proof) {
+        if vrf_verify(&pk, network, epoch, &output, &proof) {
             accepted_outputs.push(output);
             accepted.push(entry);
         } else {
@@ -780,7 +779,7 @@ fn jail_validator(
 /// Outcome of [`ingest_witnesses`].
 ///
 /// Each field is a deterministic-order list of validator ids
-/// transitioned by witness application this slot, used by `apply_slot`
+/// transitioned by witness application this epoch, used by `apply_epoch`
 /// to populate the matching [`SlotEffects`] fields.
 #[derive(Default)]
 struct WitnessOutcome {
@@ -811,7 +810,7 @@ enum ShardEvent {
 /// `watermark + 1` is admitted, gaps and already-consumed leaves are
 /// silently dropped. The watermark advances on apply (regardless of
 /// whether the variant produced a validator-level event), so an
-/// honest committee can re-include a missing leaf next slot once the
+/// honest committee can re-include a missing leaf next epoch once the
 /// gap is filled.
 ///
 /// `Witness::Beacon::Equivocation` variants are collected alongside
@@ -823,12 +822,12 @@ enum ShardEvent {
 ///
 /// The wire decoder already bounds proposals at
 /// [`MAX_WITNESSES_PER_PROPOSER`](hyperscale_types::MAX_WITNESSES_PER_PROPOSER)
-/// via [`BeaconProposal`]'s `BoundedVec`. The slot-level cap
+/// via [`BeaconProposal`]'s `BoundedVec`. The epoch-level cap
 /// [`MAX_WITNESSES_PER_SLOT`](crate::constants::MAX_WITNESSES_PER_SLOT)
 /// is the product `BEACON_SIGNER_COUNT × MAX_WITNESSES_PER_PROPOSER`,
 /// which the wire bounds already imply for a well-formed committee.
 /// The check here exists as defence in depth: if the committee size
-/// ever grows without the slot cap being re-derived, the slot cap
+/// ever grows without the epoch cap being re-derived, the epoch cap
 /// bounds aggregate witness work regardless.
 fn ingest_witnesses(
     state: &mut BeaconState,
@@ -839,7 +838,7 @@ fn ingest_witnesses(
 
     use crate::constants::MAX_WITNESSES_PER_SLOT;
 
-    // Collect Shard witnesses with within-slot dedup keyed by
+    // Collect Shard witnesses with within-epoch dedup keyed by
     // `(shard_id, leaf_index)` — the unique identity of a witness in
     // its source shard's accumulator. `ShardWitnessProof` isn't `Ord`
     // (it's a wire type), so we key the dedup set on the tuple
@@ -900,7 +899,7 @@ fn ingest_witnesses(
     // Apply equivocations. Each is re-verified independently before
     // jailing; permanent-Equivocation already-jailed validators are
     // the no-op idempotence case. The validator-id→pubkey lookup is
-    // built once per slot, only when at least one equivocation is
+    // built once per epoch, only when at least one equivocation is
     // present (most slots carry none).
     if !equivocations.is_empty() {
         let lookup: Vec<(ValidatorId, Bls12381G1PublicKey)> = state
@@ -1041,7 +1040,7 @@ fn apply_shard_payload(
             // malformed key just fails every signature verification it
             // touches; the validator never signs successfully and gets
             // jailed via the miss-counter, costing at most one stalled
-            // slot per malformed registration.
+            // epoch per malformed registration.
             state.validators.insert(
                 *validator_id,
                 ValidatorRecord {
@@ -1063,7 +1062,7 @@ fn apply_shard_payload(
         ShardWitnessPayload::DeactivateValidator { validator_id } => {
             // Operator-initiated retirement. Flips to
             // `InsufficientStake` from every status except those that
-            // already represent "not consuming a slot" or "permanently
+            // already represent "not consuming a epoch" or "permanently
             // out": `InsufficientStake` itself and
             // `Jailed { Equivocation }`. Fault-cause jails
             // (`Performance`, `Recovery`) can still be deactivated —
@@ -1087,7 +1086,7 @@ fn apply_shard_payload(
         ShardWitnessPayload::Unjail { id } => {
             // Fault-cause jails return to `Pooled` once cooldown has
             // elapsed AND the pool can still support the additional
-            // active slot at the current dynamic `min_stake`. A pool
+            // active epoch at the current dynamic `min_stake`. A pool
             // that over-committed while the validator was jailed
             // strands them — operator recourse is to deactivate
             // another validator or deposit more stake before lifting.
@@ -1447,7 +1446,7 @@ fn distribute_epoch_rewards(state: &mut BeaconState) -> BTreeMap<StakePoolId, St
 /// `MissedProposal` jail cascade — they'll miss votes, accumulate
 /// misses, and the threshold trips the normal performance jail.
 ///
-/// Returns the ids that flipped this slot, deterministic ascending
+/// Returns the ids that flipped this epoch, deterministic ascending
 /// by `BTreeMap` iteration.
 fn auto_ready_timeout(state: &mut BeaconState) -> Vec<ValidatorId> {
     let current_epoch = state.current_epoch.inner();
@@ -1496,19 +1495,19 @@ mod tests {
     }
 
     /// Build an honest VRF-signed empty `BeaconProposal` for validator
-    /// `id` at `slot`. No witnesses (witness ingestion is a later
+    /// `id` at `epoch`. No witnesses (witness ingestion is a later
     /// stage); just a deterministic VRF reveal.
-    fn vrf_proposal(id: u64, slot: Slot) -> BeaconProposal {
+    fn vrf_proposal(id: u64, epoch: Epoch) -> BeaconProposal {
         let sk = keypair(id);
-        let (output, proof) = vrf_sign(&sk, &net(), slot);
+        let (output, proof) = vrf_sign(&sk, &net(), epoch);
         BeaconProposal::new(Vec::new(), output, proof)
     }
 
     /// Build a `BeaconProposal` whose VRF proof has been tampered with
     /// so verification fails. The (output, proof) pair is internally
     /// consistent by hash binding, but the BLS sig is broken.
-    fn malformed_vrf_proposal(id: u64, slot: Slot) -> BeaconProposal {
-        let p = vrf_proposal(id, slot);
+    fn malformed_vrf_proposal(id: u64, epoch: Epoch) -> BeaconProposal {
+        let p = vrf_proposal(id, epoch);
         let mut proof = p.vrf_proof();
         proof.0[0] ^= 1;
         // Output binding still matches the tampered proof (so we get
@@ -1529,7 +1528,6 @@ mod tests {
 
     fn empty_state() -> BeaconState {
         BeaconState {
-            current_slot: Slot::GENESIS,
             current_epoch: Epoch::GENESIS,
             validators: BTreeMap::new(),
             pools: BTreeMap::new(),
@@ -1731,7 +1729,7 @@ mod tests {
     /// Pins the `miss_counters` field shape (per-validator `u32`
     /// counter) so a future refactor that changes the value type is
     /// caught. The scoping invariants (per-epoch reset, status-
-    /// transition reset) live with `apply_slot`, not the type.
+    /// transition reset) live with `apply_epoch`, not the type.
     #[test]
     fn miss_counters_field_is_per_validator_u32_map() {
         let mut state = empty_state();
@@ -1745,16 +1743,10 @@ mod tests {
 
     /// Build a state with `n` validators all sitting in the global pool
     /// (status `Pooled`), one empty shard, and the given randomness +
-    /// `current_slot`. `pool_draw` reads `state.current_slot` and
-    /// `state.current_epoch` so the caller sets them up explicitly.
-    fn state_with_pool(
-        n: u64,
-        randomness: Randomness,
-        current_slot: Slot,
-        current_epoch: Epoch,
-    ) -> BeaconState {
+    /// `current_epoch`. `pool_draw` reads `state.current_epoch` and
+    /// `state.current_epoch` so the caller sets it up explicitly.
+    fn state_with_pool(n: u64, randomness: Randomness, current_epoch: Epoch) -> BeaconState {
         let mut state = empty_state();
-        state.current_slot = current_slot;
         state.current_epoch = current_epoch;
         state.randomness = randomness;
         let pool_id = StakePoolId::new(0);
@@ -1800,8 +1792,8 @@ mod tests {
     /// converge after a pool-draw event.
     #[test]
     fn pool_draw_is_deterministic_across_replicas() {
-        let mut a = state_with_pool(8, Randomness([0x5A; 32]), Slot::new(7), Epoch::new(1));
-        let mut b = state_with_pool(8, Randomness([0x5A; 32]), Slot::new(7), Epoch::new(1));
+        let mut a = state_with_pool(8, Randomness([0x5A; 32]), Epoch::new(1));
+        let mut b = state_with_pool(8, Randomness([0x5A; 32]), Epoch::new(1));
         let pick_a = pool_draw(&mut a, ShardGroupId::new(0)).unwrap();
         let pick_b = pool_draw(&mut b, ShardGroupId::new(0)).unwrap();
         assert_eq!(pick_a, pick_b);
@@ -1809,14 +1801,14 @@ mod tests {
         assert_eq!(pooled_validators(&a), pooled_validators(&b));
     }
 
-    /// Two draws at the same `(slot, shard)` pick distinct validators
+    /// Two draws at the same `(epoch, shard)` pick distinct validators
     /// even though the PRNG seed re-derives identically. The first
     /// draw flips its chosen validator to `OnShard`; the second draw's
     /// `pooled_validators` re-derivation excludes them, so the second
     /// draw indexes into a strictly smaller pool of different members.
     #[test]
     fn pool_draw_two_calls_same_slot_shard_pick_distinct_validators() {
-        let mut state = state_with_pool(8, Randomness([0x42; 32]), Slot::new(11), Epoch::new(1));
+        let mut state = state_with_pool(8, Randomness([0x42; 32]), Epoch::new(1));
         let first = pool_draw(&mut state, ShardGroupId::new(0)).unwrap();
         let second = pool_draw(&mut state, ShardGroupId::new(0)).unwrap();
         assert_ne!(first, second);
@@ -1832,7 +1824,7 @@ mod tests {
     #[test]
     fn pool_draw_places_chosen_validator_with_current_epoch() {
         let placed_epoch = Epoch::new(5);
-        let mut state = state_with_pool(4, Randomness([0x99; 32]), Slot::new(3), placed_epoch);
+        let mut state = state_with_pool(4, Randomness([0x99; 32]), placed_epoch);
         let chosen = pool_draw(&mut state, ShardGroupId::new(0)).unwrap();
         let status = state.validators.get(&chosen).unwrap().status;
         assert_eq!(
@@ -1845,14 +1837,14 @@ mod tests {
         );
     }
 
-    /// Different shards within the same `(state, slot)` use distinct
+    /// Different shards within the same `(state, epoch)` use distinct
     /// PRNG streams. Across multiple randomness values at least one
     /// pair must differ — if the shard id were collapsed out of the
     /// seed, no pair would ever differ.
     #[test]
     fn pool_draw_across_shards_uses_distinct_seeds() {
         let any_differ = (0u8..16).any(|i| {
-            let mut a = state_with_pool(8, Randomness([i; 32]), Slot::new(5), Epoch::GENESIS);
+            let mut a = state_with_pool(8, Randomness([i; 32]), Epoch::GENESIS);
             // Add a second shard so the draw target exists.
             a.shard_committees
                 .insert(ShardGroupId::new(1), ShardCommittee::default());
@@ -1864,51 +1856,51 @@ mod tests {
         assert!(any_differ);
     }
 
-    // ─── apply_slot regression check + slot advance ──────────────────────
+    // ─── apply_epoch regression check + epoch advance ──────────────────────
 
-    /// `apply_slot` rejects a slot that doesn't strictly advance
-    /// `state.current_slot`. Catches runner bugs that replay or
+    /// `apply_epoch` rejects a epoch that doesn't strictly advance
+    /// `state.current_epoch`. Catches runner bugs that replay or
     /// re-order SPC commits before the chain-difference math
     /// (cooldown, unbonding, ready-timeout) silently underflows.
     #[test]
-    #[should_panic(expected = "apply_slot regression")]
-    fn apply_slot_panics_on_slot_replay() {
+    #[should_panic(expected = "apply_epoch regression")]
+    fn apply_epoch_panics_on_slot_replay() {
         let mut state = single_pool_state(4);
         state.committee = (0u64..4).map(ValidatorId::new).collect();
-        apply_slot(&mut state, &net(), Slot::new(5), &[]);
-        // Replay of slot 5: current_slot is now 5, so slot=5 is
+        apply_epoch(&mut state, &net(), Epoch::new(5), &[]);
+        // Replay of epoch 5: current_epoch is now 5, so epoch=5 is
         // neither advance nor regression — must panic.
-        apply_slot(&mut state, &net(), Slot::new(5), &[]);
+        apply_epoch(&mut state, &net(), Epoch::new(5), &[]);
     }
 
     #[test]
-    #[should_panic(expected = "apply_slot regression")]
-    fn apply_slot_panics_on_slot_going_backwards() {
+    #[should_panic(expected = "apply_epoch regression")]
+    fn apply_epoch_panics_on_slot_going_backwards() {
         let mut state = single_pool_state(4);
         state.committee = (0u64..4).map(ValidatorId::new).collect();
-        apply_slot(&mut state, &net(), Slot::new(5), &[]);
-        apply_slot(&mut state, &net(), Slot::new(3), &[]);
+        apply_epoch(&mut state, &net(), Epoch::new(5), &[]);
+        apply_epoch(&mut state, &net(), Epoch::new(3), &[]);
     }
 
     #[test]
-    fn apply_slot_advances_current_slot() {
+    fn apply_epoch_advances_current_epoch() {
         let mut state = single_pool_state(4);
         state.committee = (0u64..4).map(ValidatorId::new).collect();
-        apply_slot(&mut state, &net(), Slot::new(7), &[]);
-        assert_eq!(state.current_slot, Slot::new(7));
+        apply_epoch(&mut state, &net(), Epoch::new(7), &[]);
+        assert_eq!(state.current_epoch, Epoch::new(7));
     }
 
     // ─── filter_and_roll_randomness ──────────────────────────────────────
 
-    /// Randomness rolls even on an all-empty slot. The mixer runs over
+    /// Randomness rolls even on an all-empty epoch. The mixer runs over
     /// `prev_randomness` alone — needed so the "all rejected" path is
-    /// well-defined and the chain doesn't stall on a silent slot.
+    /// well-defined and the chain doesn't stall on a silent epoch.
     #[test]
     fn randomness_rolls_with_empty_committed() {
         let mut state = single_pool_state(4);
         state.committee = (0u64..4).map(ValidatorId::new).collect();
         let prior = state.randomness;
-        apply_slot(&mut state, &net(), Slot::new(1), &[]);
+        apply_next_epoch(&mut state, &[]);
         assert_ne!(state.randomness, prior);
     }
 
@@ -1925,8 +1917,11 @@ mod tests {
             validator_record(5, 0, ValidatorStatus::Pooled),
         );
         let prior = state.randomness;
-        let bad = vec![(ValidatorId::new(5), vrf_proposal(5, Slot::new(1)))];
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &bad);
+        let bad = vec![(
+            ValidatorId::new(5),
+            vrf_proposal(5, state.current_epoch.next()),
+        )];
+        let effects = apply_next_epoch(&mut state, &bad);
         // Randomness rolled (over prev alone), but no contribution
         // from the dropped proposal — and no rejected_reveals entry.
         assert_ne!(state.randomness, prior);
@@ -1941,11 +1936,17 @@ mod tests {
         let mut state = single_pool_state(4);
         state.committee = (0u64..4).map(ValidatorId::new).collect();
         let committed = vec![
-            (ValidatorId::new(0), vrf_proposal(0, Slot::new(1))),
-            (ValidatorId::new(1), vrf_proposal(1, Slot::new(1))),
+            (
+                ValidatorId::new(0),
+                vrf_proposal(0, state.current_epoch.next()),
+            ),
+            (
+                ValidatorId::new(1),
+                vrf_proposal(1, state.current_epoch.next()),
+            ),
         ];
         let prior = state.randomness;
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+        let effects = apply_next_epoch(&mut state, &committed);
         assert_ne!(state.randomness, prior);
         assert!(effects.rejected_reveals.is_empty());
         assert!(effects.jailed.is_empty());
@@ -1959,12 +1960,13 @@ mod tests {
         let mut b = single_pool_state(4);
         a.committee = (0u64..4).map(ValidatorId::new).collect();
         b.committee = a.committee.clone();
+        let target = a.current_epoch.next();
         let committed = vec![
-            (ValidatorId::new(0), vrf_proposal(0, Slot::new(1))),
-            (ValidatorId::new(1), vrf_proposal(1, Slot::new(1))),
+            (ValidatorId::new(0), vrf_proposal(0, target)),
+            (ValidatorId::new(1), vrf_proposal(1, target)),
         ];
-        apply_slot(&mut a, &net(), Slot::new(1), &committed);
-        apply_slot(&mut b, &net(), Slot::new(1), &committed);
+        apply_next_epoch(&mut a, &committed);
+        apply_next_epoch(&mut b, &committed);
         assert_eq!(a.randomness, b.randomness);
     }
 
@@ -1992,22 +1994,25 @@ mod tests {
             validator_record(4, 0, ValidatorStatus::Pooled),
         );
 
-        let committed = vec![(ValidatorId::new(0), malformed_vrf_proposal(0, Slot::new(1)))];
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+        let committed = vec![(
+            ValidatorId::new(0),
+            malformed_vrf_proposal(0, state.current_epoch.next()),
+        )];
+        let effects = apply_next_epoch(&mut state, &committed);
 
         // Proposer 0 in rejected_reveals AND jailed.
         assert_eq!(effects.rejected_reveals, vec![ValidatorId::new(0)]);
         assert_eq!(effects.jailed, vec![ValidatorId::new(0)]);
-        // Status flipped to Jailed { Performance, since_epoch = GENESIS }.
+        // Status flipped to Jailed { Performance, since_epoch = current }.
         assert_eq!(
             state.validators.get(&ValidatorId::new(0)).unwrap().status,
             ValidatorStatus::Jailed {
-                since_epoch: Epoch::GENESIS,
+                since_epoch: state.current_epoch,
                 reason: JailReason::Performance,
             },
         );
         // Shard committee size stays at 4 — validator 4 drawn from
-        // pool to refill the freed slot.
+        // pool to refill the freed epoch.
         let members = &state.shard_committees[&ShardGroupId::new(0)].members;
         assert_eq!(members.len(), 4);
         assert!(!members.contains(&ValidatorId::new(0)));
@@ -2033,16 +2038,17 @@ mod tests {
         state_a.committee = (0u64..4).map(ValidatorId::new).collect();
         state_b.committee = state_a.committee.clone();
 
-        // A: one honest proposer at slot 1.
-        let honest_only = vec![(ValidatorId::new(1), vrf_proposal(1, Slot::new(1)))];
-        apply_slot(&mut state_a, &net(), Slot::new(1), &honest_only);
+        // A: one honest proposer at epoch 1.
+        let target = state_a.current_epoch.next();
+        let honest_only = vec![(ValidatorId::new(1), vrf_proposal(1, target))];
+        apply_next_epoch(&mut state_a, &honest_only);
 
         // B: same honest proposer + one malformed reveal from proposer 0.
         let mixed = vec![
-            (ValidatorId::new(0), malformed_vrf_proposal(0, Slot::new(1))),
-            (ValidatorId::new(1), vrf_proposal(1, Slot::new(1))),
+            (ValidatorId::new(0), malformed_vrf_proposal(0, target)),
+            (ValidatorId::new(1), vrf_proposal(1, target)),
         ];
-        apply_slot(&mut state_b, &net(), Slot::new(1), &mixed);
+        apply_next_epoch(&mut state_b, &mixed);
 
         // Randomness identical — the malformed reveal contributed nothing.
         assert_eq!(state_a.randomness, state_b.randomness);
@@ -2054,13 +2060,28 @@ mod tests {
         BlockHash, BoundedVec, ShardWitness, ShardWitnessPayload, ShardWitnessProof, Witness,
     };
 
-    /// Build a VRF-signed proposal for `id` at `slot` carrying the given
+    /// Build a VRF-signed proposal for `id` at `epoch` carrying the given
     /// witnesses. The `BoundedVec` inside `BeaconProposal` still caps
     /// witness count at construction.
-    fn vrf_proposal_with_witnesses(id: u64, slot: Slot, witnesses: Vec<Witness>) -> BeaconProposal {
+    fn vrf_proposal_with_witnesses(
+        id: u64,
+        epoch: Epoch,
+        witnesses: Vec<Witness>,
+    ) -> BeaconProposal {
         let sk = keypair(id);
-        let (output, proof) = vrf_sign(&sk, &net(), slot);
+        let (output, proof) = vrf_sign(&sk, &net(), epoch);
         BeaconProposal::new(witnesses, output, proof)
+    }
+
+    /// Apply the next epoch on top of `state.current_epoch`. Helper to
+    /// avoid the borrow-checker complaint of calling `apply_epoch`
+    /// with `state.current_epoch.next()` inline.
+    fn apply_next_epoch(
+        state: &mut BeaconState,
+        committed: &[(ValidatorId, BeaconProposal)],
+    ) -> SlotEffects {
+        let next = state.current_epoch.next();
+        apply_epoch(state, &net(), next, committed)
     }
 
     fn shard_witness(shard_id: u64, leaf_index: u64, payload: ShardWitnessPayload) -> Witness {
@@ -2102,9 +2123,9 @@ mod tests {
         );
         let committed = vec![(
             ValidatorId::new(0),
-            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w0, w1]),
+            vrf_proposal_with_witnesses(0, state.current_epoch.next(), vec![w0, w1]),
         )];
-        apply_slot(&mut state, &net(), Slot::new(1), &committed);
+        apply_next_epoch(&mut state, &committed);
 
         let pool = state.pools.get(&StakePoolId::new(7)).unwrap();
         assert_eq!(pool.total_stake, Stake::from_whole_tokens(150));
@@ -2137,9 +2158,9 @@ mod tests {
         );
         let committed = vec![(
             ValidatorId::new(0),
-            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+            vrf_proposal_with_witnesses(0, state.current_epoch.next(), vec![w]),
         )];
-        apply_slot(&mut state, &net(), Slot::new(1), &committed);
+        apply_next_epoch(&mut state, &committed);
 
         let pool = state.pools.get(&pool_id).unwrap();
         // total_stake unchanged.
@@ -2152,7 +2173,7 @@ mod tests {
         );
         assert_eq!(
             pool.pending_withdrawals[0].initiated_at_epoch,
-            Epoch::new(3)
+            state.current_epoch
         );
         // effective_stake dropped by the requested amount.
         assert_eq!(
@@ -2182,9 +2203,9 @@ mod tests {
         );
         let committed = vec![(
             ValidatorId::new(0),
-            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+            vrf_proposal_with_witnesses(0, state.current_epoch.next(), vec![w]),
         )];
-        apply_slot(&mut state, &net(), Slot::new(1), &committed);
+        apply_next_epoch(&mut state, &committed);
 
         let pool = state.pools.get(&pool_id).unwrap();
         assert!(pool.pending_withdrawals.is_empty());
@@ -2196,7 +2217,7 @@ mod tests {
         );
     }
 
-    /// Within-slot dedup: the same `(shard_id, leaf_index)` carried by
+    /// Within-epoch dedup: the same `(shard_id, leaf_index)` carried by
     /// multiple proposers counts as one event. Pins the dedup gate
     /// against a future refactor.
     #[test]
@@ -2215,13 +2236,13 @@ mod tests {
                     ValidatorId::new(i),
                     vrf_proposal_with_witnesses(
                         i,
-                        Slot::new(1),
+                        Epoch::new(1),
                         vec![shard_witness(0, 1, payload.clone())],
                     ),
                 )
             })
             .collect();
-        apply_slot(&mut state, &net(), Slot::new(1), &committed);
+        apply_next_epoch(&mut state, &committed);
 
         let pool = state.pools.get(&StakePoolId::new(7)).unwrap();
         // Only one deposit applied — total_stake reflects a single 100.
@@ -2258,9 +2279,9 @@ mod tests {
         );
         let committed = vec![(
             ValidatorId::new(0),
-            vrf_proposal_with_witnesses(0, Slot::new(1), vec![gap, replay]),
+            vrf_proposal_with_witnesses(0, state.current_epoch.next(), vec![gap, replay]),
         )];
-        apply_slot(&mut state, &net(), Slot::new(1), &committed);
+        apply_next_epoch(&mut state, &committed);
 
         // Neither pool was touched.
         assert!(!state.pools.contains_key(&StakePoolId::new(7)));
@@ -2309,9 +2330,9 @@ mod tests {
         ];
         let committed = vec![(
             ValidatorId::new(0),
-            vrf_proposal_with_witnesses(0, Slot::new(1), ws),
+            vrf_proposal_with_witnesses(0, state.current_epoch.next(), ws),
         )];
-        apply_slot(&mut state, &net(), Slot::new(1), &committed);
+        apply_next_epoch(&mut state, &committed);
 
         let pool = state.pools.get(&StakePoolId::new(7)).unwrap();
         assert_eq!(pool.total_stake, Stake::from_whole_tokens(6));
@@ -2350,15 +2371,15 @@ mod tests {
         );
         let committed = vec![(
             ValidatorId::new(0),
-            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+            vrf_proposal_with_witnesses(0, state.current_epoch.next(), vec![w]),
         )];
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+        let effects = apply_next_epoch(&mut state, &committed);
 
         assert_eq!(effects.registered, vec![new_id]);
         let rec = state.validators.get(&new_id).unwrap();
         assert_eq!(rec.pool, pool_id);
         assert_eq!(rec.status, ValidatorStatus::Pooled);
-        assert_eq!(rec.registered_at_epoch, Epoch::new(2));
+        assert_eq!(rec.registered_at_epoch, state.current_epoch);
         assert_eq!(rec.pubkey, new_pubkey);
         assert!(state.pools[&pool_id].validators.contains(&new_id));
     }
@@ -2388,9 +2409,9 @@ mod tests {
         );
         let committed = vec![(
             ValidatorId::new(0),
-            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+            vrf_proposal_with_witnesses(0, state.current_epoch.next(), vec![w]),
         )];
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+        let effects = apply_next_epoch(&mut state, &committed);
 
         assert!(effects.registered.is_empty());
         // Record unchanged — pubkey from the duplicate witness didn't
@@ -2417,9 +2438,9 @@ mod tests {
         );
         let committed = vec![(
             ValidatorId::new(0),
-            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+            vrf_proposal_with_witnesses(0, state.current_epoch.next(), vec![w]),
         )];
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+        let effects = apply_next_epoch(&mut state, &committed);
 
         assert!(effects.registered.is_empty());
         assert!(!state.validators.contains_key(&ValidatorId::new(5)));
@@ -2438,7 +2459,7 @@ mod tests {
     fn deactivate_validator_on_shard_cascades() {
         // 4 actives + 1 pooled. Pool stake exactly covers 4
         // (`max_active_count = 4`), so after the cascade refills the
-        // freed slot the pool sits at `cur = max` and `auto_reactivate`
+        // freed epoch the pool sits at `cur = max` and `auto_reactivate`
         // doesn't reverse the deactivation.
         let mut state = single_pool_state(4);
         state.committee = (0u64..4).map(ValidatorId::new).collect();
@@ -2463,9 +2484,9 @@ mod tests {
         );
         let committed = vec![(
             ValidatorId::new(0),
-            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+            vrf_proposal_with_witnesses(0, state.current_epoch.next(), vec![w]),
         )];
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+        let effects = apply_next_epoch(&mut state, &committed);
 
         assert_eq!(effects.deactivated, vec![ValidatorId::new(0)]);
         assert_eq!(
@@ -2510,9 +2531,9 @@ mod tests {
         );
         let committed = vec![(
             ValidatorId::new(0),
-            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+            vrf_proposal_with_witnesses(0, state.current_epoch.next(), vec![w]),
         )];
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+        let effects = apply_next_epoch(&mut state, &committed);
 
         assert_eq!(effects.deactivated, vec![ValidatorId::new(5)]);
         assert_eq!(
@@ -2568,9 +2589,9 @@ mod tests {
         ];
         let committed = vec![(
             ValidatorId::new(0),
-            vrf_proposal_with_witnesses(0, Slot::new(1), ws),
+            vrf_proposal_with_witnesses(0, state.current_epoch.next(), ws),
         )];
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+        let effects = apply_next_epoch(&mut state, &committed);
 
         assert!(effects.deactivated.is_empty());
         assert_eq!(
@@ -2615,9 +2636,9 @@ mod tests {
         );
         let committed = vec![(
             ValidatorId::new(0),
-            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+            vrf_proposal_with_witnesses(0, state.current_epoch.next(), vec![w]),
         )];
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+        let effects = apply_next_epoch(&mut state, &committed);
 
         assert_eq!(effects.deactivated, vec![ValidatorId::new(10)]);
         assert_eq!(
@@ -2674,9 +2695,9 @@ mod tests {
         );
         let committed = vec![(
             ValidatorId::new(0),
-            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+            vrf_proposal_with_witnesses(0, state.current_epoch.next(), vec![w]),
         )];
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+        let effects = apply_next_epoch(&mut state, &committed);
 
         assert_eq!(effects.unjailed, vec![ValidatorId::new(10)]);
         assert_eq!(
@@ -2691,8 +2712,9 @@ mod tests {
     fn unjail_before_cooldown_is_no_op() {
         let since = Epoch::new(5);
         let mut state = state_with_jailed(since, JailReason::Performance);
-        // current_epoch advances by less than the cooldown.
-        state.current_epoch = Epoch::new(since.inner() + JAIL_COOLDOWN_EPOCHS - 1);
+        // current_epoch two short of cooldown — apply_next_epoch's
+        // advance lands at (since + cooldown - 1), still under.
+        state.current_epoch = Epoch::new(since.inner() + JAIL_COOLDOWN_EPOCHS - 2);
 
         let w = shard_witness(
             0,
@@ -2703,9 +2725,9 @@ mod tests {
         );
         let committed = vec![(
             ValidatorId::new(0),
-            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+            vrf_proposal_with_witnesses(0, state.current_epoch.next(), vec![w]),
         )];
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+        let effects = apply_next_epoch(&mut state, &committed);
 
         assert!(effects.unjailed.is_empty());
         assert_eq!(
@@ -2733,9 +2755,9 @@ mod tests {
         );
         let committed = vec![(
             ValidatorId::new(0),
-            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+            vrf_proposal_with_witnesses(0, state.current_epoch.next(), vec![w]),
         )];
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+        let effects = apply_next_epoch(&mut state, &committed);
 
         assert!(effects.unjailed.is_empty());
         assert_eq!(
@@ -2748,7 +2770,7 @@ mod tests {
     }
 
     /// Unjail rejected when the pool can't support one more active
-    /// slot at the current `min_stake`. Validator stays Jailed.
+    /// epoch at the current `min_stake`. Validator stays Jailed.
     #[test]
     fn unjail_rejected_when_pool_at_capacity() {
         // single_pool_state(4) saturates the pool exactly: 4 actives,
@@ -2786,9 +2808,9 @@ mod tests {
         );
         let committed = vec![(
             ValidatorId::new(0),
-            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+            vrf_proposal_with_witnesses(0, state.current_epoch.next(), vec![w]),
         )];
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+        let effects = apply_next_epoch(&mut state, &committed);
 
         assert!(effects.unjailed.is_empty());
         assert_eq!(
@@ -2816,9 +2838,9 @@ mod tests {
         );
         let committed = vec![(
             ValidatorId::new(0),
-            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+            vrf_proposal_with_witnesses(0, state.current_epoch.next(), vec![w]),
         )];
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+        let effects = apply_next_epoch(&mut state, &committed);
 
         assert!(effects.unjailed.is_empty());
         assert!(matches!(
@@ -2891,9 +2913,9 @@ mod tests {
         );
         let committed = vec![(
             ValidatorId::new(0),
-            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+            vrf_proposal_with_witnesses(0, state.current_epoch.next(), vec![w]),
         )];
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+        let effects = apply_next_epoch(&mut state, &committed);
 
         assert_eq!(effects.readied, vec![ValidatorId::new(1)]);
         assert_eq!(
@@ -2923,9 +2945,9 @@ mod tests {
         );
         let committed = vec![(
             ValidatorId::new(0),
-            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+            vrf_proposal_with_witnesses(0, state.current_epoch.next(), vec![w]),
         )];
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+        let effects = apply_next_epoch(&mut state, &committed);
 
         assert!(effects.readied.is_empty());
         assert_eq!(state.validators.get(&ValidatorId::new(0)).unwrap(), &pre);
@@ -2951,9 +2973,9 @@ mod tests {
         );
         let committed = vec![(
             ValidatorId::new(0),
-            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+            vrf_proposal_with_witnesses(0, state.current_epoch.next(), vec![w]),
         )];
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+        let effects = apply_next_epoch(&mut state, &committed);
 
         assert!(effects.readied.is_empty());
         assert_eq!(
@@ -2994,9 +3016,9 @@ mod tests {
         let w = missed_proposal_witness(0, 1, target);
         let committed = vec![(
             ValidatorId::new(0),
-            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+            vrf_proposal_with_witnesses(0, state.current_epoch.next(), vec![w]),
         )];
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+        let effects = apply_next_epoch(&mut state, &committed);
 
         assert!(effects.jailed.is_empty());
         assert_eq!(state.miss_counters.get(&target), Some(&1));
@@ -3048,9 +3070,9 @@ mod tests {
         let w = missed_proposal_witness(0, 1, target);
         let committed = vec![(
             ValidatorId::new(0),
-            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+            vrf_proposal_with_witnesses(0, state.current_epoch.next(), vec![w]),
         )];
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+        let effects = apply_next_epoch(&mut state, &committed);
 
         assert!(effects.jailed.is_empty());
         assert!(!state.miss_counters.contains_key(&target));
@@ -3070,15 +3092,15 @@ mod tests {
         let w = missed_proposal_witness(0, 1, target);
         let committed = vec![(
             ValidatorId::new(0),
-            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+            vrf_proposal_with_witnesses(0, state.current_epoch.next(), vec![w]),
         )];
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+        let effects = apply_next_epoch(&mut state, &committed);
 
         assert!(effects.jailed.is_empty());
         assert!(!state.miss_counters.contains_key(&target));
     }
 
-    /// One `MissedProposal` per witness — multiple in a single slot
+    /// One `MissedProposal` per witness — multiple in a single epoch
     /// against the same validator accumulate. Below threshold, no
     /// jail.
     #[test]
@@ -3093,9 +3115,9 @@ mod tests {
             .collect();
         let committed = vec![(
             ValidatorId::new(0),
-            vrf_proposal_with_witnesses(0, Slot::new(1), ws),
+            vrf_proposal_with_witnesses(0, state.current_epoch.next(), ws),
         )];
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+        let effects = apply_next_epoch(&mut state, &committed);
 
         assert!(effects.jailed.is_empty());
         assert_eq!(state.miss_counters.get(&target), Some(&3));
@@ -3133,16 +3155,16 @@ mod tests {
         let w = missed_proposal_witness(0, 1, target);
         let committed = vec![(
             ValidatorId::new(0),
-            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+            vrf_proposal_with_witnesses(0, state.current_epoch.next(), vec![w]),
         )];
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+        let effects = apply_next_epoch(&mut state, &committed);
 
         assert_eq!(effects.jailed, vec![target]);
         // Jailed under Performance at current_epoch.
         assert_eq!(
             state.validators.get(&target).unwrap().status,
             ValidatorStatus::Jailed {
-                since_epoch: Epoch::GENESIS,
+                since_epoch: state.current_epoch,
                 reason: JailReason::Performance,
             },
         );
@@ -3164,8 +3186,11 @@ mod tests {
         // Pre-seed a non-zero miss counter for validator 0.
         state.miss_counters.insert(ValidatorId::new(0), 7);
 
-        let committed = vec![(ValidatorId::new(0), malformed_vrf_proposal(0, Slot::new(1)))];
-        apply_slot(&mut state, &net(), Slot::new(1), &committed);
+        let committed = vec![(
+            ValidatorId::new(0),
+            malformed_vrf_proposal(0, state.current_epoch.next()),
+        )];
+        apply_next_epoch(&mut state, &committed);
 
         // Validator 0 jailed via VRF; counter must be cleared.
         assert!(!state.miss_counters.contains_key(&ValidatorId::new(0)));
@@ -3188,9 +3213,9 @@ mod tests {
         );
         let committed = vec![(
             ValidatorId::new(0),
-            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+            vrf_proposal_with_witnesses(0, state.current_epoch.next(), vec![w]),
         )];
-        apply_slot(&mut state, &net(), Slot::new(1), &committed);
+        apply_next_epoch(&mut state, &committed);
 
         assert!(!state.miss_counters.contains_key(&ValidatorId::new(0)));
     }
@@ -3204,12 +3229,16 @@ mod tests {
     };
 
     /// Build a valid `PcVoteEquivocation` for `equivocator` at
-    /// `(slot, view)` over two distinct round-1 vectors. Both sigs
+    /// `(epoch, view)` over two distinct round-1 vectors. Both sigs
     /// verify under the equivocator's pubkey; the value mismatch is
     /// what makes it a contradiction.
-    fn build_vote_equivocation(equivocator: u64, slot: Slot, view: SpcView) -> PcVoteEquivocation {
+    fn build_vote_equivocation(
+        equivocator: u64,
+        epoch: Epoch,
+        view: SpcView,
+    ) -> PcVoteEquivocation {
         let sk = keypair(equivocator);
-        let spc_ctx = spc_context(slot);
+        let spc_ctx = spc_context(epoch);
         let pc_ctx = pc_context(&spc_ctx, view);
         let value_a = PcVector::new([PcValueElement::new([0xAA; 32])]);
         let value_b = PcVector::new([PcValueElement::new([0xBB; 32])]);
@@ -3217,7 +3246,7 @@ mod tests {
         let msg_b = pc_vote_signing_message(&net(), DOMAIN_PC_VOTE1, &pc_ctx, &value_b);
         PcVoteEquivocation {
             validator: ValidatorId::new(equivocator),
-            slot,
+            epoch,
             view,
             round: PcVoteRound::Vote1,
             value_a,
@@ -3227,8 +3256,8 @@ mod tests {
         }
     }
 
-    fn vote_equivocation_witness(equivocator: u64, slot: Slot, view: SpcView) -> Witness {
-        let ev = build_vote_equivocation(equivocator, slot, view);
+    fn vote_equivocation_witness(equivocator: u64, epoch: Epoch, view: SpcView) -> Witness {
+        let ev = build_vote_equivocation(equivocator, epoch, view);
         Witness::Beacon(BeaconWitness::Equivocation {
             evidence: Box::new(Evidence::Vote(Box::new(ev))),
         })
@@ -3257,18 +3286,18 @@ mod tests {
         );
 
         let target = ValidatorId::new(1);
-        let w = vote_equivocation_witness(target.inner(), Slot::new(5), SpcView::new(0));
+        let w = vote_equivocation_witness(target.inner(), Epoch::new(5), SpcView::new(0));
         let committed = vec![(
             ValidatorId::new(0),
-            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+            vrf_proposal_with_witnesses(0, state.current_epoch.next(), vec![w]),
         )];
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+        let effects = apply_next_epoch(&mut state, &committed);
 
         assert_eq!(effects.jailed, vec![target]);
         assert_eq!(
             state.validators.get(&target).unwrap().status,
             ValidatorStatus::Jailed {
-                since_epoch: Epoch::GENESIS,
+                since_epoch: state.current_epoch,
                 reason: JailReason::Equivocation,
             },
         );
@@ -3290,18 +3319,18 @@ mod tests {
             validator_record(10, 0, ValidatorStatus::Pooled),
         );
 
-        let w = vote_equivocation_witness(10, Slot::new(5), SpcView::new(0));
+        let w = vote_equivocation_witness(10, Epoch::new(5), SpcView::new(0));
         let committed = vec![(
             ValidatorId::new(0),
-            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+            vrf_proposal_with_witnesses(0, state.current_epoch.next(), vec![w]),
         )];
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+        let effects = apply_next_epoch(&mut state, &committed);
 
         assert_eq!(effects.jailed, vec![ValidatorId::new(10)]);
         assert_eq!(
             state.validators.get(&ValidatorId::new(10)).unwrap().status,
             ValidatorStatus::Jailed {
-                since_epoch: Epoch::GENESIS,
+                since_epoch: state.current_epoch,
                 reason: JailReason::Equivocation,
             },
         );
@@ -3326,18 +3355,18 @@ mod tests {
             ),
         );
 
-        let w = vote_equivocation_witness(10, Slot::new(5), SpcView::new(0));
+        let w = vote_equivocation_witness(10, Epoch::new(5), SpcView::new(0));
         let committed = vec![(
             ValidatorId::new(0),
-            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+            vrf_proposal_with_witnesses(0, state.current_epoch.next(), vec![w]),
         )];
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+        let effects = apply_next_epoch(&mut state, &committed);
 
         assert_eq!(effects.jailed, vec![ValidatorId::new(10)]);
         assert_eq!(
             state.validators.get(&ValidatorId::new(10)).unwrap().status,
             ValidatorStatus::Jailed {
-                since_epoch: Epoch::GENESIS,
+                since_epoch: state.current_epoch,
                 reason: JailReason::Equivocation,
             },
         );
@@ -3362,12 +3391,12 @@ mod tests {
             ),
         );
 
-        let w = vote_equivocation_witness(10, Slot::new(5), SpcView::new(0));
+        let w = vote_equivocation_witness(10, Epoch::new(5), SpcView::new(0));
         let committed = vec![(
             ValidatorId::new(0),
-            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+            vrf_proposal_with_witnesses(0, state.current_epoch.next(), vec![w]),
         )];
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+        let effects = apply_next_epoch(&mut state, &committed);
 
         assert!(effects.jailed.is_empty());
         // since_epoch unchanged — no jail re-applied.
@@ -3386,16 +3415,16 @@ mod tests {
     fn vote_equivocation_with_invalid_sig_is_dropped() {
         let mut state = single_pool_state(4);
         state.committee = (0u64..4).map(ValidatorId::new).collect();
-        let mut ev = build_vote_equivocation(1, Slot::new(5), SpcView::new(0));
+        let mut ev = build_vote_equivocation(1, Epoch::new(5), SpcView::new(0));
         ev.sig_a.0[0] ^= 1;
         let w = Witness::Beacon(BeaconWitness::Equivocation {
             evidence: Box::new(Evidence::Vote(Box::new(ev))),
         });
         let committed = vec![(
             ValidatorId::new(0),
-            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+            vrf_proposal_with_witnesses(0, state.current_epoch.next(), vec![w]),
         )];
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+        let effects = apply_next_epoch(&mut state, &committed);
 
         assert!(effects.jailed.is_empty());
         // Validator 1's status unchanged — still OnShard.
@@ -3424,7 +3453,7 @@ mod tests {
         let anchor = BeaconBlockHash::from_raw(Hash::from_bytes(b"anchor"));
         let request = RecoveryRequest::new(
             anchor,
-            Slot::new(7),
+            Epoch::new(7),
             RecoveryRound::new(1),
             ValidatorId::new(1),
             zero_bls_signature(),
@@ -3445,9 +3474,9 @@ mod tests {
         });
         let committed = vec![(
             ValidatorId::new(0),
-            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+            vrf_proposal_with_witnesses(0, state.current_epoch.next(), vec![w]),
         )];
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+        let effects = apply_next_epoch(&mut state, &committed);
 
         assert!(effects.jailed.is_empty());
         assert!(matches!(
@@ -3461,7 +3490,7 @@ mod tests {
     /// Build a single-pool state with `n_actives` active validators
     /// (placed `OnShard`) and one pre-loaded `PendingWithdrawal`. The
     /// fixture parks `current_epoch` at a value past the unbonding
-    /// window so the test can run `apply_slot` and watch the
+    /// window so the test can run `apply_epoch` and watch the
     /// withdrawal mature.
     fn state_with_pending_withdrawal(
         n_actives: u64,
@@ -3517,8 +3546,9 @@ mod tests {
     #[test]
     fn unmatured_withdrawal_stays_pending() {
         let initiated = Epoch::new(2);
-        // current_epoch one short of maturity.
-        let current = Epoch::new(initiated.inner() + UNBONDING_WINDOW_EPOCHS - 1);
+        // current_epoch two short of maturity — apply_next_epoch
+        // advances by 1 and the check runs at the still-unmature value.
+        let current = Epoch::new(initiated.inner() + UNBONDING_WINDOW_EPOCHS - 2);
         let mut state = state_with_pending_withdrawal(
             4,
             Stake::from_attos(4 * MIN_STAKE_FLOOR.attos()),
@@ -3528,7 +3558,7 @@ mod tests {
         );
         let pre_total = state.pools[&StakePoolId::new(0)].total_stake;
 
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &[]);
+        let effects = apply_next_epoch(&mut state, &[]);
 
         assert!(effects.deactivated.is_empty());
         let pool = &state.pools[&StakePoolId::new(0)];
@@ -3553,7 +3583,7 @@ mod tests {
             current,
         );
 
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &[]);
+        let effects = apply_next_epoch(&mut state, &[]);
 
         assert!(effects.deactivated.is_empty());
         let pool = &state.pools[&StakePoolId::new(0)];
@@ -3571,7 +3601,9 @@ mod tests {
     fn multiple_matured_withdrawals_batch() {
         let initiated_a = Epoch::new(2);
         let initiated_b = Epoch::new(3);
-        let current = Epoch::new(initiated_b.inner() + UNBONDING_WINDOW_EPOCHS);
+        // Set `current` one epoch before maturity so apply_next_epoch's
+        // advance lands exactly at the maturity boundary for `initiated_b`.
+        let current = Epoch::new(initiated_b.inner() + UNBONDING_WINDOW_EPOCHS - 1);
         let mut state = state_with_pending_withdrawal(
             4,
             Stake::from_attos(100 * MIN_STAKE_FLOOR.attos()),
@@ -3585,8 +3617,10 @@ mod tests {
             amount: Stake::from_attos(2 * MIN_STAKE_FLOOR.attos()),
             initiated_at_epoch: initiated_b,
         });
+        // still-pending withdrawal initiated late enough that
+        // post-apply current_epoch - still_pending < WINDOW.
         let still_pending_epoch =
-            Epoch::new(current.inner().saturating_sub(UNBONDING_WINDOW_EPOCHS - 1));
+            Epoch::new(current.inner().saturating_sub(UNBONDING_WINDOW_EPOCHS - 2));
         pool.pending_withdrawals.push(PendingWithdrawal {
             amount: Stake::from_whole_tokens(7),
             initiated_at_epoch: still_pending_epoch,
@@ -3594,7 +3628,7 @@ mod tests {
 
         let pre_total = state.pools[&StakePoolId::new(0)].total_stake;
 
-        apply_slot(&mut state, &net(), Slot::new(1), &[]);
+        apply_next_epoch(&mut state, &[]);
 
         let pool = &state.pools[&StakePoolId::new(0)];
         // Released = MIN_STAKE_FLOOR + 2 * MIN_STAKE_FLOOR.
@@ -3627,7 +3661,7 @@ mod tests {
             current,
         );
 
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &[]);
+        let effects = apply_next_epoch(&mut state, &[]);
 
         assert_eq!(effects.deactivated, vec![ValidatorId::new(3)]);
         // Validator 3 transitioned to InsufficientStake.
@@ -3660,7 +3694,7 @@ mod tests {
             current,
         );
 
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &[]);
+        let effects = apply_next_epoch(&mut state, &[]);
 
         // 3 highest-id validators flipped to InsufficientStake.
         assert_eq!(
@@ -3749,7 +3783,7 @@ mod tests {
         // reactivation cur=4 ≤ max=4.
         let mut state = state_with_insufficient(3, &[5], 4 * MIN_STAKE_FLOOR.attos());
 
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &[]);
+        let effects = apply_next_epoch(&mut state, &[]);
 
         assert_eq!(effects.reactivated, vec![ValidatorId::new(5)]);
         assert_eq!(
@@ -3766,7 +3800,7 @@ mod tests {
         // → no reactivation.
         let mut state = state_with_insufficient(4, &[5], 4 * MIN_STAKE_FLOOR.attos());
 
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &[]);
+        let effects = apply_next_epoch(&mut state, &[]);
 
         assert!(effects.reactivated.is_empty());
         assert_eq!(
@@ -3781,7 +3815,7 @@ mod tests {
     fn auto_reactivate_noop_when_no_candidates() {
         let mut state = state_with_insufficient(3, &[], 10 * MIN_STAKE_FLOOR.attos());
 
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &[]);
+        let effects = apply_next_epoch(&mut state, &[]);
 
         assert!(effects.reactivated.is_empty());
     }
@@ -3797,7 +3831,7 @@ mod tests {
         // cur=3=max, no further picks.
         let mut state = state_with_insufficient(1, &[5, 7, 9], 3 * MIN_STAKE_FLOOR.attos());
 
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &[]);
+        let effects = apply_next_epoch(&mut state, &[]);
 
         assert_eq!(
             effects.reactivated,
@@ -3819,7 +3853,7 @@ mod tests {
     }
 
     /// A validator just deactivated by `complete_pending_withdrawals`
-    /// in the same slot is NOT re-promoted: the pool that deactivated
+    /// in the same epoch is NOT re-promoted: the pool that deactivated
     /// them has `cur = max` after the release, so the auto-reactivate
     /// gate skips it.
     #[test]
@@ -3836,9 +3870,9 @@ mod tests {
             current,
         );
 
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &[]);
+        let effects = apply_next_epoch(&mut state, &[]);
 
-        // Validator 3 was deactivated this slot.
+        // Validator 3 was deactivated this epoch.
         assert_eq!(effects.deactivated, vec![ValidatorId::new(3)]);
         // …and NOT re-promoted.
         assert!(effects.reactivated.is_empty());
@@ -4123,7 +4157,7 @@ mod tests {
         state.committee = vec![ValidatorId::new(0)];
         insert_unready_on_shard(&mut state, 0, placed);
 
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &[]);
+        let effects = apply_next_epoch(&mut state, &[]);
 
         assert_eq!(effects.readied, vec![ValidatorId::new(0)]);
         assert_eq!(
@@ -4140,13 +4174,15 @@ mod tests {
     #[test]
     fn auto_ready_timeout_holds_before_threshold() {
         let placed = Epoch::new(3);
-        let current = Epoch::new(placed.inner() + READY_TIMEOUT_EPOCHS - 1);
+        // Two short of maturity — apply_next_epoch's advance lands at
+        // (placed + THRESHOLD - 1), still under.
+        let current = Epoch::new(placed.inner() + READY_TIMEOUT_EPOCHS - 2);
         let mut state = empty_state();
         state.current_epoch = current;
         state.committee = vec![ValidatorId::new(0)];
         insert_unready_on_shard(&mut state, 0, placed);
 
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &[]);
+        let effects = apply_next_epoch(&mut state, &[]);
 
         assert!(effects.readied.is_empty());
         assert!(matches!(
@@ -4180,7 +4216,7 @@ mod tests {
             ),
         );
 
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &[]);
+        let effects = apply_next_epoch(&mut state, &[]);
 
         assert!(effects.readied.is_empty());
         assert_eq!(
@@ -4212,7 +4248,7 @@ mod tests {
             Epoch::new(current.inner() - READY_TIMEOUT_EPOCHS),
         );
 
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &[]);
+        let effects = apply_next_epoch(&mut state, &[]);
 
         // Ids 0 and 2 flipped; 1 didn't.
         assert_eq!(
@@ -4233,7 +4269,7 @@ mod tests {
         ));
     }
 
-    /// `Ready` witness this slot and `auto_ready_timeout` flipping
+    /// `Ready` witness this epoch and `auto_ready_timeout` flipping
     /// other validators both populate `SlotEffects.readied` —
     /// witness path first, timeout path appended. Pins the
     /// dual-source field semantics.
@@ -4309,9 +4345,9 @@ mod tests {
         );
         let committed = vec![(
             ValidatorId::new(0),
-            vrf_proposal_with_witnesses(0, Slot::new(1), vec![ready_witness]),
+            vrf_proposal_with_witnesses(0, state.current_epoch.next(), vec![ready_witness]),
         )];
-        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+        let effects = apply_next_epoch(&mut state, &committed);
 
         // Both ended up in readied: validator 1 via witness, validator
         // 2 via timeout. Order: witness path appends first, then

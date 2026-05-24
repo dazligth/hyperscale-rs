@@ -1,7 +1,7 @@
 //! Domain-separated signing for beacon-chain VRF reveals.
 //!
-//! Each committee member signs `(network, slot)` under [`DOMAIN_PC_VRF`]
-//! to produce a slot-bound VRF reveal. The 96-byte BLS signature is the
+//! Each committee member signs `(network, epoch)` under [`DOMAIN_PC_VRF`]
+//! to produce a epoch-bound VRF reveal. The 96-byte BLS signature is the
 //! [`VrfProof`](crate::VrfProof); its digest is the
 //! [`VrfOutput`](crate::VrfOutput) mixed into beacon randomness.
 //!
@@ -14,7 +14,7 @@
 use blake3::Hasher;
 
 use crate::{
-    Bls12381G1PrivateKey, Bls12381G1PublicKey, Bls12381G2Signature, NetworkDefinition, Slot,
+    Bls12381G1PrivateKey, Bls12381G1PublicKey, Bls12381G2Signature, Epoch, NetworkDefinition,
     VrfOutput, VrfProof, verify_bls12381_v1,
 };
 
@@ -27,17 +27,17 @@ pub const DOMAIN_PC_VRF: &[u8] = b"HYPERSCALE_PC_VRF_v1";
 /// fails verification.
 const DOMAIN_VRF_OUTPUT: &[u8] = b"HYPERSCALE_VRF_OUTPUT_v1";
 
-/// Build the canonical signing bytes for a VRF reveal at `slot` under
+/// Build the canonical signing bytes for a VRF reveal at `epoch` under
 /// `network`.
 ///
 /// Layout: `domain || network.id || slot_le_bytes (8)`. Both fields are
 /// fixed-width so no length prefixes are needed.
 #[must_use]
-pub fn vrf_reveal_message(network: &NetworkDefinition, slot: Slot) -> Vec<u8> {
+pub fn vrf_reveal_message(network: &NetworkDefinition, epoch: Epoch) -> Vec<u8> {
     let mut out = Vec::with_capacity(DOMAIN_PC_VRF.len() + 1 + 8);
     out.extend_from_slice(DOMAIN_PC_VRF);
     out.push(network.id);
-    out.extend_from_slice(&slot.to_le_bytes());
+    out.extend_from_slice(&epoch.to_le_bytes());
     out
 }
 
@@ -56,19 +56,19 @@ pub fn vrf_output_from_proof(proof: &VrfProof) -> VrfOutput {
     VrfOutput(*h.finalize().as_bytes())
 }
 
-/// Sign `(network, slot)` and return the resulting `(VrfOutput,
+/// Sign `(network, epoch)` and return the resulting `(VrfOutput,
 /// VrfProof)` pair.
 ///
 /// Deterministic — BLS sigs in min-pk mode are a function of `(sk,
-/// message)` only, so the same `(sk, network, slot)` always produces
+/// message)` only, so the same `(sk, network, epoch)` always produces
 /// the same pair.
 #[must_use]
 pub fn vrf_sign(
     sk: &Bls12381G1PrivateKey,
     network: &NetworkDefinition,
-    slot: Slot,
+    epoch: Epoch,
 ) -> (VrfOutput, VrfProof) {
-    let msg = vrf_reveal_message(network, slot);
+    let msg = vrf_reveal_message(network, epoch);
     let sig = sk.sign_v1(&msg);
     let proof = VrfProof(sig.0);
     let output = vrf_output_from_proof(&proof);
@@ -76,11 +76,11 @@ pub fn vrf_sign(
 }
 
 /// Verify that `(output, proof)` was produced by `pk` over `(network,
-/// slot)`.
+/// epoch)`.
 ///
 /// Two checks, both must hold:
 /// 1. `proof` (as a BLS sig) verifies against `pk` over the bytes
-///    produced by [`vrf_reveal_message`] at `(network, slot)`.
+///    produced by [`vrf_reveal_message`] at `(network, epoch)`.
 /// 2. `output == vrf_output_from_proof(proof)`. Without this an
 ///    adversary holding a valid `(pk, proof)` pair could grind any
 ///    `output` they wanted into beacon randomness.
@@ -88,11 +88,11 @@ pub fn vrf_sign(
 pub fn vrf_verify(
     pk: &Bls12381G1PublicKey,
     network: &NetworkDefinition,
-    slot: Slot,
+    epoch: Epoch,
     output: &VrfOutput,
     proof: &VrfProof,
 ) -> bool {
-    let msg = vrf_reveal_message(network, slot);
+    let msg = vrf_reveal_message(network, epoch);
     let sig = Bls12381G2Signature(proof.0);
     if !verify_bls12381_v1(&msg, pk, &sig) {
         return false;
@@ -116,7 +116,7 @@ mod tests {
     /// host.
     #[test]
     fn vrf_reveal_message_byte_layout_is_pinned() {
-        let bytes = vrf_reveal_message(&net(), Slot::new(5));
+        let bytes = vrf_reveal_message(&net(), Epoch::new(5));
 
         let mut expected = Vec::new();
         expected.extend_from_slice(DOMAIN_PC_VRF);
@@ -128,21 +128,21 @@ mod tests {
     }
 
     /// Distinct slots produce distinct signing bytes under the same
-    /// network — every slot's reveal is bound to its own slot number so
-    /// a reveal can't be replayed against a later slot.
+    /// network — every epoch's reveal is bound to its own epoch number so
+    /// a reveal can't be replayed against a later epoch.
     #[test]
     fn vrf_reveal_message_differs_across_slots() {
-        let a = vrf_reveal_message(&net(), Slot::new(1));
-        let b = vrf_reveal_message(&net(), Slot::new(2));
+        let a = vrf_reveal_message(&net(), Epoch::new(1));
+        let b = vrf_reveal_message(&net(), Epoch::new(2));
         assert_ne!(a, b);
     }
 
-    /// Cross-network replay protection: byte-identical `(slot,)` inputs
+    /// Cross-network replay protection: byte-identical `(epoch,)` inputs
     /// under different networks must produce different signing bytes.
     #[test]
     fn vrf_reveal_message_differs_across_networks() {
-        let mainnet = vrf_reveal_message(&NetworkDefinition::mainnet(), Slot::new(7));
-        let stokenet = vrf_reveal_message(&NetworkDefinition::stokenet(), Slot::new(7));
+        let mainnet = vrf_reveal_message(&NetworkDefinition::mainnet(), Epoch::new(7));
+        let stokenet = vrf_reveal_message(&NetworkDefinition::stokenet(), Epoch::new(7));
         assert_ne!(mainnet, stokenet);
     }
 
@@ -152,7 +152,7 @@ mod tests {
     /// the result bytes diverge.
     #[test]
     fn vrf_reveal_message_differs_from_other_beacon_pc_domains() {
-        let vrf = vrf_reveal_message(&net(), Slot::new(1));
+        let vrf = vrf_reveal_message(&net(), Epoch::new(1));
         // The PC-vote encoders take a context + vector, but as long as
         // the prefix bytes differ at the domain tag, the full messages
         // can never match regardless of suffix content.
@@ -173,11 +173,11 @@ mod tests {
     #[test]
     fn vrf_sign_verify_round_trip() {
         let sk = keypair(3);
-        let (output, proof) = vrf_sign(&sk, &net(), Slot::new(42));
+        let (output, proof) = vrf_sign(&sk, &net(), Epoch::new(42));
         assert!(vrf_verify(
             &sk.public_key(),
             &net(),
-            Slot::new(42),
+            Epoch::new(42),
             &output,
             &proof
         ));
@@ -187,8 +187,8 @@ mod tests {
     #[test]
     fn vrf_sign_is_deterministic() {
         let sk = keypair(7);
-        let a = vrf_sign(&sk, &net(), Slot::new(100));
-        let b = vrf_sign(&sk, &net(), Slot::new(100));
+        let a = vrf_sign(&sk, &net(), Epoch::new(100));
+        let b = vrf_sign(&sk, &net(), Epoch::new(100));
         assert_eq!(a, b);
     }
 
@@ -197,26 +197,26 @@ mod tests {
     fn vrf_verify_rejects_cross_party() {
         let sk_a = keypair(3);
         let sk_b = keypair(4);
-        let (output, proof) = vrf_sign(&sk_a, &net(), Slot::new(42));
+        let (output, proof) = vrf_sign(&sk_a, &net(), Epoch::new(42));
         assert!(!vrf_verify(
             &sk_b.public_key(),
             &net(),
-            Slot::new(42),
+            Epoch::new(42),
             &output,
             &proof
         ));
     }
 
-    /// A reveal for slot N doesn't verify against slot M ≠ N — the slot
+    /// A reveal for epoch N doesn't verify against epoch M ≠ N — the epoch
     /// is bound into the signing message.
     #[test]
     fn vrf_verify_rejects_wrong_slot() {
         let sk = keypair(3);
-        let (output, proof) = vrf_sign(&sk, &net(), Slot::new(42));
+        let (output, proof) = vrf_sign(&sk, &net(), Epoch::new(42));
         assert!(!vrf_verify(
             &sk.public_key(),
             &net(),
-            Slot::new(43),
+            Epoch::new(43),
             &output,
             &proof
         ));
@@ -224,15 +224,15 @@ mod tests {
 
     /// Cross-network replay protection at the verify layer: a reveal
     /// signed under mainnet doesn't verify against stokenet even when
-    /// the slot matches.
+    /// the epoch matches.
     #[test]
     fn vrf_verify_rejects_cross_network() {
         let sk = keypair(3);
-        let (output, proof) = vrf_sign(&sk, &NetworkDefinition::mainnet(), Slot::new(42));
+        let (output, proof) = vrf_sign(&sk, &NetworkDefinition::mainnet(), Epoch::new(42));
         assert!(!vrf_verify(
             &sk.public_key(),
             &NetworkDefinition::stokenet(),
-            Slot::new(42),
+            Epoch::new(42),
             &output,
             &proof,
         ));
@@ -244,12 +244,12 @@ mod tests {
     #[test]
     fn vrf_verify_rejects_tampered_output() {
         let sk = keypair(3);
-        let (mut output, proof) = vrf_sign(&sk, &net(), Slot::new(42));
+        let (mut output, proof) = vrf_sign(&sk, &net(), Epoch::new(42));
         output.0[0] ^= 1;
         assert!(!vrf_verify(
             &sk.public_key(),
             &net(),
-            Slot::new(42),
+            Epoch::new(42),
             &output,
             &proof
         ));
@@ -260,12 +260,12 @@ mod tests {
     #[test]
     fn vrf_verify_rejects_tampered_proof() {
         let sk = keypair(3);
-        let (output, mut proof) = vrf_sign(&sk, &net(), Slot::new(42));
+        let (output, mut proof) = vrf_sign(&sk, &net(), Epoch::new(42));
         proof.0[0] ^= 1;
         assert!(!vrf_verify(
             &sk.public_key(),
             &net(),
-            Slot::new(42),
+            Epoch::new(42),
             &output,
             &proof
         ));

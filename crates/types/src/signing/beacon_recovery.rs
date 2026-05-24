@@ -1,7 +1,7 @@
 //! Domain-separated signing for beacon-chain recovery requests.
 //!
 //! Each active validator signs the triple
-//! `(last_block_hash, last_block_slot, recovery_round)` under
+//! `(last_block_hash, last_block_epoch, recovery_round)` under
 //! [`DOMAIN_RECOVERY_REQUEST`] to attest the beacon chain has not
 //! progressed past that anchor within the recovery timeout. Aggregating
 //! ≥⅔ of active signers over the same triple produces a
@@ -14,30 +14,30 @@
 //! confused with a PC vote, a VRF reveal, or a beacon-header sig, all
 //! of which reuse the same BLS keys.
 
-use crate::{BeaconBlockHash, NetworkDefinition, RecoveryRound, Slot};
+use crate::{BeaconBlockHash, Epoch, NetworkDefinition, RecoveryRound};
 
 /// Domain tag for individual recovery-request signatures and for the
 /// aggregate signature on the assembled [`RecoveryCertificate`](crate::RecoveryCertificate).
 pub const DOMAIN_RECOVERY_REQUEST: &[u8] = b"HYPERSCALE_RECOVERY_REQUEST_v1";
 
 /// Build the canonical signing bytes for a recovery request at
-/// `(last_block_hash, last_block_slot, recovery_round)` under `network`.
+/// `(last_block_hash, last_block_epoch, recovery_round)` under `network`.
 ///
 /// Layout: `domain || network.id || last_block_hash (32) ||
-/// last_block_slot_le (8) || recovery_round_le (4)`. All fields are
+/// last_block_epoch_le (8) || recovery_round_le (4)`. All fields are
 /// fixed-width so no length prefixes are needed.
 #[must_use]
 pub fn recovery_request_message(
     network: &NetworkDefinition,
     last_block_hash: &BeaconBlockHash,
-    last_block_slot: Slot,
+    last_block_epoch: Epoch,
     recovery_round: RecoveryRound,
 ) -> Vec<u8> {
     let mut out = Vec::with_capacity(DOMAIN_RECOVERY_REQUEST.len() + 1 + 32 + 8 + 4);
     out.extend_from_slice(DOMAIN_RECOVERY_REQUEST);
     out.push(network.id);
     out.extend_from_slice(last_block_hash.as_bytes());
-    out.extend_from_slice(&last_block_slot.to_le_bytes());
+    out.extend_from_slice(&last_block_epoch.to_le_bytes());
     out.extend_from_slice(&recovery_round.to_le_bytes());
     out
 }
@@ -64,7 +64,7 @@ mod tests {
     #[test]
     fn recovery_request_message_byte_layout_is_pinned() {
         let bytes =
-            recovery_request_message(&net(), &anchor(), Slot::new(5), RecoveryRound::new(2));
+            recovery_request_message(&net(), &anchor(), Epoch::new(5), RecoveryRound::new(2));
 
         let mut expected = Vec::new();
         expected.extend_from_slice(DOMAIN_RECOVERY_REQUEST);
@@ -82,37 +82,37 @@ mod tests {
     /// as round N+1 by tampering with the field.
     #[test]
     fn recovery_request_message_differs_across_rounds() {
-        let a = recovery_request_message(&net(), &anchor(), Slot::new(1), RecoveryRound::new(0));
-        let b = recovery_request_message(&net(), &anchor(), Slot::new(1), RecoveryRound::new(1));
+        let a = recovery_request_message(&net(), &anchor(), Epoch::new(1), RecoveryRound::new(0));
+        let b = recovery_request_message(&net(), &anchor(), Epoch::new(1), RecoveryRound::new(1));
         assert_ne!(a, b);
     }
 
-    /// Distinct anchors at the same `(slot, round)` produce distinct
+    /// Distinct anchors at the same `(epoch, round)` produce distinct
     /// signing bytes — a sig over one anchor can't be replayed against
     /// another.
     #[test]
     fn recovery_request_message_differs_across_anchors() {
         let other = BeaconBlockHash::from_raw(Hash::from_bytes(b"other"));
-        let a = recovery_request_message(&net(), &anchor(), Slot::new(1), RecoveryRound::INITIAL);
-        let b = recovery_request_message(&net(), &other, Slot::new(1), RecoveryRound::INITIAL);
+        let a = recovery_request_message(&net(), &anchor(), Epoch::new(1), RecoveryRound::INITIAL);
+        let b = recovery_request_message(&net(), &other, Epoch::new(1), RecoveryRound::INITIAL);
         assert_ne!(a, b);
     }
 
     /// Cross-network replay protection: byte-identical
-    /// `(anchor, slot, round)` inputs under different networks must
+    /// `(anchor, epoch, round)` inputs under different networks must
     /// produce different signing bytes.
     #[test]
     fn recovery_request_message_differs_across_networks() {
         let mainnet = recovery_request_message(
             &NetworkDefinition::mainnet(),
             &anchor(),
-            Slot::new(1),
+            Epoch::new(1),
             RecoveryRound::INITIAL,
         );
         let stokenet = recovery_request_message(
             &NetworkDefinition::stokenet(),
             &anchor(),
-            Slot::new(1),
+            Epoch::new(1),
             RecoveryRound::INITIAL,
         );
         assert_ne!(mainnet, stokenet);
@@ -124,7 +124,7 @@ mod tests {
     #[test]
     fn recovery_request_message_differs_from_other_beacon_domains() {
         let bytes =
-            recovery_request_message(&net(), &anchor(), Slot::new(1), RecoveryRound::INITIAL);
+            recovery_request_message(&net(), &anchor(), Epoch::new(1), RecoveryRound::INITIAL);
         assert_ne!(&bytes[..DOMAIN_RECOVERY_REQUEST.len()], DOMAIN_PC_VRF);
         assert_ne!(
             &bytes[..DOMAIN_RECOVERY_REQUEST.len()],

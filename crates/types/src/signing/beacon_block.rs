@@ -1,7 +1,7 @@
 //! Domain-separated signing for beacon block headers.
 //!
-//! The slot committee's BLS aggregate signature over a
-//! [`BeaconBlockHeader`] is what finalizes a beacon slot. Each signer
+//! The epoch committee's BLS aggregate signature over a
+//! [`BeaconBlockHeader`] is what finalizes a beacon epoch. Each signer
 //! signs the canonical message produced by [`beacon_block_header_message`]
 //! under [`DOMAIN_BEACON_BLOCK_HEADER`]; the aggregate rides inside the
 //! committed [`BeaconBlock`](crate::BeaconBlock) as
@@ -21,7 +21,7 @@ pub const DOMAIN_BEACON_BLOCK_HEADER: &[u8] = b"HYPERSCALE_BEACON_BLOCK_HEADER_v
 /// Layout: `domain || network.id || header_hash (32)`. The 32-byte
 /// header hash is the SBOR-content commitment from
 /// [`BeaconBlockHeader::hash`], so the signer is bound to every field
-/// of the header — slot, prev hash, proposals root, state root, and any
+/// of the header — epoch, prev hash, proposals root, state root, and any
 /// attached recovery cert.
 #[must_use]
 pub fn beacon_block_header_message(
@@ -41,16 +41,16 @@ mod tests {
     use super::*;
     use crate::signing::DOMAIN_PC_VRF;
     use crate::{
-        BeaconBlockHash, BeaconProposalsRoot, BeaconStateRoot, Hash, RecoveryCertHash, Slot,
+        BeaconBlockHash, BeaconProposalsRoot, BeaconStateRoot, Epoch, Hash, RecoveryCertHash,
     };
 
     fn net() -> NetworkDefinition {
         NetworkDefinition::simulator()
     }
 
-    fn sample_header(slot: u64) -> BeaconBlockHeader {
+    fn sample_header(epoch: u64) -> BeaconBlockHeader {
         BeaconBlockHeader::new(
-            Slot::new(slot),
+            Epoch::new(epoch),
             BeaconBlockHash::from_raw(Hash::from_bytes(b"prev")),
             BeaconProposalsRoot::from_raw(Hash::from_bytes(b"proposals")),
             BeaconStateRoot::from_raw(Hash::from_bytes(b"state")),

@@ -1,6 +1,6 @@
 //! Prefix Consensus (PC) vote and QC wire types.
 //!
-//! PC is the inner three-round protocol that drives one slot's committee
+//! PC is the inner three-round protocol that drives one epoch's committee
 //! from individual input vectors to a single certified
 //! `(certified_low, certified_high)` pair. Every honest committee
 //! member's input vector is a sequence of [`PcValueElement`]s; PC's job
@@ -15,7 +15,7 @@ use sbor::prelude::*;
 
 use crate::primitives::signer_bitfield::MAX_VALIDATORS;
 use crate::{
-    Bls12381G2Signature, BoundedVec, MAX_PREFIX_SIGS, MAX_VOTE_VECTOR_LEN, SignerBitfield, Slot,
+    Bls12381G2Signature, BoundedVec, Epoch, MAX_PREFIX_SIGS, MAX_VOTE_VECTOR_LEN, SignerBitfield,
     SpcView, ValidatorId,
 };
 
@@ -54,7 +54,7 @@ impl PcValueElement {
 
 /// A PC input vector — a bounded ordered sequence of [`PcValueElement`]s.
 ///
-/// PC's safety property guarantees a finalized slot's certified low /
+/// PC's safety property guarantees a finalized epoch's certified low /
 /// high pair are both prefixes of every honest committee member's
 /// committed vector ("Lemma 3.1"). Carrying the full vector at every
 /// round (rather than a hash) lets verifiers run the prefix-consistency
@@ -132,7 +132,7 @@ impl<'a> IntoIterator for &'a PcVector {
 
 /// Round-1 vote — a signer's input vector with an `L+1` prefix-sig
 /// fan-out (one signature per prefix of `v_in`, including the empty
-/// prefix slot).
+/// prefix epoch).
 #[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
 pub struct PcVote1 {
     validator: ValidatorId,
@@ -167,7 +167,7 @@ impl PcVote1 {
         self.validator
     }
 
-    /// Signer's input vector for the slot.
+    /// Signer's input vector for the epoch.
     #[must_use]
     pub const fn v_in(&self) -> &PcVector {
         &self.v_in
@@ -665,7 +665,7 @@ pub enum PcVoteRound {
 }
 
 /// Self-authenticating evidence that a single validator double-signed
-/// at the same `(slot, view, round)` of the inner Prefix Consensus.
+/// at the same `(epoch, view, round)` of the inner Prefix Consensus.
 ///
 /// Carries two `(value, sig)` pairs the equivocator signed at the same
 /// round. The slim wire form — fat votes don't need to ride into the
@@ -677,8 +677,8 @@ pub enum PcVoteRound {
 pub struct PcVoteEquivocation {
     /// Validator that double-signed.
     pub validator: ValidatorId,
-    /// Slot the inner Prefix Consensus instance belongs to.
-    pub slot: Slot,
+    /// Epoch the inner Prefix Consensus instance belongs to.
+    pub epoch: Epoch,
     /// SPC view at which the instance was running.
     pub view: SpcView,
     /// Round of the inner Prefix Consensus at which the double-sign
@@ -933,7 +933,7 @@ mod tests {
         for round in [PcVoteRound::Vote1, PcVoteRound::Vote2, PcVoteRound::Vote3] {
             let e = PcVoteEquivocation {
                 validator: ValidatorId::new(7),
-                slot: Slot::new(42),
+                epoch: Epoch::new(42),
                 view: SpcView::new(3),
                 round,
                 value_a: sample_vector(2),

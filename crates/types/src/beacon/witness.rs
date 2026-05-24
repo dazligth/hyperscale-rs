@@ -65,7 +65,7 @@ pub enum ShardWitnessPayload {
     /// The pool registers a new validator node. The published pubkey
     /// is carried on the witness so the beacon can verify the
     /// validator's signed outputs without a side-channel registry.
-    /// Rejected by `apply_slot` if the pool's effective stake doesn't
+    /// Rejected by `apply_epoch` if the pool's effective stake doesn't
     /// support another activation at the current dynamic `min_stake`.
     RegisterValidator {
         /// Pool that operates this validator.
@@ -77,7 +77,7 @@ pub enum ShardWitnessPayload {
     },
     /// The pool operator deactivates one of their validator nodes.
     /// Transitions the validator out of any active role; if currently
-    /// on a shard, frees the slot for a pool draw.
+    /// on a shard, frees the epoch for a pool draw.
     DeactivateValidator {
         /// Validator being deactivated.
         validator_id: ValidatorId,
@@ -85,7 +85,7 @@ pub enum ShardWitnessPayload {
     /// Validator took an unjail action on the staking contract.
     /// Beacon-side: if currently jailed under a fault-cause reason,
     /// the cooldown has elapsed, and the pool can still support the
-    /// additional active slot at the current dynamic `min_stake`,
+    /// additional active epoch at the current dynamic `min_stake`,
     /// transition back to the pool. Otherwise silently dropped.
     /// Equivocation jails are never unjailed.
     Unjail {
@@ -259,9 +259,9 @@ pub struct ShardWitness {
 /// Two flavors:
 ///
 /// - [`Self::Recovery`] — a committee member signed both a recovery
-///   request and a finalized block past the request's anchor slot.
+///   request and a finalized block past the request's anchor epoch.
 /// - [`Self::Vote`] — a single validator double-signed at the same
-///   `(slot, view, round)` of an inner Prefix Consensus instance.
+///   `(epoch, view, round)` of an inner Prefix Consensus instance.
 ///
 /// Both variants jail the equivocator permanently. Each is boxed so
 /// the enum's stack size stays balanced.
@@ -289,7 +289,7 @@ impl EquivocationEvidence {
 /// itself is the proof, no shard accumulator needed.
 #[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
 pub enum BeaconWitness {
-    /// Cryptographic equivocation evidence. `apply_slot` re-runs
+    /// Cryptographic equivocation evidence. `apply_epoch` re-runs
     /// verification and jails the equivocator permanently on success.
     Equivocation {
         /// The underlying evidence — recovery contradiction or PC
@@ -471,10 +471,10 @@ mod tests {
     }
 
     fn sample_pc_vote_equivocation() -> PcVoteEquivocation {
-        use crate::{Bls12381G2Signature, PcVector, PcVoteRound, Slot, SpcView};
+        use crate::{Bls12381G2Signature, Epoch, PcVector, PcVoteRound, SpcView};
         PcVoteEquivocation {
             validator: ValidatorId::new(5),
-            slot: Slot::new(10),
+            epoch: Epoch::new(10),
             view: SpcView::new(1),
             round: PcVoteRound::Vote1,
             value_a: PcVector::empty(),
@@ -487,8 +487,8 @@ mod tests {
     fn sample_recovery_equivocation() -> RecoveryEquivocation {
         use crate::{
             BeaconBlockHash, BeaconBlockHeader, BeaconProposalsRoot, BeaconStateRoot,
-            Bls12381G2Signature, Hash, RecoveryCertHash, RecoveryRequest, RecoveryRound,
-            SignerBitfield, Slot,
+            Bls12381G2Signature, Epoch, Hash, RecoveryCertHash, RecoveryRequest, RecoveryRound,
+            SignerBitfield,
         };
         let mut block_signers = SignerBitfield::new(4);
         block_signers.set(0);
@@ -497,13 +497,13 @@ mod tests {
             validator: ValidatorId::new(6),
             request: RecoveryRequest::new(
                 BeaconBlockHash::from_raw(Hash::from_bytes(b"anchor")),
-                Slot::new(7),
+                Epoch::new(7),
                 RecoveryRound::new(1),
                 ValidatorId::new(6),
                 Bls12381G2Signature([0x11; 96]),
             ),
             block_header: BeaconBlockHeader::new(
-                Slot::new(8),
+                Epoch::new(8),
                 BeaconBlockHash::from_raw(Hash::from_bytes(b"prev")),
                 BeaconProposalsRoot::from_raw(Hash::from_bytes(b"proposals")),
                 BeaconStateRoot::from_raw(Hash::from_bytes(b"state")),

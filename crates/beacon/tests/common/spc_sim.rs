@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use hyperscale_beacon::spc::{SpcEffect, SpcEvent, SpcInstance, VpcMsgPayload};
 use hyperscale_types::{
-    Bls12381G1PrivateKey, Bls12381G1PublicKey, NetworkDefinition, PcVector, Slot, ValidatorId,
+    Bls12381G1PrivateKey, Bls12381G1PublicKey, Epoch, NetworkDefinition, PcVector, ValidatorId,
     bls_keypair_from_seed,
 };
 
@@ -35,9 +35,9 @@ pub struct SpcSim {
 impl SpcSim {
     /// Build an `n`-party sim. Each party gets a deterministic BLS
     /// keypair seeded from `(seed, validator_id)` and a fresh
-    /// [`SpcInstance`] for `slot`.
+    /// [`SpcInstance`] for `epoch`.
     #[must_use]
-    pub fn new(n: usize, seed: u64, slot: Slot, view_timeout: Duration) -> Self {
+    pub fn new(n: usize, seed: u64, epoch: Epoch, view_timeout: Duration) -> Self {
         let network = NetworkDefinition::simulator();
         let mut sks = Vec::with_capacity(n);
         let mut members = Vec::with_capacity(n);
@@ -53,7 +53,7 @@ impl SpcSim {
             .map(|i| {
                 SpcInstance::new(
                     network.clone(),
-                    slot,
+                    epoch,
                     members.clone(),
                     members[i].0,
                     Arc::clone(&sks[i]),

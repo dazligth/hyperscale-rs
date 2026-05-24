@@ -1,6 +1,6 @@
 //! Domain-separated signing for beacon PC inner-consensus votes.
 
-use crate::{NetworkDefinition, PC_VALUE_ELEMENT_BYTES, PcVector, Slot, SpcView};
+use crate::{Epoch, NetworkDefinition, PC_VALUE_ELEMENT_BYTES, PcVector, SpcView};
 
 /// Domain tag for beacon PC round-1 votes.
 pub const DOMAIN_PC_VOTE1: &[u8] = b"HYPERSCALE_PC_VOTE1_v1";
@@ -25,14 +25,14 @@ pub const DOMAIN_PC_VOTE3: &[u8] = b"HYPERSCALE_PC_VOTE3_v1";
 /// pair `(empty_view, reported_max_view)` for the view-change protocol.
 pub const DOMAIN_PC_EMPTY_VIEW: &[u8] = b"HYPERSCALE_PC_EMPTY_VIEW_v1";
 
-/// Derive an SPC instance's domain context from its slot.
+/// Derive an SPC instance's domain context from its epoch.
 ///
-/// Used as the per-slot binding when constructing PC signing messages
-/// — the same vector signed under one slot's context will not verify
-/// against another slot's context.
+/// Used as the per-epoch binding when constructing PC signing messages
+/// — the same vector signed under one epoch's context will not verify
+/// against another epoch's context.
 #[must_use]
-pub fn spc_context(slot: Slot) -> Vec<u8> {
-    slot.to_le_bytes().to_vec()
+pub fn spc_context(epoch: Epoch) -> Vec<u8> {
+    epoch.to_le_bytes().to_vec()
 }
 
 /// Derive a PC instance's domain context from its containing SPC
@@ -106,7 +106,7 @@ mod tests {
     #[test]
     fn pc_vote_signing_message_byte_layout_is_pinned() {
         let network = net();
-        let ctx = spc_context(Slot::new(5));
+        let ctx = spc_context(Epoch::new(5));
         let v = PcVector::new(vec![ve(1), ve(2)]);
         let bytes = pc_vote_signing_message(&network, DOMAIN_PC_VOTE1, &ctx, &v);
 
@@ -114,7 +114,7 @@ mod tests {
         expected.extend_from_slice(DOMAIN_PC_VOTE1);
         expected.push(network.id);
         expected.extend_from_slice(&8u32.to_le_bytes()); // ctx_len
-        expected.extend_from_slice(&5u64.to_le_bytes()); // slot
+        expected.extend_from_slice(&5u64.to_le_bytes()); // epoch
         expected.extend_from_slice(&2u32.to_le_bytes()); // vector_len
         expected.extend_from_slice(ve(1).as_bytes());
         expected.extend_from_slice(ve(2).as_bytes());
@@ -131,7 +131,7 @@ mod tests {
     /// a single SPC view depends on this.
     #[test]
     fn pc_vote_signing_message_domain_separates_rounds() {
-        let ctx = spc_context(Slot::new(1));
+        let ctx = spc_context(Epoch::new(1));
         let v = PcVector::new(vec![ve(7)]);
         let m1 = pc_vote_signing_message(&net(), DOMAIN_PC_VOTE1, &ctx, &v);
         let m2 = pc_vote_signing_message(&net(), DOMAIN_PC_VOTE2, &ctx, &v);
@@ -151,7 +151,7 @@ mod tests {
     /// signing bytes.
     #[test]
     fn pc_vote_signing_message_differs_across_networks() {
-        let ctx = spc_context(Slot::new(1));
+        let ctx = spc_context(Epoch::new(1));
         let v = PcVector::new(vec![ve(7)]);
         let mainnet =
             pc_vote_signing_message(&NetworkDefinition::mainnet(), DOMAIN_PC_VOTE1, &ctx, &v);
@@ -165,7 +165,7 @@ mod tests {
     /// contexts. Locks the cross-view replay protection.
     #[test]
     fn pc_context_separates_views() {
-        let spc = spc_context(Slot::new(3));
+        let spc = spc_context(Epoch::new(3));
         let pc_a = pc_context(&spc, SpcView::new(1));
         let pc_b = pc_context(&spc, SpcView::new(2));
         assert_eq!(pc_a.len(), spc.len() + 4);
@@ -173,10 +173,13 @@ mod tests {
         assert_ne!(pc_a, pc_b);
     }
 
-    /// `spc_context` is exactly the slot LE bytes — bytes-pinned so
-    /// the cross-slot replay-protection layout never drifts.
+    /// `spc_context` is exactly the epoch LE bytes — bytes-pinned so
+    /// the cross-epoch replay-protection layout never drifts.
     #[test]
     fn spc_context_byte_layout_is_pinned() {
-        assert_eq!(spc_context(Slot::new(0x42)), 0x42u64.to_le_bytes().to_vec());
+        assert_eq!(
+            spc_context(Epoch::new(0x42)),
+            0x42u64.to_le_bytes().to_vec()
+        );
     }
 }

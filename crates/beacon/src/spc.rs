@@ -1,7 +1,7 @@
 //! Strong Prefix Consensus — pure verifiers + signing helpers.
 //!
-//! SPC drives one slot through a sequence of views. Each view runs an
-//! inner PC instance under `pc_context(spc_context(slot), view)`; the
+//! SPC drives one epoch through a sequence of views. Each view runs an
+//! inner PC instance under `pc_context(spc_context(epoch), view)`; the
 //! inner PC is leaderless (every committee member broadcasts their
 //! `v_in`), but view *entry* is leader-driven — the cyclic-shifted
 //! first party in the view's ranking proposes an [`SpcProposalObject`]
@@ -45,9 +45,9 @@ use std::time::Duration;
 
 use blake3::Hasher;
 use hyperscale_types::{
-    Bls12381G1PrivateKey, Bls12381G1PublicKey, DOMAIN_PC_EMPTY_VIEW, Hash, NetworkDefinition,
-    PC_VALUE_ELEMENT_BYTES, PcQc3, PcValueElement, PcVector, PcVote1, PcVote2, PcVote3,
-    PcVoteEquivocation, Slot, SpcCert, SpcEmptyLowEvidence, SpcEmptyViewMsg, SpcHighTriple,
+    Bls12381G1PrivateKey, Bls12381G1PublicKey, DOMAIN_PC_EMPTY_VIEW, Epoch, Hash,
+    NetworkDefinition, PC_VALUE_ELEMENT_BYTES, PcQc3, PcValueElement, PcVector, PcVote1, PcVote2,
+    PcVote3, PcVoteEquivocation, SpcCert, SpcEmptyLowEvidence, SpcEmptyViewMsg, SpcHighTriple,
     SpcProposalObject, SpcSkipSig, SpcView, ValidatorId, aggregate_verify_bls_different_messages,
     pc_context, pc_vote_signing_message, spc_context,
 };
@@ -679,7 +679,7 @@ pub enum SpcEvent {
     /// `from` is the transport-level sender id. `NewView` isn't
     /// sender-signed (the cert authenticates the parent claim
     /// cryptographically), so `from` only determines which validator's
-    /// proposal-object slot this `NewView` fills. Two distinct valid
+    /// proposal-object epoch this `NewView` fills. Two distinct valid
     /// certs from the same `from` are valid relays, not equivocation —
     /// last-write-wins.
     NewView {
@@ -751,7 +751,7 @@ impl SpcMessage {
     /// Reconstruct an [`SpcEvent`] from this wire message and the
     /// transport-level sender id. `from` only affects routing of
     /// `NewView` (it determines which validator's proposal-object
-    /// slot to fill); the other variants are sender-independent.
+    /// epoch to fill); the other variants are sender-independent.
     #[must_use]
     pub fn into_event(self, from: ValidatorId) -> SpcEvent {
         match self {
@@ -781,14 +781,14 @@ struct ViewState {
 impl ViewState {
     fn new(
         network: NetworkDefinition,
-        slot: Slot,
+        epoch: Epoch,
         view: SpcView,
         committee: Vec<(ValidatorId, Bls12381G1PublicKey)>,
         me: ValidatorId,
         me_sk: Arc<Bls12381G1PrivateKey>,
     ) -> Self {
         Self {
-            vpc: PcInstance::new(network, slot, view, committee, me, me_sk),
+            vpc: PcInstance::new(network, epoch, view, committee, me, me_sk),
             proposal_objects: BTreeMap::new(),
             vpc_input_fed: false,
             empty_views: BTreeMap::new(),
@@ -813,7 +813,7 @@ const MAX_PENDING_EMPTY_VIEW_AHEAD: u32 = 4;
 /// ahead).
 pub struct SpcInstance {
     network: NetworkDefinition,
-    slot: Slot,
+    epoch: Epoch,
     spc_ctx: Vec<u8>,
     committee: Vec<(ValidatorId, Bls12381G1PublicKey)>,
     me: ValidatorId,
@@ -839,7 +839,7 @@ pub struct SpcInstance {
 }
 
 impl SpcInstance {
-    /// Construct a fresh SPC instance for `slot`. Creates the view-1
+    /// Construct a fresh SPC instance for `epoch`. Creates the view-1
     /// `PcInstance` eagerly.
     ///
     /// `view_timeout` is the duration the parent (the
@@ -854,19 +854,19 @@ impl SpcInstance {
     #[must_use]
     pub fn new(
         network: NetworkDefinition,
-        slot: Slot,
+        epoch: Epoch,
         committee: Vec<(ValidatorId, Bls12381G1PublicKey)>,
         me: ValidatorId,
         me_sk: Arc<Bls12381G1PrivateKey>,
         view_timeout: Duration,
     ) -> Self {
-        let spc_ctx = spc_context(slot);
+        let spc_ctx = spc_context(epoch);
         let mut views = BTreeMap::new();
         views.insert(
             SpcView::new(1),
             ViewState::new(
                 network.clone(),
-                slot,
+                epoch,
                 SpcView::new(1),
                 committee.clone(),
                 me,
@@ -875,7 +875,7 @@ impl SpcInstance {
         );
         Self {
             network,
-            slot,
+            epoch,
             spc_ctx,
             committee,
             me,
@@ -1155,7 +1155,7 @@ impl SpcInstance {
         let view_state = self.views.entry(view).or_insert_with(|| {
             ViewState::new(
                 self.network.clone(),
-                self.slot,
+                self.epoch,
                 view,
                 self.committee.clone(),
                 self.me,
@@ -1241,7 +1241,7 @@ impl SpcInstance {
         let view_state = self.views.entry(view).or_insert_with(|| {
             ViewState::new(
                 self.network.clone(),
-                self.slot,
+                self.epoch,
                 view,
                 self.committee.clone(),
                 self.me,
@@ -1366,7 +1366,7 @@ impl SpcInstance {
 #[cfg(test)]
 mod tests {
     use hyperscale_types::{
-        Bls12381G2Signature, PcQc2, PcXpProof, SignerBitfield, Slot, generate_bls_keypair,
+        Bls12381G2Signature, Epoch, PcQc2, PcXpProof, SignerBitfield, generate_bls_keypair,
         spc_context,
     };
 
@@ -1383,7 +1383,7 @@ mod tests {
     }
 
     fn ctx() -> Vec<u8> {
-        spc_context(Slot::new(1))
+        spc_context(Epoch::new(1))
     }
 
     fn dummy_pc_qc3() -> PcQc3 {
@@ -1605,7 +1605,7 @@ mod tests {
         let (sks, members) = fsm_committee(4);
         SpcInstance::new(
             net(),
-            Slot::new(1),
+            Epoch::new(1),
             members.clone(),
             members[idx].0,
             Arc::clone(&sks[idx]),
@@ -1750,7 +1750,7 @@ mod tests {
     fn empty_view_with_non_progressing_reported_view_rejected() {
         let mut fsm = fsm_instance(0);
         let (sks, members) = fsm_committee(4);
-        let spc_ctx = spc_context(Slot::new(1));
+        let spc_ctx = spc_context(Epoch::new(1));
         let reported = SpcHighTriple {
             view: SpcView::new(5),
             value: PcVector::empty(),

@@ -11,9 +11,9 @@ use super::core::SimBeaconStorage;
 impl BeaconChainWriter for SimBeaconStorage {
     fn commit_beacon_block(&self, block: &Arc<BeaconBlock>) {
         let mut inner = write_or_recover(&self.inner);
-        let slot = block.slot();
+        let epoch = block.epoch();
         let hash = block.block_hash();
-        inner.by_slot.insert(slot, Arc::clone(block));
-        inner.hash_to_slot.insert(hash, slot);
+        inner.by_slot.insert(epoch, Arc::clone(block));
+        inner.hash_to_slot.insert(hash, epoch);
     }
 }

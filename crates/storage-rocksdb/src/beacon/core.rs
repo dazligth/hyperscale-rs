@@ -21,15 +21,15 @@ use crate::typed_cf::{TypedCf, batch_put, get};
 /// `RocksDB`-backed beacon-chain storage.
 ///
 /// Persists committed [`BeaconBlock`](hyperscale_types::BeaconBlock)s
-/// in two column families: a primary `slot → block` store and a
-/// secondary `block_hash → slot` index. Writes go through a single
+/// in two column families: a primary `epoch → block` store and a
+/// secondary `block_hash → epoch` index. Writes go through a single
 /// atomic `WriteBatch` per commit so the secondary index never lags
 /// the primary.
 pub struct RocksDbBeaconStorage {
     pub(super) db: Arc<DB>,
     /// Serialises commits so concurrent multi-vnode emits land in a
     /// deterministic order. Reads run lock-free; idempotent commits
-    /// of the same `(slot, hash)` no-op at the storage level.
+    /// of the same `(epoch, hash)` no-op at the storage level.
     pub(super) commit_lock: Mutex<()>,
 }
 
@@ -46,7 +46,7 @@ impl RocksDbBeaconStorage {
     /// Open the beacon-chain database with a custom `RocksDB` config.
     ///
     /// Reuses the workspace-wide [`RocksDbConfig`] surface; beacon's
-    /// access patterns are write-cold (one commit per beacon slot,
+    /// access patterns are write-cold (one commit per beacon epoch,
     /// minutes apart) so the shard tier's per-CF tuning isn't worth
     /// porting here.
     ///
@@ -111,10 +111,10 @@ impl RocksDbBeaconStorage {
             .commit_lock
             .lock()
             .expect("beacon commit_lock poisoned");
-        let slot = block.slot().inner();
+        let epoch = block.epoch().inner();
         let mut batch = WriteBatch::default();
-        self.cf_batch_put::<BeaconBlocksBySlotCf>(&mut batch, &slot, block);
-        self.cf_batch_put::<BeaconHashToSlotCf>(&mut batch, &block.block_hash().into_raw(), &slot);
+        self.cf_batch_put::<BeaconBlocksBySlotCf>(&mut batch, &epoch, block);
+        self.cf_batch_put::<BeaconHashToSlotCf>(&mut batch, &block.block_hash().into_raw(), &epoch);
         let mut write_opts = WriteOptions::default();
         write_opts.set_sync(true);
         self.db

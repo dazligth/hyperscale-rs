@@ -3,7 +3,7 @@
 //!
 //! When the beacon chain stalls past the recovery timeout at a given
 //! anchor, active validators broadcast individually signed
-//! [`RecoveryRequest`]s naming `(last_block_hash, last_block_slot,
+//! [`RecoveryRequest`]s naming `(last_block_hash, last_block_epoch,
 //! recovery_round)`. Once ≥⅔ of the active set sign the same triple,
 //! anyone can aggregate them into a [`RecoveryCertificate`] that triggers
 //! deterministic committee replacement at the consensus layer.
@@ -16,21 +16,21 @@
 use sbor::prelude::*;
 
 use crate::{
-    BeaconBlockHash, BeaconBlockHeader, Bls12381G2Signature, Hash, RecoveryCertHash, RecoveryRound,
-    SignerBitfield, Slot, ValidatorId,
+    BeaconBlockHash, BeaconBlockHeader, Bls12381G2Signature, BoundedVec, Epoch, Hash,
+    MAX_EXCLUDED_VALIDATORS, RecoveryCertHash, RecoveryRound, SignerBitfield, ValidatorId,
 };
 
 /// One active validator's signed attestation that the beacon chain has
-/// not progressed past `(last_block_hash, last_block_slot)` within the
+/// not progressed past `(last_block_hash, last_block_epoch)` within the
 /// recovery timeout.
 ///
 /// Gossiped across the full active validator set; ≥⅔ of active signers
-/// (one validator one vote) signing the same `(anchor, slot, round)`
+/// (one validator one vote) signing the same `(anchor, epoch, round)`
 /// triple assemble into a [`RecoveryCertificate`].
 #[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
 pub struct RecoveryRequest {
     last_block_hash: BeaconBlockHash,
-    last_block_slot: Slot,
+    last_block_epoch: Epoch,
     recovery_round: RecoveryRound,
     signer: ValidatorId,
     sig: Bls12381G2Signature,
@@ -41,14 +41,14 @@ impl RecoveryRequest {
     #[must_use]
     pub const fn new(
         last_block_hash: BeaconBlockHash,
-        last_block_slot: Slot,
+        last_block_epoch: Epoch,
         recovery_round: RecoveryRound,
         signer: ValidatorId,
         sig: Bls12381G2Signature,
     ) -> Self {
         Self {
             last_block_hash,
-            last_block_slot,
+            last_block_epoch,
             recovery_round,
             signer,
             sig,
@@ -61,10 +61,10 @@ impl RecoveryRequest {
         self.last_block_hash
     }
 
-    /// Slot of the anchor block.
+    /// Epoch of the anchor block.
     #[must_use]
-    pub const fn last_block_slot(&self) -> Slot {
-        self.last_block_slot
+    pub const fn last_block_epoch(&self) -> Epoch {
+        self.last_block_epoch
     }
 
     /// Which recovery attempt at this anchor this request belongs to.
@@ -88,7 +88,7 @@ impl RecoveryRequest {
 
 /// Self-authenticating certificate: ≥⅔ of active signers (one validator
 /// one vote) attested that no finalization had occurred past
-/// `(last_block_hash, last_block_slot)` within their recovery timeout.
+/// `(last_block_hash, last_block_epoch)` within their recovery timeout.
 ///
 /// Triggers deterministic committee replacement when the cert is
 /// observed by the beacon state machine. The cert's content hash is
@@ -100,32 +100,53 @@ impl RecoveryRequest {
 /// the anchor block's epoch — [`signers`](Self::signers) is a bitfield
 /// indexed into that enumeration, paired with a single aggregate
 /// signature that verifies under the union of the corresponding pubkeys.
+///
+/// `excluded_validators` lists the cumulative set of dead committees
+/// from every failed recovery round for this anchor's epoch — used by
+/// the recovery-aware committee sampler to avoid landing on
+/// already-failed validators. Bounded by
+/// [`MAX_EXCLUDED_VALIDATORS`].
 #[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
 pub struct RecoveryCertificate {
     last_block_hash: BeaconBlockHash,
-    last_block_slot: Slot,
+    last_block_epoch: Epoch,
     recovery_round: RecoveryRound,
+    excluded_validators: BoundedVec<ValidatorId, MAX_EXCLUDED_VALIDATORS>,
     signers: SignerBitfield,
     aggregate_sig: Bls12381G2Signature,
 }
 
 impl RecoveryCertificate {
     /// Build a `RecoveryCertificate` from its parts.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `excluded_validators.len() > MAX_EXCLUDED_VALIDATORS`.
     #[must_use]
-    pub const fn new(
+    pub fn new(
         last_block_hash: BeaconBlockHash,
-        last_block_slot: Slot,
+        last_block_epoch: Epoch,
         recovery_round: RecoveryRound,
+        excluded_validators: Vec<ValidatorId>,
         signers: SignerBitfield,
         aggregate_sig: Bls12381G2Signature,
     ) -> Self {
         Self {
             last_block_hash,
-            last_block_slot,
+            last_block_epoch,
             recovery_round,
+            excluded_validators: excluded_validators.into(),
             signers,
             aggregate_sig,
         }
+    }
+
+    /// Cumulative set of validators excluded from the post-recovery
+    /// committee sampler — the union of all dead committees across
+    /// failed recovery rounds for this anchor's epoch.
+    #[must_use]
+    pub const fn excluded_validators(&self) -> &BoundedVec<ValidatorId, MAX_EXCLUDED_VALIDATORS> {
+        &self.excluded_validators
     }
 
     /// Hash of the anchor block the cert pins as the chain's latest
@@ -135,10 +156,10 @@ impl RecoveryCertificate {
         self.last_block_hash
     }
 
-    /// Slot of the anchor block.
+    /// Epoch of the anchor block.
     #[must_use]
-    pub const fn last_block_slot(&self) -> Slot {
-        self.last_block_slot
+    pub const fn last_block_epoch(&self) -> Epoch {
+        self.last_block_epoch
     }
 
     /// Which recovery attempt at this anchor produced this cert.
@@ -201,8 +222,8 @@ pub fn recovery_cert_hash(cert: Option<&RecoveryCertificate>) -> RecoveryCertHas
 /// Self-authenticating evidence that a single validator signed both:
 ///   1. a [`RecoveryRequest`] claiming `request.last_block_hash` was their
 ///      latest finalized view, AND
-///   2. a finalized [`BeaconBlock`](crate::BeaconBlock) at a slot
-///      strictly greater than `request.last_block_slot`.
+///   2. a finalized [`BeaconBlock`](crate::BeaconBlock) at a epoch
+///      strictly greater than `request.last_block_epoch`.
 ///
 /// The two attestations are semantically contradictory. The recovery
 /// request is carried verbatim; the finalized block is collapsed to
@@ -217,7 +238,7 @@ pub struct RecoveryEquivocation {
     /// Recovery request claiming the anchor was the validator's latest view.
     pub request: RecoveryRequest,
     /// Header of a beacon block finalized strictly past
-    /// `request.last_block_slot`.
+    /// `request.last_block_epoch`.
     pub block_header: BeaconBlockHeader,
     /// Committee bitfield from the finalized block. The equivocator's
     /// position is set; the verifier confirms membership and reruns the
@@ -239,8 +260,9 @@ mod tests {
         signers.set(2);
         RecoveryCertificate::new(
             BeaconBlockHash::from_raw(Hash::from_bytes(b"anchor")),
-            Slot::new(7),
+            Epoch::new(7),
             RecoveryRound::new(1),
+            Vec::new(),
             signers,
             Bls12381G2Signature([0x22; 96]),
         )
@@ -249,7 +271,7 @@ mod tests {
     fn sample_request() -> RecoveryRequest {
         RecoveryRequest::new(
             BeaconBlockHash::from_raw(Hash::from_bytes(b"anchor")),
-            Slot::new(7),
+            Epoch::new(7),
             RecoveryRound::new(1),
             ValidatorId::new(3),
             Bls12381G2Signature([0x33; 96]),
@@ -294,8 +316,9 @@ mod tests {
         let a = sample_cert();
         let b = RecoveryCertificate::new(
             a.last_block_hash(),
-            a.last_block_slot(),
+            a.last_block_epoch(),
             a.recovery_round().next(),
+            Vec::new(),
             a.signers().clone(),
             a.aggregate_sig(),
         );
@@ -321,7 +344,7 @@ mod tests {
             validator: ValidatorId::new(2),
             request: sample_request(),
             block_header: BeaconBlockHeader::new(
-                Slot::new(8),
+                Epoch::new(8),
                 BeaconBlockHash::from_raw(Hash::from_bytes(b"prev")),
                 BeaconProposalsRoot::from_raw(Hash::from_bytes(b"proposals")),
                 BeaconStateRoot::from_raw(Hash::from_bytes(b"state")),

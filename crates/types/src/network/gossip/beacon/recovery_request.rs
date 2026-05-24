@@ -10,7 +10,7 @@ use crate::{MessageClass, NetworkMessage, RecoveryRequest};
 /// Broadcasts one active validator's signed recovery attestation.
 ///
 /// Gossiped across the full active validator set; ≥⅔ of active signers
-/// (one validator one vote) signing the same `(anchor, slot, round)`
+/// (one validator one vote) signing the same `(anchor, epoch, round)`
 /// triple assemble into a [`RecoveryCertificate`](crate::RecoveryCertificate)
 /// that triggers deterministic committee replacement.
 ///
@@ -70,12 +70,12 @@ mod tests {
     use sbor::prelude::*;
 
     use super::*;
-    use crate::{BeaconBlockHash, Bls12381G2Signature, Hash, RecoveryRound, Slot, ValidatorId};
+    use crate::{BeaconBlockHash, Bls12381G2Signature, Epoch, Hash, RecoveryRound, ValidatorId};
 
     fn sample_request() -> RecoveryRequest {
         RecoveryRequest::new(
             BeaconBlockHash::from_raw(Hash::from_bytes(b"anchor")),
-            Slot::new(7),
+            Epoch::new(7),
             RecoveryRound::new(1),
             ValidatorId::new(3),
             Bls12381G2Signature([0x33; 96]),

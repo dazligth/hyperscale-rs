@@ -1,9 +1,9 @@
-//! [`BeaconBlock`] — the committee-finalized record of one slot.
+//! [`BeaconBlock`] — the committee-finalized record of one epoch.
 //!
 //! A `BeaconBlock` pairs a constant-size [`BeaconBlockHeader`] with a BLS
-//! aggregate signature from the slot's committee. The aggregate verifies
+//! aggregate signature from the epoch's committee. The aggregate verifies
 //! in O(1) against the union of the signers' pubkeys, so the block is
-//! self-authenticating against any caller that holds the slot's committee
+//! self-authenticating against any caller that holds the epoch's committee
 //! enumeration.
 //!
 //! Recovery certificates ride inline as `Option<RecoveryCertificate>`,
@@ -14,16 +14,16 @@
 use sbor::prelude::*;
 
 use crate::{
-    BeaconBlockHash, BeaconBlockHeader, BeaconStateRoot, Bls12381G2Signature, RecoveryCertificate,
-    SignerBitfield, Slot, zero_bls_signature,
+    BeaconBlockHash, BeaconBlockHeader, BeaconStateRoot, Bls12381G2Signature, Epoch,
+    RecoveryCertificate, SignerBitfield, zero_bls_signature,
 };
 
 /// A committee-finalized beacon block: header + BLS aggregate over the
 /// header bytes, optionally carrying the recovery certificate that
-/// justifies the slot's committee.
+/// justifies the epoch's committee.
 ///
 /// The aggregate verifies under the union of [`signers`](Self::signers)'
-/// pubkeys, which the verifier resolves through the slot's committee
+/// pubkeys, which the verifier resolves through the epoch's committee
 /// enumeration (positional bitfield).
 #[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
 pub struct BeaconBlock {
@@ -55,7 +55,7 @@ impl BeaconBlock {
         }
     }
 
-    /// Genesis block (slot 0): genesis header with the given state root,
+    /// Genesis block (epoch 0): genesis header with the given state root,
     /// empty signer set, zero aggregate signature, no recovery cert.
     #[must_use]
     pub const fn genesis(state_root: BeaconStateRoot) -> Self {
@@ -100,10 +100,10 @@ impl BeaconBlock {
         self.recovery_cert.as_ref()
     }
 
-    /// Slot this block finalizes (delegates to the header).
+    /// Epoch this block finalizes (delegates to the header).
     #[must_use]
-    pub const fn slot(&self) -> Slot {
-        self.header.slot()
+    pub const fn epoch(&self) -> Epoch {
+        self.header.epoch()
     }
 
     /// Hash of this block (delegates to [`BeaconBlockHeader::hash`]).
@@ -112,7 +112,7 @@ impl BeaconBlock {
         self.header.hash()
     }
 
-    /// Whether this is the genesis block (slot 0).
+    /// Whether this is the genesis block (epoch 0).
     #[must_use]
     pub fn is_genesis(&self) -> bool {
         self.header.is_genesis()
@@ -132,7 +132,7 @@ mod tests {
 
     fn sample_header(recovery_cert_hash_value: RecoveryCertHash) -> BeaconBlockHeader {
         BeaconBlockHeader::new(
-            Slot::new(7),
+            Epoch::new(7),
             BeaconBlockHash::from_raw(Hash::from_bytes(b"prev")),
             BeaconProposalsRoot::from_raw(Hash::from_bytes(b"proposals")),
             BeaconStateRoot::from_raw(Hash::from_bytes(b"state")),
@@ -147,8 +147,9 @@ mod tests {
         signers.set(2);
         RecoveryCertificate::new(
             BeaconBlockHash::from_raw(Hash::from_bytes(b"anchor")),
-            Slot::new(5),
+            Epoch::new(5),
             RecoveryRound::new(1),
+            Vec::new(),
             signers,
             Bls12381G2Signature([0x22; 96]),
         )
@@ -217,7 +218,7 @@ mod tests {
         let state_root = BeaconStateRoot::from_raw(Hash::from_bytes(b"genesis-state"));
         let g = BeaconBlock::genesis(state_root);
         assert!(g.is_genesis());
-        assert_eq!(g.slot(), Slot::GENESIS);
+        assert_eq!(g.epoch(), Epoch::GENESIS);
         assert_eq!(g.signer_count(), 0);
         assert_eq!(g.aggregate_sig().0, [0u8; 96]);
         assert!(g.recovery_cert().is_none());

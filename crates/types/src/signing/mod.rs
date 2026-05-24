@@ -22,8 +22,8 @@
 //! | `HYPERSCALE_PC_VOTE{1,2,3}_v1` | Beacon PC inner-consensus votes |
 //! | `HYPERSCALE_PC_VOTE2_LENGTH_v1` | Length attestation rider on PC round-2 |
 //! | `HYPERSCALE_PC_EMPTY_VIEW_v1` | SPC empty-view skip statement |
-//! | `HYPERSCALE_PC_VRF_v1` | Beacon VRF reveal (per-slot randomness contribution) |
-//! | `HYPERSCALE_BEACON_BLOCK_HEADER_v1` | Slot-committee sig over a beacon block header |
+//! | `HYPERSCALE_PC_VRF_v1` | Beacon VRF reveal (per-epoch randomness contribution) |
+//! | `HYPERSCALE_BEACON_BLOCK_HEADER_v1` | Epoch-committee sig over a beacon block header |
 //! | `HYPERSCALE_RECOVERY_REQUEST_v1` | Recovery request + aggregated recovery cert sig |
 //!
 //! # Usage
