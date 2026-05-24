@@ -8,7 +8,7 @@
 //! committee sampler that consumes `excluded_validators`.
 
 use hyperscale_types::{
-    Bls12381G1PublicKey, NetworkDefinition, RecoveryEquivocation, ValidatorId,
+    Bls12381G1PublicKey, NetworkDefinition, RecoveryCertificate, RecoveryEquivocation, ValidatorId,
     aggregate_verify_bls_different_messages, beacon_block_header_message, recovery_request_message,
 };
 
@@ -112,6 +112,90 @@ pub fn verify_recovery_equivocation(
     let block_msgs: Vec<&[u8]> =
         std::iter::repeat_n(block_msg.as_slice(), signer_pks.len()).collect();
     aggregate_verify_bls_different_messages(&block_msgs, &ev.block_aggregate_sig, &signer_pks)
+}
+
+// ─── RecoveryCertificate verification ──────────────────────────────────────
+
+/// Verify a [`RecoveryCertificate`] against the current active-duty
+/// pool.
+///
+/// `active_pool` is the validators currently in
+/// `OnShard { ready: true, .. }` across any shard, paired with their
+/// BLS pubkeys, sorted by `ValidatorId` (the enumeration the cert's
+/// `signers` bitfield is indexed against). `last_cert` is the most
+/// recently applied recovery cert, if any.
+///
+/// Returns `true` only when:
+/// - `cert.signers().num_validators() == active_pool.len()` — the
+///   bitfield must be sized to the current pool; positional indexing
+///   breaks if these diverge.
+/// - Signer count meets the quorum threshold `⌈2 × pool_size / 3⌉ + 1`.
+/// - When `last_cert` shares the same anchor (block hash + epoch), the
+///   new `recovery_round` is strictly greater. Round monotonicity
+///   clears implicitly on anchor change.
+/// - The aggregate signature verifies under the union of pubkeys at
+///   the set bits, over the canonical signing bytes
+///   `recovery_request_message(network, anchor, epoch, round)`.
+///
+/// The `excluded_validators` size cap is enforced structurally by the
+/// `BoundedVec<_, MAX_EXCLUDED_VALIDATORS>` field on
+/// `RecoveryCertificate`; the wire decoder rejects oversize lists
+/// before they reach this verifier.
+///
+/// # Active-pool drift
+///
+/// `active_pool` is the pool *at verification time*. If the active set
+/// has shifted between cert signing and verification (a validator
+/// jailed or readied in between), the bitfield's positional indices
+/// may map to a pool that's a near-superset of the original — the
+/// aggregate signature still verifies as long as the signer set
+/// hasn't lost any members. Larger drifts produce a false-negative
+/// rejection rather than a false-positive acceptance, preserving
+/// safety.
+#[must_use]
+pub fn verify_recovery_cert(
+    cert: &RecoveryCertificate,
+    network: &NetworkDefinition,
+    active_pool: &[(ValidatorId, Bls12381G1PublicKey)],
+    last_cert: Option<&RecoveryCertificate>,
+) -> bool {
+    let pool_size = active_pool.len();
+    if cert.signers().num_validators() != pool_size {
+        return false;
+    }
+
+    // Quorum threshold: ⌈2N/3⌉ + 1.
+    let signer_count = cert.signers().count_ones();
+    let quorum = (2 * pool_size).div_ceil(3) + 1;
+    if signer_count < quorum {
+        return false;
+    }
+
+    // Round monotonicity at the anchor.
+    if let Some(prev) = last_cert
+        && prev.last_block_hash() == cert.last_block_hash()
+        && prev.last_block_epoch() == cert.last_block_epoch()
+        && cert.recovery_round() <= prev.recovery_round()
+    {
+        return false;
+    }
+
+    let signer_pks: Vec<Bls12381G1PublicKey> = cert
+        .signers()
+        .set_indices()
+        .map(|i| active_pool[i].1)
+        .collect();
+    if signer_pks.is_empty() {
+        return false;
+    }
+    let msg = recovery_request_message(
+        network,
+        &cert.last_block_hash(),
+        cert.last_block_epoch(),
+        cert.recovery_round(),
+    );
+    let msgs: Vec<&[u8]> = std::iter::repeat_n(msg.as_slice(), signer_pks.len()).collect();
+    aggregate_verify_bls_different_messages(&msgs, &cert.aggregate_sig(), &signer_pks)
 }
 
 #[cfg(test)]
@@ -305,5 +389,150 @@ mod tests {
         }
         ev.block_signers = wide;
         assert!(!verify_recovery_equivocation(&ev, &net(), &lookup));
+    }
+
+    // ─── verify_recovery_cert ────────────────────────────────────────────
+
+    /// Build a recovery cert with `signer_count` of `pool_size`
+    /// validators signing. Returns the cert and the active pool.
+    fn genuine_cert(
+        anchor_epoch: u64,
+        recovery_round: u32,
+        pool_size: usize,
+        signer_count: usize,
+    ) -> (RecoveryCertificate, Vec<(ValidatorId, Bls12381G1PublicKey)>) {
+        assert!(signer_count <= pool_size);
+        let keys: Vec<Bls12381G1PrivateKey> = (0..pool_size).map(|i| keypair(i as u64)).collect();
+        let pool: Vec<(ValidatorId, Bls12381G1PublicKey)> = keys
+            .iter()
+            .enumerate()
+            .map(|(i, sk)| (ValidatorId::new(i as u64), sk.public_key()))
+            .collect();
+
+        let msg = recovery_request_message(
+            &net(),
+            &anchor(),
+            Epoch::new(anchor_epoch),
+            RecoveryRound::new(recovery_round),
+        );
+        let sigs: Vec<Bls12381G2Signature> = keys
+            .iter()
+            .take(signer_count)
+            .map(|sk| sk.sign_v1(&msg))
+            .collect();
+        let aggregate_sig =
+            Bls12381G2Signature::aggregate(&sigs, true).expect("aggregate succeeds");
+
+        let mut signers = SignerBitfield::new(pool_size);
+        for i in 0..signer_count {
+            signers.set(i);
+        }
+
+        let cert = RecoveryCertificate::new(
+            anchor(),
+            Epoch::new(anchor_epoch),
+            RecoveryRound::new(recovery_round),
+            Vec::new(),
+            signers,
+            aggregate_sig,
+        );
+        (cert, pool)
+    }
+
+    #[test]
+    fn cert_accepts_genuine_quorum() {
+        // Pool of 7, quorum = ⌈14/3⌉ + 1 = 5 + 1 = 6.
+        let (cert, pool) = genuine_cert(5, 0, 7, 6);
+        assert!(verify_recovery_cert(&cert, &net(), &pool, None));
+    }
+
+    #[test]
+    fn cert_rejects_below_quorum() {
+        // Pool of 7, quorum = 6. 5 signers — one short.
+        let (cert, pool) = genuine_cert(5, 0, 7, 5);
+        assert!(!verify_recovery_cert(&cert, &net(), &pool, None));
+    }
+
+    /// Bitfield sized to a different pool than the verifier sees —
+    /// positional indexing breaks and the cert must be rejected.
+    #[test]
+    fn cert_rejects_bitfield_size_mismatch() {
+        let (cert, pool) = genuine_cert(5, 0, 7, 6);
+        // Trim the pool to 6 entries; bitfield still claims 7.
+        let trimmed: Vec<_> = pool.into_iter().take(6).collect();
+        assert!(!verify_recovery_cert(&cert, &net(), &trimmed, None));
+    }
+
+    /// A cert at round N for an anchor where the last applied cert was
+    /// already at round N (or higher) is rejected — round must strictly
+    /// advance to supersede.
+    #[test]
+    fn cert_rejects_non_monotonic_round_at_same_anchor() {
+        let (prev, pool) = genuine_cert(5, 1, 7, 6);
+        // Same anchor, same round — must reject.
+        let (same_round, _) = genuine_cert(5, 1, 7, 6);
+        assert!(!verify_recovery_cert(
+            &same_round,
+            &net(),
+            &pool,
+            Some(&prev)
+        ));
+        // Same anchor, lower round — must reject.
+        let (lower_round, _) = genuine_cert(5, 0, 7, 6);
+        assert!(!verify_recovery_cert(
+            &lower_round,
+            &net(),
+            &pool,
+            Some(&prev)
+        ));
+    }
+
+    /// Round monotonicity is scoped per-anchor: a round-0 cert at a
+    /// new anchor is fine even if a higher-round cert was applied at a
+    /// different anchor.
+    #[test]
+    fn cert_accepts_round_zero_at_different_anchor() {
+        let (prev, pool) = genuine_cert(5, 5, 7, 6);
+        // Different anchor epoch — clears the monotonicity gate.
+        let (new_anchor, _) = genuine_cert(6, 0, 7, 6);
+        assert!(verify_recovery_cert(
+            &new_anchor,
+            &net(),
+            &pool,
+            Some(&prev)
+        ));
+    }
+
+    /// Tampering the aggregate sig bytes breaks verification.
+    #[test]
+    fn cert_rejects_tampered_aggregate_sig() {
+        let (cert, pool) = genuine_cert(5, 0, 7, 6);
+        let mut bad_sig = cert.aggregate_sig();
+        bad_sig.0[0] ^= 1;
+        let tampered = RecoveryCertificate::new(
+            cert.last_block_hash(),
+            cert.last_block_epoch(),
+            cert.recovery_round(),
+            Vec::new(),
+            cert.signers().clone(),
+            bad_sig,
+        );
+        assert!(!verify_recovery_cert(&tampered, &net(), &pool, None));
+    }
+
+    /// Changing the round in the cert body without re-signing produces
+    /// a sig over the wrong canonical message — verifier rejects.
+    #[test]
+    fn cert_rejects_rebadged_round() {
+        let (cert, pool) = genuine_cert(5, 0, 7, 6);
+        let rebadged = RecoveryCertificate::new(
+            cert.last_block_hash(),
+            cert.last_block_epoch(),
+            RecoveryRound::new(1),
+            Vec::new(),
+            cert.signers().clone(),
+            cert.aggregate_sig(),
+        );
+        assert!(!verify_recovery_cert(&rebadged, &net(), &pool, None));
     }
 }
