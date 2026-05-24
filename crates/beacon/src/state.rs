@@ -616,6 +616,7 @@ pub fn apply_epoch(
     let witness = ingest_witnesses(state, network, &vrf.accepted);
     let withdrawal = complete_pending_withdrawals(state);
     let reactivated = auto_reactivate(state);
+    let rewards_credited = distribute_epoch_rewards(state);
     let timeout_readied = auto_ready_timeout(state);
 
     let mut jailed = vrf.jailed;
@@ -633,6 +634,7 @@ pub fn apply_epoch(
         reactivated,
         readied,
         rejected_reveals: vrf.rejected_reveals,
+        rewards_credited,
         ..SlotEffects::default()
     }
 }
@@ -1400,10 +1402,6 @@ fn auto_reactivate(state: &mut BeaconState) -> Vec<ValidatorId> {
 /// `u128` intermediate arithmetic is overflow-safe for the full
 /// `Stake` range: the multiplication is `emission × validators_in_pool`,
 /// both bounded well below `u128::MAX / u128::MAX` headroom.
-///
-/// Called by the epoch-boundary stage on epoch advance; not invoked
-/// on slots that don't cross an epoch boundary.
-#[allow(dead_code)] // epoch-boundary caller pending
 fn distribute_epoch_rewards(state: &mut BeaconState) -> BTreeMap<StakePoolId, Stake> {
     let mut active_count: BTreeMap<StakePoolId, u64> = BTreeMap::new();
     for record in state.validators.values() {
@@ -2163,8 +2161,13 @@ mod tests {
         apply_next_epoch(&mut state, &committed);
 
         let pool = state.pools.get(&pool_id).unwrap();
-        // total_stake unchanged.
-        assert_eq!(pool.total_stake, pre_total);
+        // StakeWithdraw doesn't touch total_stake; the epoch's emission
+        // credit (single ready pool collects the full share) accounts
+        // for the only delta.
+        assert_eq!(
+            pool.total_stake,
+            pre_total.saturating_add(EMISSIONS_PER_EPOCH)
+        );
         // pending_withdrawals records the request at current_epoch.
         assert_eq!(pool.pending_withdrawals.len(), 1);
         assert_eq!(
@@ -2175,10 +2178,13 @@ mod tests {
             pool.pending_withdrawals[0].initiated_at_epoch,
             state.current_epoch
         );
-        // effective_stake dropped by the requested amount.
+        // effective_stake = total_stake − pending; pending up by 1000
+        // whole tokens, total up by the epoch emission.
         assert_eq!(
             effective_stake(pool),
-            pre_effective.saturating_sub(Stake::from_whole_tokens(1_000)),
+            pre_effective
+                .saturating_add(EMISSIONS_PER_EPOCH)
+                .saturating_sub(Stake::from_whole_tokens(1_000)),
         );
     }
 
@@ -3562,7 +3568,12 @@ mod tests {
 
         assert!(effects.deactivated.is_empty());
         let pool = &state.pools[&StakePoolId::new(0)];
-        assert_eq!(pool.total_stake, pre_total);
+        // Unmatured withdrawal leaves total_stake alone; the only
+        // delta is the epoch emission credit.
+        assert_eq!(
+            pool.total_stake,
+            pre_total.saturating_add(EMISSIONS_PER_EPOCH)
+        );
         assert_eq!(pool.pending_withdrawals.len(), 1);
     }
 
@@ -3587,9 +3598,11 @@ mod tests {
 
         assert!(effects.deactivated.is_empty());
         let pool = &state.pools[&StakePoolId::new(0)];
+        // 99 × FLOOR after release, plus the epoch emission credit.
         assert_eq!(
             pool.total_stake,
-            Stake::from_attos(100 * MIN_STAKE_FLOOR.attos() - MIN_STAKE_FLOOR.attos()),
+            Stake::from_attos(100 * MIN_STAKE_FLOOR.attos() - MIN_STAKE_FLOOR.attos())
+                .saturating_add(EMISSIONS_PER_EPOCH),
         );
         assert!(pool.pending_withdrawals.is_empty());
     }
@@ -3631,10 +3644,13 @@ mod tests {
         apply_next_epoch(&mut state, &[]);
 
         let pool = &state.pools[&StakePoolId::new(0)];
-        // Released = MIN_STAKE_FLOOR + 2 * MIN_STAKE_FLOOR.
+        // Released = MIN_STAKE_FLOOR + 2 * MIN_STAKE_FLOOR; epoch
+        // emission credit goes back on top.
         assert_eq!(
             pool.total_stake,
-            pre_total.saturating_sub(Stake::from_attos(3 * MIN_STAKE_FLOOR.attos())),
+            pre_total
+                .saturating_sub(Stake::from_attos(3 * MIN_STAKE_FLOOR.attos()))
+                .saturating_add(EMISSIONS_PER_EPOCH),
         );
         // One pending entry remains.
         assert_eq!(pool.pending_withdrawals.len(), 1);
