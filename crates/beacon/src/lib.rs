@@ -11,6 +11,7 @@
 //! `BeaconState` and exposes it via `current_topology_snapshot()`.
 
 pub mod constants;
+pub mod msc;
 pub mod pc;
 pub mod prefix_ops;
 pub mod sampling;
