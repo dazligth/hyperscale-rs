@@ -43,8 +43,9 @@ pub use beacon::{
     SpcEmptyViewMsg, SpcHighTriple, SpcProposalObject, SpcSkipSig, Witness, recovery_cert_hash,
 };
 pub use crypto::batch_verify::{
-    batch_verify_bls_different_messages, batch_verify_bls_different_messages_all_or_nothing,
-    batch_verify_bls_same_message, batch_verify_ed25519,
+    aggregate_verify_bls_different_messages, batch_verify_bls_different_messages,
+    batch_verify_bls_different_messages_all_or_nothing, batch_verify_bls_same_message,
+    batch_verify_ed25519,
 };
 pub use crypto::keys::{
     bls_keypair_from_seed, ed25519_keypair_from_seed, generate_bls_keypair,

@@ -5,7 +5,7 @@ use blst::{BLST_ERROR, blst_scalar, blst_scalar_from_bendian};
 use ed25519_dalek::{Signature as DalekSignature, VerifyingKey as DalekVerifyingKey, verify_batch};
 use radix_common::crypto::{
     BLS12381_CIPHERSITE_V1, Bls12381G1PublicKey, Bls12381G2Signature, Ed25519PublicKey,
-    Ed25519Signature, verify_bls12381_v1,
+    Ed25519Signature, aggregate_verify_bls12381_v1, verify_bls12381_v1,
 };
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng, rng};
@@ -151,6 +151,42 @@ pub fn batch_verify_bls_different_messages_all_or_nothing(
     );
 
     result == BLST_ERROR::BLST_SUCCESS
+}
+
+/// Verify a single BLS aggregate signature where each signer signed a
+/// DIFFERENT message.
+///
+/// Distinct from [`batch_verify_bls_different_messages_all_or_nothing`]
+/// in that the input is **one combined sig** (already aggregated at
+/// build time, e.g. via `Bls12381G2Signature::aggregate`), not a slice
+/// of individual sigs. The PC inner-consensus QC verifiers consume this
+/// shape — `PcQc1`/`PcQc2`/`PcQc3` carry a single `x_agg_sig` that
+/// covers per-signer prefix messages.
+///
+/// Internally calls Radix's [`aggregate_verify_bls12381_v1`], so domain
+/// separation lives in the message bytes (the BLS suite is the fixed
+/// POP-style `BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_`). Rogue-key
+/// safety comes from POP at key registration time — callers must
+/// ensure every public key has been validated as a real validator key
+/// before reaching this verifier.
+///
+/// Returns `false` on empty input, length mismatch between `messages`
+/// and `pubkeys`, or invalid signature.
+#[must_use]
+pub fn aggregate_verify_bls_different_messages(
+    messages: &[&[u8]],
+    aggregate_sig: &Bls12381G2Signature,
+    pubkeys: &[Bls12381G1PublicKey],
+) -> bool {
+    if messages.len() != pubkeys.len() || messages.is_empty() {
+        return false;
+    }
+    let pairs: Vec<(Bls12381G1PublicKey, Vec<u8>)> = pubkeys
+        .iter()
+        .zip(messages.iter())
+        .map(|(pk, m)| (*pk, m.to_vec()))
+        .collect();
+    aggregate_verify_bls12381_v1(&pairs, aggregate_sig)
 }
 
 /// Batch verify multiple BLS signatures over DIFFERENT messages.
@@ -377,5 +413,99 @@ mod tests {
 
         let results = batch_verify_bls_different_messages(&messages, &signatures, &pubkeys);
         assert_eq!(results, vec![true, false]);
+    }
+
+    #[test]
+    fn aggregate_verify_different_messages_accepts_valid_aggregate() {
+        let kp1 = generate_bls_keypair();
+        let kp2 = generate_bls_keypair();
+        let kp3 = generate_bls_keypair();
+
+        let msg1 = b"prefix []";
+        let msg2 = b"prefix [a]";
+        let msg3 = b"prefix [a, b]";
+
+        let sig1 = kp1.sign_v1(msg1);
+        let sig2 = kp2.sign_v1(msg2);
+        let sig3 = kp3.sign_v1(msg3);
+
+        let agg_sig = Bls12381G2Signature::aggregate(&[sig1, sig2, sig3], true).unwrap();
+
+        let messages: Vec<&[u8]> = vec![msg1, msg2, msg3];
+        let pubkeys = vec![kp1.public_key(), kp2.public_key(), kp3.public_key()];
+
+        assert!(aggregate_verify_bls_different_messages(
+            &messages, &agg_sig, &pubkeys
+        ));
+    }
+
+    #[test]
+    fn aggregate_verify_different_messages_rejects_tampered_message() {
+        let kp1 = generate_bls_keypair();
+        let kp2 = generate_bls_keypair();
+
+        let msg1 = b"signed-1";
+        let msg2 = b"signed-2";
+
+        let sig1 = kp1.sign_v1(msg1);
+        let sig2 = kp2.sign_v1(msg2);
+        let agg_sig = Bls12381G2Signature::aggregate(&[sig1, sig2], true).unwrap();
+
+        // Same sig, but verifier supplies a tampered message at index 1.
+        let tampered: &[u8] = b"tampered-2";
+        let messages: Vec<&[u8]> = vec![msg1, tampered];
+        let pubkeys = vec![kp1.public_key(), kp2.public_key()];
+
+        assert!(!aggregate_verify_bls_different_messages(
+            &messages, &agg_sig, &pubkeys
+        ));
+    }
+
+    #[test]
+    fn aggregate_verify_different_messages_rejects_swapped_pubkeys() {
+        // kp1 signed msg1, kp2 signed msg2. Verifier supplies pubkeys in
+        // swapped order — verify must fail because the per-signer
+        // message-to-key binding is broken.
+        let kp1 = generate_bls_keypair();
+        let kp2 = generate_bls_keypair();
+
+        let msg1 = b"signed-by-kp1";
+        let msg2 = b"signed-by-kp2";
+
+        let sig1 = kp1.sign_v1(msg1);
+        let sig2 = kp2.sign_v1(msg2);
+        let agg_sig = Bls12381G2Signature::aggregate(&[sig1, sig2], true).unwrap();
+
+        let messages: Vec<&[u8]> = vec![msg1, msg2];
+        let swapped = vec![kp2.public_key(), kp1.public_key()];
+
+        assert!(!aggregate_verify_bls_different_messages(
+            &messages, &agg_sig, &swapped
+        ));
+    }
+
+    #[test]
+    fn aggregate_verify_different_messages_rejects_empty_input() {
+        let kp = generate_bls_keypair();
+        let sig = kp.sign_v1(b"x");
+        let agg = Bls12381G2Signature::aggregate(&[sig], true).unwrap();
+
+        assert!(!aggregate_verify_bls_different_messages(&[], &agg, &[]));
+    }
+
+    #[test]
+    fn aggregate_verify_different_messages_rejects_length_mismatch() {
+        let kp1 = generate_bls_keypair();
+        let kp2 = generate_bls_keypair();
+        let sig = kp1.sign_v1(b"x");
+        let agg = Bls12381G2Signature::aggregate(&[sig], true).unwrap();
+
+        let msg: &[u8] = b"x";
+        let messages: Vec<&[u8]> = vec![msg];
+        let pubkeys = vec![kp1.public_key(), kp2.public_key()];
+
+        assert!(!aggregate_verify_bls_different_messages(
+            &messages, &agg, &pubkeys
+        ));
     }
 }
