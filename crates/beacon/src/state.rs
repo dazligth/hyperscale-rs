@@ -29,8 +29,8 @@ use hyperscale_types::{
 };
 
 use crate::constants::{
-    JAIL_COOLDOWN_EPOCHS, MIN_STAKE_FLOOR, MISSED_PROPOSAL_JAIL_THRESHOLD, POOL_BUFFER_TARGET,
-    SHARD_CAPACITY, UNBONDING_WINDOW_EPOCHS,
+    EMISSIONS_PER_EPOCH, JAIL_COOLDOWN_EPOCHS, MIN_STAKE_FLOOR, MISSED_PROPOSAL_JAIL_THRESHOLD,
+    POOL_BUFFER_TARGET, SHARD_CAPACITY, UNBONDING_WINDOW_EPOCHS,
 };
 use crate::pc::verify_vote_equivocation;
 use crate::sampling::draw_from_pool;
@@ -1377,6 +1377,59 @@ fn auto_reactivate(state: &mut BeaconState) -> Vec<ValidatorId> {
         }
     }
     reactivated
+}
+
+// ─── epoch rewards ─────────────────────────────────────────────────────────
+
+/// Credit one epoch's emissions across stake pools pro-rata to each
+/// pool's count of `OnShard { ready: true }` validators.
+///
+/// Pure deterministic function of `(state)`. Returns the per-pool
+/// credits actually applied; zero-share pools are omitted.
+///
+/// Integer-division rounding remainder is burned — the per-year
+/// emission envelope ([`TOKENS_PER_YEAR_TARGET`](crate::constants::TOKENS_PER_YEAR_TARGET))
+/// is a sizing target, not a hard cap, so the per-epoch remainder
+/// (at most `active_pools − 1` attos) drops on the floor rather than
+/// accumulating in state.
+/// Epochs where no pool has a ready `OnShard` validator return an
+/// empty map without crediting — the whole epoch's emission burns.
+///
+/// `u128` intermediate arithmetic is overflow-safe for the full
+/// `Stake` range: the multiplication is `emission × validators_in_pool`,
+/// both bounded well below `u128::MAX / u128::MAX` headroom.
+///
+/// Called by the epoch-boundary stage on epoch advance; not invoked
+/// on slots that don't cross an epoch boundary.
+#[allow(dead_code)] // epoch-boundary caller pending
+fn distribute_epoch_rewards(state: &mut BeaconState) -> BTreeMap<StakePoolId, Stake> {
+    let mut active_count: BTreeMap<StakePoolId, u64> = BTreeMap::new();
+    for record in state.validators.values() {
+        if matches!(record.status, ValidatorStatus::OnShard { ready: true, .. }) {
+            *active_count.entry(record.pool).or_insert(0) += 1;
+        }
+    }
+    let total_active: u64 = active_count.values().sum();
+    if total_active == 0 {
+        return BTreeMap::new();
+    }
+    let emission = EMISSIONS_PER_EPOCH.attos();
+    let total = u128::from(total_active);
+    let mut credited = BTreeMap::new();
+    for (pool_id, n) in active_count {
+        let share_attos = emission * u128::from(n) / total;
+        if share_attos == 0 {
+            continue;
+        }
+        let share = Stake::from_attos(share_attos);
+        let pool = state
+            .pools
+            .get_mut(&pool_id)
+            .expect("OnShard validator's pool must be present in state.pools");
+        pool.total_stake = pool.total_stake.saturating_add(share);
+        credited.insert(pool_id, share);
+    }
+    credited
 }
 
 #[cfg(test)]
@@ -3754,5 +3807,234 @@ mod tests {
             state.validators.get(&ValidatorId::new(3)).unwrap().status,
             ValidatorStatus::InsufficientStake,
         );
+    }
+
+    // ─── distribute_epoch_rewards ────────────────────────────────────────
+
+    use crate::constants::EMISSIONS_PER_EPOCH;
+
+    /// State with no `OnShard { ready: true }` validators returns no
+    /// credits — the whole epoch's emission burns.
+    #[test]
+    fn distribute_epoch_rewards_no_op_when_no_ready_actives() {
+        let mut state = empty_state();
+        // Empty pool entry so the function has something to iterate
+        // over without hitting the no-active branch via empty
+        // validators.
+        state.pools.insert(
+            StakePoolId::new(0),
+            StakePool {
+                id: StakePoolId::new(0),
+                total_stake: Stake::from_whole_tokens(1_000_000),
+                validators: BTreeSet::new(),
+                pending_withdrawals: Vec::new(),
+            },
+        );
+        let pre_total = state.pools[&StakePoolId::new(0)].total_stake;
+
+        let credited = distribute_epoch_rewards(&mut state);
+
+        assert!(credited.is_empty());
+        assert_eq!(state.pools[&StakePoolId::new(0)].total_stake, pre_total);
+    }
+
+    /// Validators with `ready: false` don't count — pool with one
+    /// ready + one not-ready credits as if it had one active.
+    #[test]
+    fn distribute_epoch_rewards_excludes_unready_validators() {
+        let mut state = single_pool_state(0);
+        let pool_id = StakePoolId::new(0);
+        let shard = ShardGroupId::new(0);
+        // Two validators: ready and not-ready, both OnShard.
+        state.validators.insert(
+            ValidatorId::new(0),
+            validator_record(
+                0,
+                0,
+                ValidatorStatus::OnShard {
+                    shard,
+                    ready: true,
+                    placed_at_epoch: Epoch::GENESIS,
+                },
+            ),
+        );
+        state.validators.insert(
+            ValidatorId::new(1),
+            validator_record(
+                1,
+                0,
+                ValidatorStatus::OnShard {
+                    shard,
+                    ready: false,
+                    placed_at_epoch: Epoch::GENESIS,
+                },
+            ),
+        );
+        state
+            .pools
+            .get_mut(&pool_id)
+            .unwrap()
+            .validators
+            .extend([ValidatorId::new(0), ValidatorId::new(1)]);
+        let pre_total = state.pools[&pool_id].total_stake;
+
+        let credited = distribute_epoch_rewards(&mut state);
+
+        // One pool got credited (the only one with ready actives).
+        assert_eq!(credited.len(), 1);
+        let credit = credited[&pool_id];
+        // Single-active-validator-only-pool case: the credit equals
+        // the full epoch emission (no rounding remainder when total =
+        // count = 1).
+        assert_eq!(credit, EMISSIONS_PER_EPOCH);
+        assert_eq!(
+            state.pools[&pool_id].total_stake,
+            pre_total.saturating_add(credit),
+        );
+    }
+
+    /// Multi-pool distribution: pro-rata by ready-active count.
+    /// Two pools with 1 vs 3 ready actives get 1/4 vs 3/4 of the
+    /// emission respectively (integer-division remainder burned).
+    #[test]
+    fn distribute_epoch_rewards_splits_pro_rata_by_ready_count() {
+        let mut state = empty_state();
+        let pool_a = StakePoolId::new(1);
+        let pool_b = StakePoolId::new(2);
+        let shard = ShardGroupId::new(0);
+
+        // Pool A: 1 ready active.
+        state.pools.insert(
+            pool_a,
+            StakePool {
+                id: pool_a,
+                total_stake: Stake::from_whole_tokens(1_000),
+                validators: std::iter::once(ValidatorId::new(10)).collect(),
+                pending_withdrawals: Vec::new(),
+            },
+        );
+        state.validators.insert(
+            ValidatorId::new(10),
+            ValidatorRecord {
+                id: ValidatorId::new(10),
+                pool: pool_a,
+                status: ValidatorStatus::OnShard {
+                    shard,
+                    ready: true,
+                    placed_at_epoch: Epoch::GENESIS,
+                },
+                registered_at_epoch: Epoch::GENESIS,
+                pubkey: pubkey(10),
+            },
+        );
+
+        // Pool B: 3 ready actives.
+        state.pools.insert(
+            pool_b,
+            StakePool {
+                id: pool_b,
+                total_stake: Stake::from_whole_tokens(1_000),
+                validators: (20u64..23).map(ValidatorId::new).collect(),
+                pending_withdrawals: Vec::new(),
+            },
+        );
+        for i in 20u64..23 {
+            state.validators.insert(
+                ValidatorId::new(i),
+                ValidatorRecord {
+                    id: ValidatorId::new(i),
+                    pool: pool_b,
+                    status: ValidatorStatus::OnShard {
+                        shard,
+                        ready: true,
+                        placed_at_epoch: Epoch::GENESIS,
+                    },
+                    registered_at_epoch: Epoch::GENESIS,
+                    pubkey: pubkey(i),
+                },
+            );
+        }
+
+        let credited = distribute_epoch_rewards(&mut state);
+
+        // Pool A's share = EMISSIONS_PER_EPOCH * 1 / 4 (integer
+        // div). Pool B's share = EMISSIONS_PER_EPOCH * 3 / 4.
+        let total = 4u128;
+        let expected_a = Stake::from_attos(EMISSIONS_PER_EPOCH.attos() / total);
+        let expected_b = Stake::from_attos(EMISSIONS_PER_EPOCH.attos() * 3 / total);
+        assert_eq!(credited[&pool_a], expected_a);
+        assert_eq!(credited[&pool_b], expected_b);
+        // Sum is at most EMISSIONS_PER_EPOCH (remainder burns at most
+        // total_pools - 1 = 1 atto).
+        let sum = credited[&pool_a].attos() + credited[&pool_b].attos();
+        assert!(sum <= EMISSIONS_PER_EPOCH.attos());
+        assert!(EMISSIONS_PER_EPOCH.attos() - sum < total);
+    }
+
+    /// Zero-share pools (in this case: pool with only `Pooled`
+    /// validators, no `OnShard { ready: true }`) are omitted from
+    /// the returned map.
+    #[test]
+    fn distribute_epoch_rewards_omits_zero_share_pools() {
+        let mut state = empty_state();
+        let pool_a = StakePoolId::new(1);
+        let pool_b = StakePoolId::new(2);
+
+        // Pool A: 1 ready active. Pool B: only a Pooled validator.
+        state.pools.insert(
+            pool_a,
+            StakePool {
+                id: pool_a,
+                total_stake: Stake::from_whole_tokens(1_000),
+                validators: std::iter::once(ValidatorId::new(10)).collect(),
+                pending_withdrawals: Vec::new(),
+            },
+        );
+        state.pools.insert(
+            pool_b,
+            StakePool {
+                id: pool_b,
+                total_stake: Stake::from_whole_tokens(1_000),
+                validators: std::iter::once(ValidatorId::new(20)).collect(),
+                pending_withdrawals: Vec::new(),
+            },
+        );
+        state.validators.insert(
+            ValidatorId::new(10),
+            ValidatorRecord {
+                id: ValidatorId::new(10),
+                pool: pool_a,
+                status: ValidatorStatus::OnShard {
+                    shard: ShardGroupId::new(0),
+                    ready: true,
+                    placed_at_epoch: Epoch::GENESIS,
+                },
+                registered_at_epoch: Epoch::GENESIS,
+                pubkey: pubkey(10),
+            },
+        );
+        state.validators.insert(
+            ValidatorId::new(20),
+            validator_record(20, 2, ValidatorStatus::Pooled),
+        );
+
+        let credited = distribute_epoch_rewards(&mut state);
+
+        // Only pool A credited.
+        assert_eq!(credited.len(), 1);
+        assert!(credited.contains_key(&pool_a));
+        assert!(!credited.contains_key(&pool_b));
+    }
+
+    /// Deterministic: two states with byte-identical inputs produce
+    /// byte-identical credits.
+    #[test]
+    fn distribute_epoch_rewards_is_deterministic() {
+        let mut a = single_pool_state(4);
+        let mut b = single_pool_state(4);
+        let credits_a = distribute_epoch_rewards(&mut a);
+        let credits_b = distribute_epoch_rewards(&mut b);
+        assert_eq!(credits_a, credits_b);
+        assert_eq!(a.pools, b.pools);
     }
 }
