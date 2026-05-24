@@ -24,8 +24,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use blake3::Hasher;
 use hyperscale_types::{
     BeaconProposal, Bls12381G1PublicKey, Epoch, LeafIndex, NetworkDefinition, Randomness,
-    RecoveryCertificate, ShardGroupId, Slot, Stake, StakePoolId, ValidatorId, VrfOutput,
-    vrf_verify,
+    RecoveryCertificate, ShardGroupId, ShardWitnessPayload, Slot, Stake, StakePoolId, ValidatorId,
+    VrfOutput, vrf_verify,
 };
 
 use crate::constants::{MIN_STAKE_FLOOR, POOL_BUFFER_TARGET, SHARD_CAPACITY};
@@ -610,16 +610,30 @@ pub fn apply_slot(
     state.current_slot = slot;
 
     let vrf = filter_and_roll_randomness(state, network, slot, committed);
+    let witness = ingest_witnesses(state, &vrf.accepted);
+
+    let mut jailed = vrf.jailed;
+    jailed.extend(witness.jailed);
 
     SlotEffects {
+        registered: witness.registered,
+        deactivated: witness.deactivated,
+        jailed,
+        unjailed: witness.unjailed,
+        readied: witness.readied,
         rejected_reveals: vrf.rejected_reveals,
-        jailed: vrf.jailed,
         ..SlotEffects::default()
     }
 }
 
-/// Outcome of [`filter_and_roll_randomness`].
-struct VrfStageOutcome {
+/// Outcome of [`filter_and_roll_randomness`]. The borrowed `accepted`
+/// slice lets [`ingest_witnesses`] iterate the proposals that survived
+/// the VRF check without re-running the filter.
+struct VrfStageOutcome<'a> {
+    /// Proposals from committee members whose VRF reveal verified.
+    /// References into the `committed` slice supplied to
+    /// [`apply_slot`].
+    accepted: Vec<&'a (ValidatorId, BeaconProposal)>,
     /// Validators in `state.committee` whose VRF reveal failed to
     /// verify. Their entire proposal — including any witnesses — was
     /// dropped on the same grounds.
@@ -653,17 +667,19 @@ struct VrfStageOutcome {
 /// elapses. Non-`OnShard` rejected proposers (shouldn't normally
 /// happen — non-committee filter already ran) silently fail the cascade
 /// gate without jailing.
-fn filter_and_roll_randomness(
+fn filter_and_roll_randomness<'a>(
     state: &mut BeaconState,
     network: &NetworkDefinition,
     slot: Slot,
-    committed: &[(ValidatorId, BeaconProposal)],
-) -> VrfStageOutcome {
+    committed: &'a [(ValidatorId, BeaconProposal)],
+) -> VrfStageOutcome<'a> {
     let committee_set: BTreeSet<ValidatorId> = state.committee.iter().copied().collect();
 
+    let mut accepted: Vec<&'a (ValidatorId, BeaconProposal)> = Vec::new();
     let mut rejected_reveals = Vec::new();
     let mut accepted_outputs: Vec<VrfOutput> = Vec::new();
-    for (party, prop) in committed {
+    for entry in committed {
+        let (party, prop) = entry;
         if !committee_set.contains(party) {
             continue;
         }
@@ -679,6 +695,7 @@ fn filter_and_roll_randomness(
         let proof = prop.vrf_proof();
         if vrf_verify(&pk, network, slot, &output, &proof) {
             accepted_outputs.push(output);
+            accepted.push(entry);
         } else {
             rejected_reveals.push(*party);
         }
@@ -718,8 +735,187 @@ fn filter_and_roll_randomness(
     }
 
     VrfStageOutcome {
+        accepted,
         rejected_reveals,
         jailed,
+    }
+}
+
+// ─── witness ingestion ────────────────────────────────────────────────────
+
+/// Outcome of [`ingest_witnesses`].
+///
+/// Each field is a deterministic-order list of validator ids
+/// transitioned by witness application this slot, used by `apply_slot`
+/// to populate the matching [`SlotEffects`] fields.
+#[derive(Default)]
+struct WitnessOutcome {
+    registered: Vec<ValidatorId>,
+    deactivated: Vec<ValidatorId>,
+    jailed: Vec<ValidatorId>,
+    unjailed: Vec<ValidatorId>,
+    readied: Vec<ValidatorId>,
+}
+
+/// Validator-status effect of one shard-lift application.
+///
+/// `StakeDeposit` and `StakeWithdraw` payloads mutate pool state but
+/// produce no validator-level event (caller sees `None`).
+#[allow(dead_code)] // not every variant is constructed by the apply_shard_payload arms in place
+enum ShardEvent {
+    Registered(ValidatorId),
+    Deactivated(ValidatorId),
+    Jailed(ValidatorId),
+    Unjailed(ValidatorId),
+    Readied(ValidatorId),
+}
+
+/// Collect, dedup, and apply the witnesses ridden by `accepted`
+/// proposals.
+///
+/// Shard lifts pass the per-shard `consumed_through` watermark — only
+/// `watermark + 1` is admitted, gaps and already-consumed leaves are
+/// silently dropped. The watermark advances on apply (regardless of
+/// whether the variant produced a validator-level event), so an
+/// honest committee can re-include a missing leaf next slot once the
+/// gap is filled.
+///
+/// `Witness::Beacon` variants (equivocation evidence) are not yet
+/// handled — they're silently skipped at the collection step. The
+/// equivocation-handling branch lands when its verifier glue does.
+///
+/// # Defense-in-depth caps
+///
+/// The wire decoder already bounds proposals at
+/// [`MAX_WITNESSES_PER_PROPOSER`](hyperscale_types::MAX_WITNESSES_PER_PROPOSER)
+/// via [`BeaconProposal`]'s `BoundedVec`. The slot-level cap
+/// [`MAX_WITNESSES_PER_SLOT`](crate::constants::MAX_WITNESSES_PER_SLOT)
+/// is the product `BEACON_SIGNER_COUNT × MAX_WITNESSES_PER_PROPOSER`,
+/// which the wire bounds already imply for a well-formed committee.
+/// The check here exists as a defence in depth: if the committee size
+/// ever grows without the slot cap being re-derived, the slot cap
+/// bounds aggregate witness work regardless.
+fn ingest_witnesses(
+    state: &mut BeaconState,
+    accepted: &[&(ValidatorId, BeaconProposal)],
+) -> WitnessOutcome {
+    use hyperscale_types::{ShardWitness, Witness};
+
+    use crate::constants::MAX_WITNESSES_PER_SLOT;
+
+    // Collect Shard witnesses with within-slot dedup keyed by
+    // `(shard_id, leaf_index)` — the unique identity of a witness in
+    // its source shard's accumulator. `ShardWitnessProof` isn't `Ord`
+    // (it's a wire type), so we key the dedup set on the tuple
+    // directly.
+    let mut shard_seen: BTreeSet<(ShardGroupId, LeafIndex)> = BTreeSet::new();
+    let mut shard_lifts: Vec<&ShardWitness> = Vec::new();
+    'collect: for (_, prop) in accepted {
+        for w in prop.witnesses().iter() {
+            if shard_lifts.len() >= MAX_WITNESSES_PER_SLOT {
+                break 'collect;
+            }
+            match w {
+                Witness::Shard(sw) => {
+                    if !shard_seen.insert((sw.proof.shard_id, sw.proof.leaf_index)) {
+                        continue;
+                    }
+                    shard_lifts.push(sw);
+                }
+                Witness::Beacon(_) => {
+                    // Equivocation verification lands separately; skip
+                    // unhandled `BeaconWitness` variants for now.
+                }
+            }
+        }
+    }
+
+    let mut outcome = WitnessOutcome::default();
+
+    // Apply shard lifts in `(shard_id, leaf_index)` order, gated by
+    // the per-shard watermark. Watermark advances on apply regardless
+    // of whether the variant produced a validator-level event, so a
+    // no-op variant (e.g. stake adjustment) doesn't stall the shard's
+    // accumulator.
+    shard_lifts.sort_by_key(|sw| (sw.proof.shard_id, sw.proof.leaf_index));
+    for sw in shard_lifts {
+        let watermark = state
+            .consumed_through
+            .get(&sw.proof.shard_id)
+            .copied()
+            .unwrap_or(LeafIndex::new(0));
+        if sw.proof.leaf_index.inner() != watermark.inner() + 1 {
+            continue;
+        }
+        match apply_shard_payload(state, &sw.payload) {
+            Some(ShardEvent::Registered(id)) => outcome.registered.push(id),
+            Some(ShardEvent::Deactivated(id)) => outcome.deactivated.push(id),
+            Some(ShardEvent::Jailed(id)) => outcome.jailed.push(id),
+            Some(ShardEvent::Unjailed(id)) => outcome.unjailed.push(id),
+            Some(ShardEvent::Readied(id)) => outcome.readied.push(id),
+            None => {}
+        }
+        state
+            .consumed_through
+            .insert(sw.proof.shard_id, sw.proof.leaf_index);
+    }
+
+    outcome
+}
+
+/// Dispatch a single shard-witness payload to its handler.
+///
+/// `StakeDeposit` and `StakeWithdraw` mutate pool state without
+/// producing a validator-level event — they return `None`. Variants
+/// that change validator status return the corresponding
+/// [`ShardEvent`] for [`ingest_witnesses`] to route into
+/// [`WitnessOutcome`].
+fn apply_shard_payload(
+    state: &mut BeaconState,
+    payload: &ShardWitnessPayload,
+) -> Option<ShardEvent> {
+    match payload {
+        ShardWitnessPayload::StakeDeposit { pool_id, amount } => {
+            // Implicit pool creation on first deposit; subsequent
+            // deposits accumulate into `total_stake`.
+            let pool = state.pools.entry(*pool_id).or_insert_with(|| StakePool {
+                id: *pool_id,
+                total_stake: Stake::ZERO,
+                validators: BTreeSet::new(),
+                pending_withdrawals: Vec::new(),
+            });
+            pool.total_stake = pool.total_stake.saturating_add(*amount);
+            None
+        }
+        ShardWitnessPayload::StakeWithdraw { pool_id, amount } => {
+            // Withdrawal request enters the unbonding window.
+            // `total_stake` is unchanged until maturation;
+            // `effective_stake` drops immediately via the added
+            // `pending_withdrawals` entry.
+            //
+            // Defense-in-depth: reject `amount > effective_stake`.
+            // Shard staking contracts validate before emitting; the
+            // re-check here keeps total_stake whole through the
+            // maturation cycle even if a buggy or hostile shard emits
+            // an over-withdrawal that `saturating_sub` would silently
+            // clamp.
+            let pool = state.pools.get_mut(pool_id)?;
+            if *amount > effective_stake(pool) {
+                return None;
+            }
+            pool.pending_withdrawals.push(PendingWithdrawal {
+                amount: *amount,
+                initiated_at_epoch: state.current_epoch,
+            });
+            None
+        }
+        ShardWitnessPayload::RegisterValidator { .. }
+        | ShardWitnessPayload::DeactivateValidator { .. }
+        | ShardWitnessPayload::Unjail { .. }
+        | ShardWitnessPayload::Ready { .. }
+        | ShardWitnessPayload::MissedProposal { .. } => {
+            todo!("ShardWitnessPayload variant not yet implemented")
+        }
     }
 }
 
@@ -1298,5 +1494,278 @@ mod tests {
 
         // Randomness identical — the malformed reveal contributed nothing.
         assert_eq!(state_a.randomness, state_b.randomness);
+    }
+
+    // ─── ingest_witnesses framework + stake variants ─────────────────────
+
+    use hyperscale_types::{
+        BlockHash, BoundedVec, ShardWitness, ShardWitnessPayload, ShardWitnessProof, Witness,
+    };
+
+    /// Build a VRF-signed proposal for `id` at `slot` carrying the given
+    /// witnesses. The `BoundedVec` inside `BeaconProposal` still caps
+    /// witness count at construction.
+    fn vrf_proposal_with_witnesses(id: u64, slot: Slot, witnesses: Vec<Witness>) -> BeaconProposal {
+        let sk = keypair(id);
+        let (output, proof) = vrf_sign(&sk, &net(), slot);
+        BeaconProposal::new(witnesses, output, proof)
+    }
+
+    fn shard_witness(shard_id: u64, leaf_index: u64, payload: ShardWitnessPayload) -> Witness {
+        Witness::Shard(ShardWitness {
+            payload,
+            proof: ShardWitnessProof {
+                shard_id: ShardGroupId::new(shard_id),
+                committed_block_hash: BlockHash::ZERO,
+                leaf_index: LeafIndex::new(leaf_index),
+                siblings: BoundedVec::new(),
+            },
+        })
+    }
+
+    /// `StakeDeposit` for an unknown pool implicitly creates the pool
+    /// and accumulates `total_stake`. Subsequent deposits accumulate
+    /// further.
+    #[test]
+    fn stake_deposit_creates_pool_implicitly_and_accumulates() {
+        let mut state = single_pool_state(4);
+        state.committee = (0u64..4).map(ValidatorId::new).collect();
+        // Pool 7 doesn't exist yet — first StakeDeposit creates it.
+        let w0 = shard_witness(
+            0,
+            1,
+            ShardWitnessPayload::StakeDeposit {
+                pool_id: StakePoolId::new(7),
+                amount: Stake::from_whole_tokens(100),
+            },
+        );
+        // Second deposit on the same pool accumulates.
+        let w1 = shard_witness(
+            0,
+            2,
+            ShardWitnessPayload::StakeDeposit {
+                pool_id: StakePoolId::new(7),
+                amount: Stake::from_whole_tokens(50),
+            },
+        );
+        let committed = vec![(
+            ValidatorId::new(0),
+            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w0, w1]),
+        )];
+        apply_slot(&mut state, &net(), Slot::new(1), &committed);
+
+        let pool = state.pools.get(&StakePoolId::new(7)).unwrap();
+        assert_eq!(pool.total_stake, Stake::from_whole_tokens(150));
+        // Watermark advanced to 2 for shard 0.
+        assert_eq!(
+            state.consumed_through.get(&ShardGroupId::new(0)),
+            Some(&LeafIndex::new(2))
+        );
+    }
+
+    /// `StakeWithdraw` appends a `PendingWithdrawal` tagged with the
+    /// current epoch; `total_stake` is unchanged but `effective_stake`
+    /// drops immediately.
+    #[test]
+    fn stake_withdraw_records_pending_withdrawal_at_current_epoch() {
+        let mut state = single_pool_state(4);
+        state.committee = (0u64..4).map(ValidatorId::new).collect();
+        state.current_epoch = Epoch::new(3);
+        let pool_id = StakePoolId::new(0);
+        let pre_total = state.pools.get(&pool_id).unwrap().total_stake;
+        let pre_effective = effective_stake(state.pools.get(&pool_id).unwrap());
+
+        let w = shard_witness(
+            0,
+            1,
+            ShardWitnessPayload::StakeWithdraw {
+                pool_id,
+                amount: Stake::from_whole_tokens(1_000),
+            },
+        );
+        let committed = vec![(
+            ValidatorId::new(0),
+            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+        )];
+        apply_slot(&mut state, &net(), Slot::new(1), &committed);
+
+        let pool = state.pools.get(&pool_id).unwrap();
+        // total_stake unchanged.
+        assert_eq!(pool.total_stake, pre_total);
+        // pending_withdrawals records the request at current_epoch.
+        assert_eq!(pool.pending_withdrawals.len(), 1);
+        assert_eq!(
+            pool.pending_withdrawals[0].amount,
+            Stake::from_whole_tokens(1_000)
+        );
+        assert_eq!(
+            pool.pending_withdrawals[0].initiated_at_epoch,
+            Epoch::new(3)
+        );
+        // effective_stake dropped by the requested amount.
+        assert_eq!(
+            effective_stake(pool),
+            pre_effective.saturating_sub(Stake::from_whole_tokens(1_000)),
+        );
+    }
+
+    /// Defense-in-depth: an over-withdrawal (`amount > effective_stake`)
+    /// is rejected outright — no `pending_withdrawals` entry added.
+    /// Without this, `saturating_sub` in `effective_stake` would
+    /// silently clamp accounting to zero.
+    #[test]
+    fn stake_withdraw_rejects_over_effective_stake() {
+        let mut state = single_pool_state(4);
+        state.committee = (0u64..4).map(ValidatorId::new).collect();
+        let pool_id = StakePoolId::new(0);
+        let effective = effective_stake(state.pools.get(&pool_id).unwrap());
+
+        let w = shard_witness(
+            0,
+            1,
+            ShardWitnessPayload::StakeWithdraw {
+                pool_id,
+                amount: effective.saturating_add(Stake::from_whole_tokens(1)),
+            },
+        );
+        let committed = vec![(
+            ValidatorId::new(0),
+            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+        )];
+        apply_slot(&mut state, &net(), Slot::new(1), &committed);
+
+        let pool = state.pools.get(&pool_id).unwrap();
+        assert!(pool.pending_withdrawals.is_empty());
+        // Watermark still advances on apply (the witness was consumed,
+        // even though the variant rejected it).
+        assert_eq!(
+            state.consumed_through.get(&ShardGroupId::new(0)),
+            Some(&LeafIndex::new(1))
+        );
+    }
+
+    /// Within-slot dedup: the same `(shard_id, leaf_index)` carried by
+    /// multiple proposers counts as one event. Pins the dedup gate
+    /// against a future refactor.
+    #[test]
+    fn witness_dedup_by_shard_and_leaf_index() {
+        let mut state = single_pool_state(4);
+        state.committee = (0u64..4).map(ValidatorId::new).collect();
+        // Same deposit witness submitted by three proposers — should
+        // apply exactly once.
+        let payload = ShardWitnessPayload::StakeDeposit {
+            pool_id: StakePoolId::new(7),
+            amount: Stake::from_whole_tokens(100),
+        };
+        let committed: Vec<(ValidatorId, BeaconProposal)> = (0u64..3)
+            .map(|i| {
+                (
+                    ValidatorId::new(i),
+                    vrf_proposal_with_witnesses(
+                        i,
+                        Slot::new(1),
+                        vec![shard_witness(0, 1, payload.clone())],
+                    ),
+                )
+            })
+            .collect();
+        apply_slot(&mut state, &net(), Slot::new(1), &committed);
+
+        let pool = state.pools.get(&StakePoolId::new(7)).unwrap();
+        // Only one deposit applied — total_stake reflects a single 100.
+        assert_eq!(pool.total_stake, Stake::from_whole_tokens(100));
+    }
+
+    /// Watermark gate: a witness with `leaf_index != consumed + 1` is
+    /// silently dropped. Gaps and re-plays don't apply.
+    #[test]
+    fn watermark_gate_drops_gap_and_replay() {
+        let mut state = single_pool_state(4);
+        state.committee = (0u64..4).map(ValidatorId::new).collect();
+        // Pre-set the watermark to 5; submit a witness for leaf_index 7
+        // (gap) and another for leaf_index 5 (replay). Neither applies.
+        state
+            .consumed_through
+            .insert(ShardGroupId::new(0), LeafIndex::new(5));
+
+        let gap = shard_witness(
+            0,
+            7,
+            ShardWitnessPayload::StakeDeposit {
+                pool_id: StakePoolId::new(7),
+                amount: Stake::from_whole_tokens(1),
+            },
+        );
+        let replay = shard_witness(
+            0,
+            5,
+            ShardWitnessPayload::StakeDeposit {
+                pool_id: StakePoolId::new(8),
+                amount: Stake::from_whole_tokens(1),
+            },
+        );
+        let committed = vec![(
+            ValidatorId::new(0),
+            vrf_proposal_with_witnesses(0, Slot::new(1), vec![gap, replay]),
+        )];
+        apply_slot(&mut state, &net(), Slot::new(1), &committed);
+
+        // Neither pool was touched.
+        assert!(!state.pools.contains_key(&StakePoolId::new(7)));
+        assert!(!state.pools.contains_key(&StakePoolId::new(8)));
+        // Watermark unchanged.
+        assert_eq!(
+            state.consumed_through.get(&ShardGroupId::new(0)),
+            Some(&LeafIndex::new(5))
+        );
+    }
+
+    /// In-order application: a sequence of consecutive `leaf_index` from
+    /// the same shard, even when submitted out of order in the
+    /// proposal, applies in order and advances the watermark by all.
+    #[test]
+    fn witnesses_applied_in_leaf_index_order() {
+        let mut state = single_pool_state(4);
+        state.committee = (0u64..4).map(ValidatorId::new).collect();
+        // Three deposits at indices 1, 2, 3 to pool 7, submitted in
+        // reverse order in the proposal.
+        let ws = vec![
+            shard_witness(
+                0,
+                3,
+                ShardWitnessPayload::StakeDeposit {
+                    pool_id: StakePoolId::new(7),
+                    amount: Stake::from_whole_tokens(3),
+                },
+            ),
+            shard_witness(
+                0,
+                1,
+                ShardWitnessPayload::StakeDeposit {
+                    pool_id: StakePoolId::new(7),
+                    amount: Stake::from_whole_tokens(1),
+                },
+            ),
+            shard_witness(
+                0,
+                2,
+                ShardWitnessPayload::StakeDeposit {
+                    pool_id: StakePoolId::new(7),
+                    amount: Stake::from_whole_tokens(2),
+                },
+            ),
+        ];
+        let committed = vec![(
+            ValidatorId::new(0),
+            vrf_proposal_with_witnesses(0, Slot::new(1), ws),
+        )];
+        apply_slot(&mut state, &net(), Slot::new(1), &committed);
+
+        let pool = state.pools.get(&StakePoolId::new(7)).unwrap();
+        assert_eq!(pool.total_stake, Stake::from_whole_tokens(6));
+        assert_eq!(
+            state.consumed_through.get(&ShardGroupId::new(0)),
+            Some(&LeafIndex::new(3))
+        );
     }
 }
