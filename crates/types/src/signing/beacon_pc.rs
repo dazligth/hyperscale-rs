@@ -1,6 +1,6 @@
 //! Domain-separated signing for beacon PC inner-consensus votes.
 
-use crate::{PC_VALUE_ELEMENT_BYTES, PcVector, Slot, SpcView};
+use crate::{NetworkDefinition, PC_VALUE_ELEMENT_BYTES, PcVector, Slot, SpcView};
 
 /// Domain tag for beacon PC round-1 votes.
 pub const DOMAIN_PC_VOTE1: &[u8] = b"HYPERSCALE_PC_VOTE1_v1";
@@ -57,19 +57,25 @@ pub fn pc_context(spc_ctx: &[u8], view: SpcView) -> Vec<u8> {
 /// [`pc_context`] (per-view binding); standalone tests may pass any
 /// fixed-width bytes as long as signers and verifiers agree.
 ///
-/// Layout: `domain || ctx_len (u32 LE) || ctx || vector_len (u32 LE)
-/// || vector_bytes`. Both `context` and `vector` are length-prefixed
-/// so callers that route arbitrary bytes through the signature can't
-/// confuse one `(ctx, v)` for another `(ctx', v')` via boundary
-/// ambiguity.
+/// Layout: `domain || network.id || ctx_len (u32 LE) || ctx ||
+/// vector_len (u32 LE) || vector_bytes`. Both `context` and `vector`
+/// are length-prefixed so callers that route arbitrary bytes through
+/// the signature can't confuse one `(ctx, v)` for another `(ctx', v')`
+/// via boundary ambiguity.
 #[must_use]
-pub fn pc_vote_signing_message(domain: &[u8], context: &[u8], vector: &PcVector) -> Vec<u8> {
+pub fn pc_vote_signing_message(
+    network: &NetworkDefinition,
+    domain: &[u8],
+    context: &[u8],
+    vector: &PcVector,
+) -> Vec<u8> {
     let ctx_len = u32::try_from(context.len()).unwrap_or(u32::MAX);
     let v_len = u32::try_from(vector.len()).unwrap_or(u32::MAX);
     let mut out = Vec::with_capacity(
-        domain.len() + 4 + context.len() + 4 + vector.len() * PC_VALUE_ELEMENT_BYTES,
+        domain.len() + 1 + 4 + context.len() + 4 + vector.len() * PC_VALUE_ELEMENT_BYTES,
     );
     out.extend_from_slice(domain);
+    out.push(network.id);
     out.extend_from_slice(&ctx_len.to_le_bytes());
     out.extend_from_slice(context);
     out.extend_from_slice(&v_len.to_le_bytes());
@@ -84,6 +90,10 @@ mod tests {
     use super::*;
     use crate::PcValueElement;
 
+    fn net() -> NetworkDefinition {
+        NetworkDefinition::simulator()
+    }
+
     fn ve(n: u8) -> PcValueElement {
         PcValueElement::new([n; PC_VALUE_ELEMENT_BYTES])
     }
@@ -95,12 +105,14 @@ mod tests {
     /// `usize` width on the host.
     #[test]
     fn pc_vote_signing_message_byte_layout_is_pinned() {
+        let network = net();
         let ctx = spc_context(Slot::new(5));
         let v = PcVector::new(vec![ve(1), ve(2)]);
-        let bytes = pc_vote_signing_message(DOMAIN_PC_VOTE1, &ctx, &v);
+        let bytes = pc_vote_signing_message(&network, DOMAIN_PC_VOTE1, &ctx, &v);
 
         let mut expected = Vec::new();
         expected.extend_from_slice(DOMAIN_PC_VOTE1);
+        expected.push(network.id);
         expected.extend_from_slice(&8u32.to_le_bytes()); // ctx_len
         expected.extend_from_slice(&5u64.to_le_bytes()); // slot
         expected.extend_from_slice(&2u32.to_le_bytes()); // vector_len
@@ -110,7 +122,7 @@ mod tests {
         assert_eq!(bytes, expected);
         assert_eq!(
             bytes.len(),
-            DOMAIN_PC_VOTE1.len() + 4 + 8 + 4 + 2 * PC_VALUE_ELEMENT_BYTES
+            DOMAIN_PC_VOTE1.len() + 1 + 4 + 8 + 4 + 2 * PC_VALUE_ELEMENT_BYTES
         );
     }
 
@@ -121,17 +133,31 @@ mod tests {
     fn pc_vote_signing_message_domain_separates_rounds() {
         let ctx = spc_context(Slot::new(1));
         let v = PcVector::new(vec![ve(7)]);
-        let m1 = pc_vote_signing_message(DOMAIN_PC_VOTE1, &ctx, &v);
-        let m2 = pc_vote_signing_message(DOMAIN_PC_VOTE2, &ctx, &v);
-        let m3 = pc_vote_signing_message(DOMAIN_PC_VOTE3, &ctx, &v);
-        let mev = pc_vote_signing_message(DOMAIN_PC_EMPTY_VIEW, &ctx, &v);
-        let m2l = pc_vote_signing_message(DOMAIN_PC_VOTE2_LENGTH, &ctx, &v);
+        let m1 = pc_vote_signing_message(&net(), DOMAIN_PC_VOTE1, &ctx, &v);
+        let m2 = pc_vote_signing_message(&net(), DOMAIN_PC_VOTE2, &ctx, &v);
+        let m3 = pc_vote_signing_message(&net(), DOMAIN_PC_VOTE3, &ctx, &v);
+        let mev = pc_vote_signing_message(&net(), DOMAIN_PC_EMPTY_VIEW, &ctx, &v);
+        let m2l = pc_vote_signing_message(&net(), DOMAIN_PC_VOTE2_LENGTH, &ctx, &v);
         let all = [&m1, &m2, &m3, &mev, &m2l];
         for (i, a) in all.iter().enumerate() {
             for b in &all[i + 1..] {
                 assert_ne!(a, b);
             }
         }
+    }
+
+    /// Cross-network replay protection: byte-identical `(domain, ctx,
+    /// vector)` inputs under different networks must produce different
+    /// signing bytes.
+    #[test]
+    fn pc_vote_signing_message_differs_across_networks() {
+        let ctx = spc_context(Slot::new(1));
+        let v = PcVector::new(vec![ve(7)]);
+        let mainnet =
+            pc_vote_signing_message(&NetworkDefinition::mainnet(), DOMAIN_PC_VOTE1, &ctx, &v);
+        let stokenet =
+            pc_vote_signing_message(&NetworkDefinition::stokenet(), DOMAIN_PC_VOTE1, &ctx, &v);
+        assert_ne!(mainnet, stokenet);
     }
 
     /// `pc_context` extends an SPC context by 4 bytes of view, so two
