@@ -28,7 +28,7 @@ use hyperscale_types::{
     VrfOutput, vrf_verify,
 };
 
-use crate::constants::{MIN_STAKE_FLOOR, POOL_BUFFER_TARGET, SHARD_CAPACITY};
+use crate::constants::{JAIL_COOLDOWN_EPOCHS, MIN_STAKE_FLOOR, POOL_BUFFER_TARGET, SHARD_CAPACITY};
 use crate::sampling::draw_from_pool;
 
 /// Domain tag for the beacon-randomness mixer. Binds the BLAKE3 input
@@ -870,6 +870,7 @@ fn ingest_witnesses(
 /// that change validator status return the corresponding
 /// [`ShardEvent`] for [`ingest_witnesses`] to route into
 /// [`WitnessOutcome`].
+#[allow(clippy::too_many_lines)] // single dispatch over ShardWitnessPayload variants
 fn apply_shard_payload(
     state: &mut BeaconState,
     payload: &ShardWitnessPayload,
@@ -977,10 +978,64 @@ fn apply_shard_payload(
             deactivate_to_insufficient_stake(state, *validator_id);
             Some(ShardEvent::Deactivated(*validator_id))
         }
-        ShardWitnessPayload::Unjail { .. }
-        | ShardWitnessPayload::Ready { .. }
-        | ShardWitnessPayload::MissedProposal { .. } => {
-            todo!("ShardWitnessPayload variant not yet implemented")
+        ShardWitnessPayload::Unjail { id } => {
+            // Fault-cause jails return to `Pooled` once cooldown has
+            // elapsed AND the pool can still support the additional
+            // active slot at the current dynamic `min_stake`. A pool
+            // that over-committed while the validator was jailed
+            // strands them — operator recourse is to deactivate
+            // another validator or deposit more stake before lifting.
+            // Equivocation jails are permanent regardless.
+            let rec = state.validators.get(id)?;
+            let ValidatorStatus::Jailed {
+                since_epoch,
+                reason,
+            } = rec.status
+            else {
+                return None;
+            };
+            if reason == JailReason::Equivocation {
+                return None;
+            }
+            if state.current_epoch.inner() < since_epoch.inner() + JAIL_COOLDOWN_EPOCHS {
+                return None;
+            }
+            let pool_id = rec.pool;
+            let pool = state.pools.get(&pool_id)?;
+            if current_active_count(pool, state) + 1 > max_active_count(pool, state) {
+                return None;
+            }
+            state
+                .validators
+                .get_mut(id)
+                .expect("rec read above guarantees presence")
+                .status = ValidatorStatus::Pooled;
+            Some(ShardEvent::Unjailed(*id))
+        }
+        ShardWitnessPayload::Ready { id } => {
+            // Flip `ready: false → true` for an `OnShard` validator.
+            // Other statuses (including already-ready `OnShard`) are
+            // silent no-ops — re-signalling ready isn't an error,
+            // just irrelevant.
+            let rec = state.validators.get_mut(id)?;
+            if let ValidatorStatus::OnShard {
+                shard,
+                ready: false,
+                placed_at_epoch,
+            } = rec.status
+            {
+                rec.status = ValidatorStatus::OnShard {
+                    shard,
+                    ready: true,
+                    placed_at_epoch,
+                };
+                Some(ShardEvent::Readied(*id))
+            } else {
+                None
+            }
+        }
+        ShardWitnessPayload::MissedProposal { .. } => {
+            todo!("ShardWitnessPayload::MissedProposal not yet implemented")
         }
     }
 }
@@ -2157,6 +2212,342 @@ mod tests {
         assert_eq!(
             state.validators.get(&ValidatorId::new(10)).unwrap().status,
             ValidatorStatus::InsufficientStake,
+        );
+    }
+
+    // ─── Unjail ──────────────────────────────────────────────────────────
+
+    /// Insert a Jailed{Performance} validator under pool 0 at
+    /// `since_epoch`. The fixture state's pool has been bumped to
+    /// support one extra active validator at the floor, so the
+    /// capacity gate inside `Unjail` won't reject.
+    fn state_with_jailed(since_epoch: Epoch, reason: JailReason) -> BeaconState {
+        let mut state = single_pool_state(3);
+        state.committee = (0u64..3).map(ValidatorId::new).collect();
+        let pool_id = StakePoolId::new(0);
+        state.pools.get_mut(&pool_id).unwrap().total_stake =
+            Stake::from_attos(4 * MIN_STAKE_FLOOR.attos());
+        state
+            .pools
+            .get_mut(&pool_id)
+            .unwrap()
+            .validators
+            .insert(ValidatorId::new(10));
+        state.validators.insert(
+            ValidatorId::new(10),
+            validator_record(
+                10,
+                0,
+                ValidatorStatus::Jailed {
+                    since_epoch,
+                    reason,
+                },
+            ),
+        );
+        state
+    }
+
+    /// Unjail after cooldown with pool capacity transitions to `Pooled`.
+    #[test]
+    fn unjail_after_cooldown_returns_to_pooled() {
+        let since = Epoch::new(5);
+        let mut state = state_with_jailed(since, JailReason::Performance);
+        state.current_epoch = Epoch::new(since.inner() + JAIL_COOLDOWN_EPOCHS);
+
+        let w = shard_witness(
+            0,
+            1,
+            ShardWitnessPayload::Unjail {
+                id: ValidatorId::new(10),
+            },
+        );
+        let committed = vec![(
+            ValidatorId::new(0),
+            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+        )];
+        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+
+        assert_eq!(effects.unjailed, vec![ValidatorId::new(10)]);
+        assert_eq!(
+            state.validators.get(&ValidatorId::new(10)).unwrap().status,
+            ValidatorStatus::Pooled,
+        );
+    }
+
+    /// Unjail before cooldown elapses is a silent no-op — the
+    /// validator stays Jailed.
+    #[test]
+    fn unjail_before_cooldown_is_no_op() {
+        let since = Epoch::new(5);
+        let mut state = state_with_jailed(since, JailReason::Performance);
+        // current_epoch advances by less than the cooldown.
+        state.current_epoch = Epoch::new(since.inner() + JAIL_COOLDOWN_EPOCHS - 1);
+
+        let w = shard_witness(
+            0,
+            1,
+            ShardWitnessPayload::Unjail {
+                id: ValidatorId::new(10),
+            },
+        );
+        let committed = vec![(
+            ValidatorId::new(0),
+            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+        )];
+        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+
+        assert!(effects.unjailed.is_empty());
+        assert_eq!(
+            state.validators.get(&ValidatorId::new(10)).unwrap().status,
+            ValidatorStatus::Jailed {
+                since_epoch: since,
+                reason: JailReason::Performance,
+            },
+        );
+    }
+
+    /// Equivocation jails never unjail, even past the cooldown.
+    #[test]
+    fn unjail_of_equivocation_jail_is_permanent_no_op() {
+        let since = Epoch::new(5);
+        let mut state = state_with_jailed(since, JailReason::Equivocation);
+        state.current_epoch = Epoch::new(since.inner() + 10 * JAIL_COOLDOWN_EPOCHS);
+
+        let w = shard_witness(
+            0,
+            1,
+            ShardWitnessPayload::Unjail {
+                id: ValidatorId::new(10),
+            },
+        );
+        let committed = vec![(
+            ValidatorId::new(0),
+            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+        )];
+        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+
+        assert!(effects.unjailed.is_empty());
+        assert_eq!(
+            state.validators.get(&ValidatorId::new(10)).unwrap().status,
+            ValidatorStatus::Jailed {
+                since_epoch: since,
+                reason: JailReason::Equivocation,
+            },
+        );
+    }
+
+    /// Unjail rejected when the pool can't support one more active
+    /// slot at the current `min_stake`. Validator stays Jailed.
+    #[test]
+    fn unjail_rejected_when_pool_at_capacity() {
+        // single_pool_state(4) saturates the pool exactly: 4 actives,
+        // pool stake = 4 * MIN_STAKE_FLOOR, max_active_count = 4. Add
+        // a Jailed validator that would push count to 5 if unjailed.
+        let since = Epoch::new(5);
+        let mut state = single_pool_state(4);
+        state.committee = (0u64..4).map(ValidatorId::new).collect();
+        state.current_epoch = Epoch::new(since.inner() + JAIL_COOLDOWN_EPOCHS);
+        let pool_id = StakePoolId::new(0);
+        state
+            .pools
+            .get_mut(&pool_id)
+            .unwrap()
+            .validators
+            .insert(ValidatorId::new(10));
+        state.validators.insert(
+            ValidatorId::new(10),
+            validator_record(
+                10,
+                0,
+                ValidatorStatus::Jailed {
+                    since_epoch: since,
+                    reason: JailReason::Performance,
+                },
+            ),
+        );
+
+        let w = shard_witness(
+            0,
+            1,
+            ShardWitnessPayload::Unjail {
+                id: ValidatorId::new(10),
+            },
+        );
+        let committed = vec![(
+            ValidatorId::new(0),
+            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+        )];
+        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+
+        assert!(effects.unjailed.is_empty());
+        assert_eq!(
+            state.validators.get(&ValidatorId::new(10)).unwrap().status,
+            ValidatorStatus::Jailed {
+                since_epoch: since,
+                reason: JailReason::Performance,
+            },
+        );
+    }
+
+    /// Unjail against a non-jailed validator (e.g. `Pooled`, `OnShard`)
+    /// is a silent no-op.
+    #[test]
+    fn unjail_of_non_jailed_validator_is_no_op() {
+        let mut state = single_pool_state(4);
+        state.committee = (0u64..4).map(ValidatorId::new).collect();
+        // Validator 0 is OnShard, not Jailed.
+        let w = shard_witness(
+            0,
+            1,
+            ShardWitnessPayload::Unjail {
+                id: ValidatorId::new(0),
+            },
+        );
+        let committed = vec![(
+            ValidatorId::new(0),
+            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+        )];
+        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+
+        assert!(effects.unjailed.is_empty());
+        assert!(matches!(
+            state.validators.get(&ValidatorId::new(0)).unwrap().status,
+            ValidatorStatus::OnShard { .. },
+        ));
+    }
+
+    // ─── Ready ───────────────────────────────────────────────────────────
+
+    /// Ready on `OnShard { ready: false }` flips to `ready: true` —
+    /// `placed_at_epoch` and `shard` carry through unchanged.
+    #[test]
+    fn ready_flips_on_shard_false_to_true() {
+        let mut state = single_pool_state(0);
+        state.committee = Vec::new();
+        let shard = ShardGroupId::new(0);
+        let placed = Epoch::new(3);
+        // Put validator 1 on shard 0 as not-yet-ready.
+        let pool_id = StakePoolId::new(0);
+        state.pools.insert(
+            pool_id,
+            StakePool {
+                id: pool_id,
+                total_stake: Stake::from_whole_tokens(1_000_000),
+                validators: [ValidatorId::new(0), ValidatorId::new(1)]
+                    .into_iter()
+                    .collect(),
+                pending_withdrawals: Vec::new(),
+            },
+        );
+        state.validators.insert(
+            ValidatorId::new(0),
+            validator_record(
+                0,
+                0,
+                ValidatorStatus::OnShard {
+                    shard,
+                    ready: true,
+                    placed_at_epoch: Epoch::GENESIS,
+                },
+            ),
+        );
+        state.validators.insert(
+            ValidatorId::new(1),
+            validator_record(
+                1,
+                0,
+                ValidatorStatus::OnShard {
+                    shard,
+                    ready: false,
+                    placed_at_epoch: placed,
+                },
+            ),
+        );
+        state.committee = vec![ValidatorId::new(0)];
+        state.shard_committees.insert(
+            shard,
+            ShardCommittee {
+                members: vec![ValidatorId::new(0), ValidatorId::new(1)],
+            },
+        );
+
+        let w = shard_witness(
+            0,
+            1,
+            ShardWitnessPayload::Ready {
+                id: ValidatorId::new(1),
+            },
+        );
+        let committed = vec![(
+            ValidatorId::new(0),
+            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+        )];
+        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+
+        assert_eq!(effects.readied, vec![ValidatorId::new(1)]);
+        assert_eq!(
+            state.validators.get(&ValidatorId::new(1)).unwrap().status,
+            ValidatorStatus::OnShard {
+                shard,
+                ready: true,
+                placed_at_epoch: placed,
+            },
+        );
+    }
+
+    /// Ready on an already-ready `OnShard` validator is a silent
+    /// no-op — re-signalling ready isn't an error.
+    #[test]
+    fn ready_on_already_ready_is_no_op() {
+        let mut state = single_pool_state(4);
+        state.committee = (0u64..4).map(ValidatorId::new).collect();
+        let pre = state.validators.get(&ValidatorId::new(0)).unwrap().clone();
+
+        let w = shard_witness(
+            0,
+            1,
+            ShardWitnessPayload::Ready {
+                id: ValidatorId::new(0),
+            },
+        );
+        let committed = vec![(
+            ValidatorId::new(0),
+            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+        )];
+        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+
+        assert!(effects.readied.is_empty());
+        assert_eq!(state.validators.get(&ValidatorId::new(0)).unwrap(), &pre);
+    }
+
+    /// Ready against a `Pooled` validator is a silent no-op (the
+    /// validator isn't on a shard yet).
+    #[test]
+    fn ready_on_pooled_is_no_op() {
+        let mut state = single_pool_state(4);
+        state.committee = (0u64..4).map(ValidatorId::new).collect();
+        state.validators.insert(
+            ValidatorId::new(5),
+            validator_record(5, 0, ValidatorStatus::Pooled),
+        );
+
+        let w = shard_witness(
+            0,
+            1,
+            ShardWitnessPayload::Ready {
+                id: ValidatorId::new(5),
+            },
+        );
+        let committed = vec![(
+            ValidatorId::new(0),
+            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+        )];
+        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+
+        assert!(effects.readied.is_empty());
+        assert_eq!(
+            state.validators.get(&ValidatorId::new(5)).unwrap().status,
+            ValidatorStatus::Pooled,
         );
     }
 }
