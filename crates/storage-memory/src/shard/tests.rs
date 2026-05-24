@@ -282,11 +282,12 @@ fn test_snapshot_isolation() {
 }
 
 #[test]
-fn test_snapshot_structural_sharing_performance() {
+fn test_snapshot_clone_performance() {
     let storage = SimShardStorage::new();
 
     // Insert 10,000 items via substates-only (no JMT computation).
-    // This test measures OrdMap snapshot performance, not tree commit speed.
+    // This test bounds the cost of a single BTreeMap-clone snapshot at
+    // simulation scale, not tree commit speed.
     for i in 0..10_000u32 {
         let partition_key = DbPartitionKey {
             node_key: i.to_be_bytes().to_vec(),
@@ -323,8 +324,9 @@ fn test_snapshot_structural_sharing_performance() {
     let _snap5 = storage.snapshot();
     let elapsed = start.elapsed();
 
-    // 5 snapshots of 10k items should be very fast
-    // With BTreeMap clone this would take 10+ ms; with OrdMap it's < 1ms
+    // Guardrail against accidental quadratic behaviour or extra
+    // per-snapshot work; 5 BTreeMap clones of 10k entries fits well
+    // under the cap on any reasonable machine.
     assert!(
         elapsed.as_millis() < 50,
         "5 snapshots took {elapsed:?}, expected < 50ms"

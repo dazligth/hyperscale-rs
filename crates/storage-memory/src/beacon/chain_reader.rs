@@ -3,25 +3,28 @@
 use std::sync::Arc;
 
 use hyperscale_storage::BeaconChainReader;
+use hyperscale_storage::lock_recover::read_or_recover;
 use hyperscale_types::{BeaconBlock, BeaconBlockHash, Slot};
 
 use super::core::SimBeaconStorage;
 
 impl BeaconChainReader for SimBeaconStorage {
     fn get_beacon_block_by_slot(&self, slot: Slot) -> Option<Arc<BeaconBlock>> {
-        let inner = self.inner.read().expect("SimBeaconStorage poisoned");
-        inner.by_slot.get(&slot).cloned()
+        read_or_recover(&self.inner).by_slot.get(&slot).cloned()
     }
 
     fn get_beacon_block_by_hash(&self, hash: BeaconBlockHash) -> Option<Arc<BeaconBlock>> {
-        let inner = self.inner.read().expect("SimBeaconStorage poisoned");
+        let inner = read_or_recover(&self.inner);
         let slot = *inner.hash_to_slot.get(&hash)?;
         inner.by_slot.get(&slot).cloned()
     }
 
     fn latest_committed_slot(&self) -> Option<Slot> {
-        let inner = self.inner.read().expect("SimBeaconStorage poisoned");
-        inner.by_slot.keys().next_back().copied()
+        read_or_recover(&self.inner)
+            .by_slot
+            .keys()
+            .next_back()
+            .copied()
     }
 
     fn iter_beacon_blocks_from(
@@ -33,7 +36,7 @@ impl BeaconChainReader for SimBeaconStorage {
         // lock. Memory cost is bounded by the number of committed
         // blocks at or after `from`.
         let snapshot: Vec<Arc<BeaconBlock>> = {
-            let inner = self.inner.read().expect("SimBeaconStorage poisoned");
+            let inner = read_or_recover(&self.inner);
             inner
                 .by_slot
                 .range(from..)

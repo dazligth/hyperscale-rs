@@ -2,9 +2,11 @@
 //!
 //! In-memory storage implementation for deterministic simulation testing (DST).
 //!
-//! Uses `im::OrdMap` for O(1) structural-sharing clones, enabling efficient
-//! snapshots without copying the entire dataset. This is critical for parallel
-//! transaction execution where each transaction needs an isolated view.
+//! Substate state and the chain index live in `BTreeMap`s under a single
+//! `RwLock`; snapshots are constructed by cloning those maps under the
+//! read lock. Sufficient for simulation workloads up to ~tens of
+//! thousands of substates per shard — production uses
+//! `hyperscale-storage-rocksdb`.
 //!
 //! # JMT Integration
 //!
