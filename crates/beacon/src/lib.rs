@@ -14,3 +14,4 @@ pub mod constants;
 pub mod pc;
 pub mod prefix_ops;
 pub mod sampling;
+pub mod spc;
