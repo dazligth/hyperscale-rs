@@ -8,8 +8,9 @@
 //! committee sampler that consumes `excluded_validators`.
 
 use hyperscale_types::{
-    Bls12381G1PublicKey, NetworkDefinition, RecoveryCertificate, RecoveryEquivocation, ValidatorId,
-    aggregate_verify_bls_different_messages, beacon_block_header_message, recovery_request_message,
+    BeaconBlock, Bls12381G1PublicKey, NetworkDefinition, RecoveryCertificate, RecoveryEquivocation,
+    ValidatorId, aggregate_verify_bls_different_messages, beacon_block_header_message,
+    recovery_request_message,
 };
 
 /// Verify that a [`RecoveryEquivocation`] is a genuine double-attestation
@@ -196,6 +197,66 @@ pub fn verify_recovery_cert(
     );
     let msgs: Vec<&[u8]> = std::iter::repeat_n(msg.as_slice(), signer_pks.len()).collect();
     aggregate_verify_bls_different_messages(&msgs, &cert.aggregate_sig(), &signer_pks)
+}
+
+// ─── Block-selection rule ──────────────────────────────────────────────────
+
+/// Pick the winning [`BeaconBlock`] when two valid candidates exist for
+/// the same epoch.
+///
+/// Race source: a slow original committee can finalize a block while a
+/// recovery cert is being assembled in parallel. Both blocks pass their
+/// own header / aggregate checks, but the chain can only commit one per
+/// epoch, and every honest validator must converge on the same choice.
+///
+/// Selection order:
+///
+/// 1. A cert-bearing block wins over a no-cert block. The cert is
+///    on-chain proof that the active-duty quorum deemed the prior
+///    committee's attempt inadequate at this epoch.
+/// 2. Among two cert-bearing blocks, the higher [`RecoveryRound`]
+///    wins. Within an epoch, recovery rounds chain on failure with
+///    cumulative exclusions, so the higher-round cert reflects the
+///    fuller picture.
+/// 3. Final tie-break: lower [`BeaconBlockHash`]. Deterministic so
+///    every honest validator picks the same winner regardless of
+///    network-arrival order.
+///
+/// # Panics
+///
+/// Panics if `a.epoch() != b.epoch()`. The rule is scoped to
+/// same-epoch race resolution; callers must align the candidates'
+/// epochs before invoking.
+///
+/// [`RecoveryRound`]: hyperscale_types::RecoveryRound
+/// [`BeaconBlockHash`]: hyperscale_types::BeaconBlockHash
+#[must_use]
+pub fn select_winning_block<'a>(a: &'a BeaconBlock, b: &'a BeaconBlock) -> &'a BeaconBlock {
+    assert_eq!(
+        a.epoch(),
+        b.epoch(),
+        "select_winning_block: cross-epoch comparison",
+    );
+    match (a.recovery_cert(), b.recovery_cert()) {
+        (Some(_), None) => a,
+        (None, Some(_)) => b,
+        (Some(ca), Some(cb)) => match ca.recovery_round().cmp(&cb.recovery_round()) {
+            std::cmp::Ordering::Greater => a,
+            std::cmp::Ordering::Less => b,
+            std::cmp::Ordering::Equal => tie_break_by_hash(a, b),
+        },
+        (None, None) => tie_break_by_hash(a, b),
+    }
+}
+
+/// Tie-break: lower [`BeaconBlockHash`] wins. Deterministic across
+/// replicas.
+fn tie_break_by_hash<'a>(a: &'a BeaconBlock, b: &'a BeaconBlock) -> &'a BeaconBlock {
+    if a.block_hash() <= b.block_hash() {
+        a
+    } else {
+        b
+    }
 }
 
 #[cfg(test)]
@@ -534,5 +595,109 @@ mod tests {
             cert.aggregate_sig(),
         );
         assert!(!verify_recovery_cert(&rebadged, &net(), &pool, None));
+    }
+
+    // ─── select_winning_block ────────────────────────────────────────────
+
+    use hyperscale_types::{BeaconBlock, recovery_cert_hash};
+
+    /// Build a `BeaconBlock` for `epoch` whose header's
+    /// `state_root` is keyed off `state_byte` (so two callers can
+    /// build distinct blocks at the same epoch with predictable
+    /// hash ordering). Aggregate sig is zero — the selection rule
+    /// doesn't re-verify signatures, only inspects the
+    /// `recovery_cert` field and the block hash.
+    fn block(epoch: u64, state_byte: u8, cert: Option<RecoveryCertificate>) -> BeaconBlock {
+        let header = BeaconBlockHeader::new(
+            Epoch::new(epoch),
+            BeaconBlockHash::from_raw(Hash::from_bytes(b"prev")),
+            BeaconProposalsRoot::from_raw(Hash::from_bytes(b"proposals")),
+            BeaconStateRoot::from_raw(Hash::from_bytes(&[state_byte; 8])),
+            recovery_cert_hash(cert.as_ref()),
+        );
+        BeaconBlock::new(
+            header,
+            SignerBitfield::new(4),
+            Bls12381G2Signature([0u8; 96]),
+            cert,
+        )
+    }
+
+    /// Helper: synthesize a cert at the given round. Signature bytes
+    /// are zero — selection doesn't re-verify.
+    fn cert(round: u32) -> RecoveryCertificate {
+        RecoveryCertificate::new(
+            BeaconBlockHash::from_raw(Hash::from_bytes(b"anchor")),
+            Epoch::new(0),
+            RecoveryRound::new(round),
+            Vec::new(),
+            SignerBitfield::new(4),
+            Bls12381G2Signature([0u8; 96]),
+        )
+    }
+
+    /// A cert-bearing block wins over a no-cert block at the same epoch
+    /// regardless of argument order.
+    #[test]
+    fn select_cert_bearing_wins_over_no_cert() {
+        let with_cert = block(7, 0xAA, Some(cert(0)));
+        let no_cert = block(7, 0xBB, None);
+        assert_eq!(
+            select_winning_block(&with_cert, &no_cert).block_hash(),
+            with_cert.block_hash(),
+        );
+        assert_eq!(
+            select_winning_block(&no_cert, &with_cert).block_hash(),
+            with_cert.block_hash(),
+        );
+    }
+
+    /// Among two cert-bearing blocks at the same epoch, the higher
+    /// `recovery_round` wins regardless of argument order.
+    #[test]
+    fn select_higher_round_wins_among_cert_bearing() {
+        let round_0 = block(7, 0xAA, Some(cert(0)));
+        let round_3 = block(7, 0xBB, Some(cert(3)));
+        assert_eq!(
+            select_winning_block(&round_0, &round_3).block_hash(),
+            round_3.block_hash(),
+        );
+        assert_eq!(
+            select_winning_block(&round_3, &round_0).block_hash(),
+            round_3.block_hash(),
+        );
+    }
+
+    /// Final tie-break: lower block hash wins, regardless of argument
+    /// order. The chosen winner is the same block whichever order the
+    /// caller supplies.
+    #[test]
+    fn select_tie_break_by_lower_block_hash() {
+        let a = block(7, 0x01, None);
+        let b = block(7, 0xFE, None);
+        let lower = a.block_hash().min(b.block_hash());
+        assert_eq!(select_winning_block(&a, &b).block_hash(), lower);
+        assert_eq!(select_winning_block(&b, &a).block_hash(), lower);
+    }
+
+    /// Tie on `recovery_round` (both cert-bearing at same round) falls
+    /// through to the lower-hash tie-break.
+    #[test]
+    fn select_tie_break_among_same_round_cert_bearing() {
+        let a = block(7, 0x01, Some(cert(2)));
+        let b = block(7, 0xFE, Some(cert(2)));
+        let lower = a.block_hash().min(b.block_hash());
+        assert_eq!(select_winning_block(&a, &b).block_hash(), lower);
+        assert_eq!(select_winning_block(&b, &a).block_hash(), lower);
+    }
+
+    /// Cross-epoch comparison is a programmer error — the rule is
+    /// scoped to same-epoch race resolution.
+    #[test]
+    #[should_panic(expected = "cross-epoch comparison")]
+    fn select_panics_on_cross_epoch() {
+        let a = block(7, 0xAA, None);
+        let b = block(8, 0xBB, None);
+        let _ = select_winning_block(&a, &b);
     }
 }
