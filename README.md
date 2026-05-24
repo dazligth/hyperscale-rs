@@ -16,6 +16,7 @@ Rust implementation of Hyperscale consensus protocol.
 
 | Crate | Purpose |
 |-------|---------|
+| [`beacon`](crates/beacon) | Beacon-chain coordinator (PC/SPC/MSC consensus, validator-set + topology source) |
 | [`core`](crates/core) | The `StateMachine` and `SubStateMachine` traits that everything implements |
 | [`dispatch`](crates/dispatch) | Abstract trait for scheduling CPU-intensive work across priority-isolated pools |
 | [`dispatch-pooled`](crates/dispatch-pooled) | Production dispatch using rayon thread pools with core allocation and pinning |
