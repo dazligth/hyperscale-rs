@@ -30,7 +30,7 @@ use hyperscale_types::{
 
 use crate::constants::{
     EMISSIONS_PER_EPOCH, JAIL_COOLDOWN_EPOCHS, MIN_STAKE_FLOOR, MISSED_PROPOSAL_JAIL_THRESHOLD,
-    POOL_BUFFER_TARGET, SHARD_CAPACITY, UNBONDING_WINDOW_EPOCHS,
+    POOL_BUFFER_TARGET, READY_TIMEOUT_EPOCHS, SHARD_CAPACITY, UNBONDING_WINDOW_EPOCHS,
 };
 use crate::pc::verify_vote_equivocation;
 use crate::sampling::draw_from_pool;
@@ -617,11 +617,14 @@ pub fn apply_slot(
     let witness = ingest_witnesses(state, network, &vrf.accepted);
     let withdrawal = complete_pending_withdrawals(state);
     let reactivated = auto_reactivate(state);
+    let timeout_readied = auto_ready_timeout(state);
 
     let mut jailed = vrf.jailed;
     jailed.extend(witness.jailed);
     let mut deactivated = witness.deactivated;
     deactivated.extend(withdrawal.deactivated);
+    let mut readied = witness.readied;
+    readied.extend(timeout_readied);
 
     SlotEffects {
         registered: witness.registered,
@@ -629,7 +632,7 @@ pub fn apply_slot(
         jailed,
         unjailed: witness.unjailed,
         reactivated,
-        readied: witness.readied,
+        readied,
         rejected_reveals: vrf.rejected_reveals,
         ..SlotEffects::default()
     }
@@ -1430,6 +1433,42 @@ fn distribute_epoch_rewards(state: &mut BeaconState) -> BTreeMap<StakePoolId, St
         credited.insert(pool_id, share);
     }
     credited
+}
+
+// ─── auto-ready timeout ────────────────────────────────────────────────────
+
+/// Flip `OnShard { ready: false }` validators to `ready: true` once
+/// `current_epoch − placed_at_epoch ≥ READY_TIMEOUT_EPOCHS`.
+///
+/// Backstop for the event-driven ready path: validators normally
+/// signal sync-completion via a `Ready` shard witness; the timeout
+/// catches the case where that signal never arrives. A validator
+/// auto-readied while still mid-sync exposes themselves to a
+/// `MissedProposal` jail cascade — they'll miss votes, accumulate
+/// misses, and the threshold trips the normal performance jail.
+///
+/// Returns the ids that flipped this slot, deterministic ascending
+/// by `BTreeMap` iteration.
+fn auto_ready_timeout(state: &mut BeaconState) -> Vec<ValidatorId> {
+    let current_epoch = state.current_epoch.inner();
+    let mut readied = Vec::new();
+    for (id, rec) in &mut state.validators {
+        if let ValidatorStatus::OnShard {
+            shard,
+            ready: false,
+            placed_at_epoch,
+        } = rec.status
+            && current_epoch.saturating_sub(placed_at_epoch.inner()) >= READY_TIMEOUT_EPOCHS
+        {
+            rec.status = ValidatorStatus::OnShard {
+                shard,
+                ready: true,
+                placed_at_epoch,
+            };
+            readied.push(*id);
+        }
+    }
+    readied
 }
 
 #[cfg(test)]
@@ -4036,5 +4075,250 @@ mod tests {
         let credits_b = distribute_epoch_rewards(&mut b);
         assert_eq!(credits_a, credits_b);
         assert_eq!(a.pools, b.pools);
+    }
+
+    // ─── auto_ready_timeout ──────────────────────────────────────────────
+
+    use crate::constants::READY_TIMEOUT_EPOCHS;
+
+    /// Helper: place validator `id` on shard 0 at `placed_at_epoch`
+    /// with `ready: false`. Inserts into pool 0's validator set so
+    /// derived helpers see the pool correctly.
+    fn insert_unready_on_shard(state: &mut BeaconState, id: u64, placed_at_epoch: Epoch) {
+        let pool_id = StakePoolId::new(0);
+        let shard = ShardGroupId::new(0);
+        state
+            .pools
+            .entry(pool_id)
+            .or_insert_with(|| StakePool {
+                id: pool_id,
+                total_stake: Stake::from_whole_tokens(1_000_000),
+                validators: BTreeSet::new(),
+                pending_withdrawals: Vec::new(),
+            })
+            .validators
+            .insert(ValidatorId::new(id));
+        state.validators.insert(
+            ValidatorId::new(id),
+            validator_record(
+                id,
+                0,
+                ValidatorStatus::OnShard {
+                    shard,
+                    ready: false,
+                    placed_at_epoch,
+                },
+            ),
+        );
+    }
+
+    /// Validator placed `READY_TIMEOUT_EPOCHS` epochs ago flips to
+    /// `ready: true` (with `placed_at_epoch` preserved).
+    #[test]
+    fn auto_ready_timeout_flips_after_threshold() {
+        let placed = Epoch::new(3);
+        let current = Epoch::new(placed.inner() + READY_TIMEOUT_EPOCHS);
+        let mut state = empty_state();
+        state.current_epoch = current;
+        state.committee = vec![ValidatorId::new(0)];
+        insert_unready_on_shard(&mut state, 0, placed);
+
+        let effects = apply_slot(&mut state, &net(), Slot::new(1), &[]);
+
+        assert_eq!(effects.readied, vec![ValidatorId::new(0)]);
+        assert_eq!(
+            state.validators.get(&ValidatorId::new(0)).unwrap().status,
+            ValidatorStatus::OnShard {
+                shard: ShardGroupId::new(0),
+                ready: true,
+                placed_at_epoch: placed,
+            },
+        );
+    }
+
+    /// Validator placed just under the threshold stays `ready: false`.
+    #[test]
+    fn auto_ready_timeout_holds_before_threshold() {
+        let placed = Epoch::new(3);
+        let current = Epoch::new(placed.inner() + READY_TIMEOUT_EPOCHS - 1);
+        let mut state = empty_state();
+        state.current_epoch = current;
+        state.committee = vec![ValidatorId::new(0)];
+        insert_unready_on_shard(&mut state, 0, placed);
+
+        let effects = apply_slot(&mut state, &net(), Slot::new(1), &[]);
+
+        assert!(effects.readied.is_empty());
+        assert!(matches!(
+            state.validators.get(&ValidatorId::new(0)).unwrap().status,
+            ValidatorStatus::OnShard { ready: false, .. },
+        ));
+    }
+
+    /// Validators in non-`OnShard{ready:false}` statuses are
+    /// unchanged — `Pooled`, `Jailed`, already-ready `OnShard`,
+    /// `InsufficientStake` all bypass the timeout.
+    #[test]
+    fn auto_ready_timeout_ignores_non_unready_on_shard() {
+        let mut state = single_pool_state(4); // 4 ready OnShard
+        state.committee = (0u64..4).map(ValidatorId::new).collect();
+        state.current_epoch = Epoch::new(10 * READY_TIMEOUT_EPOCHS);
+        // Add a Pooled and a Jailed validator — neither should flip.
+        state.validators.insert(
+            ValidatorId::new(10),
+            validator_record(10, 0, ValidatorStatus::Pooled),
+        );
+        state.validators.insert(
+            ValidatorId::new(11),
+            validator_record(
+                11,
+                0,
+                ValidatorStatus::Jailed {
+                    since_epoch: Epoch::GENESIS,
+                    reason: JailReason::Performance,
+                },
+            ),
+        );
+
+        let effects = apply_slot(&mut state, &net(), Slot::new(1), &[]);
+
+        assert!(effects.readied.is_empty());
+        assert_eq!(
+            state.validators.get(&ValidatorId::new(10)).unwrap().status,
+            ValidatorStatus::Pooled,
+        );
+        assert_eq!(
+            state.validators.get(&ValidatorId::new(11)).unwrap().status,
+            ValidatorStatus::Jailed {
+                since_epoch: Epoch::GENESIS,
+                reason: JailReason::Performance,
+            },
+        );
+    }
+
+    /// Multiple unready validators: only those past the threshold
+    /// flip; the under-threshold ones stay.
+    #[test]
+    fn auto_ready_timeout_flips_selectively_by_placed_epoch() {
+        let current = Epoch::new(2 * READY_TIMEOUT_EPOCHS);
+        let mut state = empty_state();
+        state.current_epoch = current;
+        // Three validators at distinct ages: 2T past, 1 under, exactly T past.
+        insert_unready_on_shard(&mut state, 0, Epoch::GENESIS);
+        insert_unready_on_shard(&mut state, 1, Epoch::new(current.inner() - 1));
+        insert_unready_on_shard(
+            &mut state,
+            2,
+            Epoch::new(current.inner() - READY_TIMEOUT_EPOCHS),
+        );
+
+        let effects = apply_slot(&mut state, &net(), Slot::new(1), &[]);
+
+        // Ids 0 and 2 flipped; 1 didn't.
+        assert_eq!(
+            effects.readied,
+            vec![ValidatorId::new(0), ValidatorId::new(2)]
+        );
+        assert!(matches!(
+            state.validators.get(&ValidatorId::new(0)).unwrap().status,
+            ValidatorStatus::OnShard { ready: true, .. },
+        ));
+        assert!(matches!(
+            state.validators.get(&ValidatorId::new(1)).unwrap().status,
+            ValidatorStatus::OnShard { ready: false, .. },
+        ));
+        assert!(matches!(
+            state.validators.get(&ValidatorId::new(2)).unwrap().status,
+            ValidatorStatus::OnShard { ready: true, .. },
+        ));
+    }
+
+    /// `Ready` witness this slot and `auto_ready_timeout` flipping
+    /// other validators both populate `SlotEffects.readied` —
+    /// witness path first, timeout path appended. Pins the
+    /// dual-source field semantics.
+    #[test]
+    fn readied_field_carries_both_witness_and_timeout_flips() {
+        let mut state = empty_state();
+        state.current_epoch = Epoch::new(5 * READY_TIMEOUT_EPOCHS);
+        state.committee = vec![ValidatorId::new(0)];
+
+        // Validator 0: OnShard{ready:true} — needed to sign the
+        // proposal.
+        let pool_id = StakePoolId::new(0);
+        state.pools.insert(
+            pool_id,
+            StakePool {
+                id: pool_id,
+                total_stake: Stake::from_whole_tokens(1_000_000),
+                validators: [
+                    ValidatorId::new(0),
+                    ValidatorId::new(1),
+                    ValidatorId::new(2),
+                ]
+                .into_iter()
+                .collect(),
+                pending_withdrawals: Vec::new(),
+            },
+        );
+        state.validators.insert(
+            ValidatorId::new(0),
+            validator_record(
+                0,
+                0,
+                ValidatorStatus::OnShard {
+                    shard: ShardGroupId::new(0),
+                    ready: true,
+                    placed_at_epoch: Epoch::GENESIS,
+                },
+            ),
+        );
+        state
+            .shard_committees
+            .insert(ShardGroupId::new(0), ShardCommittee::default());
+        state
+            .shard_committees
+            .get_mut(&ShardGroupId::new(0))
+            .unwrap()
+            .members
+            .push(ValidatorId::new(0));
+
+        // Validator 1: not-yet-ready, gets explicit Ready witness.
+        insert_unready_on_shard(&mut state, 1, Epoch::new(0));
+        // Validator 2: not-yet-ready, will hit timeout.
+        insert_unready_on_shard(&mut state, 2, Epoch::new(0));
+        // Wait — both were placed at 0, both past timeout. Place
+        // validator 1 fresh so the witness path is exercised
+        // distinctly from the timeout path.
+        state
+            .validators
+            .get_mut(&ValidatorId::new(1))
+            .unwrap()
+            .status = ValidatorStatus::OnShard {
+            shard: ShardGroupId::new(0),
+            ready: false,
+            placed_at_epoch: state.current_epoch, // age 0 — under threshold
+        };
+
+        let ready_witness = shard_witness(
+            0,
+            1,
+            ShardWitnessPayload::Ready {
+                id: ValidatorId::new(1),
+            },
+        );
+        let committed = vec![(
+            ValidatorId::new(0),
+            vrf_proposal_with_witnesses(0, Slot::new(1), vec![ready_witness]),
+        )];
+        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+
+        // Both ended up in readied: validator 1 via witness, validator
+        // 2 via timeout. Order: witness path appends first, then
+        // timeout.
+        assert_eq!(
+            effects.readied,
+            vec![ValidatorId::new(1), ValidatorId::new(2)]
+        );
     }
 }
