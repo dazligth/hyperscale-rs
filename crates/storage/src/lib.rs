@@ -22,11 +22,15 @@
 
 #![warn(missing_docs)]
 
+pub mod beacon;
 pub mod shard;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_helpers;
 
+pub use beacon::chain_reader::BeaconChainReader;
+pub use beacon::chain_writer::BeaconChainWriter;
+pub use beacon::storage::BeaconStorage;
 use hyperscale_jmt::TreeReader;
 pub use shard::chain_reader::{BlockForSync, ChainReader};
 pub use shard::chain_writer::{BeaconWitnessCommit, ChainWriter, PreparedCommitBatchEntry};

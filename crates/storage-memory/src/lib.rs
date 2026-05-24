@@ -12,7 +12,9 @@
 //! `jmt_height()` and `state_root()` for state commitment. This ensures
 //! simulation has identical JMT behavior to production.
 
+pub mod beacon;
 pub mod shard;
 
+pub use beacon::core::SimBeaconStorage;
 pub use shard::core::SimStorage;
 pub use shard::snapshot::SimSnapshot;
