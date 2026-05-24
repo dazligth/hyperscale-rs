@@ -1,0 +1,671 @@
+#![allow(dead_code)]
+
+//! Prefix Consensus inner-consensus vote and QC verifiers.
+//!
+//! PC is the per-view inner consensus that drives one validator's
+//! `v_in_i` input vector through three rounds of attestation, producing
+//! a [`PcQc3`] terminal certificate carrying both the certified low
+//! (`x_pp`, the mcp of round-3 signers' `x_p_i`) and certified high
+//! (`x_pe`, the mce).
+//!
+//! This module hosts the **verify** side of PC — pure functions over
+//! wire types from `hyperscale_types::beacon::pc`. The verify and build
+//! sides are deliberately split: callers that only need to validate
+//! caller-supplied QCs (SPC, the witness fetch responder) link only the
+//! verify side.
+//!
+//! # Soundness gates encoded in the verifiers
+//!
+//! - **Signer-set sizing** (`qc.signers.len() == n - f`): strict equality
+//!   plus per-party dedup enforces "exactly n-f distinct signers" — any
+//!   relaxation to `>= n - f` would let duplicates inflate a sub-quorum.
+//! - **Committee membership**: every signer's [`ValidatorId`] must
+//!   resolve to a committee position before any BLS pairing is paid.
+//!   Three independent reasons: panic-safety against unregistered ids,
+//!   state-hygiene against phantom signers crowding out real ones, and
+//!   sub-quorum inflation since anyone can mint a BLS keypair.
+//! - **Wire-size caps**: [`MAX_VOTE_VECTOR_LEN`] bounds verify cost
+//!   (one BLS pairing per prefix sig) against a hostile peer flooding
+//!   oversized votes. Enforced by [`BoundedVec`] at decode time and
+//!   re-asserted here as a defense against caller-built QCs that bypass
+//!   decode.
+
+use std::collections::BTreeSet;
+
+use hyperscale_types::{
+    Bls12381G1PublicKey, Bls12381G2Signature, DOMAIN_PC_VOTE1, DOMAIN_PC_VOTE2,
+    DOMAIN_PC_VOTE2_LENGTH, DOMAIN_PC_VOTE3, MAX_VOTE_VECTOR_LEN, NetworkDefinition,
+    PC_VALUE_ELEMENT_BYTES, PcCompactVote, PcDivergingProof, PcQc1, PcQc2, PcQc3, PcValueElement,
+    PcVector, PcVote1, PcVote2, PcVote3, PcXpProof, ValidatorId,
+    aggregate_verify_bls_different_messages, pc_vote_signing_message,
+};
+
+use crate::prefix_ops::qc1_certify;
+
+/// Resolve a committee signer's public key, or return `None` if they
+/// aren't in the committee. Linear scan — committee sizes are small
+/// (≤ a few dozen), so a `BTreeMap` lookup wouldn't pay back its setup
+/// cost in the typical case.
+fn pubkey_in_committee(
+    committee: &[(ValidatorId, Bls12381G1PublicKey)],
+    validator: ValidatorId,
+) -> Option<Bls12381G1PublicKey> {
+    committee
+        .iter()
+        .find(|(id, _)| *id == validator)
+        .map(|(_, pk)| *pk)
+}
+
+/// Byzantine fault threshold for a committee of size `n` — classic
+/// BFT `f = (n - 1) / 3`. Committees too small to tolerate any faults
+/// (`n < 4`) return `0`; verifiers that need `n - f` signers rely on
+/// the caller having sized the committee correctly.
+const fn byzantine_threshold(n: usize) -> usize {
+    n.saturating_sub(1) / 3
+}
+
+/// Build the per-prefix signing messages for a round-1 or round-2 vote.
+/// Returns `|v| + 1` messages, one per prefix length `k ∈ 0..=|v|`,
+/// each binding `(network, domain, ctx, v[..k])`.
+fn prefix_signing_messages(
+    network: &NetworkDefinition,
+    domain: &[u8],
+    pc_ctx: &[u8],
+    v: &PcVector,
+) -> Vec<Vec<u8>> {
+    (0..=v.len())
+        .map(|k| {
+            let prefix = PcVector::new(v.iter().take(k).copied());
+            pc_vote_signing_message(network, domain, pc_ctx, &prefix)
+        })
+        .collect()
+}
+
+/// Build the canonical signing message for a length attestation:
+/// a single-element vector carrying `len` under [`DOMAIN_PC_VOTE2_LENGTH`].
+/// Binds a [`PcVote2`] signer to their specific `|x|`, closing the
+/// prefix-sig splice attack on [`PcXpProof::ShortWitness`].
+fn length_attestation_message(network: &NetworkDefinition, pc_ctx: &[u8], len: usize) -> Vec<u8> {
+    let len_element = PcValueElement::new({
+        let mut bytes = [0u8; PC_VALUE_ELEMENT_BYTES];
+        bytes[..8].copy_from_slice(&(len as u64).to_le_bytes());
+        bytes
+    });
+    let v = PcVector::new(std::iter::once(len_element));
+    pc_vote_signing_message(network, DOMAIN_PC_VOTE2_LENGTH, pc_ctx, &v)
+}
+
+/// Verify a round-2 length attestation against a signer's pubkey.
+pub(crate) fn verify_length_attestation(
+    sig: &Bls12381G2Signature,
+    pk: &Bls12381G1PublicKey,
+    network: &NetworkDefinition,
+    pc_ctx: &[u8],
+    len: usize,
+) -> bool {
+    let msg = length_attestation_message(network, pc_ctx, len);
+    aggregate_verify_bls_different_messages(&[msg.as_slice()], sig, std::slice::from_ref(pk))
+}
+
+// ─── Round 1 ───────────────────────────────────────────────────────────────
+
+/// Verify a single round-1 vote. Pure function over wire types.
+pub(crate) fn verify_vote1(
+    v1: &PcVote1,
+    network: &NetworkDefinition,
+    pc_ctx: &[u8],
+    committee: &[(ValidatorId, Bls12381G1PublicKey)],
+) -> bool {
+    let Some(pk) = pubkey_in_committee(committee, v1.validator()) else {
+        return false;
+    };
+    if v1.v_in().len() > MAX_VOTE_VECTOR_LEN {
+        return false;
+    }
+    if v1.prefix_sigs().len() != v1.v_in().len() + 1 {
+        return false;
+    }
+    let messages_owned = prefix_signing_messages(network, DOMAIN_PC_VOTE1, pc_ctx, v1.v_in());
+    let messages: Vec<&[u8]> = messages_owned.iter().map(Vec::as_slice).collect();
+    let pks = vec![pk; v1.prefix_sigs().len()];
+    let sigs: Vec<Bls12381G2Signature> = v1.prefix_sigs().iter().copied().collect();
+    let Ok(agg) = Bls12381G2Signature::aggregate(&sigs, true) else {
+        return false;
+    };
+    aggregate_verify_bls_different_messages(&messages, &agg, &pks)
+}
+
+/// Verify a round-1 QC — the certified prefix `x` plus the compact
+/// view of every round-1 signer's `v_in_i` relative to `x`.
+///
+/// Two soundness gates beyond signature verification:
+/// 1. `qc1.x_signers.len() == n - f` (with per-party dedup) — see
+///    module-level note on signer-set sizing.
+/// 2. `qc1_certify(reconstructed_inputs, f) == Some(qc1.x)` — pins
+///    `x` to the longest prefix attained by some `(f+1)`-subset of
+///    `S_1`'s inputs, forcing it above the all-honest subset's mcp.
+#[must_use]
+pub fn verify_qc1(
+    qc1: &PcQc1,
+    network: &NetworkDefinition,
+    pc_ctx: &[u8],
+    committee: &[(ValidatorId, Bls12381G1PublicKey)],
+) -> bool {
+    let n = committee.len();
+    let f = byzantine_threshold(n);
+    let q = n - f;
+
+    if qc1.x().len() > MAX_VOTE_VECTOR_LEN {
+        return false;
+    }
+    if qc1.x_signers().len() != q {
+        return false;
+    }
+
+    let mut seen: BTreeSet<ValidatorId> = BTreeSet::new();
+    let mut values: Vec<PcVector> = Vec::with_capacity(q);
+    let mut pks: Vec<Bls12381G1PublicKey> = Vec::with_capacity(q);
+    let mut subset_inputs: Vec<PcVector> = Vec::with_capacity(q);
+
+    for cv in qc1.x_signers().iter() {
+        let Some(pk) = pubkey_in_committee(committee, cv.validator()) else {
+            return false;
+        };
+        if !seen.insert(cv.validator()) {
+            return false;
+        }
+        let Some(v_prime) = reconstruct_compact_vote(cv, qc1.x()) else {
+            return false;
+        };
+        subset_inputs.push(v_prime.clone());
+        values.push(v_prime);
+        pks.push(pk);
+    }
+
+    let messages_owned: Vec<Vec<u8>> = values
+        .iter()
+        .map(|v| pc_vote_signing_message(network, DOMAIN_PC_VOTE1, pc_ctx, v))
+        .collect();
+    let messages: Vec<&[u8]> = messages_owned.iter().map(Vec::as_slice).collect();
+    if !aggregate_verify_bls_different_messages(&messages, &qc1.x_agg_sig(), &pks) {
+        return false;
+    }
+
+    qc1_certify(&subset_inputs, f).as_ref() == Some(qc1.x())
+}
+
+/// Reconstruct a signer's `v'_i = mcp(v_in_i, x) ++ [divergent?]` from
+/// the compact encoding. Returns `None` when the encoding is structurally
+/// invalid (`shared_len > |x|`, or `divergent.is_some()` and the divergent
+/// element coincides with `x[shared_len]` — which would collapse to a
+/// non-divergent vote and fails uniqueness).
+fn reconstruct_compact_vote(cv: &PcCompactVote, x: &PcVector) -> Option<PcVector> {
+    let shared_len = cv.shared_len() as usize;
+    if shared_len > x.len() {
+        return None;
+    }
+    let shared = x.as_slice()[..shared_len].iter().copied();
+    Some(match cv.divergent() {
+        None => PcVector::new(shared),
+        Some(d) => {
+            // The compact encoding is unique only if `d` actually
+            // diverges from `x[shared_len]` (when the latter exists).
+            if let Some(x_at) = x.as_slice().get(shared_len)
+                && x_at == d
+            {
+                return None;
+            }
+            PcVector::new(shared.chain(std::iter::once(*d)))
+        }
+    })
+}
+
+// ─── Round 2 ───────────────────────────────────────────────────────────────
+
+/// Verify a single round-2 vote — `(x, prefix_sigs, embedded qc1,
+/// length_attestation)`. Calls into [`verify_qc1`] for the embedded
+/// round-1 QC; recurses indirectly through
+/// [`PcXpProof::ShortWitness`] in [`verify_qc2`].
+pub(crate) fn verify_vote2(
+    v2: &PcVote2,
+    network: &NetworkDefinition,
+    pc_ctx: &[u8],
+    committee: &[(ValidatorId, Bls12381G1PublicKey)],
+) -> bool {
+    let Some(pk) = pubkey_in_committee(committee, v2.validator()) else {
+        return false;
+    };
+    if v2.x().len() > MAX_VOTE_VECTOR_LEN {
+        return false;
+    }
+    if v2.prefix_sigs().len() != v2.x().len() + 1 {
+        return false;
+    }
+    if !verify_qc1(v2.qc1(), network, pc_ctx, committee) {
+        return false;
+    }
+    // Vote2's `x` must be the QC1Certify output of its embedded QC1.
+    if v2.x() != v2.qc1().x() {
+        return false;
+    }
+    if !verify_length_attestation(&v2.length_attestation(), &pk, network, pc_ctx, v2.x().len()) {
+        return false;
+    }
+    let messages_owned = prefix_signing_messages(network, DOMAIN_PC_VOTE2, pc_ctx, v2.x());
+    let messages: Vec<&[u8]> = messages_owned.iter().map(Vec::as_slice).collect();
+    let pks = vec![pk; v2.prefix_sigs().len()];
+    let sigs: Vec<Bls12381G2Signature> = v2.prefix_sigs().iter().copied().collect();
+    let Ok(agg) = Bls12381G2Signature::aggregate(&sigs, true) else {
+        return false;
+    };
+    aggregate_verify_bls_different_messages(&messages, &agg, &pks)
+}
+
+/// Verify a round-2 QC — the multi-sig over `x_p` plus the witness
+/// `π` that `x_p` is the actual mcp of the round-2 quorum's `x` values.
+///
+/// `π` handling branches three ways: [`PcXpProof::Full`] is the all-equal
+/// case (every signer's `x = x_p`); [`PcXpProof::Diverging`] carries
+/// two witnesses with divergent extensions plus their backing QC1s;
+/// [`PcXpProof::ShortWitness`] embeds an entire [`PcVote2`] whose `x`
+/// equals `x_p`.
+#[must_use]
+pub fn verify_qc2(
+    qc2: &PcQc2,
+    network: &NetworkDefinition,
+    pc_ctx: &[u8],
+    committee: &[(ValidatorId, Bls12381G1PublicKey)],
+) -> bool {
+    let n = committee.len();
+    let f = byzantine_threshold(n);
+    let q = n - f;
+
+    if qc2.x_p().len() > MAX_VOTE_VECTOR_LEN {
+        return false;
+    }
+    if qc2.signers().count() != q {
+        return false;
+    }
+    let signer_indices: Vec<usize> = qc2.signers().set_indices().collect();
+    if signer_indices.iter().any(|&i| i >= n) {
+        return false;
+    }
+    let signer_pks: Vec<Bls12381G1PublicKey> =
+        signer_indices.iter().map(|&i| committee[i].1).collect();
+    let signer_ids: BTreeSet<ValidatorId> =
+        signer_indices.iter().map(|&i| committee[i].0).collect();
+
+    let x_p_message = pc_vote_signing_message(network, DOMAIN_PC_VOTE2, pc_ctx, qc2.x_p());
+    let x_p_messages: Vec<&[u8]> = std::iter::repeat_n(x_p_message.as_slice(), q).collect();
+    if !aggregate_verify_bls_different_messages(&x_p_messages, &qc2.multi_sig(), &signer_pks) {
+        return false;
+    }
+
+    match qc2.pi() {
+        PcXpProof::Full { length_multi_sig } => {
+            let len_msg = length_attestation_message(network, pc_ctx, qc2.x_p().len());
+            let len_messages: Vec<&[u8]> = std::iter::repeat_n(len_msg.as_slice(), q).collect();
+            aggregate_verify_bls_different_messages(&len_messages, length_multi_sig, &signer_pks)
+        }
+        PcXpProof::Diverging(proof) => {
+            verify_diverging_proof(proof, qc2, &signer_ids, network, pc_ctx, committee)
+        }
+        PcXpProof::ShortWitness { witness } => {
+            if !signer_ids.contains(&witness.validator()) {
+                return false;
+            }
+            if witness.x() != qc2.x_p() {
+                return false;
+            }
+            verify_vote2(witness, network, pc_ctx, committee)
+        }
+    }
+}
+
+fn verify_diverging_proof(
+    proof: &PcDivergingProof,
+    qc2: &PcQc2,
+    signer_ids: &BTreeSet<ValidatorId>,
+    network: &NetworkDefinition,
+    pc_ctx: &[u8],
+    committee: &[(ValidatorId, Bls12381G1PublicKey)],
+) -> bool {
+    if proof.j == proof.k || proof.j_divergent == proof.k_divergent {
+        return false;
+    }
+    if !signer_ids.contains(&proof.j) || !signer_ids.contains(&proof.k) {
+        return false;
+    }
+    let (Some(pk_j), Some(pk_k)) = (
+        pubkey_in_committee(committee, proof.j),
+        pubkey_in_committee(committee, proof.k),
+    ) else {
+        return false;
+    };
+    if !verify_qc1(&proof.qc1_j, network, pc_ctx, committee)
+        || !verify_qc1(&proof.qc1_k, network, pc_ctx, committee)
+    {
+        return false;
+    }
+    // Each witness's qc1.x must extend x_p ++ [divergent] — the qc1
+    // anchors the divergent extension to a real round-1 quorum.
+    let mut j_extended: Vec<PcValueElement> = qc2.x_p().iter().copied().collect();
+    j_extended.push(proof.j_divergent);
+    let j_vec = PcVector::new(j_extended);
+    let mut k_extended: Vec<PcValueElement> = qc2.x_p().iter().copied().collect();
+    k_extended.push(proof.k_divergent);
+    let k_vec = PcVector::new(k_extended);
+    if !j_vec.is_prefix_of(proof.qc1_j.x()) || !k_vec.is_prefix_of(proof.qc1_k.x()) {
+        return false;
+    }
+    let j_msg = pc_vote_signing_message(network, DOMAIN_PC_VOTE2, pc_ctx, &j_vec);
+    if !aggregate_verify_bls_different_messages(&[j_msg.as_slice()], &proof.j_sig, &[pk_j]) {
+        return false;
+    }
+    let k_msg = pc_vote_signing_message(network, DOMAIN_PC_VOTE2, pc_ctx, &k_vec);
+    aggregate_verify_bls_different_messages(&[k_msg.as_slice()], &proof.k_sig, &[pk_k])
+}
+
+// ─── Round 3 ───────────────────────────────────────────────────────────────
+
+/// Verify a single round-3 vote — `(x_p, sig_xp, embedded qc2)`. The
+/// signer's individual sig over `x_p` plus the embedded QC2 binding
+/// `x_p` to a real round-2 quorum.
+pub(crate) fn verify_vote3(
+    v3: &PcVote3,
+    network: &NetworkDefinition,
+    pc_ctx: &[u8],
+    committee: &[(ValidatorId, Bls12381G1PublicKey)],
+) -> bool {
+    let Some(pk) = pubkey_in_committee(committee, v3.validator()) else {
+        return false;
+    };
+    let msg = pc_vote_signing_message(network, DOMAIN_PC_VOTE3, pc_ctx, v3.x_p());
+    if !aggregate_verify_bls_different_messages(&[msg.as_slice()], &v3.sig_xp(), &[pk]) {
+        return false;
+    }
+    if !verify_qc2(v3.qc2(), network, pc_ctx, committee) {
+        return false;
+    }
+    v3.x_p() == v3.qc2().x_p()
+}
+
+/// Verify a round-3 QC — the terminal certificate.
+///
+/// Carries both endpoints `(x_pp, x_pe)` of the round-3 quorum's
+/// `x_p` distribution, the per-signer `|x_p_i|`s, and an aggregate
+/// sig binding each signer to their `x_p_i = x_pe[..len_i]`.
+///
+/// Five soundness gates: (1) `x_pp ⪯ x_pe`; (2) embedded QC2s for both
+/// endpoints valid; (3) endpoint values match the QC2s' `x_p`; (4)
+/// `all_signers.len() == n - f` with dedup; (5) min/max of signer
+/// lengths equal `|x_pp|` and `|x_pe|` respectively — `x_pp` is the
+/// shortest of the round-3 signers' `x_p_i`, `x_pe` the longest.
+#[must_use]
+pub fn verify_qc3(
+    qc3: &PcQc3,
+    network: &NetworkDefinition,
+    pc_ctx: &[u8],
+    committee: &[(ValidatorId, Bls12381G1PublicKey)],
+) -> bool {
+    let n = committee.len();
+    let f = byzantine_threshold(n);
+    let q = n - f;
+
+    let x_pe = qc3.x_pe();
+    let qc2_xpe = qc3.qc2_xpe();
+    if x_pe.len() > MAX_VOTE_VECTOR_LEN {
+        return false;
+    }
+    if !qc3.x_pp().is_prefix_of(x_pe) {
+        return false;
+    }
+    if !verify_qc2(qc3.qc2_xpp(), network, pc_ctx, committee) {
+        return false;
+    }
+    if !verify_qc2(qc2_xpe, network, pc_ctx, committee) {
+        return false;
+    }
+    if qc3.qc2_xpp().x_p() != qc3.x_pp() {
+        return false;
+    }
+    if qc2_xpe.x_p() != x_pe {
+        return false;
+    }
+    if qc3.all_signers().len() != q {
+        return false;
+    }
+
+    let mut seen: BTreeSet<ValidatorId> = BTreeSet::new();
+    let mut values: Vec<PcVector> = Vec::with_capacity(q);
+    let mut pks: Vec<Bls12381G1PublicKey> = Vec::with_capacity(q);
+    let mut min_len = usize::MAX;
+    let mut max_len = 0usize;
+    for signer in qc3.all_signers().iter() {
+        let Some(pk) = pubkey_in_committee(committee, signer.validator) else {
+            return false;
+        };
+        if !seen.insert(signer.validator) {
+            return false;
+        }
+        let len = signer.prefix_len as usize;
+        if len > x_pe.len() || len < qc3.x_pp().len() {
+            return false;
+        }
+        min_len = min_len.min(len);
+        max_len = max_len.max(len);
+        values.push(PcVector::new(x_pe.as_slice()[..len].iter().copied()));
+        pks.push(pk);
+    }
+    if min_len != qc3.x_pp().len() || max_len != x_pe.len() {
+        return false;
+    }
+
+    let messages_owned: Vec<Vec<u8>> = values
+        .iter()
+        .map(|v| pc_vote_signing_message(network, DOMAIN_PC_VOTE3, pc_ctx, v))
+        .collect();
+    let messages: Vec<&[u8]> = messages_owned.iter().map(Vec::as_slice).collect();
+    aggregate_verify_bls_different_messages(&messages, &qc3.agg_sig(), &pks)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Structural-rejection smoke tests for the verifier gates.
+
+    use hyperscale_types::{
+        PC_VALUE_ELEMENT_BYTES, PcCompactLenSigner, PcCompactVote, PcQc1, PcQc2, PcQc3,
+        PcValueElement, PcVector, PcXpProof, SignerBitfield, generate_bls_keypair,
+    };
+
+    use super::*;
+
+    fn net() -> NetworkDefinition {
+        NetworkDefinition::simulator()
+    }
+
+    fn committee(n: usize) -> Vec<(ValidatorId, Bls12381G1PublicKey)> {
+        (0..n as u64)
+            .map(|i| (ValidatorId::new(i), generate_bls_keypair().public_key()))
+            .collect()
+    }
+
+    fn elem(b: u8) -> PcValueElement {
+        PcValueElement::new([b; PC_VALUE_ELEMENT_BYTES])
+    }
+
+    fn ctx() -> Vec<u8> {
+        // Standalone test context — real callers use `spc_context(slot)`
+        // followed by `pc_context(spc_ctx, view)`, but the verifier
+        // doesn't care about its internal shape so long as it agrees
+        // with the signer.
+        vec![1, 2, 3, 4]
+    }
+
+    /// QC1 with the wrong signer-set size (≠ n - f) must be rejected
+    /// before any BLS pairing — this is the signer-set-sizing gate.
+    #[test]
+    fn verify_qc1_rejects_wrong_signer_count() {
+        let c = committee(4);
+        // n=4, f=1, q=3 — supply only 2 signers.
+        let qc1 = PcQc1::new(
+            PcVector::new(std::iter::once(elem(1))),
+            vec![
+                PcCompactVote::new(ValidatorId::new(0), 1, None),
+                PcCompactVote::new(ValidatorId::new(1), 1, None),
+            ],
+            generate_bls_keypair().sign_v1(b"unused"),
+        );
+        assert!(!verify_qc1(&qc1, &net(), &ctx(), &c));
+    }
+
+    /// QC1 carrying a non-committee `ValidatorId` in its signer list
+    /// must be rejected — this is the committee-membership gate.
+    #[test]
+    fn verify_qc1_rejects_non_committee_signer() {
+        let c = committee(4);
+        let qc1 = PcQc1::new(
+            PcVector::empty(),
+            vec![
+                PcCompactVote::new(ValidatorId::new(0), 0, None),
+                PcCompactVote::new(ValidatorId::new(1), 0, None),
+                // 999 is outside the committee.
+                PcCompactVote::new(ValidatorId::new(999), 0, None),
+            ],
+            generate_bls_keypair().sign_v1(b"unused"),
+        );
+        assert!(!verify_qc1(&qc1, &net(), &ctx(), &c));
+    }
+
+    /// QC1 with a duplicate signer must be rejected — closes the
+    /// sub-quorum-inflation path.
+    #[test]
+    fn verify_qc1_rejects_duplicate_signer() {
+        let c = committee(4);
+        let qc1 = PcQc1::new(
+            PcVector::empty(),
+            vec![
+                PcCompactVote::new(ValidatorId::new(0), 0, None),
+                PcCompactVote::new(ValidatorId::new(1), 0, None),
+                // Duplicate of validator 1.
+                PcCompactVote::new(ValidatorId::new(1), 0, None),
+            ],
+            generate_bls_keypair().sign_v1(b"unused"),
+        );
+        assert!(!verify_qc1(&qc1, &net(), &ctx(), &c));
+    }
+
+    /// QC2 with the wrong signer-bitfield count (≠ n - f) must be
+    /// rejected before any BLS pairing.
+    #[test]
+    fn verify_qc2_rejects_wrong_signer_count() {
+        let c = committee(4);
+        let mut bf = SignerBitfield::new(4);
+        bf.set(0);
+        bf.set(1);
+        // Only 2 of expected 3.
+        let qc2 = PcQc2::new(
+            PcVector::empty(),
+            bf,
+            generate_bls_keypair().sign_v1(b"unused"),
+            PcXpProof::Full {
+                length_multi_sig: generate_bls_keypair().sign_v1(b"unused"),
+            },
+        );
+        assert!(!verify_qc2(&qc2, &net(), &ctx(), &c));
+    }
+
+    /// QC2 with a signer-bitfield bit set outside the committee range
+    /// must be rejected.
+    #[test]
+    fn verify_qc2_rejects_out_of_range_bitfield() {
+        let c = committee(4);
+        // Size 8 bitfield (bigger than committee) with bit at index 7
+        // — outside the n=4 committee range.
+        let mut bf = SignerBitfield::new(8);
+        bf.set(0);
+        bf.set(1);
+        bf.set(7);
+        let qc2 = PcQc2::new(
+            PcVector::empty(),
+            bf,
+            generate_bls_keypair().sign_v1(b"unused"),
+            PcXpProof::Full {
+                length_multi_sig: generate_bls_keypair().sign_v1(b"unused"),
+            },
+        );
+        assert!(!verify_qc2(&qc2, &net(), &ctx(), &c));
+    }
+
+    /// QC3 must reject `x_pp` that isn't a prefix of `x_pe` — the
+    /// foundational structural invariant.
+    #[test]
+    fn verify_qc3_rejects_non_prefix_endpoints() {
+        let c = committee(4);
+        // x_pp = [2], x_pe = [1] — not a prefix.
+        let qc3 = PcQc3::new(
+            PcVector::new(std::iter::once(elem(2))),
+            dummy_qc2(),
+            Some(PcVector::new(std::iter::once(elem(1)))),
+            Some(dummy_qc2()),
+            vec![PcCompactLenSigner::new(ValidatorId::new(0), 1)],
+            generate_bls_keypair().sign_v1(b"unused"),
+        );
+        assert!(!verify_qc3(&qc3, &net(), &ctx(), &c));
+    }
+
+    /// QC3 with `all_signers.len() ≠ n - f` is rejected for size
+    /// — even before signature checks.
+    #[test]
+    fn verify_qc3_rejects_wrong_signer_count() {
+        let c = committee(4);
+        let qc3 = PcQc3::new(
+            PcVector::empty(),
+            dummy_qc2(),
+            None,
+            None,
+            // Expected 3, supplied 2.
+            vec![
+                PcCompactLenSigner::new(ValidatorId::new(0), 0),
+                PcCompactLenSigner::new(ValidatorId::new(1), 0),
+            ],
+            generate_bls_keypair().sign_v1(b"unused"),
+        );
+        assert!(!verify_qc3(&qc3, &net(), &ctx(), &c));
+    }
+
+    /// `reconstruct_compact_vote` rejects an encoding where the
+    /// "divergent" element coincides with `x[shared_len]`. Such an
+    /// encoding would be non-unique (could equally be encoded as
+    /// `shared_len + 1, divergent = x[shared_len + 1]?`).
+    #[test]
+    fn reconstruct_compact_vote_rejects_non_unique_divergent() {
+        let x = PcVector::new([elem(1), elem(2)]);
+        // Diverges at position 0 but the "divergent" element IS x[0].
+        let cv = PcCompactVote::new(ValidatorId::new(0), 0, Some(elem(1)));
+        assert!(reconstruct_compact_vote(&cv, &x).is_none());
+    }
+
+    /// Length attestation message must differ across `len` values to
+    /// stop length-splice attacks.
+    #[test]
+    fn length_attestation_message_differs_across_lengths() {
+        let a = length_attestation_message(&net(), &ctx(), 0);
+        let b = length_attestation_message(&net(), &ctx(), 1);
+        let c = length_attestation_message(&net(), &ctx(), 17);
+        assert_ne!(a, b);
+        assert_ne!(b, c);
+        assert_ne!(a, c);
+    }
+
+    fn dummy_qc2() -> PcQc2 {
+        PcQc2::new(
+            PcVector::empty(),
+            SignerBitfield::new(4),
+            generate_bls_keypair().sign_v1(b"unused"),
+            PcXpProof::Full {
+                length_multi_sig: generate_bls_keypair().sign_v1(b"unused"),
+            },
+        )
+    }
+}
