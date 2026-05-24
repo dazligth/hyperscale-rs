@@ -35,7 +35,7 @@ use crate::constants::{
     SHUFFLE_INTERVAL_EPOCHS, UNBONDING_WINDOW_EPOCHS,
 };
 use crate::pc::verify_vote_equivocation;
-use crate::recovery::verify_recovery_equivocation;
+use crate::recovery::{verify_recovery_cert, verify_recovery_equivocation};
 use crate::sampling::{draw_from_pool, prng_from, sample_committee};
 
 /// Domain tag for the beacon-randomness mixer. Binds the BLAKE3 input
@@ -629,6 +629,7 @@ pub fn apply_epoch(
     network: &NetworkDefinition,
     epoch: Epoch,
     committed: &[(ValidatorId, BeaconProposal)],
+    recovery_cert: Option<&RecoveryCertificate>,
 ) -> SlotEffects {
     assert!(
         epoch > state.current_epoch,
@@ -656,7 +657,7 @@ pub fn apply_epoch(
     let rewards_credited = distribute_epoch_rewards(state);
     let timeout_readied = auto_ready_timeout(state);
     run_shuffle_step(state);
-    let beacon_committee_transition = resample_beacon_committee(state);
+    let beacon_committee_transition = apply_recovery_or_resample(state, network, recovery_cert);
 
     let mut jailed = vrf.jailed;
     jailed.extend(witness.jailed);
@@ -680,6 +681,43 @@ pub fn apply_epoch(
         committee_changed: true,
         beacon_committee_transition: Some(beacon_committee_transition),
     }
+}
+
+/// Resample the beacon committee under either the recovery path (a
+/// valid cert is present, install replacement committee with
+/// exclusion-aware sampling) or the natural path (no cert, or cert
+/// failed verification — silently fall through to the normal resample).
+///
+/// A failed-verification cert is dropped rather than panicking: the
+/// runner shouldn't be able to brick the chain by submitting a bad
+/// cert, and a well-formed honest committee will produce a normal
+/// block at this epoch in that case.
+fn apply_recovery_or_resample(
+    state: &mut BeaconState,
+    network: &NetworkDefinition,
+    recovery_cert: Option<&RecoveryCertificate>,
+) -> CommitteeTransition {
+    if let Some(cert) = recovery_cert {
+        let active_pool: Vec<(ValidatorId, Bls12381G1PublicKey)> = state
+            .validators
+            .iter()
+            .filter(|(_, r)| matches!(r.status, ValidatorStatus::OnShard { ready: true, .. }))
+            .map(|(id, rec)| (*id, rec.pubkey))
+            .collect();
+        if verify_recovery_cert(
+            cert,
+            network,
+            &active_pool,
+            state.last_recovery_cert.as_ref(),
+        ) {
+            let excluded: BTreeSet<ValidatorId> =
+                cert.excluded_validators().iter().copied().collect();
+            let transition = resample_beacon_committee(state, &excluded, TransitionCause::Recovery);
+            state.last_recovery_cert = Some(cert.clone());
+            return transition;
+        }
+    }
+    resample_beacon_committee(state, &BTreeSet::new(), TransitionCause::NaturalShuffle)
 }
 
 /// Outcome of [`filter_and_roll_randomness`]. The borrowed `accepted`
@@ -1609,14 +1647,26 @@ fn run_shuffle_step(state: &mut BeaconState) {
 /// by [`run_shuffle_step`] are excluded from this resample's input.
 /// Order matters — putting the resample before the shuffle would feed
 /// stale `OnShard { ready: true }` ids into the sampler.
-fn resample_beacon_committee(state: &mut BeaconState) -> CommitteeTransition {
+///
+/// `excluded` is the validator set the sampler must skip on top of the
+/// natural [`beacon_eligible`] filter — empty on the normal path,
+/// populated from a [`RecoveryCertificate`]'s cumulative exclusions on
+/// the recovery path. `cause` tags the resulting transition.
+fn resample_beacon_committee(
+    state: &mut BeaconState,
+    excluded: &BTreeSet<ValidatorId>,
+    cause: TransitionCause,
+) -> CommitteeTransition {
     let prior = std::mem::take(&mut state.committee);
-    let eligible = beacon_eligible(state);
+    let eligible: Vec<ValidatorId> = beacon_eligible(state)
+        .into_iter()
+        .filter(|id| !excluded.contains(id))
+        .collect();
     state.committee = sample_committee(&eligible, state.randomness.as_bytes(), BEACON_SIGNER_COUNT);
     CommitteeTransition {
         from: prior,
         to: state.committee.clone(),
-        cause: TransitionCause::NaturalShuffle,
+        cause,
         at_slot: state.current_epoch,
     }
 }
@@ -2075,10 +2125,10 @@ mod tests {
     fn apply_epoch_panics_on_slot_replay() {
         let mut state = single_pool_state(4);
         state.committee = (0u64..4).map(ValidatorId::new).collect();
-        apply_epoch(&mut state, &net(), Epoch::new(5), &[]);
+        apply_epoch(&mut state, &net(), Epoch::new(5), &[], None);
         // Replay of epoch 5: current_epoch is now 5, so epoch=5 is
         // neither advance nor regression — must panic.
-        apply_epoch(&mut state, &net(), Epoch::new(5), &[]);
+        apply_epoch(&mut state, &net(), Epoch::new(5), &[], None);
     }
 
     #[test]
@@ -2086,15 +2136,15 @@ mod tests {
     fn apply_epoch_panics_on_slot_going_backwards() {
         let mut state = single_pool_state(4);
         state.committee = (0u64..4).map(ValidatorId::new).collect();
-        apply_epoch(&mut state, &net(), Epoch::new(5), &[]);
-        apply_epoch(&mut state, &net(), Epoch::new(3), &[]);
+        apply_epoch(&mut state, &net(), Epoch::new(5), &[], None);
+        apply_epoch(&mut state, &net(), Epoch::new(3), &[], None);
     }
 
     #[test]
     fn apply_epoch_advances_current_epoch() {
         let mut state = single_pool_state(4);
         state.committee = (0u64..4).map(ValidatorId::new).collect();
-        apply_epoch(&mut state, &net(), Epoch::new(7), &[]);
+        apply_epoch(&mut state, &net(), Epoch::new(7), &[], None);
         assert_eq!(state.current_epoch, Epoch::new(7));
     }
 
@@ -2289,7 +2339,7 @@ mod tests {
         committed: &[(ValidatorId, BeaconProposal)],
     ) -> SlotEffects {
         let next = state.current_epoch.next();
-        apply_epoch(state, &net(), next, committed)
+        apply_epoch(state, &net(), next, committed, None)
     }
 
     fn shard_witness(shard_id: u64, leaf_index: u64, payload: ShardWitnessPayload) -> Witness {
@@ -5012,6 +5062,189 @@ mod tests {
                 ValidatorId::new(2),
                 ValidatorId::new(3),
             ]
+        );
+    }
+
+    // ─── apply_epoch recovery-cert integration ───────────────────────────
+
+    use hyperscale_types::{
+        BeaconBlockHash, Bls12381G2Signature, Hash, RecoveryCertificate, RecoveryRound,
+        SignerBitfield, recovery_request_message,
+    };
+
+    /// Build a real `RecoveryCertificate` signed by the first
+    /// `signer_count` validators (their keypairs match the ones
+    /// `single_pool_state` installs via `validator_record`).
+    fn build_recovery_cert(
+        pool_size: usize,
+        signer_count: usize,
+        anchor_hash: BeaconBlockHash,
+        anchor_epoch: Epoch,
+        round: RecoveryRound,
+        excluded: Vec<ValidatorId>,
+    ) -> RecoveryCertificate {
+        let keys: Vec<Bls12381G1PrivateKey> = (0..pool_size).map(|i| keypair(i as u64)).collect();
+        let msg = recovery_request_message(&net(), &anchor_hash, anchor_epoch, round);
+        let sigs: Vec<Bls12381G2Signature> = keys
+            .iter()
+            .take(signer_count)
+            .map(|sk| sk.sign_v1(&msg))
+            .collect();
+        let aggregate_sig =
+            Bls12381G2Signature::aggregate(&sigs, true).expect("aggregate succeeds");
+        let mut signers = SignerBitfield::new(pool_size);
+        for i in 0..signer_count {
+            signers.set(i);
+        }
+        RecoveryCertificate::new(
+            anchor_hash,
+            anchor_epoch,
+            round,
+            excluded,
+            signers,
+            aggregate_sig,
+        )
+    }
+
+    /// A valid recovery cert flips the committee transition to
+    /// `Recovery` and is recorded in `state.last_recovery_cert`.
+    #[test]
+    fn apply_epoch_with_valid_cert_installs_recovery_committee() {
+        let mut state = single_pool_state(7);
+        state.committee = (0u64..4).map(ValidatorId::new).collect();
+        let anchor = BeaconBlockHash::from_raw(Hash::from_bytes(b"anchor"));
+        // 7 active validators; quorum = ⌈14/3⌉+1 = 6. Cert signed by all 7.
+        let cert = build_recovery_cert(
+            7,
+            7,
+            anchor,
+            Epoch::GENESIS,
+            RecoveryRound::new(0),
+            Vec::new(),
+        );
+        let next = state.current_epoch.next();
+        let effects = apply_epoch(&mut state, &net(), next, &[], Some(&cert));
+
+        let transition = effects
+            .beacon_committee_transition
+            .expect("recovery emits a transition");
+        assert_eq!(transition.cause, TransitionCause::Recovery);
+        assert_eq!(transition.at_slot, next);
+        assert_eq!(
+            state
+                .last_recovery_cert
+                .as_ref()
+                .map(RecoveryCertificate::recovery_round),
+            Some(RecoveryRound::new(0)),
+        );
+        assert_eq!(state.committee.len(), BEACON_SIGNER_COUNT);
+    }
+
+    /// `excluded_validators` are filtered out of the recovery-sampling
+    /// input — they never land in the resampled committee.
+    #[test]
+    fn apply_epoch_with_cert_excludes_validators_from_committee() {
+        let mut state = single_pool_state(7);
+        state.committee = (0u64..4).map(ValidatorId::new).collect();
+        let anchor = BeaconBlockHash::from_raw(Hash::from_bytes(b"anchor"));
+        // Exclude validators 0 and 1.
+        let excluded = vec![ValidatorId::new(0), ValidatorId::new(1)];
+        let cert = build_recovery_cert(
+            7,
+            7,
+            anchor,
+            Epoch::GENESIS,
+            RecoveryRound::new(0),
+            excluded.clone(),
+        );
+        let next = state.current_epoch.next();
+        apply_epoch(&mut state, &net(), next, &[], Some(&cert));
+
+        for ex in &excluded {
+            assert!(
+                !state.committee.contains(ex),
+                "excluded validator {ex:?} landed in committee"
+            );
+        }
+        // Committee is sized to BEACON_SIGNER_COUNT (=4); 5 remaining
+        // eligibles (2,3,4,5,6) cover that with one to spare.
+        assert_eq!(state.committee.len(), BEACON_SIGNER_COUNT);
+    }
+
+    /// A cert that fails verification (here: below quorum) falls
+    /// through to the normal resample — natural-shuffle transition,
+    /// `last_recovery_cert` unchanged.
+    #[test]
+    fn apply_epoch_with_invalid_cert_falls_through_to_normal_resample() {
+        let mut state = single_pool_state(7);
+        state.committee = (0u64..4).map(ValidatorId::new).collect();
+        let anchor = BeaconBlockHash::from_raw(Hash::from_bytes(b"anchor"));
+        // Below quorum: only 3 signers in a pool of 7 (quorum is 6).
+        let cert = build_recovery_cert(
+            7,
+            3,
+            anchor,
+            Epoch::GENESIS,
+            RecoveryRound::new(0),
+            Vec::new(),
+        );
+        let next = state.current_epoch.next();
+        let effects = apply_epoch(&mut state, &net(), next, &[], Some(&cert));
+
+        let transition = effects.beacon_committee_transition.unwrap();
+        assert_eq!(transition.cause, TransitionCause::NaturalShuffle);
+        assert!(state.last_recovery_cert.is_none());
+    }
+
+    /// Round monotonicity: a second cert at the same anchor with a
+    /// non-advancing round is rejected. The first cert is recorded;
+    /// the second falls through to natural resample and doesn't
+    /// overwrite `last_recovery_cert`.
+    #[test]
+    fn apply_epoch_rejects_non_monotonic_recovery_round() {
+        let mut state = single_pool_state(7);
+        state.committee = (0u64..4).map(ValidatorId::new).collect();
+        let anchor = BeaconBlockHash::from_raw(Hash::from_bytes(b"anchor"));
+
+        // First cert at round 2 lands.
+        let first = build_recovery_cert(
+            7,
+            7,
+            anchor,
+            Epoch::GENESIS,
+            RecoveryRound::new(2),
+            Vec::new(),
+        );
+        let next = state.current_epoch.next();
+        apply_epoch(&mut state, &net(), next, &[], Some(&first));
+        assert_eq!(
+            state
+                .last_recovery_cert
+                .as_ref()
+                .map(RecoveryCertificate::recovery_round),
+            Some(RecoveryRound::new(2)),
+        );
+
+        // Second cert at same anchor, round 2 — must not advance state.
+        let replay = build_recovery_cert(
+            7,
+            7,
+            anchor,
+            Epoch::GENESIS,
+            RecoveryRound::new(2),
+            Vec::new(),
+        );
+        let next = state.current_epoch.next();
+        let effects = apply_epoch(&mut state, &net(), next, &[], Some(&replay));
+        let transition = effects.beacon_committee_transition.unwrap();
+        assert_eq!(transition.cause, TransitionCause::NaturalShuffle);
+        // last_recovery_cert still holds the first cert.
+        assert_eq!(
+            state
+                .last_recovery_cert
+                .as_ref()
+                .map(RecoveryCertificate::recovery_round),
+            Some(RecoveryRound::new(2)),
         );
     }
 }

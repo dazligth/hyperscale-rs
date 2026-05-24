@@ -134,7 +134,7 @@ fn fifty_epochs_byte_identical_across_replicas() {
     for e in 1..=EPOCHS {
         let target = Epoch::new(e);
         for replica in &mut replicas {
-            apply_epoch(replica, &network, target, &[]);
+            apply_epoch(replica, &network, target, &[], None);
         }
         for i in 1..V {
             assert_eq!(replicas[0], replicas[i], "replicas diverged at epoch {e}");
