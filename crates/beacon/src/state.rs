@@ -23,15 +23,16 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use blake3::Hasher;
 use hyperscale_types::{
-    BeaconProposal, Bls12381G1PublicKey, Epoch, LeafIndex, NetworkDefinition, Randomness,
-    RecoveryCertificate, ShardGroupId, ShardWitnessPayload, Slot, Stake, StakePoolId, ValidatorId,
-    VrfOutput, vrf_verify,
+    BeaconProposal, Bls12381G1PublicKey, Epoch, EquivocationEvidence, LeafIndex, NetworkDefinition,
+    Randomness, RecoveryCertificate, ShardGroupId, ShardWitnessPayload, Slot, Stake, StakePoolId,
+    ValidatorId, VrfOutput, vrf_verify,
 };
 
 use crate::constants::{
     JAIL_COOLDOWN_EPOCHS, MIN_STAKE_FLOOR, MISSED_PROPOSAL_JAIL_THRESHOLD, POOL_BUFFER_TARGET,
     SHARD_CAPACITY,
 };
+use crate::pc::verify_vote_equivocation;
 use crate::sampling::draw_from_pool;
 
 /// Domain tag for the beacon-randomness mixer. Binds the BLAKE3 input
@@ -613,7 +614,7 @@ pub fn apply_slot(
     state.current_slot = slot;
 
     let vrf = filter_and_roll_randomness(state, network, slot, committed);
-    let witness = ingest_witnesses(state, &vrf.accepted);
+    let witness = ingest_witnesses(state, network, &vrf.accepted);
 
     let mut jailed = vrf.jailed;
     jailed.extend(witness.jailed);
@@ -719,10 +720,10 @@ fn filter_and_roll_randomness<'a>(
     let since_epoch = state.current_epoch;
     for party in &rejected_reveals {
         let prior_status = state.validators.get(party).map(|r| r.status);
-        let Some(ValidatorStatus::OnShard { shard, .. }) = prior_status else {
+        if !matches!(prior_status, Some(ValidatorStatus::OnShard { .. })) {
             continue;
-        };
-        jail_for_performance(state, *party, shard, since_epoch);
+        }
+        jail_validator(state, *party, JailReason::Performance, since_epoch);
         jailed.push(*party);
     }
 
@@ -733,41 +734,37 @@ fn filter_and_roll_randomness<'a>(
     }
 }
 
-/// Transition an `OnShard` `victim` to `Jailed { Performance,
-/// since_epoch }`, removing them from `shard`'s committee, drawing a
-/// refill from the global pool, and clearing any per-validator state
-/// scoped to their old `OnShard` placement (currently
-/// [`BeaconState::miss_counters`]).
+/// Transition `victim` to `Jailed { since_epoch, reason }` and run
+/// the shared cleanup: clear any per-validator state scoped to their
+/// old placement (currently [`BeaconState::miss_counters`]); if they
+/// were `OnShard`, remove from that shard's committee and draw a
+/// refill from the global pool.
 ///
-/// Caller must have already established that the validator is
-/// currently `OnShard { shard, .. }` — that invariant is what makes
-/// the cascade meaningful (no shard committee membership to remove
-/// from otherwise, no freed slot to refill).
-///
-/// # Panics
-///
-/// Panics if `victim` is absent from `state.validators` — the caller
-/// has just read a `prior_status` for it, so absence here is a
-/// structural inconsistency.
-fn jail_for_performance(
+/// Silent no-op if `victim` isn't in `state.validators`. Callers that
+/// want to gate on the prior status (e.g. equivocation's "skip
+/// already-permanent `Equivocation` jails") must do that gate before
+/// calling.
+fn jail_validator(
     state: &mut BeaconState,
     victim: ValidatorId,
-    shard: ShardGroupId,
+    reason: JailReason,
     since_epoch: Epoch,
 ) {
-    state
-        .validators
-        .get_mut(&victim)
-        .expect("caller has just read victim's status; record must be present")
-        .status = ValidatorStatus::Jailed {
-        since_epoch,
-        reason: JailReason::Performance,
+    let Some(rec) = state.validators.get_mut(&victim) else {
+        return;
     };
-    if let Some(committee) = state.shard_committees.get_mut(&shard) {
-        committee.members.retain(|v| *v != victim);
-    }
-    pool_draw(state, shard);
+    let prior_status = rec.status;
+    rec.status = ValidatorStatus::Jailed {
+        since_epoch,
+        reason,
+    };
     state.miss_counters.remove(&victim);
+    if let ValidatorStatus::OnShard { shard, .. } = prior_status {
+        if let Some(committee) = state.shard_committees.get_mut(&shard) {
+            committee.members.retain(|v| *v != victim);
+        }
+        pool_draw(state, shard);
+    }
 }
 
 // ─── witness ingestion ────────────────────────────────────────────────────
@@ -809,9 +806,10 @@ enum ShardEvent {
 /// honest committee can re-include a missing leaf next slot once the
 /// gap is filled.
 ///
-/// `Witness::Beacon` variants (equivocation evidence) are not yet
-/// handled — they're silently skipped at the collection step. The
-/// equivocation-handling branch lands when its verifier glue does.
+/// `Witness::Beacon::Equivocation` variants are collected alongside
+/// shard lifts and re-verified before applying. No dedup is needed —
+/// re-application is idempotent once the validator is `Jailed {
+/// Equivocation }`.
 ///
 /// # Defense-in-depth caps
 ///
@@ -821,14 +819,15 @@ enum ShardEvent {
 /// [`MAX_WITNESSES_PER_SLOT`](crate::constants::MAX_WITNESSES_PER_SLOT)
 /// is the product `BEACON_SIGNER_COUNT × MAX_WITNESSES_PER_PROPOSER`,
 /// which the wire bounds already imply for a well-formed committee.
-/// The check here exists as a defence in depth: if the committee size
+/// The check here exists as defence in depth: if the committee size
 /// ever grows without the slot cap being re-derived, the slot cap
 /// bounds aggregate witness work regardless.
 fn ingest_witnesses(
     state: &mut BeaconState,
+    network: &NetworkDefinition,
     accepted: &[&(ValidatorId, BeaconProposal)],
 ) -> WitnessOutcome {
-    use hyperscale_types::{ShardWitness, Witness};
+    use hyperscale_types::{BeaconWitness, ShardWitness, Witness};
 
     use crate::constants::MAX_WITNESSES_PER_SLOT;
 
@@ -836,12 +835,14 @@ fn ingest_witnesses(
     // `(shard_id, leaf_index)` — the unique identity of a witness in
     // its source shard's accumulator. `ShardWitnessProof` isn't `Ord`
     // (it's a wire type), so we key the dedup set on the tuple
-    // directly.
+    // directly. Beacon witnesses collect without dedup; their jail
+    // gate ("not already permanently jailed") provides the idempotence.
     let mut shard_seen: BTreeSet<(ShardGroupId, LeafIndex)> = BTreeSet::new();
     let mut shard_lifts: Vec<&ShardWitness> = Vec::new();
+    let mut equivocations: Vec<&BeaconWitness> = Vec::new();
     'collect: for (_, prop) in accepted {
         for w in prop.witnesses().iter() {
-            if shard_lifts.len() >= MAX_WITNESSES_PER_SLOT {
+            if shard_lifts.len() + equivocations.len() >= MAX_WITNESSES_PER_SLOT {
                 break 'collect;
             }
             match w {
@@ -851,9 +852,8 @@ fn ingest_witnesses(
                     }
                     shard_lifts.push(sw);
                 }
-                Witness::Beacon(_) => {
-                    // Equivocation verification lands separately; skip
-                    // unhandled `BeaconWitness` variants for now.
+                Witness::Beacon(bw) => {
+                    equivocations.push(bw);
                 }
             }
         }
@@ -889,7 +889,68 @@ fn ingest_witnesses(
             .insert(sw.proof.shard_id, sw.proof.leaf_index);
     }
 
+    // Apply equivocations. Each is re-verified independently before
+    // jailing; permanent-Equivocation already-jailed validators are
+    // the no-op idempotence case. The validator-id→pubkey lookup is
+    // built once per slot, only when at least one equivocation is
+    // present (most slots carry none).
+    if !equivocations.is_empty() {
+        let lookup: Vec<(ValidatorId, Bls12381G1PublicKey)> = state
+            .validators
+            .iter()
+            .map(|(id, rec)| (*id, rec.pubkey))
+            .collect();
+        for bw in equivocations {
+            let BeaconWitness::Equivocation { evidence } = bw;
+            if !verify_equivocation_evidence(evidence, network, &lookup) {
+                continue;
+            }
+            let validator_id = evidence.validator();
+            let Some(rec) = state.validators.get(&validator_id) else {
+                continue;
+            };
+            // Equivocation supersedes every status except an existing
+            // permanent equivocation jail. The race-exit defence covers
+            // `InsufficientStake` (operator tried to escape via
+            // `DeactivateValidator`) and fault-cause `Jailed` (the
+            // existing jail is upgraded to permanent).
+            let already_permanent = matches!(
+                rec.status,
+                ValidatorStatus::Jailed {
+                    reason: JailReason::Equivocation,
+                    ..
+                }
+            );
+            if already_permanent {
+                continue;
+            }
+            jail_validator(
+                state,
+                validator_id,
+                JailReason::Equivocation,
+                state.current_epoch,
+            );
+            outcome.jailed.push(validator_id);
+        }
+    }
+
     outcome
+}
+
+/// Re-validate an [`EquivocationEvidence`] under the current
+/// validator-set pubkey lookup. `Vote` re-runs the PC double-sign
+/// check; `Recovery` evidence requires recovery-cert infrastructure
+/// that hasn't been built yet and currently always returns `false`
+/// (silently dropped at the ingestion site).
+fn verify_equivocation_evidence(
+    evidence: &EquivocationEvidence,
+    network: &NetworkDefinition,
+    lookup: &[(ValidatorId, Bls12381G1PublicKey)],
+) -> bool {
+    match evidence {
+        EquivocationEvidence::Vote(v) => verify_vote_equivocation(v, network, lookup),
+        EquivocationEvidence::Recovery(_) => false,
+    }
 }
 
 /// Dispatch a single shard-witness payload to its handler.
@@ -1095,10 +1156,16 @@ fn apply_shard_payload(
             if *count < MISSED_PROPOSAL_JAIL_THRESHOLD {
                 return None;
             }
-            // Threshold crossed: jail under Performance and cascade.
-            // `jail_for_performance` clears `miss_counters[proposer]`
-            // as part of the OnShard transition cleanup.
-            jail_for_performance(state, *proposer_id, placement_shard, state.current_epoch);
+            // Threshold crossed: jail under Performance. `jail_validator`
+            // re-reads the status to find the shard for the cascade
+            // and clears `miss_counters[proposer]` as part of the
+            // shared cleanup.
+            jail_validator(
+                state,
+                *proposer_id,
+                JailReason::Performance,
+                state.current_epoch,
+            );
             Some(ShardEvent::Jailed(*proposer_id))
         }
     }
@@ -2849,5 +2916,266 @@ mod tests {
         apply_slot(&mut state, &net(), Slot::new(1), &committed);
 
         assert!(!state.miss_counters.contains_key(&ValidatorId::new(0)));
+    }
+
+    // ─── BeaconWitness equivocation ──────────────────────────────────────
+
+    use hyperscale_types::{
+        BeaconWitness, DOMAIN_PC_VOTE1, EquivocationEvidence as Evidence, PcValueElement, PcVector,
+        PcVoteEquivocation, PcVoteRound, RecoveryEquivocation, SpcView, pc_context,
+        pc_vote_signing_message, spc_context,
+    };
+
+    /// Build a valid `PcVoteEquivocation` for `equivocator` at
+    /// `(slot, view)` over two distinct round-1 vectors. Both sigs
+    /// verify under the equivocator's pubkey; the value mismatch is
+    /// what makes it a contradiction.
+    fn build_vote_equivocation(equivocator: u64, slot: Slot, view: SpcView) -> PcVoteEquivocation {
+        let sk = keypair(equivocator);
+        let spc_ctx = spc_context(slot);
+        let pc_ctx = pc_context(&spc_ctx, view);
+        let value_a = PcVector::new([PcValueElement::new([0xAA; 32])]);
+        let value_b = PcVector::new([PcValueElement::new([0xBB; 32])]);
+        let msg_a = pc_vote_signing_message(&net(), DOMAIN_PC_VOTE1, &pc_ctx, &value_a);
+        let msg_b = pc_vote_signing_message(&net(), DOMAIN_PC_VOTE1, &pc_ctx, &value_b);
+        PcVoteEquivocation {
+            validator: ValidatorId::new(equivocator),
+            slot,
+            view,
+            round: PcVoteRound::Vote1,
+            value_a,
+            sig_a: sk.sign_v1(&msg_a),
+            value_b,
+            sig_b: sk.sign_v1(&msg_b),
+        }
+    }
+
+    fn vote_equivocation_witness(equivocator: u64, slot: Slot, view: SpcView) -> Witness {
+        let ev = build_vote_equivocation(equivocator, slot, view);
+        Witness::Beacon(BeaconWitness::Equivocation {
+            evidence: Box::new(Evidence::Vote(Box::new(ev))),
+        })
+    }
+
+    /// Verified PC vote equivocation against an `OnShard` validator
+    /// jails permanently under `Equivocation` and cascades the
+    /// committee removal + `pool_draw` refill.
+    #[test]
+    fn vote_equivocation_jails_on_shard_validator_with_cascade() {
+        let mut state = single_pool_state(4);
+        state.committee = (0u64..4).map(ValidatorId::new).collect();
+        // Add a 5th validator in the pool to fuel refill.
+        let pool_id = StakePoolId::new(0);
+        state.pools.get_mut(&pool_id).unwrap().total_stake =
+            Stake::from_attos(5 * MIN_STAKE_FLOOR.attos());
+        state
+            .pools
+            .get_mut(&pool_id)
+            .unwrap()
+            .validators
+            .insert(ValidatorId::new(4));
+        state.validators.insert(
+            ValidatorId::new(4),
+            validator_record(4, 0, ValidatorStatus::Pooled),
+        );
+
+        let target = ValidatorId::new(1);
+        let w = vote_equivocation_witness(target.inner(), Slot::new(5), SpcView::new(0));
+        let committed = vec![(
+            ValidatorId::new(0),
+            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+        )];
+        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+
+        assert_eq!(effects.jailed, vec![target]);
+        assert_eq!(
+            state.validators.get(&target).unwrap().status,
+            ValidatorStatus::Jailed {
+                since_epoch: Epoch::GENESIS,
+                reason: JailReason::Equivocation,
+            },
+        );
+        let members = &state.shard_committees[&ShardGroupId::new(0)].members;
+        assert_eq!(members.len(), 4);
+        assert!(!members.contains(&target));
+        assert!(members.contains(&ValidatorId::new(4)));
+    }
+
+    /// Verified equivocation against a `Pooled` validator flips
+    /// status to permanent `Jailed { Equivocation }`; no cascade
+    /// (validator wasn't on a shard).
+    #[test]
+    fn vote_equivocation_jails_pooled_validator_in_place() {
+        let mut state = single_pool_state(4);
+        state.committee = (0u64..4).map(ValidatorId::new).collect();
+        state.validators.insert(
+            ValidatorId::new(10),
+            validator_record(10, 0, ValidatorStatus::Pooled),
+        );
+
+        let w = vote_equivocation_witness(10, Slot::new(5), SpcView::new(0));
+        let committed = vec![(
+            ValidatorId::new(0),
+            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+        )];
+        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+
+        assert_eq!(effects.jailed, vec![ValidatorId::new(10)]);
+        assert_eq!(
+            state.validators.get(&ValidatorId::new(10)).unwrap().status,
+            ValidatorStatus::Jailed {
+                since_epoch: Epoch::GENESIS,
+                reason: JailReason::Equivocation,
+            },
+        );
+    }
+
+    /// Equivocation promotes a fault-cause `Jailed{Performance}` to
+    /// permanent `Jailed{Equivocation}` — race-defence so a validator
+    /// can't escape permanent record via an earlier soft jail.
+    #[test]
+    fn vote_equivocation_promotes_performance_jail_to_equivocation() {
+        let mut state = single_pool_state(4);
+        state.committee = (0u64..4).map(ValidatorId::new).collect();
+        state.validators.insert(
+            ValidatorId::new(10),
+            validator_record(
+                10,
+                0,
+                ValidatorStatus::Jailed {
+                    since_epoch: Epoch::GENESIS,
+                    reason: JailReason::Performance,
+                },
+            ),
+        );
+
+        let w = vote_equivocation_witness(10, Slot::new(5), SpcView::new(0));
+        let committed = vec![(
+            ValidatorId::new(0),
+            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+        )];
+        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+
+        assert_eq!(effects.jailed, vec![ValidatorId::new(10)]);
+        assert_eq!(
+            state.validators.get(&ValidatorId::new(10)).unwrap().status,
+            ValidatorStatus::Jailed {
+                since_epoch: Epoch::GENESIS,
+                reason: JailReason::Equivocation,
+            },
+        );
+    }
+
+    /// Equivocation against an already-permanent `Jailed{Equivocation}`
+    /// is a silent no-op — re-application is idempotent.
+    #[test]
+    fn vote_equivocation_against_already_equivocation_is_no_op() {
+        let mut state = single_pool_state(4);
+        state.committee = (0u64..4).map(ValidatorId::new).collect();
+        let prior_epoch = Epoch::new(2);
+        state.validators.insert(
+            ValidatorId::new(10),
+            validator_record(
+                10,
+                0,
+                ValidatorStatus::Jailed {
+                    since_epoch: prior_epoch,
+                    reason: JailReason::Equivocation,
+                },
+            ),
+        );
+
+        let w = vote_equivocation_witness(10, Slot::new(5), SpcView::new(0));
+        let committed = vec![(
+            ValidatorId::new(0),
+            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+        )];
+        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+
+        assert!(effects.jailed.is_empty());
+        // since_epoch unchanged — no jail re-applied.
+        assert_eq!(
+            state.validators.get(&ValidatorId::new(10)).unwrap().status,
+            ValidatorStatus::Jailed {
+                since_epoch: prior_epoch,
+                reason: JailReason::Equivocation,
+            },
+        );
+    }
+
+    /// Invalid equivocation evidence (sigs don't verify) is silently
+    /// dropped. Tampered `sig_a` here; verify rejects.
+    #[test]
+    fn vote_equivocation_with_invalid_sig_is_dropped() {
+        let mut state = single_pool_state(4);
+        state.committee = (0u64..4).map(ValidatorId::new).collect();
+        let mut ev = build_vote_equivocation(1, Slot::new(5), SpcView::new(0));
+        ev.sig_a.0[0] ^= 1;
+        let w = Witness::Beacon(BeaconWitness::Equivocation {
+            evidence: Box::new(Evidence::Vote(Box::new(ev))),
+        });
+        let committed = vec![(
+            ValidatorId::new(0),
+            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+        )];
+        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+
+        assert!(effects.jailed.is_empty());
+        // Validator 1's status unchanged — still OnShard.
+        assert!(matches!(
+            state.validators.get(&ValidatorId::new(1)).unwrap().status,
+            ValidatorStatus::OnShard { .. },
+        ));
+    }
+
+    /// `Recovery` equivocation always rejects under the current
+    /// verifier (recovery-cert infrastructure not yet wired). Pins
+    /// the "drop silently" behaviour against a regression that
+    /// silently jails on unverified evidence.
+    #[test]
+    fn recovery_equivocation_always_rejects() {
+        use hyperscale_types::{
+            BeaconBlockHash, BeaconBlockHeader, BeaconStateRoot, Hash, RecoveryRequest,
+            RecoveryRound, SignerBitfield, zero_bls_signature,
+        };
+
+        let mut state = single_pool_state(4);
+        state.committee = (0u64..4).map(ValidatorId::new).collect();
+
+        // Construct a minimally-valid-looking RecoveryEquivocation;
+        // the verifier returns false regardless of contents.
+        let anchor = BeaconBlockHash::from_raw(Hash::from_bytes(b"anchor"));
+        let request = RecoveryRequest::new(
+            anchor,
+            Slot::new(7),
+            RecoveryRound::new(1),
+            ValidatorId::new(1),
+            zero_bls_signature(),
+        );
+        let block_header =
+            BeaconBlockHeader::genesis(BeaconStateRoot::from_raw(Hash::from_bytes(b"state")));
+        let mut signers = SignerBitfield::new(4);
+        signers.set(0);
+        let ev = RecoveryEquivocation {
+            validator: ValidatorId::new(1),
+            request,
+            block_header,
+            block_signers: signers,
+            block_aggregate_sig: zero_bls_signature(),
+        };
+        let w = Witness::Beacon(BeaconWitness::Equivocation {
+            evidence: Box::new(Evidence::Recovery(Box::new(ev))),
+        });
+        let committed = vec![(
+            ValidatorId::new(0),
+            vrf_proposal_with_witnesses(0, Slot::new(1), vec![w]),
+        )];
+        let effects = apply_slot(&mut state, &net(), Slot::new(1), &committed);
+
+        assert!(effects.jailed.is_empty());
+        assert!(matches!(
+            state.validators.get(&ValidatorId::new(1)).unwrap().status,
+            ValidatorStatus::OnShard { .. },
+        ));
     }
 }
