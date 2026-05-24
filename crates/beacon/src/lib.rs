@@ -16,3 +16,4 @@ pub mod pc;
 pub mod prefix_ops;
 pub mod sampling;
 pub mod spc;
+pub mod state;
