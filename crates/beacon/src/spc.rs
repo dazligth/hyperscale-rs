@@ -39,17 +39,20 @@
 //!   QC3 produced under a different view (or a different SPC instance)
 //!   won't verify.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use blake3::Hasher;
 use hyperscale_types::{
     Bls12381G1PrivateKey, Bls12381G1PublicKey, DOMAIN_PC_EMPTY_VIEW, Hash, NetworkDefinition,
-    PC_VALUE_ELEMENT_BYTES, PcQc3, PcValueElement, PcVector, SpcCert, SpcEmptyLowEvidence,
-    SpcEmptyViewMsg, SpcHighTriple, SpcProposalObject, SpcSkipSig, SpcView, ValidatorId,
-    aggregate_verify_bls_different_messages, pc_context, pc_vote_signing_message,
+    PC_VALUE_ELEMENT_BYTES, PcQc3, PcValueElement, PcVector, PcVote1, PcVote2, PcVote3,
+    PcVoteEquivocation, Slot, SpcCert, SpcEmptyLowEvidence, SpcEmptyViewMsg, SpcHighTriple,
+    SpcProposalObject, SpcSkipSig, SpcView, ValidatorId, aggregate_verify_bls_different_messages,
+    pc_context, pc_vote_signing_message, spc_context,
 };
+use sbor::basic_encode;
 
-use crate::pc::verify_qc3;
+use crate::pc::{PcEffect, PcEvent, PcInstance, verify_qc3};
 
 /// Domain tag for hashing a reported high triple's value into a 32-byte
 /// digest. Keeps the digest distinct from any other Blake3 use of the
@@ -465,6 +468,612 @@ pub fn build_indirect_cert(
     })
 }
 
+// ─── Proposal-object hashing ───────────────────────────────────────────────
+
+/// Canonical bytes for an [`SpcProposalObject`] — the preimage of
+/// [`hash_proposal_object`]. Layout: `domain || view (4 LE) || cert
+/// (SBOR)`. Not signed; consumed only by the proposal-hash → input-
+/// vector pipeline.
+fn proposal_object_message(po: &SpcProposalObject) -> Vec<u8> {
+    const DOMAIN: &[u8] = b"hyperscale-spc-proposal-object-v1";
+    let mut buf = Vec::with_capacity(DOMAIN.len() + 4 + 256);
+    buf.extend_from_slice(DOMAIN);
+    buf.extend_from_slice(&po.view.to_le_bytes());
+    let cert_bytes = basic_encode(&po.cert).expect("SpcCert SBOR encoding should never fail");
+    buf.extend_from_slice(&cert_bytes);
+    buf
+}
+
+/// All-zero sentinel element used in compute-view-input vectors to mark
+/// "no proposal object from this party yet". Cleared from the hashed
+/// digest space by [`hash_proposal_object`]'s collision-avoidance
+/// rehash so a real proposal object can never hash to it.
+const HASH_BOTTOM: PcValueElement = PcValueElement::new([0u8; PC_VALUE_ELEMENT_BYTES]);
+
+/// Blake3-hash a proposal object into a `PcValueElement` suitable for
+/// the inner-PC input vector at the next view. The fallback rehash
+/// avoids accidental collision with [`HASH_BOTTOM`]: if the natural
+/// digest happens to land on all-zeros, a tag-prefixed rehash moves
+/// it elsewhere while preserving full collision resistance against
+/// other inputs.
+fn hash_proposal_object(po: &SpcProposalObject) -> PcValueElement {
+    let bytes = proposal_object_message(po);
+    let mut raw = [0u8; PC_VALUE_ELEMENT_BYTES];
+    raw.copy_from_slice(Hasher::new().update(&bytes).finalize().as_bytes());
+    if PcValueElement::new(raw) == HASH_BOTTOM {
+        let mut h2 = Hasher::new();
+        h2.update(b"hyperscale-spc-proposal-bottom-collision-v1");
+        h2.update(&raw);
+        raw.copy_from_slice(h2.finalize().as_bytes());
+    }
+    PcValueElement::new(raw)
+}
+
+/// `Parent(view, value)` — walk a value vector's first non-bottom
+/// element to its proposal-object preimage, returning the cert's
+/// parent `(view, value)`. Used by [`commit`] to chain back to view
+/// 1.
+///
+/// `view = 1` has no parent (returns `None`).
+fn parent_of(
+    view: SpcView,
+    value: &PcVector,
+    proposals: &BTreeMap<PcValueElement, SpcProposalObject>,
+) -> Option<(SpcView, PcVector)> {
+    if view.inner() == 1 {
+        return None;
+    }
+    for el in value.iter() {
+        if *el != HASH_BOTTOM
+            && let Some(po) = proposals.get(el)
+        {
+            return Some(match &po.cert {
+                SpcCert::Direct {
+                    prev_view, value, ..
+                } => (*prev_view, value.clone()),
+                SpcCert::Indirect {
+                    target_view,
+                    target_value,
+                    ..
+                } => (*target_view, target_value.clone()),
+            });
+        }
+    }
+    None
+}
+
+/// `HasParent(view, value)`: view 1 always has a parent (the genesis
+/// boundary); view ≥ 2 needs the first non-bottom hash in `value` to
+/// reference a known proposal object.
+fn has_parent(
+    view: SpcView,
+    value: &PcVector,
+    proposals: &BTreeMap<PcValueElement, SpcProposalObject>,
+) -> bool {
+    view.inner() == 1 || parent_of(view, value, proposals).is_some()
+}
+
+/// Extract a cert's referenced high triple — the triple `max_high`
+/// should update to on cert acceptance. Direct certs reference their
+/// own `(prev_view, value, proof)`; indirect certs reference the
+/// `(target_view, target_value, target_proof)` triple.
+fn referenced_triple(cert: &SpcCert) -> SpcHighTriple {
+    match cert {
+        SpcCert::Direct {
+            prev_view,
+            value,
+            proof,
+        } => SpcHighTriple {
+            view: *prev_view,
+            value: value.clone(),
+            proof: proof.clone(),
+        },
+        SpcCert::Indirect {
+            target_view,
+            target_value,
+            target_proof,
+            ..
+        } => SpcHighTriple {
+            view: *target_view,
+            value: target_value.clone(),
+            proof: target_proof.clone(),
+        },
+    }
+}
+
+// ─── FSM ───────────────────────────────────────────────────────────────────
+
+/// What [`SpcInstance::handle`] tells MSC.
+///
+/// Sub-machine-local — the parent (MSC) drains these and lifts them
+/// into either internal state mutations or further effects bubbling
+/// up to the `BeaconCoordinator`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpcEffect {
+    /// Relay an inner-PC vote to peers, tagged with the SPC view it
+    /// belongs to so the receiver routes it back into the right view's
+    /// PC instance.
+    BroadcastVpcMsg(Box<VpcMsgPayload>),
+    /// Broadcast a `new-view` to peers — we just entered `view` under
+    /// `cert`.
+    BroadcastNewView {
+        /// View this notification authorises entry to.
+        view: SpcView,
+        /// Cert backing the authorisation.
+        cert: Box<SpcCert>,
+    },
+    /// Broadcast a `new-commit` to peers — `view`'s inner PC produced
+    /// the (low, proof) pair, anchoring the commit walk.
+    BroadcastNewCommit {
+        /// View whose inner PC produced this commit.
+        view: SpcView,
+        /// Committed low value.
+        value: PcVector,
+        /// PC round-3 cert anchoring `value` as `proof.x_pp`.
+        proof: Box<PcQc3>,
+    },
+    /// Pass-through of an inner-PC equivocation, tagged with the SPC
+    /// view so the parent can reconstruct the inner PC context.
+    Equivocation {
+        /// SPC view the inner PC instance belonged to.
+        view: SpcView,
+        /// Slim wire-form evidence of the double-sign.
+        evidence: Box<PcVoteEquivocation>,
+    },
+    /// View `> 1` produced an empty low — surface evidence to the
+    /// parent so MSC can demote the cyclic-first party in the next
+    /// slot.
+    EmptyLowEvidence(Box<SpcEmptyLowEvidence>),
+    /// Agreed high output — terminal effect for this SPC instance.
+    OutputHigh(PcVector),
+}
+
+/// One inner-PC vote tagged with its SPC view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VpcMsgPayload {
+    /// Round-1 vote.
+    Vote1 {
+        /// SPC view this vote belongs to.
+        view: SpcView,
+        /// The vote payload.
+        vote: PcVote1,
+    },
+    /// Round-2 vote.
+    Vote2 {
+        /// SPC view this vote belongs to.
+        view: SpcView,
+        /// The vote payload.
+        vote: Box<PcVote2>,
+    },
+    /// Round-3 vote.
+    Vote3 {
+        /// SPC view this vote belongs to.
+        view: SpcView,
+        /// The vote payload.
+        vote: Box<PcVote3>,
+    },
+}
+
+/// Events [`SpcInstance::handle`] consumes.
+#[derive(Debug, Clone)]
+pub enum SpcEvent {
+    /// The local validator's input vector for view 1.
+    Input(PcVector),
+    /// An inner-PC vote arrived, tagged with the SPC view.
+    VpcMsg(Box<VpcMsgPayload>),
+    /// `new-view` from a peer entering `view` under `cert`.
+    NewView {
+        /// View the peer entered.
+        view: SpcView,
+        /// Cert backing the entry.
+        cert: Box<SpcCert>,
+    },
+    /// `new-commit` from a peer. Self-authenticating via the embedded
+    /// `proof`; sender label isn't load-bearing.
+    NewCommit {
+        /// View whose inner PC produced this commit.
+        view: SpcView,
+        /// Committed low value.
+        value: PcVector,
+        /// PC round-3 cert anchoring `value` as `proof.x_pp`.
+        proof: Box<PcQc3>,
+    },
+}
+
+/// Per-view local state owned by [`SpcInstance`].
+struct ViewState {
+    vpc: PcInstance,
+    proposal_objects: BTreeMap<ValidatorId, SpcProposalObject>,
+    vpc_input_fed: bool,
+}
+
+impl ViewState {
+    fn new(
+        network: NetworkDefinition,
+        slot: Slot,
+        view: SpcView,
+        committee: Vec<(ValidatorId, Bls12381G1PublicKey)>,
+        me: ValidatorId,
+        me_sk: Arc<Bls12381G1PrivateKey>,
+    ) -> Self {
+        Self {
+            vpc: PcInstance::new(network, slot, view, committee, me, me_sk),
+            proposal_objects: BTreeMap::new(),
+            vpc_input_fed: false,
+        }
+    }
+}
+
+/// One SPC FSM instance, scoped to a single slot.
+///
+/// Owns one inner PC instance per view it enters. MSC drives one
+/// `SpcInstance` per slot; this commit's scope handles the happy
+/// path (view 1 input → view 2 cert → commit). View-change machinery
+/// (`empty-view` + indirect-cert formation) lands in a follow-up.
+pub struct SpcInstance {
+    network: NetworkDefinition,
+    slot: Slot,
+    spc_ctx: Vec<u8>,
+    committee: Vec<(ValidatorId, Bls12381G1PublicKey)>,
+    me: ValidatorId,
+    me_sk: Arc<Bls12381G1PrivateKey>,
+
+    current_view: SpcView,
+    views: BTreeMap<SpcView, ViewState>,
+    proposals_by_hash: BTreeMap<PcValueElement, SpcProposalObject>,
+    new_commit_broadcast: BTreeSet<SpcView>,
+    max_high: Option<SpcHighTriple>,
+
+    low_output: Option<PcVector>,
+    high_output: Option<PcVector>,
+}
+
+impl SpcInstance {
+    /// Construct a fresh SPC instance for `slot`. Creates the view-1
+    /// `PcInstance` eagerly.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `committee.len() < 4` (inherited from `PcInstance`).
+    #[must_use]
+    pub fn new(
+        network: NetworkDefinition,
+        slot: Slot,
+        committee: Vec<(ValidatorId, Bls12381G1PublicKey)>,
+        me: ValidatorId,
+        me_sk: Arc<Bls12381G1PrivateKey>,
+    ) -> Self {
+        let spc_ctx = spc_context(slot);
+        let mut views = BTreeMap::new();
+        views.insert(
+            SpcView::new(1),
+            ViewState::new(
+                network.clone(),
+                slot,
+                SpcView::new(1),
+                committee.clone(),
+                me,
+                Arc::clone(&me_sk),
+            ),
+        );
+        Self {
+            network,
+            slot,
+            spc_ctx,
+            committee,
+            me,
+            me_sk,
+            current_view: SpcView::new(1),
+            views,
+            proposals_by_hash: BTreeMap::new(),
+            new_commit_broadcast: BTreeSet::new(),
+            max_high: None,
+            low_output: None,
+            high_output: None,
+        }
+    }
+
+    /// Highest view this instance has entered.
+    #[must_use]
+    pub const fn current_view(&self) -> SpcView {
+        self.current_view
+    }
+
+    /// Latched low output, if any. View-1's inner PC produces this.
+    #[must_use]
+    pub const fn low_output(&self) -> Option<&PcVector> {
+        self.low_output.as_ref()
+    }
+
+    /// Latched high output, if any. The commit walk surfaces this on
+    /// reaching the view-1 ancestor.
+    #[must_use]
+    pub const fn high_output(&self) -> Option<&PcVector> {
+        self.high_output.as_ref()
+    }
+
+    /// Process one event; returns the resulting effects, possibly
+    /// empty.
+    pub fn handle(&mut self, event: SpcEvent) -> Vec<SpcEffect> {
+        match event {
+            SpcEvent::Input(v) => self.on_input(v),
+            SpcEvent::VpcMsg(payload) => self.on_vpc_msg(*payload),
+            SpcEvent::NewView { view, cert } => self.on_new_view(view, *cert),
+            SpcEvent::NewCommit { view, value, proof } => self.on_new_commit(view, &value, *proof),
+        }
+    }
+
+    fn on_input(&mut self, v: PcVector) -> Vec<SpcEffect> {
+        let view_state = self.views.get_mut(&SpcView::new(1)).expect("view 1 exists");
+        if view_state.vpc_input_fed {
+            return vec![];
+        }
+        view_state.vpc_input_fed = true;
+        let pc_effects = view_state.vpc.handle(PcEvent::Input(v));
+        self.translate_pc_effects(SpcView::new(1), pc_effects)
+    }
+
+    fn on_vpc_msg(&mut self, payload: VpcMsgPayload) -> Vec<SpcEffect> {
+        let view = match &payload {
+            VpcMsgPayload::Vote1 { view, .. }
+            | VpcMsgPayload::Vote2 { view, .. }
+            | VpcMsgPayload::Vote3 { view, .. } => *view,
+        };
+        let Some(view_state) = self.views.get_mut(&view) else {
+            // No buffering — drop messages for views we haven't entered.
+            return vec![];
+        };
+        let pc_event = match payload {
+            VpcMsgPayload::Vote1 { vote, .. } => PcEvent::Vote1Received(vote),
+            VpcMsgPayload::Vote2 { vote, .. } => PcEvent::Vote2Received(vote),
+            VpcMsgPayload::Vote3 { vote, .. } => PcEvent::Vote3Received(vote),
+        };
+        let pc_effects = view_state.vpc.handle(pc_event);
+        self.translate_pc_effects(view, pc_effects)
+    }
+
+    fn translate_pc_effects(&mut self, view: SpcView, pc_effects: Vec<PcEffect>) -> Vec<SpcEffect> {
+        let mut out = vec![];
+        for effect in pc_effects {
+            match effect {
+                PcEffect::BroadcastVote1(vote) => {
+                    out.push(SpcEffect::BroadcastVpcMsg(Box::new(VpcMsgPayload::Vote1 {
+                        view,
+                        vote: *vote,
+                    })));
+                }
+                PcEffect::BroadcastVote2(vote) => {
+                    out.push(SpcEffect::BroadcastVpcMsg(Box::new(VpcMsgPayload::Vote2 {
+                        view,
+                        vote,
+                    })));
+                }
+                PcEffect::BroadcastVote3(vote) => {
+                    out.push(SpcEffect::BroadcastVpcMsg(Box::new(VpcMsgPayload::Vote3 {
+                        view,
+                        vote,
+                    })));
+                }
+                PcEffect::EquivocationObserved(ev) => {
+                    out.push(SpcEffect::Equivocation { view, evidence: ev });
+                }
+                PcEffect::Decided(qc3) => {
+                    let low = qc3.x_pp().clone();
+                    let high = qc3.x_pe().clone();
+                    out.extend(self.on_vpc_output_low(view, &low, (*qc3).clone()));
+                    out.extend(self.on_vpc_output_high(view, high, *qc3));
+                }
+            }
+        }
+        out
+    }
+
+    fn on_vpc_output_low(&mut self, view: SpcView, low: &PcVector, proof: PcQc3) -> Vec<SpcEffect> {
+        let mut out = vec![];
+        // Empty low at view > 1 → record evidence.
+        if view.inner() > 1 && low.is_empty() {
+            out.push(SpcEffect::EmptyLowEvidence(Box::new(SpcEmptyLowEvidence {
+                view,
+                proof: proof.clone(),
+            })));
+        }
+        if self.new_commit_broadcast.insert(view) {
+            out.push(SpcEffect::BroadcastNewCommit {
+                view,
+                value: low.clone(),
+                proof: Box::new(proof),
+            });
+            // `commit` walks the parent chain back toward view 1.
+            out.extend(self.commit(view, low));
+        }
+        out
+    }
+
+    fn on_vpc_output_high(
+        &mut self,
+        view: SpcView,
+        high: PcVector,
+        proof: PcQc3,
+    ) -> Vec<SpcEffect> {
+        if self.high_output.is_some() {
+            return vec![];
+        }
+        let mut out = vec![];
+        if has_parent(view, &high, &self.proposals_by_hash) {
+            let triple = SpcHighTriple {
+                view,
+                value: high.clone(),
+                proof: proof.clone(),
+            };
+            self.update_max_high(triple);
+            let Some(next_raw) = view.inner().checked_add(1) else {
+                // u32 view counter saturated; honest execution never
+                // reaches anywhere near this.
+                return out;
+            };
+            let next = SpcView::new(next_raw);
+            let cert = SpcCert::Direct {
+                prev_view: view,
+                value: high,
+                proof,
+            };
+            // Self-process: enter view+1 and broadcast.
+            out.extend(self.enter_view(next, cert.clone()));
+            out.push(SpcEffect::BroadcastNewView {
+                view: next,
+                cert: Box::new(cert),
+            });
+        }
+        // Empty-view path (view's high had no known parent) lands in
+        // the view-change follow-up.
+        out
+    }
+
+    fn on_new_view(&mut self, view: SpcView, cert: SpcCert) -> Vec<SpcEffect> {
+        if !verify_cert(&cert, view, &self.network, &self.spc_ctx, &self.committee) {
+            return vec![];
+        }
+        if view.inner() < self.current_view.inner() {
+            return vec![];
+        }
+        // The cert's parent claim has to resolve in our local
+        // `proposals_by_hash` — the FSM-level gate beyond crypto.
+        let (prev_view, parent_value) = match &cert {
+            SpcCert::Direct {
+                prev_view, value, ..
+            } => (*prev_view, value.clone()),
+            SpcCert::Indirect {
+                target_view,
+                target_value,
+                ..
+            } => (*target_view, target_value.clone()),
+        };
+        if !has_parent(prev_view, &parent_value, &self.proposals_by_hash) {
+            return vec![];
+        }
+        self.enter_view(view, cert)
+    }
+
+    fn on_new_commit(&mut self, view: SpcView, value: &PcVector, proof: PcQc3) -> Vec<SpcEffect> {
+        // `new-commit` is self-authenticating via the embedded
+        // `PcQc3` whose low is the committed value. Verify under the
+        // view's PC context, then walk the parent chain.
+        let pc_ctx = pc_context(&self.spc_ctx, view);
+        if !verify_qc3(&proof, &self.network, &pc_ctx, &self.committee) {
+            return vec![];
+        }
+        if proof.x_pp() != value {
+            return vec![];
+        }
+        let mut out = vec![];
+        if self.new_commit_broadcast.insert(view) {
+            out.push(SpcEffect::BroadcastNewCommit {
+                view,
+                value: value.clone(),
+                proof: Box::new(proof),
+            });
+        }
+        out.extend(self.commit(view, value));
+        out
+    }
+
+    fn enter_view(&mut self, view: SpcView, cert: SpcCert) -> Vec<SpcEffect> {
+        if self.high_output.is_some() {
+            return vec![];
+        }
+        if view.inner() < self.current_view.inner() {
+            return vec![];
+        }
+        let entered_new = view.inner() > self.current_view.inner();
+        if entered_new {
+            self.current_view = view;
+        }
+
+        self.update_max_high(referenced_triple(&cert));
+
+        let po = SpcProposalObject { view, cert };
+        let h = hash_proposal_object(&po);
+        self.proposals_by_hash.insert(h, po.clone());
+        let view_state = self.views.entry(view).or_insert_with(|| {
+            ViewState::new(
+                self.network.clone(),
+                self.slot,
+                view,
+                self.committee.clone(),
+                self.me,
+                Arc::clone(&self.me_sk),
+            )
+        });
+        // Last-write-wins on `(view, sender)` for proposal objects.
+        // The cert authenticates the parent claim, so two distinct
+        // valid certs from the "same sender" are valid relays, not
+        // equivocation.
+        view_state.proposal_objects.insert(self.me, po);
+
+        // Kick the inner PC once we have all `n` proposal objects
+        // (view ≥ 2; view 1 takes the application input directly).
+        let n = self.committee.len();
+        let mut out = vec![];
+        let ready =
+            view.inner() > 1 && !view_state.vpc_input_fed && view_state.proposal_objects.len() == n;
+        if ready {
+            view_state.vpc_input_fed = true;
+            let input = self.compute_view_input(view);
+            let view_state = self.views.get_mut(&view).expect("present");
+            let pc_effects = view_state.vpc.handle(PcEvent::Input(input));
+            out.extend(self.translate_pc_effects(view, pc_effects));
+        }
+        out
+    }
+
+    fn commit(&mut self, view: SpcView, value: &PcVector) -> Vec<SpcEffect> {
+        let mut out = vec![];
+        if view.inner() == 1 {
+            if self.low_output.is_none() {
+                self.low_output = Some(value.clone());
+            }
+            return out;
+        }
+        if let Some((parent_view, parent_value)) = parent_of(view, value, &self.proposals_by_hash) {
+            if parent_view.inner() == 1 {
+                if self.high_output.is_none() {
+                    self.high_output = Some(parent_value.clone());
+                    out.push(SpcEffect::OutputHigh(parent_value));
+                    // Instance is done: free the proposal table.
+                    self.proposals_by_hash.clear();
+                }
+            } else if parent_view.inner() > 1 {
+                out.extend(self.commit(parent_view, &parent_value));
+            }
+        }
+        out
+    }
+
+    fn update_max_high(&mut self, triple: SpcHighTriple) {
+        let beats = self.max_high.as_ref().is_none_or(|c| triple.view > c.view);
+        if beats {
+            self.max_high = Some(triple);
+        }
+    }
+
+    fn compute_view_input(&self, view: SpcView) -> PcVector {
+        let view_state = self.views.get(&view).expect("view present");
+        let n = self.committee.len();
+        let shifts = rank_shift_for_view(view, n);
+        // Cyclically shifted ranking: `committee[i + shifts mod n]`.
+        let elements: Vec<PcValueElement> = (0..n)
+            .map(|i| {
+                let validator = self.committee[(i + shifts) % n].0;
+                view_state
+                    .proposal_objects
+                    .get(&validator)
+                    .map_or(HASH_BOTTOM, hash_proposal_object)
+            })
+            .collect();
+        PcVector::new(elements)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use hyperscale_types::{
@@ -679,5 +1288,147 @@ mod tests {
 
     fn bls_sign_unused(sk: &Bls12381G1PrivateKey) -> Bls12381G2Signature {
         sk.sign_v1(b"unused")
+    }
+
+    // ─── FSM tests ─────────────────────────────────────────────────────
+
+    use hyperscale_types::bls_keypair_from_seed;
+
+    fn fsm_committee(
+        n: usize,
+    ) -> (
+        Vec<Arc<Bls12381G1PrivateKey>>,
+        Vec<(ValidatorId, Bls12381G1PublicKey)>,
+    ) {
+        let mut sks = Vec::with_capacity(n);
+        let mut members = Vec::with_capacity(n);
+        for i in 0..n {
+            let mut seed = [0u8; 32];
+            seed[..8].copy_from_slice(&(i as u64).to_le_bytes());
+            let sk = bls_keypair_from_seed(&seed);
+            members.push((ValidatorId::new(i as u64), sk.public_key()));
+            sks.push(Arc::new(sk));
+        }
+        (sks, members)
+    }
+
+    fn fsm_instance(idx: usize) -> SpcInstance {
+        let (sks, members) = fsm_committee(4);
+        SpcInstance::new(
+            net(),
+            Slot::new(1),
+            members.clone(),
+            members[idx].0,
+            Arc::clone(&sks[idx]),
+        )
+    }
+
+    /// Fresh `SpcInstance` constructs with view 1 as current and no
+    /// outputs latched.
+    #[test]
+    fn spc_instance_initial_state() {
+        let fsm = fsm_instance(0);
+        assert_eq!(fsm.current_view(), SpcView::new(1));
+        assert!(fsm.low_output().is_none());
+        assert!(fsm.high_output().is_none());
+    }
+
+    /// Feeding `Input` at view 1 emits exactly one
+    /// `BroadcastVpcMsg(Vote1)` — the inner PC produces a Vote1
+    /// broadcast as its first effect.
+    #[test]
+    fn spc_input_emits_vote1_broadcast() {
+        let mut fsm = fsm_instance(0);
+        let v = PcVector::new(std::iter::once(PcValueElement::new([7u8; 32])));
+        let effects = fsm.handle(SpcEvent::Input(v));
+        assert_eq!(effects.len(), 1);
+        assert!(matches!(
+            effects[0],
+            SpcEffect::BroadcastVpcMsg(ref payload) if matches!(**payload, VpcMsgPayload::Vote1 { .. })
+        ));
+    }
+
+    /// Subsequent `Input` events at view 1 are idempotent — already
+    /// fed.
+    #[test]
+    fn spc_input_idempotent_at_view_one() {
+        let mut fsm = fsm_instance(0);
+        let v = PcVector::new(std::iter::once(PcValueElement::new([1u8; 32])));
+        let _ = fsm.handle(SpcEvent::Input(v.clone()));
+        let second = fsm.handle(SpcEvent::Input(v));
+        assert!(second.is_empty());
+    }
+
+    /// `VpcMsg` for an unknown view is dropped — no buffering, no
+    /// effects.
+    #[test]
+    fn spc_vpc_msg_for_unknown_view_dropped() {
+        let mut fsm = fsm_instance(0);
+        let (_sks, members) = fsm_committee(4);
+        // Build a stub Vote1 from peer 1 under view 99 (we've only
+        // entered view 1).
+        let dummy = PcVote1::new(
+            members[1].0,
+            PcVector::empty(),
+            vec![Bls12381G2Signature([0u8; 96])],
+        );
+        let effects = fsm.handle(SpcEvent::VpcMsg(Box::new(VpcMsgPayload::Vote1 {
+            view: SpcView::new(99),
+            vote: dummy,
+        })));
+        assert!(effects.is_empty());
+    }
+
+    /// `parent_of(view 1, _)` returns `None` — view 1 has no parent.
+    /// `has_parent(view 1, _)` returns `true` — the genesis boundary.
+    #[test]
+    fn parent_helpers_at_view_one() {
+        let proposals = BTreeMap::new();
+        assert!(parent_of(SpcView::new(1), &PcVector::empty(), &proposals).is_none());
+        assert!(has_parent(SpcView::new(1), &PcVector::empty(), &proposals));
+    }
+
+    /// `parent_of(view N, _)` returns the cert's parent triple when
+    /// the value's first non-bottom hash resolves to a proposal
+    /// object in the table.
+    #[test]
+    fn parent_of_resolves_first_non_bottom_hash() {
+        let parent_value = PcVector::new(std::iter::once(PcValueElement::new([0xAB; 32])));
+        let cert = SpcCert::Direct {
+            prev_view: SpcView::new(2),
+            value: parent_value.clone(),
+            proof: dummy_pc_qc3(),
+        };
+        let po = SpcProposalObject {
+            view: SpcView::new(3),
+            cert,
+        };
+        let h = hash_proposal_object(&po);
+        let mut proposals = BTreeMap::new();
+        proposals.insert(h, po);
+
+        // Search vector: [BOTTOM, h] — second element resolves.
+        let search = PcVector::new([HASH_BOTTOM, h]);
+        let parent = parent_of(SpcView::new(3), &search, &proposals);
+        assert_eq!(parent, Some((SpcView::new(2), parent_value)));
+    }
+
+    /// `hash_proposal_object` is deterministic + never returns
+    /// [`HASH_BOTTOM`] (bottom-collision avoidance gives full
+    /// collision resistance against the sentinel).
+    #[test]
+    fn hash_proposal_object_deterministic_and_avoids_bottom() {
+        let po = SpcProposalObject {
+            view: SpcView::new(2),
+            cert: SpcCert::Direct {
+                prev_view: SpcView::new(1),
+                value: PcVector::empty(),
+                proof: dummy_pc_qc3(),
+            },
+        };
+        let h1 = hash_proposal_object(&po);
+        let h2 = hash_proposal_object(&po);
+        assert_eq!(h1, h2);
+        assert_ne!(h1, HASH_BOTTOM);
     }
 }
