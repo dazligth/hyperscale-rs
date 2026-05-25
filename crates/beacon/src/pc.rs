@@ -296,21 +296,43 @@ pub fn verify_qc2(
         signer_indices.iter().map(|&i| committee[i].0).collect();
 
     let x_p_message = pc_vote_signing_message(network, DOMAIN_PC_VOTE2, pc_ctx, qc2.x_p());
-    let x_p_messages: Vec<&[u8]> = std::iter::repeat_n(x_p_message.as_slice(), q).collect();
-    if !aggregate_verify_bls_different_messages(&x_p_messages, &qc2.multi_sig(), &signer_pks) {
-        return false;
-    }
 
     match qc2.pi() {
-        PcXpProof::Full { length_multi_sig } => {
+        PcXpProof::Full => {
+            // Full case: combined_sig folds per-signer sig(x_p) + sig([|x_p|]).
+            // Build interleaved (message, pubkey) pairs so the different-
+            // messages aggregate verifies both attestations in one call.
             let len_msg = length_attestation_message(network, pc_ctx, qc2.x_p().len());
-            let len_messages: Vec<&[u8]> = std::iter::repeat_n(len_msg.as_slice(), q).collect();
-            aggregate_verify_bls_different_messages(&len_messages, length_multi_sig, &signer_pks)
+            let mut messages: Vec<&[u8]> = Vec::with_capacity(2 * q);
+            let mut pks: Vec<Bls12381G1PublicKey> = Vec::with_capacity(2 * q);
+            for pk in &signer_pks {
+                messages.push(x_p_message.as_slice());
+                pks.push(*pk);
+                messages.push(len_msg.as_slice());
+                pks.push(*pk);
+            }
+            aggregate_verify_bls_different_messages(&messages, &qc2.combined_sig(), &pks)
         }
         PcXpProof::Diverging(proof) => {
+            let x_p_messages: Vec<&[u8]> = std::iter::repeat_n(x_p_message.as_slice(), q).collect();
+            if !aggregate_verify_bls_different_messages(
+                &x_p_messages,
+                &qc2.combined_sig(),
+                &signer_pks,
+            ) {
+                return false;
+            }
             verify_diverging_proof(proof, qc2, &signer_ids, network, pc_ctx, committee)
         }
         PcXpProof::ShortWitness { witness } => {
+            let x_p_messages: Vec<&[u8]> = std::iter::repeat_n(x_p_message.as_slice(), q).collect();
+            if !aggregate_verify_bls_different_messages(
+                &x_p_messages,
+                &qc2.combined_sig(),
+                &signer_pks,
+            ) {
+                return false;
+            }
             if !signer_ids.contains(&witness.validator()) {
                 return false;
             }
@@ -665,7 +687,7 @@ pub fn build_qc2(votes: &[&PcVote2], committee: &[(ValidatorId, Bls12381G1Public
     // Pull each signer's prefix sig at index |x_p| — covers x[..|x_p|]
     // = x_p (since every x extends x_p).
     let mut signers_bf = SignerBitfield::new(n);
-    let mut sigs: Vec<Bls12381G2Signature> = Vec::with_capacity(votes.len());
+    let mut x_p_sigs: Vec<Bls12381G2Signature> = Vec::with_capacity(votes.len());
     for v2 in votes {
         let pos = committee
             .iter()
@@ -677,19 +699,31 @@ pub fn build_qc2(votes: &[&PcVote2], committee: &[(ValidatorId, Bls12381G1Public
             .get(x_p.len())
             .copied()
             .expect("vote-2 carries |x|+1 prefix sigs; index ≤ |x_p| ≤ |x|");
-        sigs.push(sig);
+        x_p_sigs.push(sig);
     }
-    let multi_sig = Bls12381G2Signature::aggregate(&sigs, true).expect("non-empty signers");
 
     // π proof. Three branches:
-    //   - Full: every signer's `x` equals `x_p` exactly.
+    //   - Full: every signer's `x` equals `x_p` exactly — combined_sig
+    //     folds per-signer sig(x_p) + sig([|x_p|]).
     //   - Diverging: at least two signers' `x` extend past `|x_p|`
     //     with different elements at position `|x_p|`.
     //   - ShortWitness: at least one signer's `|x| = |x_p|`, while
     //     extending signers all agree at position `|x_p|`.
     let pi = build_xp_proof(votes, &x_p);
+    let combined_sig = match &pi {
+        PcXpProof::Full => {
+            let mut all_sigs = x_p_sigs;
+            for v2 in votes {
+                all_sigs.push(v2.length_attestation());
+            }
+            Bls12381G2Signature::aggregate(&all_sigs, true).expect("non-empty signers")
+        }
+        PcXpProof::Diverging(_) | PcXpProof::ShortWitness { .. } => {
+            Bls12381G2Signature::aggregate(&x_p_sigs, true).expect("non-empty signers")
+        }
+    };
 
-    PcQc2::new(x_p, signers_bf, multi_sig, pi)
+    PcQc2::new(x_p, signers_bf, combined_sig, pi)
 }
 
 fn build_xp_proof(votes: &[&PcVote2], x_p: &PcVector) -> PcXpProof {
@@ -698,11 +732,7 @@ fn build_xp_proof(votes: &[&PcVote2], x_p: &PcVector) -> PcXpProof {
         && x_p.len() == input_len
         && votes.iter().all(|v| v.x().len() == input_len);
     if all_equal_length {
-        let length_sigs: Vec<Bls12381G2Signature> =
-            votes.iter().map(|v| v.length_attestation()).collect();
-        let length_multi_sig =
-            Bls12381G2Signature::aggregate(&length_sigs, true).expect("non-empty signers");
-        return PcXpProof::Full { length_multi_sig };
+        return PcXpProof::Full;
     }
 
     let pos = x_p.len();
@@ -1232,9 +1262,7 @@ mod tests {
             PcVector::empty(),
             bf,
             generate_bls_keypair().sign_v1(b"unused"),
-            PcXpProof::Full {
-                length_multi_sig: generate_bls_keypair().sign_v1(b"unused"),
-            },
+            PcXpProof::Full,
         );
         assert!(!verify_qc2(&qc2, &net(), &ctx(), &c));
     }
@@ -1254,9 +1282,7 @@ mod tests {
             PcVector::empty(),
             bf,
             generate_bls_keypair().sign_v1(b"unused"),
-            PcXpProof::Full {
-                length_multi_sig: generate_bls_keypair().sign_v1(b"unused"),
-            },
+            PcXpProof::Full,
         );
         assert!(!verify_qc2(&qc2, &net(), &ctx(), &c));
     }
@@ -1370,9 +1396,7 @@ mod tests {
             PcVector::empty(),
             SignerBitfield::new(4),
             generate_bls_keypair().sign_v1(b"unused"),
-            PcXpProof::Full {
-                length_multi_sig: generate_bls_keypair().sign_v1(b"unused"),
-            },
+            PcXpProof::Full,
         )
     }
 

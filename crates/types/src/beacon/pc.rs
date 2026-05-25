@@ -385,14 +385,12 @@ pub struct PcDivergingProof {
 /// all agree on.
 #[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
 pub enum PcXpProof {
-    /// Every signer's `x` equals `x_p` exactly. The `x_p` multi-sig
-    /// proves `x_p ⪯ x_i`; the length multi-sig pins each `|x_i|` to
-    /// `|x_p|`, so combined they bind `x_i = x_p`.
-    Full {
-        /// Multi-sig over `[|x_p|]` from every signer in `S₂` under
-        /// the round-2 length tag.
-        length_multi_sig: Bls12381G2Signature,
-    },
+    /// Every signer's `x` equals `x_p` exactly. The cert's
+    /// [`PcQc2::combined_sig`] folds the per-signer `[|x_p|]` length
+    /// attestation into the `x_p` multi-sig under a different-messages
+    /// aggregate, so the verifier reconstructs both sets of signing
+    /// bytes from the bitfield + `x_p` alone.
+    Full,
     /// `|x_p| < L`: at least two signers' `x` values diverge at
     /// position `|x_p|`. Each witness contributes a prefix sig over
     /// `x_p ++ [divergent]` plus a `PcQc1` certifying their full `x`.
@@ -409,16 +407,26 @@ pub enum PcXpProof {
 }
 
 /// Round-2 QC: maximum common prefix of `x` values across the round-2
-/// quorum, plus the multi-sig over that prefix and a witness that it
-/// is in fact the mcp.
+/// quorum, plus a combined multi-sig and a witness that `x_p` is in
+/// fact the mcp.
+///
+/// `combined_sig` semantics depend on `pi`:
+/// - [`PcXpProof::Full`]: different-messages aggregate of every signer's
+///   `sig(x_p)` and `sig([|x_p|])` — the length attestation is folded
+///   in so the verifier can bind each signer to `x_i = x_p` from one
+///   sig instead of two.
+/// - [`PcXpProof::Diverging`] / [`PcXpProof::ShortWitness`]:
+///   same-message multi-sig over `x_p` only; the witness contributes
+///   the length-binding evidence separately.
 #[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
 pub struct PcQc2 {
     x_p: PcVector,
     /// `n - f` signers in the quorum (positional against the
     /// committee enumeration).
     signers: SignerBitfield,
-    /// BLS multi-sig over `x_p` by every signer in `signers`.
-    multi_sig: Bls12381G2Signature,
+    /// BLS aggregate signature. Coverage depends on [`PcQc2::pi`] —
+    /// see the type-level comment.
+    combined_sig: Bls12381G2Signature,
     /// Proof that `x_p` is in fact the mcp.
     pi: PcXpProof,
 }
@@ -429,13 +437,13 @@ impl PcQc2 {
     pub const fn new(
         x_p: PcVector,
         signers: SignerBitfield,
-        multi_sig: Bls12381G2Signature,
+        combined_sig: Bls12381G2Signature,
         pi: PcXpProof,
     ) -> Self {
         Self {
             x_p,
             signers,
-            multi_sig,
+            combined_sig,
             pi,
         }
     }
@@ -452,10 +460,11 @@ impl PcQc2 {
         &self.signers
     }
 
-    /// Multi-sig over `x_p`.
+    /// Combined BLS signature; see the type-level comment for what it
+    /// covers per `pi` variant.
     #[must_use]
-    pub const fn multi_sig(&self) -> Bls12381G2Signature {
-        self.multi_sig
+    pub const fn combined_sig(&self) -> Bls12381G2Signature {
+        self.combined_sig
     }
 
     /// Witness that `x_p` is the mcp of the quorum's `x` values.
@@ -768,14 +777,7 @@ mod tests {
         signers.set(0);
         signers.set(1);
         signers.set(2);
-        PcQc2::new(
-            sample_vector(2),
-            signers,
-            sample_sig(0xBB),
-            PcXpProof::Full {
-                length_multi_sig: sample_sig(0xCC),
-            },
-        )
+        PcQc2::new(sample_vector(2), signers, sample_sig(0xBB), PcXpProof::Full)
     }
 
     #[test]
@@ -855,9 +857,7 @@ mod tests {
         };
 
         let variants = vec![
-            PcXpProof::Full {
-                length_multi_sig: sample_sig(0xAA),
-            },
+            PcXpProof::Full,
             PcXpProof::Diverging(Box::new(PcDivergingProof {
                 j: ValidatorId::new(0),
                 j_divergent: sample_value(11),
@@ -916,14 +916,7 @@ mod tests {
         let high_qc2 = {
             let mut signers = SignerBitfield::new(4);
             signers.set(0);
-            PcQc2::new(
-                high.clone(),
-                signers,
-                sample_sig(0x33),
-                PcXpProof::Full {
-                    length_multi_sig: sample_sig(0x44),
-                },
-            )
+            PcQc2::new(high.clone(), signers, sample_sig(0x33), PcXpProof::Full)
         };
         let qc = PcQc3::new(
             sample_vector(2),

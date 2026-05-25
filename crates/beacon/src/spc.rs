@@ -1348,9 +1348,7 @@ mod tests {
             PcVector::empty(),
             SignerBitfield::new(4),
             generate_bls_keypair().sign_v1(b"unused"),
-            PcXpProof::Full {
-                length_multi_sig: generate_bls_keypair().sign_v1(b"unused"),
-            },
+            PcXpProof::Full,
         );
         PcQc3::new(
             PcVector::empty(),

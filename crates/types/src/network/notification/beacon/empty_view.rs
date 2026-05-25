@@ -65,9 +65,7 @@ mod tests {
             PcVector::empty(),
             signers,
             Bls12381G2Signature([0x11; 96]),
-            PcXpProof::Full {
-                length_multi_sig: Bls12381G2Signature([0x22; 96]),
-            },
+            PcXpProof::Full,
         );
         PcQc3::new(
             PcVector::empty(),
