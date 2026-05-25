@@ -204,6 +204,37 @@ pub fn verify_empty_low_evidence(
     evidence.proof.x_pp().is_empty()
 }
 
+/// Verify an [`SpcCert`] as a beacon-block authenticator, deriving
+/// the cert's claimed view-entry from its own contents.
+///
+/// Direct certs authorise entry to `prev_view + 1`; indirect certs to
+/// their `for_view`. Genesis certs aren't SPC view-entries and are
+/// rejected here — beacon-block genesis verification has its own path.
+///
+/// Use this when verifying an arbitrary cert as a standalone proof,
+/// not when verifying a cert in the context of a known target view
+/// (use [`verify_cert`] for that).
+#[must_use]
+pub fn verify_block_cert(
+    cert: &SpcCert,
+    network: &NetworkDefinition,
+    spc_ctx: &[u8],
+    committee: &[(ValidatorId, Bls12381G1PublicKey)],
+) -> bool {
+    match cert {
+        SpcCert::Genesis { .. } => false,
+        SpcCert::Direct { prev_view, .. } => {
+            let Some(entering) = prev_view.inner().checked_add(1) else {
+                return false;
+            };
+            verify_cert(cert, SpcView::new(entering), network, spc_ctx, committee)
+        }
+        SpcCert::Indirect { for_view, .. } => {
+            verify_cert(cert, *for_view, network, spc_ctx, committee)
+        }
+    }
+}
+
 /// Verify an [`SpcCert`] against its claimed `entering_view` — the
 /// view this cert authorises a leader to enter.
 ///
