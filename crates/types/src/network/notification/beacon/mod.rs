@@ -17,6 +17,7 @@ mod new_view;
 mod pc_vote1;
 mod pc_vote2;
 mod pc_vote3;
+mod proposal;
 
 pub use empty_view::SpcEmptyViewMsgNotification;
 pub use header_sig::BeaconBlockHeaderSigNotification;
@@ -25,3 +26,4 @@ pub use new_view::SpcNewViewNotification;
 pub use pc_vote1::PcVote1Notification;
 pub use pc_vote2::PcVote2Notification;
 pub use pc_vote3::PcVote3Notification;
+pub use proposal::BeaconProposalNotification;

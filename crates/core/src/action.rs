@@ -881,11 +881,11 @@ pub enum Action {
     },
 
     /// Sign a VRF reveal, build a `BeaconProposal` carrying
-    /// `witnesses`, and gossip it. Handler feeds the signed proposal
-    /// back to the state machine via
-    /// `ProtocolEvent::BeaconProposalReceived` with `from = local
-    /// validator` so the same admission path peer proposals use also
-    /// admits our own.
+    /// `witnesses`, and unicast it to the rest of the beacon
+    /// committee. Handler feeds the signed proposal back to the
+    /// state machine via `ProtocolEvent::BeaconProposalReceived`
+    /// with `from = local validator` so the same admission path
+    /// peer proposals use also admits our own.
     BuildAndBroadcastBeaconProposal {
         /// Epoch this proposal targets; bound into the VRF reveal's
         /// signing context.
@@ -894,6 +894,9 @@ pub enum Action {
         /// proposal. Order is preserved into `BeaconProposal::new`'s
         /// `BoundedVec`.
         witnesses: Vec<Witness>,
+        /// Beacon-committee members the proposal ships to (excluding
+        /// self).
+        recipients: Vec<ValidatorId>,
     },
 
     /// Sign the canonical bytes of `header` with the local BLS key

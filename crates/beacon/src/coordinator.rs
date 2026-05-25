@@ -327,6 +327,7 @@ impl BeaconCoordinator {
             return Vec::new();
         }
         let epoch = self.proposal_pool.epoch();
+        let recipients = self.spc_recipients();
         // Witness + equivocation draining lands with the proposer-
         // assembly wiring in a follow-up sub-commit. For now ship a
         // VRF-only proposal so the FSM still has byte-distinct
@@ -334,6 +335,7 @@ impl BeaconCoordinator {
         vec![Action::BuildAndBroadcastBeaconProposal {
             epoch,
             witnesses: Vec::new(),
+            recipients,
         }]
     }
 
@@ -967,12 +969,21 @@ mod tests {
         coord.bootstrap_spc_for_next_epoch();
         let actions = coord.try_propose();
         let in_flight = Epoch::GENESIS.next();
-        let [Action::BuildAndBroadcastBeaconProposal { epoch, witnesses }] = actions.as_slice()
+        let [
+            Action::BuildAndBroadcastBeaconProposal {
+                epoch,
+                witnesses,
+                recipients,
+            },
+        ] = actions.as_slice()
         else {
             panic!("expected BuildAndBroadcastBeaconProposal, got {actions:?}");
         };
         assert_eq!(*epoch, in_flight);
         assert!(witnesses.is_empty());
+        // Three peers in the n=4 committee (self filtered out).
+        assert_eq!(recipients.len(), 3);
+        assert!(!recipients.contains(&coord.me));
     }
 
     #[test]

@@ -13,9 +13,9 @@ mod provisions;
 mod ready_signal;
 
 pub use beacon::{
-    BeaconBlockHeaderSigNotification, PcVote1Notification, PcVote2Notification,
-    PcVote3Notification, SpcEmptyViewMsgNotification, SpcNewCommitNotification,
-    SpcNewViewNotification,
+    BeaconBlockHeaderSigNotification, BeaconProposalNotification, PcVote1Notification,
+    PcVote2Notification, PcVote3Notification, SpcEmptyViewMsgNotification,
+    SpcNewCommitNotification, SpcNewViewNotification,
 };
 pub use block_header::BlockHeaderNotification;
 pub use block_vote::BlockVoteNotification;

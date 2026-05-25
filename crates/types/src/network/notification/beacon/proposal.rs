@@ -1,15 +1,14 @@
-//! Beacon-proposal gossip — one committee member's per-epoch
-//! submission.
+//! Beacon-proposal notification — one committee member's per-epoch
+//! submission, unicast to the rest of the beacon committee.
 
 use std::sync::Arc;
 
 use sbor::prelude::BasicSbor;
 
-use crate::network::{GossipMessage, TopicScope};
 use crate::{BeaconProposal, Epoch, MessageClass, NetworkMessage, ValidatorId};
 
-/// One committee member's [`BeaconProposal`] gossiped to the rest of
-/// the committee for the current beacon epoch.
+/// One committee member's [`BeaconProposal`] sent to the rest of the
+/// beacon committee for the current epoch.
 ///
 /// The proposal is self-authenticating via its embedded VRF reveal —
 /// `proposal.vrf_proof()` is a BLS signature over `(network, epoch)`
@@ -21,8 +20,12 @@ use crate::{BeaconProposal, Epoch, MessageClass, NetworkMessage, ValidatorId};
 /// SPC's view-1 input vector commits to each peer's proposal, so a
 /// silent peer drags the input toward `HASH_BOTTOM` and degrades
 /// agreement throughput until they show up or the view rotates.
+///
+/// Unicast (not gossip) because the audience is exactly the beacon
+/// committee — bounded at `BEACON_SIGNER_COUNT`. Gossipsub's flood
+/// overhead isn't justified at that fanout.
 #[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
-pub struct BeaconProposalGossip {
+pub struct BeaconProposalNotification {
     /// Claimed sender. The VRF reveal inside `proposal` authenticates
     /// it — receivers verify against this validator's pubkey.
     pub sender: ValidatorId,
@@ -33,8 +36,8 @@ pub struct BeaconProposalGossip {
     pub proposal: Arc<BeaconProposal>,
 }
 
-impl BeaconProposalGossip {
-    /// Wrap a [`BeaconProposal`] for gossip broadcast.
+impl BeaconProposalNotification {
+    /// Wrap a [`BeaconProposal`] for committee-internal unicast.
     #[must_use]
     pub fn new(
         sender: ValidatorId,
@@ -49,7 +52,7 @@ impl BeaconProposalGossip {
     }
 }
 
-impl NetworkMessage for BeaconProposalGossip {
+impl NetworkMessage for BeaconProposalNotification {
     fn message_type_id() -> &'static str {
         "beacon.proposal"
     }
@@ -57,10 +60,6 @@ impl NetworkMessage for BeaconProposalGossip {
     fn class() -> MessageClass {
         MessageClass::Consensus
     }
-}
-
-impl GossipMessage for BeaconProposalGossip {
-    const SCOPE: TopicScope = TopicScope::Global;
 }
 
 #[cfg(test)]
@@ -76,19 +75,15 @@ mod tests {
 
     #[test]
     fn sbor_round_trip() {
-        let g = BeaconProposalGossip::new(ValidatorId::new(3), Epoch::new(7), sample_proposal());
-        let bytes = basic_encode(&g).unwrap();
-        let decoded: BeaconProposalGossip = basic_decode(&bytes).unwrap();
-        assert_eq!(g, decoded);
+        let n =
+            BeaconProposalNotification::new(ValidatorId::new(3), Epoch::new(7), sample_proposal());
+        let bytes = basic_encode(&n).unwrap();
+        let decoded: BeaconProposalNotification = basic_decode(&bytes).unwrap();
+        assert_eq!(n, decoded);
     }
 
     #[test]
     fn class_is_consensus() {
-        assert_eq!(BeaconProposalGossip::class(), MessageClass::Consensus);
-    }
-
-    #[test]
-    fn scope_is_global() {
-        assert!(matches!(BeaconProposalGossip::SCOPE, TopicScope::Global));
+        assert_eq!(BeaconProposalNotification::class(), MessageClass::Consensus);
     }
 }

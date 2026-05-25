@@ -12,11 +12,10 @@ use std::sync::Arc;
 use hyperscale_core::{Action, ActionContext, ProtocolEvent};
 use hyperscale_network::Network;
 use hyperscale_storage::ShardStorage;
-use hyperscale_types::network::gossip::beacon::BeaconProposalGossip;
 use hyperscale_types::network::notification::{
-    BeaconBlockHeaderSigNotification, PcVote1Notification, PcVote2Notification,
-    PcVote3Notification, SpcEmptyViewMsgNotification, SpcNewCommitNotification,
-    SpcNewViewNotification,
+    BeaconBlockHeaderSigNotification, BeaconProposalNotification, PcVote1Notification,
+    PcVote2Notification, PcVote3Notification, SpcEmptyViewMsgNotification,
+    SpcNewCommitNotification, SpcNewViewNotification,
 };
 use hyperscale_types::{
     BeaconProposal, SpcHighTriple, SpcMessage, SpcProposalObject, VpcMsgPayload,
@@ -138,14 +137,17 @@ where
             ctx.network
                 .notify(&recipients, &SpcNewCommitNotification::new(triple));
         }
-        Action::BuildAndBroadcastBeaconProposal { epoch, witnesses } => {
+        Action::BuildAndBroadcastBeaconProposal {
+            epoch,
+            witnesses,
+            recipients,
+        } => {
             let (vrf_output, vrf_proof) = vrf_sign(ctx.signing_key, network, epoch);
             let proposal = Arc::new(BeaconProposal::new(witnesses, vrf_output, vrf_proof));
-            ctx.network.broadcast_global(&BeaconProposalGossip::new(
-                me,
-                epoch,
-                Arc::clone(&proposal),
-            ));
+            ctx.network.notify(
+                &recipients,
+                &BeaconProposalNotification::new(me, epoch, Arc::clone(&proposal)),
+            );
             ctx.notify_protocol(ProtocolEvent::BeaconProposalReceived {
                 from: me,
                 epoch,
