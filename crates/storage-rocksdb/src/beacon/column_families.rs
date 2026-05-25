@@ -1,14 +1,19 @@
 //! Column family definitions for the beacon `RocksDB` instance.
 //!
-//! Two CFs plus the default — the entire surface of beacon-side
-//! persistence under the in-memory-replay model (committed block chain
-//! is the only persisted artifact, `BeaconState` is rebuilt from it
-//! at startup).
+//! Three live CFs plus the default. Each commit writes the (block,
+//! state) pair atomically:
+//!
+//! - `beacon_blocks_by_epoch` — primary block store, BE-`u64` keyed
+//! - `beacon_hash_to_epoch` — secondary `BeaconBlockHash → Epoch`
+//!   index so hash lookups stay O(1) without duplicating the block
+//!   payload
+//! - `beacon_state_by_epoch` — parallel `BeaconState` store; written
+//!   in the same `WriteBatch` so the pair on disk can never drift
 //!
 //! `RocksDbBeaconStorage` opens its own database directory; this CF
 //! set is disjoint from the per-shard tier.
 
-use hyperscale_types::{BeaconBlock, Hash};
+use hyperscale_types::{BeaconBlock, BeaconState, Hash};
 use rocksdb::{ColumnFamily, DB};
 
 use crate::typed_cf::{BeU64Codec, HashCodec, SborCodec, TypedCf};
@@ -16,21 +21,30 @@ use crate::typed_cf::{BeU64Codec, HashCodec, SborCodec, TypedCf};
 /// Default CF (presence required by `RocksDB`; unused by beacon today).
 pub const DEFAULT_CF: &str = "default";
 
-/// Primary store keyed by `Epoch` (big-endian `u64` for lex ordering).
-/// Value: SBOR-encoded [`BeaconBlock`](hyperscale_types::BeaconBlock).
-/// Range scans naturally yield ascending-epoch order — used by
-/// `iter_beacon_blocks_from` for startup replay.
-pub const BEACON_BLOCKS_BY_SLOT_CF: &str = "beacon_blocks_by_slot";
+/// Primary block store keyed by `Epoch` (big-endian `u64` for lex
+/// ordering). Value: SBOR-encoded
+/// [`BeaconBlock`](hyperscale_types::BeaconBlock).
+pub const BEACON_BLOCKS_BY_EPOCH_CF: &str = "beacon_blocks_by_epoch";
 
-/// Secondary index `BeaconBlockHash → Epoch` so hash lookups stay O(1)
-/// without duplicating the block payload. Value: big-endian `u64`
-/// epoch.
-pub const BEACON_HASH_TO_SLOT_CF: &str = "beacon_hash_to_slot";
+/// Secondary index `BeaconBlockHash → Epoch` so hash lookups stay
+/// O(1) without duplicating the block payload. Value: big-endian
+/// `u64` epoch.
+pub const BEACON_HASH_TO_EPOCH_CF: &str = "beacon_hash_to_epoch";
+
+/// Per-epoch `BeaconState` snapshot store keyed by `Epoch`. Value:
+/// SBOR-encoded [`BeaconState`](hyperscale_types::BeaconState).
+/// Written in the same `WriteBatch` as the block CFs so the
+/// (block, state) pair is atomically consistent on disk.
+pub const BEACON_STATE_BY_EPOCH_CF: &str = "beacon_state_by_epoch";
 
 /// Full CF set passed to `DB::open_cf_descriptors` when initialising the
 /// beacon database.
-pub const ALL_COLUMN_FAMILIES: &[&str] =
-    &[DEFAULT_CF, BEACON_BLOCKS_BY_SLOT_CF, BEACON_HASH_TO_SLOT_CF];
+pub const ALL_COLUMN_FAMILIES: &[&str] = &[
+    DEFAULT_CF,
+    BEACON_BLOCKS_BY_EPOCH_CF,
+    BEACON_HASH_TO_EPOCH_CF,
+    BEACON_STATE_BY_EPOCH_CF,
+];
 
 // ─── CfHandles ───────────────────────────────────────────────────────────────
 
@@ -38,9 +52,11 @@ pub const ALL_COLUMN_FAMILIES: &[&str] =
 ///
 /// Distinct from the per-shard tier's `CfHandles` because beacon runs
 /// its own `RocksDB` instance with a disjoint CF set.
+#[allow(clippy::struct_field_names)] // every handle binds a CF keyed by epoch; the postfix IS the key axis
 pub struct CfHandles<'a> {
-    blocks_by_slot: &'a ColumnFamily,
-    hash_to_slot: &'a ColumnFamily,
+    blocks_by_epoch: &'a ColumnFamily,
+    hash_to_epoch: &'a ColumnFamily,
+    state_by_epoch: &'a ColumnFamily,
 }
 
 impl<'a> CfHandles<'a> {
@@ -55,8 +71,9 @@ impl<'a> CfHandles<'a> {
                 .unwrap_or_else(|| panic!("beacon column family '{name}' must exist"))
         };
         Self {
-            blocks_by_slot: resolve(BEACON_BLOCKS_BY_SLOT_CF),
-            hash_to_slot: resolve(BEACON_HASH_TO_SLOT_CF),
+            blocks_by_epoch: resolve(BEACON_BLOCKS_BY_EPOCH_CF),
+            hash_to_epoch: resolve(BEACON_HASH_TO_EPOCH_CF),
+            state_by_epoch: resolve(BEACON_STATE_BY_EPOCH_CF),
         }
     }
 }
@@ -65,30 +82,45 @@ impl<'a> CfHandles<'a> {
 
 /// Primary beacon-blocks-by-epoch CF. Key: `u64` epoch (BE-encoded for
 /// lex ordering). Value: SBOR-encoded `BeaconBlock`.
-pub struct BeaconBlocksBySlotCf;
-impl TypedCf for BeaconBlocksBySlotCf {
-    const NAME: &'static str = BEACON_BLOCKS_BY_SLOT_CF;
+pub struct BeaconBlocksByEpochCf;
+impl TypedCf for BeaconBlocksByEpochCf {
+    const NAME: &'static str = BEACON_BLOCKS_BY_EPOCH_CF;
     type Key = u64;
     type Value = BeaconBlock;
     type KeyCodec = BeU64Codec;
     type ValueCodec = SborCodec<BeaconBlock>;
     type Handles<'a> = CfHandles<'a>;
     fn handle<'a>(cf: &Self::Handles<'a>) -> &'a ColumnFamily {
-        cf.blocks_by_slot
+        cf.blocks_by_epoch
     }
 }
 
 /// Secondary hash-to-epoch index CF. Key: 32-byte block hash. Value:
 /// `u64` epoch (BE-encoded for consistency with the primary CF).
-pub struct BeaconHashToSlotCf;
-impl TypedCf for BeaconHashToSlotCf {
-    const NAME: &'static str = BEACON_HASH_TO_SLOT_CF;
+pub struct BeaconHashToEpochCf;
+impl TypedCf for BeaconHashToEpochCf {
+    const NAME: &'static str = BEACON_HASH_TO_EPOCH_CF;
     type Key = Hash;
     type Value = u64;
     type KeyCodec = HashCodec;
     type ValueCodec = BeU64Codec;
     type Handles<'a> = CfHandles<'a>;
     fn handle<'a>(cf: &Self::Handles<'a>) -> &'a ColumnFamily {
-        cf.hash_to_slot
+        cf.hash_to_epoch
+    }
+}
+
+/// Per-epoch `BeaconState` CF. Key: `u64` epoch (BE-encoded). Value:
+/// SBOR-encoded `BeaconState`.
+pub struct BeaconStateByEpochCf;
+impl TypedCf for BeaconStateByEpochCf {
+    const NAME: &'static str = BEACON_STATE_BY_EPOCH_CF;
+    type Key = u64;
+    type Value = BeaconState;
+    type KeyCodec = BeU64Codec;
+    type ValueCodec = SborCodec<BeaconState>;
+    type Handles<'a> = CfHandles<'a>;
+    fn handle<'a>(cf: &Self::Handles<'a>) -> &'a ColumnFamily {
+        cf.state_by_epoch
     }
 }

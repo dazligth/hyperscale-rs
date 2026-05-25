@@ -1,10 +1,11 @@
 //! Core `SimBeaconStorage` struct.
 //!
 //! In-memory beacon-chain storage for deterministic simulation testing.
-//! Holds two maps under a single `RwLock`: a primary `epoch → block`
-//! store and a secondary `block_hash → epoch` index. Both update
-//! atomically on commit so the hash lookup is always consistent with
-//! the primary store.
+//! Holds three maps under a single `RwLock`: a primary `epoch → block`
+//! store, a secondary `block_hash → epoch` index, and a parallel
+//! `epoch → state` store. All three update atomically on commit so
+//! reads observe a consistent (block, state) pair for any committed
+//! epoch.
 //!
 //! Used by `SimulationRunner`; one `Arc<SimBeaconStorage>` per process
 //! is shared across every vnode's `BeaconCoordinator`.
@@ -12,7 +13,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
-use hyperscale_types::{BeaconBlock, BeaconBlockHash, Epoch};
+use hyperscale_types::{BeaconBlock, BeaconBlockHash, BeaconState, Epoch};
 
 /// In-memory implementation of the beacon storage tier.
 ///
@@ -25,12 +26,16 @@ pub struct SimBeaconStorage {
 }
 
 #[derive(Debug, Default)]
+#[allow(clippy::struct_field_names)] // every map is keyed by epoch; the postfix IS the key axis
 pub(super) struct Inner {
-    /// Primary store keyed by epoch. `BTreeMap` so iteration is
-    /// naturally epoch-ordered for replay.
-    pub(super) by_slot: BTreeMap<Epoch, Arc<BeaconBlock>>,
+    /// Primary block store keyed by epoch. `BTreeMap` so iteration is
+    /// naturally epoch-ordered for latest-key lookup.
+    pub(super) blocks_by_epoch: BTreeMap<Epoch, Arc<BeaconBlock>>,
     /// Secondary index `block_hash → epoch`.
-    pub(super) hash_to_slot: BTreeMap<BeaconBlockHash, Epoch>,
+    pub(super) hash_to_epoch: BTreeMap<BeaconBlockHash, Epoch>,
+    /// Parallel state store keyed by epoch. Written in the same
+    /// critical section as `blocks_by_epoch` so the pair never drifts.
+    pub(super) state_by_epoch: BTreeMap<Epoch, Arc<BeaconState>>,
 }
 
 impl SimBeaconStorage {

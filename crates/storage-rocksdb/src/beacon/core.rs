@@ -8,11 +8,12 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use hyperscale_types::BeaconBlock;
+use hyperscale_types::{BeaconBlock, BeaconState};
 use rocksdb::{ColumnFamilyDescriptor, DB, Options, WriteBatch, WriteOptions};
 
 use super::column_families::{
-    ALL_COLUMN_FAMILIES, BeaconBlocksBySlotCf, BeaconHashToSlotCf, CfHandles,
+    ALL_COLUMN_FAMILIES, BeaconBlocksByEpochCf, BeaconHashToEpochCf, BeaconStateByEpochCf,
+    CfHandles,
 };
 use crate::StorageError;
 use crate::config::RocksDbConfig;
@@ -21,15 +22,18 @@ use crate::typed_cf::{TypedCf, batch_put, get};
 /// `RocksDB`-backed beacon-chain storage.
 ///
 /// Persists committed [`BeaconBlock`](hyperscale_types::BeaconBlock)s
-/// in two column families: a primary `epoch → block` store and a
-/// secondary `block_hash → epoch` index. Writes go through a single
-/// atomic `WriteBatch` per commit so the secondary index never lags
-/// the primary.
+/// alongside their resulting
+/// [`BeaconState`](hyperscale_types::BeaconState) in three column
+/// families: a primary `epoch → block` store, a secondary
+/// `block_hash → epoch` index, and a parallel `epoch → state` store.
+/// Writes go through a single atomic `WriteBatch` per commit so the
+/// secondary index and the state row never lag the primary block row.
 pub struct RocksDbBeaconStorage {
     pub(super) db: Arc<DB>,
     /// Serialises commits so concurrent multi-vnode emits land in a
     /// deterministic order. Reads run lock-free; idempotent commits
-    /// of the same `(epoch, hash)` no-op at the storage level.
+    /// of the same `(epoch, hash, state_root)` no-op at the storage
+    /// level.
     pub(super) commit_lock: Mutex<()>,
 }
 
@@ -103,18 +107,23 @@ impl RocksDbBeaconStorage {
         batch_put::<CF>(batch, CF::handle(&self.cf()), key, value);
     }
 
-    /// Convenience for committing one block atomically: typed writes
-    /// for both CFs in a single `WriteBatch`, flushed sync under
-    /// `commit_lock`.
-    pub(super) fn commit_block_inner(&self, block: &BeaconBlock) {
+    /// Convenience for committing one (block, state) pair atomically:
+    /// typed writes for all three CFs in a single `WriteBatch`, flushed
+    /// sync under `commit_lock`.
+    pub(super) fn commit_block_inner(&self, block: &BeaconBlock, state: &BeaconState) {
         let _guard = self
             .commit_lock
             .lock()
             .expect("beacon commit_lock poisoned");
         let epoch = block.epoch().inner();
         let mut batch = WriteBatch::default();
-        self.cf_batch_put::<BeaconBlocksBySlotCf>(&mut batch, &epoch, block);
-        self.cf_batch_put::<BeaconHashToSlotCf>(&mut batch, &block.block_hash().into_raw(), &epoch);
+        self.cf_batch_put::<BeaconBlocksByEpochCf>(&mut batch, &epoch, block);
+        self.cf_batch_put::<BeaconHashToEpochCf>(
+            &mut batch,
+            &block.block_hash().into_raw(),
+            &epoch,
+        );
+        self.cf_batch_put::<BeaconStateByEpochCf>(&mut batch, &epoch, state);
         let mut write_opts = WriteOptions::default();
         write_opts.set_sync(true);
         self.db

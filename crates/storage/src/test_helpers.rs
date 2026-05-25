@@ -10,13 +10,13 @@ use std::sync::Arc;
 use hyperscale_types::test_utils::test_event_type_identifier;
 use hyperscale_types::{
     ApplicationEvent, BeaconBlock, BeaconBlockHash, BeaconBlockHeader, BeaconProposalsRoot,
-    BeaconStateRoot, BeaconWitnessLeafCount, BeaconWitnessRoot, Block, BlockHash, BlockHeader,
-    BlockHeight, Bls12381G2Signature, BoundedVec, CertificateRoot, ConsensusReceipt, Epoch,
-    EventData, ExecutionCertificate, ExecutionMetadata, ExecutionOutcome, FeeSummary,
+    BeaconState, BeaconStateRoot, BeaconWitnessLeafCount, BeaconWitnessRoot, Block, BlockHash,
+    BlockHeader, BlockHeight, Bls12381G2Signature, BoundedVec, CertificateRoot, ConsensusReceipt,
+    Epoch, EventData, ExecutionCertificate, ExecutionMetadata, ExecutionOutcome, FeeSummary,
     FinalizedWave, GlobalReceiptHash, GlobalReceiptRoot, Hash, InFlightCount, LocalReceiptRoot,
-    LogLevel, NodeId, ProposerTimestamp, ProvisionsRoot, QuorumCertificate, RecoveryCertHash,
-    Round, ShardGroupId, SignerBitfield, StateRoot, StoredReceipt, TransactionRoot, TxHash,
-    TxOutcome, ValidatorId, WaveCertificate, WaveId, WeightedTimestamp,
+    LogLevel, NodeId, ProposerTimestamp, ProvisionsRoot, QuorumCertificate, Randomness,
+    RecoveryCertHash, Round, ShardGroupId, SignerBitfield, StateRoot, StoredReceipt,
+    TransactionRoot, TxHash, TxOutcome, ValidatorId, WaveCertificate, WaveId, WeightedTimestamp,
     compute_global_receipt_root, zero_bls_signature,
 };
 use indexmap::IndexMap;
@@ -176,6 +176,32 @@ pub fn make_test_beacon_block(epoch: u64, tag: &[u8]) -> Arc<BeaconBlock> {
         Bls12381G2Signature([0x11; 96]),
         None,
     ))
+}
+
+/// Build a minimal `BeaconState` at `epoch` whose `randomness` is
+/// derived from `tag`. All collection fields are empty.
+///
+/// Sufficient to drive storage round-trip tests — every field is
+/// stable across SBOR encoding and two calls with identical inputs
+/// produce equal states. Not a valid state under beacon-state
+/// verification.
+#[must_use]
+pub fn make_test_beacon_state(epoch: u64, tag: &[u8]) -> Arc<BeaconState> {
+    use std::collections::BTreeMap;
+    let mut randomness = [0u8; 32];
+    let copy_len = tag.len().min(32);
+    randomness[..copy_len].copy_from_slice(&tag[..copy_len]);
+    Arc::new(BeaconState {
+        current_epoch: Epoch::new(epoch),
+        validators: BTreeMap::new(),
+        pools: BTreeMap::new(),
+        randomness: Randomness(randomness),
+        committee: Vec::new(),
+        shard_committees: BTreeMap::new(),
+        consumed_through: BTreeMap::new(),
+        last_recovery_cert: None,
+        miss_counters: BTreeMap::new(),
+    })
 }
 
 /// Build a deterministic locally-executed `StoredReceipt` from `seed`
