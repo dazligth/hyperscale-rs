@@ -137,7 +137,7 @@ fn qc3_round_trip_n4_all_agree() {
     // Round 3.
     let v3s = round3_quorum(&cm, &network, &ctx, 3, &qc2);
     let v3_refs: Vec<&PcVote3> = v3s.iter().collect();
-    let qc3 = build_qc3(&v3_refs);
+    let qc3 = build_qc3(&v3_refs, &cm.members);
     assert!(verify_qc3(&qc3, &network, &ctx, &cm.members));
 }
 
@@ -163,7 +163,7 @@ fn qc3_round_trip_n7_all_agree() {
 
     let v3s = round3_quorum(&cm, &network, &ctx, 5, &qc2);
     let v3_refs: Vec<&PcVote3> = v3s.iter().collect();
-    let qc3 = build_qc3(&v3_refs);
+    let qc3 = build_qc3(&v3_refs, &cm.members);
     assert!(verify_qc3(&qc3, &network, &ctx, &cm.members));
 }
 

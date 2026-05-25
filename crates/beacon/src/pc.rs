@@ -33,10 +33,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use hyperscale_types::{
     Bls12381G1PrivateKey, Bls12381G1PublicKey, Bls12381G2Signature, DOMAIN_PC_VOTE1,
     DOMAIN_PC_VOTE2, DOMAIN_PC_VOTE2_LENGTH, DOMAIN_PC_VOTE3, Epoch, MAX_VOTE_VECTOR_LEN,
-    NetworkDefinition, PC_VALUE_ELEMENT_BYTES, PcCompactLenSigner, PcCompactVote, PcDivergingProof,
-    PcQc1, PcQc2, PcQc3, PcValueElement, PcVector, PcVote1, PcVote2, PcVote3, PcVoteEquivocation,
-    PcVoteRound, PcXpProof, PositionalBundle, SignerBitfield, SpcView, ValidatorId,
-    aggregate_verify_bls_different_messages, pc_context, pc_vote_signing_message, spc_context,
+    NetworkDefinition, PC_VALUE_ELEMENT_BYTES, PcCompactVote, PcDivergingProof, PcQc1, PcQc2,
+    PcQc3, PcSignerLengths, PcValueElement, PcVector, PcVote1, PcVote2, PcVote3,
+    PcVoteEquivocation, PcVoteRound, PcXpProof, PositionalBundle, SignerBitfield, SpcView,
+    ValidatorId, aggregate_verify_bls_different_messages, pc_context, pc_vote_signing_message,
+    spc_context,
 };
 
 use crate::prefix_ops::{mce, mcp, qc1_certify};
@@ -431,30 +432,35 @@ pub fn verify_qc3(
     if qc2_xpe.x_p() != x_pe {
         return false;
     }
-    if qc3.all_signers().len() != q {
+    if qc3.all_signers().count_ones() != q {
+        return false;
+    }
+    // PerSigner encoding's length vector must match popcount.
+    if let Some(explicit) = qc3.signer_lengths().explicit_count()
+        && explicit != q
+    {
         return false;
     }
 
-    let mut seen: BTreeSet<ValidatorId> = BTreeSet::new();
     let mut values: Vec<PcVector> = Vec::with_capacity(q);
     let mut pks: Vec<Bls12381G1PublicKey> = Vec::with_capacity(q);
     let mut min_len = usize::MAX;
     let mut max_len = 0usize;
-    for signer in qc3.all_signers().iter() {
-        let Some(pk) = pubkey_in_committee(committee, signer.validator) else {
+    for (k, idx) in qc3.all_signers().set_indices().enumerate() {
+        let Some((_, pk)) = committee.get(idx) else {
             return false;
         };
-        if !seen.insert(signer.validator) {
+        let Some(len_u32) = qc3.signer_lengths().get(k) else {
             return false;
-        }
-        let len = signer.prefix_len as usize;
+        };
+        let len = len_u32 as usize;
         if len > x_pe.len() || len < qc3.x_pp().len() {
             return false;
         }
         min_len = min_len.min(len);
         max_len = max_len.max(len);
         values.push(PcVector::new(x_pe.as_slice()[..len].iter().copied()));
-        pks.push(pk);
+        pks.push(*pk);
     }
     if min_len != qc3.x_pp().len() || max_len != x_pe.len() {
         return false;
@@ -742,16 +748,19 @@ fn build_xp_proof(votes: &[&PcVote2], x_p: &PcVector) -> PcXpProof {
 
 /// Assemble a [`PcQc3`] from a round-3 quorum.
 ///
-/// Endpoints `(x_pp, x_pe)` get dedup-encoded when they coincide (the
-/// common case: every signer's `x_p` equal). The verifier resolves
-/// the dedup via [`PcQc3::x_pe`] / [`PcQc3::qc2_xpe`].
+/// `committee` is required to resolve `ValidatorId`s to bitfield
+/// positions. Endpoints `(x_pp, x_pe)` get dedup-encoded when they
+/// coincide (the common case: every signer's `x_p` equal). The
+/// verifier resolves the dedup via [`PcQc3::x_pe`] /
+/// [`PcQc3::qc2_xpe`].
 ///
 /// # Panics
 ///
-/// Panics if `votes` is empty.
+/// Panics if `votes` is empty, or if any signer in `votes` is not
+/// present in `committee`.
 #[must_use]
 #[allow(clippy::similar_names)] // x_pp / x_pe / qc2_xpp / qc2_xpe match PcQc3's wire-type field names
-pub fn build_qc3(votes: &[&PcVote3]) -> PcQc3 {
+pub fn build_qc3(votes: &[&PcVote3], committee: &[(ValidatorId, Bls12381G1PublicKey)]) -> PcQc3 {
     let x_ps: Vec<PcVector> = votes.iter().map(|v| v.x_p().clone()).collect();
     let x_pp = mcp(&x_ps).expect("build_qc3 caller guarantees non-empty votes");
     let x_pe = mce(&x_ps).expect("round-3 x_p values mutually extend");
@@ -767,13 +776,25 @@ pub fn build_qc3(votes: &[&PcVote3]) -> PcQc3 {
         .map(|v| v.qc2().clone())
         .expect("x_pe is some vote's x_p");
 
-    let mut all_signers: Vec<PcCompactLenSigner> = Vec::with_capacity(votes.len());
-    let mut sig_bytes: Vec<Bls12381G2Signature> = Vec::with_capacity(votes.len());
+    let n = committee.len();
+    let mut all_signers = SignerBitfield::new(n);
+    let mut indexed: Vec<(usize, u32, Bls12381G2Signature)> = Vec::with_capacity(votes.len());
     for v in votes {
+        let pos = committee
+            .iter()
+            .position(|(id, _)| *id == v.validator())
+            .expect("build_qc3: vote signer not in committee");
+        if all_signers.is_set(pos) {
+            continue;
+        }
+        all_signers.set(pos);
         let prefix_len = u32::try_from(v.x_p().len()).unwrap_or(u32::MAX);
-        all_signers.push(PcCompactLenSigner::new(v.validator(), prefix_len));
-        sig_bytes.push(v.sig_xp());
+        indexed.push((pos, prefix_len, v.sig_xp()));
     }
+    indexed.sort_by_key(|(pos, _, _)| *pos);
+    let lens: Vec<u32> = indexed.iter().map(|(_, l, _)| *l).collect();
+    let sig_bytes: Vec<Bls12381G2Signature> = indexed.iter().map(|(_, _, s)| *s).collect();
+    let signer_lengths = PcSignerLengths::from_per_signer(lens);
     let agg_sig = Bls12381G2Signature::aggregate(&sig_bytes, true).expect("non-empty signers");
 
     let x_pe_dedup = (x_pp != x_pe).then_some(x_pe);
@@ -785,6 +806,7 @@ pub fn build_qc3(votes: &[&PcVote3]) -> PcQc3 {
         x_pe_dedup,
         qc2_xpe_dedup,
         all_signers,
+        signer_lengths,
         agg_sig,
     )
 }
@@ -1076,7 +1098,7 @@ impl PcInstance {
         }
         let q = self.quorum();
         let vote3s: Vec<&PcVote3> = self.vote3_pool.values().take(q).collect();
-        let qc3 = build_qc3(&vote3s);
+        let qc3 = build_qc3(&vote3s, &self.committee);
         self.decided = true;
         vec![PcEffect::Decided(Box::new(qc3))]
     }
@@ -1123,7 +1145,7 @@ mod tests {
     use std::sync::Arc;
 
     use hyperscale_types::{
-        PC_VALUE_ELEMENT_BYTES, PcCompactLenSigner, PcCompactVote, PcQc1, PcQc2, PcQc3,
+        PC_VALUE_ELEMENT_BYTES, PcCompactVote, PcQc1, PcQc2, PcQc3, PcSignerLengths,
         PcValueElement, PcVector, PcXpProof, SignerBitfield, generate_bls_keypair,
     };
 
@@ -1245,32 +1267,36 @@ mod tests {
     fn verify_qc3_rejects_non_prefix_endpoints() {
         let c = committee(4);
         // x_pp = [2], x_pe = [1] — not a prefix.
+        let mut signers = SignerBitfield::new(4);
+        signers.set(0);
         let qc3 = PcQc3::new(
             PcVector::new(std::iter::once(elem(2))),
             dummy_qc2(),
             Some(PcVector::new(std::iter::once(elem(1)))),
             Some(dummy_qc2()),
-            vec![PcCompactLenSigner::new(ValidatorId::new(0), 1)],
+            signers,
+            PcSignerLengths::Uniform(1),
             generate_bls_keypair().sign_v1(b"unused"),
         );
         assert!(!verify_qc3(&qc3, &net(), &ctx(), &c));
     }
 
-    /// QC3 with `all_signers.len() ≠ n - f` is rejected for size
-    /// — even before signature checks.
+    /// QC3 with `all_signers.count_ones() ≠ n - f` is rejected for
+    /// size — even before signature checks.
     #[test]
     fn verify_qc3_rejects_wrong_signer_count() {
         let c = committee(4);
+        let mut signers = SignerBitfield::new(4);
+        signers.set(0);
+        signers.set(1);
         let qc3 = PcQc3::new(
             PcVector::empty(),
             dummy_qc2(),
             None,
             None,
             // Expected 3, supplied 2.
-            vec![
-                PcCompactLenSigner::new(ValidatorId::new(0), 0),
-                PcCompactLenSigner::new(ValidatorId::new(1), 0),
-            ],
+            signers,
+            PcSignerLengths::Uniform(0),
             generate_bls_keypair().sign_v1(b"unused"),
         );
         assert!(!verify_qc3(&qc3, &net(), &ctx(), &c));

@@ -519,27 +519,63 @@ impl PcVote3 {
     }
 }
 
-/// One round-3 signer's `(validator, |x_p_i|)` pair.
+/// Per-signer prefix-length encoding for [`PcQc3`].
 ///
-/// By "Lemma 3.1" every round-3 signer's `x_p_i` extends the others,
-/// so the longest `x_pe` plus a length per signer fully recovers each
-/// `x_p_i = x_pe[..len_i]`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, BasicSbor)]
-pub struct PcCompactLenSigner {
-    /// Round-3 signer.
-    pub validator: ValidatorId,
-    /// Length of this signer's certified prefix `x_p_i`. Bounded above
-    /// by `MAX_VOTE_VECTOR_LEN`.
-    pub prefix_len: u32,
+/// By "Lemma 3.1" every round-3 signer's `x_p_i` extends the others, so
+/// each `x_p_i = x_pe[..len_i]` is fully recovered from `x_pe` plus
+/// `len_i`. In the steady state every signer agrees on the same `len`
+/// and the encoding collapses to a single `u32`; otherwise the
+/// per-signer lengths ride in set-bit order matching the parent
+/// bundle's bitfield.
+#[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
+pub enum PcSignerLengths {
+    /// Every signer's `|x_p_i|` equals this value. Common case.
+    Uniform(u32),
+    /// One `|x_p_i|` per signer, in the parent bundle's set-bit order.
+    /// Length must equal the bitfield's `count_ones()`.
+    PerSigner(BoundedVec<u32, MAX_VALIDATORS>),
 }
 
-impl PcCompactLenSigner {
-    /// Build a `PcCompactLenSigner` from its parts.
+impl PcSignerLengths {
+    /// Pick the most compact encoding for a sequence of per-signer
+    /// lengths, in set-bit order.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `lens.is_empty()`. The caller (round-3 quorum
+    /// assembly) always supplies at least `f + 1` lengths.
     #[must_use]
-    pub const fn new(validator: ValidatorId, prefix_len: u32) -> Self {
-        Self {
-            validator,
-            prefix_len,
+    pub fn from_per_signer(lens: Vec<u32>) -> Self {
+        assert!(
+            !lens.is_empty(),
+            "PcSignerLengths: at least one length required",
+        );
+        let first = lens[0];
+        if lens.iter().all(|l| *l == first) {
+            Self::Uniform(first)
+        } else {
+            Self::PerSigner(lens.into())
+        }
+    }
+
+    /// Return the `i`-th signer's `|x_p_i|`. `None` when out of range
+    /// for the per-signer encoding; always `Some(uniform)` for the
+    /// uniform encoding regardless of `i`.
+    #[must_use]
+    pub fn get(&self, i: usize) -> Option<u32> {
+        match self {
+            Self::Uniform(l) => Some(*l),
+            Self::PerSigner(lens) => lens.get(i).copied(),
+        }
+    }
+
+    /// Length of the per-signer vector under the `PerSigner` encoding,
+    /// or `None` when the uniform encoding has no explicit count.
+    #[must_use]
+    pub const fn explicit_count(&self) -> Option<usize> {
+        match self {
+            Self::Uniform(_) => None,
+            Self::PerSigner(lens) => Some(lens.len()),
         }
     }
 }
@@ -561,26 +597,26 @@ pub struct PcQc3 {
     x_pe: Option<PcVector>,
     /// `None` is dedup-encoding for "same as `qc2_xpp`".
     qc2_xpe: Option<PcQc2>,
-    /// `(validator, |x_p_i|)` for *every* signer in the round-3 quorum.
-    all_signers: BoundedVec<PcCompactLenSigner, MAX_VALIDATORS>,
+    /// Round-3 signer bitfield (positional against the committee).
+    all_signers: SignerBitfield,
+    /// `|x_p_i|` for every signer in `all_signers`, in set-bit order;
+    /// collapsed to a single value when all signers agreed.
+    signer_lengths: PcSignerLengths,
     /// Aggregate over `sig_i(x_p_i)` for every signer in `all_signers`.
     agg_sig: Bls12381G2Signature,
 }
 
 impl PcQc3 {
     /// Build a `PcQc3` from its parts.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `all_signers.len() > MAX_VALIDATORS`.
     #[must_use]
     #[allow(clippy::similar_names)] // paper notation: x_pp / x_pe and qc2_xpp / qc2_xpe
-    pub fn new(
+    pub const fn new(
         x_pp: PcVector,
         qc2_xpp: PcQc2,
         x_pe: Option<PcVector>,
         qc2_xpe: Option<PcQc2>,
-        all_signers: Vec<PcCompactLenSigner>,
+        all_signers: SignerBitfield,
+        signer_lengths: PcSignerLengths,
         agg_sig: Bls12381G2Signature,
     ) -> Self {
         Self {
@@ -588,7 +624,8 @@ impl PcQc3 {
             qc2_xpp,
             x_pe,
             qc2_xpe,
-            all_signers: all_signers.into(),
+            all_signers,
+            signer_lengths,
             agg_sig,
         }
     }
@@ -619,10 +656,16 @@ impl PcQc3 {
         self.qc2_xpe.as_ref().unwrap_or(&self.qc2_xpp)
     }
 
-    /// `(validator, |x_p_i|)` for every signer in the round-3 quorum.
+    /// Round-3 signer bitfield, positional against the committee.
     #[must_use]
-    pub const fn all_signers(&self) -> &BoundedVec<PcCompactLenSigner, MAX_VALIDATORS> {
+    pub const fn all_signers(&self) -> &SignerBitfield {
         &self.all_signers
+    }
+
+    /// Per-signer prefix-length encoding, in set-bit order.
+    #[must_use]
+    pub const fn signer_lengths(&self) -> &PcSignerLengths {
+        &self.signer_lengths
     }
 
     /// Different-messages aggregate over the signers' `sig_i(x_p_i)`.
@@ -844,6 +887,14 @@ mod tests {
         }
     }
 
+    fn signers_bitfield(num_validators: usize, set: &[usize]) -> SignerBitfield {
+        let mut bf = SignerBitfield::new(num_validators);
+        for &i in set {
+            bf.set(i);
+        }
+        bf
+    }
+
     #[test]
     fn qc3_dedup_encoding_resolves_to_low_when_high_is_none() {
         let qc = PcQc3::new(
@@ -851,7 +902,8 @@ mod tests {
             sample_qc2(),
             None,
             None,
-            vec![PcCompactLenSigner::new(ValidatorId::new(0), 2)],
+            signers_bitfield(4, &[0]),
+            PcSignerLengths::Uniform(2),
             sample_sig(0xEE),
         );
         assert_eq!(qc.x_pe(), qc.x_pp());
@@ -878,10 +930,8 @@ mod tests {
             sample_qc2(),
             Some(high.clone()),
             Some(high_qc2.clone()),
-            vec![
-                PcCompactLenSigner::new(ValidatorId::new(0), 2),
-                PcCompactLenSigner::new(ValidatorId::new(1), 3),
-            ],
+            signers_bitfield(4, &[0, 1]),
+            PcSignerLengths::PerSigner(vec![2u32, 3].into()),
             sample_sig(0xEE),
         );
         assert_eq!(qc.x_pe(), &high);
@@ -895,15 +945,36 @@ mod tests {
             sample_qc2(),
             Some(sample_vector(3)),
             None,
-            vec![
-                PcCompactLenSigner::new(ValidatorId::new(0), 2),
-                PcCompactLenSigner::new(ValidatorId::new(1), 3),
-            ],
+            signers_bitfield(4, &[0, 1]),
+            PcSignerLengths::PerSigner(vec![2u32, 3].into()),
             sample_sig(0xEE),
         );
         let bytes = basic_encode(&qc).unwrap();
         let decoded: PcQc3 = basic_decode(&bytes).unwrap();
         assert_eq!(qc, decoded);
+    }
+
+    #[test]
+    fn signer_lengths_collapses_to_uniform_when_all_equal() {
+        let lens = PcSignerLengths::from_per_signer(vec![3, 3, 3]);
+        assert!(matches!(lens, PcSignerLengths::Uniform(3)));
+    }
+
+    #[test]
+    fn signer_lengths_keeps_per_signer_when_divergent() {
+        let lens = PcSignerLengths::from_per_signer(vec![2, 3, 3]);
+        assert!(matches!(lens, PcSignerLengths::PerSigner(_)));
+        assert_eq!(lens.get(0), Some(2));
+        assert_eq!(lens.get(1), Some(3));
+        assert_eq!(lens.explicit_count(), Some(3));
+    }
+
+    #[test]
+    fn uniform_signer_lengths_returns_same_value_for_any_index() {
+        let lens = PcSignerLengths::Uniform(5);
+        assert_eq!(lens.get(0), Some(5));
+        assert_eq!(lens.get(10), Some(5));
+        assert_eq!(lens.explicit_count(), None);
     }
 
     #[test]

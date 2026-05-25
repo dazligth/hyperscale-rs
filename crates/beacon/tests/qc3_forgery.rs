@@ -55,7 +55,8 @@ fn forge_qc3_with_empty_xpp_is_rejected() {
         real.qc2_xpp().clone(),
         Some(real_x_pe),
         Some(real_qc2_xpe),
-        real.all_signers().iter().copied().collect(),
+        real.all_signers().clone(),
+        real.signer_lengths().clone(),
         real.agg_sig(),
     );
 
@@ -85,7 +86,8 @@ fn forge_qc3_with_extended_xpe_is_rejected() {
         real.qc2_xpp().clone(),
         Some(extended_x_pe),
         Some(real.qc2_xpe().clone()),
-        real.all_signers().iter().copied().collect(),
+        real.all_signers().clone(),
+        real.signer_lengths().clone(),
         real.agg_sig(),
     );
 

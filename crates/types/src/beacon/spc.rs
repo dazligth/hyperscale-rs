@@ -259,7 +259,7 @@ impl SpcMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PcQc2, PcValueElement, PcXpProof, SignerBitfield};
+    use crate::{PcQc2, PcSignerLengths, PcValueElement, PcXpProof, SignerBitfield};
 
     fn sample_pc_qc3() -> PcQc3 {
         let mut signers = SignerBitfield::new(4);
@@ -267,7 +267,7 @@ mod tests {
         signers.set(1);
         let qc2 = PcQc2::new(
             PcVector::empty(),
-            signers,
+            signers.clone(),
             Bls12381G2Signature([0x11; 96]),
             PcXpProof::Full {
                 length_multi_sig: Bls12381G2Signature([0x22; 96]),
@@ -278,7 +278,8 @@ mod tests {
             qc2,
             None,
             None,
-            Vec::new(),
+            signers,
+            PcSignerLengths::Uniform(0),
             Bls12381G2Signature([0x33; 96]),
         )
     }

@@ -1318,7 +1318,7 @@ mod tests {
     use std::sync::Arc;
 
     use hyperscale_types::{
-        Bls12381G2Signature, Epoch, PcQc2, PcVote1, PcXpProof, SignerBitfield,
+        Bls12381G2Signature, Epoch, PcQc2, PcSignerLengths, PcVote1, PcXpProof, SignerBitfield,
         generate_bls_keypair, spc_context,
     };
 
@@ -1352,7 +1352,8 @@ mod tests {
             qc2,
             None,
             None,
-            Vec::new(),
+            SignerBitfield::new(4),
+            PcSignerLengths::Uniform(0),
             generate_bls_keypair().sign_v1(b"unused"),
         )
     }

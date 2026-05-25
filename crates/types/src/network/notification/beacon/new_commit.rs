@@ -56,7 +56,10 @@ mod tests {
     use sbor::prelude::*;
 
     use super::*;
-    use crate::{Bls12381G2Signature, PcQc2, PcQc3, PcVector, PcXpProof, SignerBitfield, SpcView};
+    use crate::{
+        Bls12381G2Signature, PcQc2, PcQc3, PcSignerLengths, PcVector, PcXpProof, SignerBitfield,
+        SpcView,
+    };
 
     fn sample_pc_qc3() -> PcQc3 {
         let mut signers = SignerBitfield::new(4);
@@ -74,7 +77,8 @@ mod tests {
             qc2,
             None,
             None,
-            Vec::new(),
+            SignerBitfield::new(4),
+            PcSignerLengths::Uniform(0),
             Bls12381G2Signature([0x33; 96]),
         )
     }

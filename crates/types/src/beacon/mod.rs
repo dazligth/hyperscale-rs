@@ -43,8 +43,8 @@ pub use limits::{
     MAX_WITNESS_PROOF_DEPTH, MAX_WITNESSES_PER_FETCH, MAX_WITNESSES_PER_PROPOSER,
 };
 pub use pc::{
-    PC_VALUE_ELEMENT_BYTES, PcCompactLenSigner, PcCompactVote, PcDivergingProof, PcQc1, PcQc2,
-    PcQc3, PcValueElement, PcVector, PcVote1, PcVote2, PcVote3, PcVoteEquivocation, PcVoteRound,
+    PC_VALUE_ELEMENT_BYTES, PcCompactVote, PcDivergingProof, PcQc1, PcQc2, PcQc3, PcSignerLengths,
+    PcValueElement, PcVector, PcVote1, PcVote2, PcVote3, PcVoteEquivocation, PcVoteRound,
     PcXpProof,
 };
 pub use proposal::{BeaconProposal, compute_proposals_root};
