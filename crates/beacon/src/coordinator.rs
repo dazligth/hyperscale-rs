@@ -17,8 +17,8 @@
 use std::sync::Arc;
 
 use hyperscale_types::{
-    BeaconBlock, BeaconState, Bls12381G1PrivateKey, Epoch, LocalTimestamp, NetworkDefinition,
-    RECOVERY_TIMEOUT, ValidatorId, state_root,
+    BeaconBlock, BeaconState, Epoch, LocalTimestamp, NetworkDefinition, RECOVERY_TIMEOUT,
+    ValidatorId, state_root,
 };
 
 use crate::block_sync::BeaconBlockSyncManager;
@@ -77,13 +77,9 @@ pub struct BeaconCoordinator {
 
     me: ValidatorId,
 
-    /// Threaded into per-epoch [`SpcInstance`]s so they can sign
-    /// without an out-of-band key-store roundtrip.
-    #[allow(dead_code)] // read by SPC bootstrap once handlers wire it in
-    me_sk: Arc<Bls12381G1PrivateKey>,
-
     /// Mixed into every signing helper's domain bytes; carried so
-    /// per-epoch SPC instances don't re-thread it from the runner.
+    /// per-epoch SPC instances and outbound canonical-bytes
+    /// encoders don't re-thread it from the runner.
     #[allow(dead_code)] // read by SPC bootstrap once handlers wire it in
     network: NetworkDefinition,
 
@@ -109,7 +105,6 @@ impl BeaconCoordinator {
         latest_block: Arc<BeaconBlock>,
         latest_state: BeaconState,
         me: ValidatorId,
-        me_sk: Arc<Bls12381G1PrivateKey>,
         network: NetworkDefinition,
     ) -> Self {
         debug_assert_eq!(
@@ -129,7 +124,6 @@ impl BeaconCoordinator {
             equivocations: EquivocationObservations::new(),
             sync: BeaconBlockSyncManager::new(),
             me,
-            me_sk,
             network,
             now: LocalTimestamp::ZERO,
         }
@@ -240,12 +234,6 @@ mod tests {
         bls_keypair_from_seed(&s).public_key()
     }
 
-    fn signing_key(seed: u64) -> Arc<Bls12381G1PrivateKey> {
-        let mut s = [0u8; 32];
-        s[..8].copy_from_slice(&seed.to_le_bytes());
-        Arc::new(bls_keypair_from_seed(&s))
-    }
-
     /// 4 validators, all on the beacon committee, all placed on shard 0.
     fn sample_genesis() -> BeaconGenesisConfig {
         let pool_id = StakePoolId::new(0);
@@ -285,7 +273,6 @@ mod tests {
             block,
             state,
             ValidatorId::new(0),
-            signing_key(0),
             NetworkDefinition::simulator(),
         );
         assert_eq!(coord.current_epoch(), Epoch::GENESIS);
@@ -301,7 +288,6 @@ mod tests {
             Arc::clone(&block),
             state,
             ValidatorId::new(0),
-            signing_key(0),
             NetworkDefinition::simulator(),
         );
         assert_eq!(coord.latest_block().block_hash(), block_hash);
@@ -315,7 +301,6 @@ mod tests {
             block,
             state,
             ValidatorId::new(99),
-            signing_key(99),
             NetworkDefinition::simulator(),
         );
         assert!(!coord.is_on_committee());
@@ -328,7 +313,6 @@ mod tests {
             block,
             state,
             ValidatorId::new(0),
-            signing_key(0),
             NetworkDefinition::simulator(),
         );
         let t = LocalTimestamp::from_millis(123_456);
@@ -347,7 +331,6 @@ mod tests {
             Arc::new(mismatched_block),
             state,
             ValidatorId::new(0),
-            signing_key(0),
             NetworkDefinition::simulator(),
         );
     }
@@ -359,7 +342,6 @@ mod tests {
             block,
             state,
             ValidatorId::new(0),
-            signing_key(0),
             NetworkDefinition::simulator(),
         );
         let boundary = LocalTimestamp::from_millis(10_000);
@@ -379,7 +361,6 @@ mod tests {
             block,
             state,
             ValidatorId::new(0),
-            signing_key(0),
             NetworkDefinition::simulator(),
         );
         let expected = LocalTimestamp::from_millis(100_000);
@@ -402,7 +383,6 @@ mod tests {
             block,
             state,
             ValidatorId::new(0),
-            signing_key(0),
             NetworkDefinition::simulator(),
         );
         assert_eq!(coord.current_state(), &original);

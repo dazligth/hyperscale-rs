@@ -12,7 +12,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hyperscale_beacon::pc::{sign_vote1, sign_vote2, sign_vote3};
-use hyperscale_beacon::spc::{SpcEffect, SpcEvent, SpcInstance, VpcMsgPayload};
+use hyperscale_beacon::spc::{
+    SpcEffect, SpcEvent, SpcInstance, VpcMsgPayload, sign_empty_view_msg,
+};
 use hyperscale_types::{
     Bls12381G1PrivateKey, Bls12381G1PublicKey, Epoch, NetworkDefinition, PcVector, SpcView,
     ValidatorId, bls_keypair_from_seed, pc_context, spc_context,
@@ -59,7 +61,6 @@ impl SpcSim {
                     epoch,
                     members.clone(),
                     members[i].0,
-                    Arc::clone(&sks[i]),
                     view_timeout,
                 )
             })
@@ -172,8 +173,11 @@ impl SpcSim {
                         proof: proof.clone(),
                     });
                 }
-                SpcEffect::BroadcastEmptyView(msg) => {
-                    self.fanout(sender_idx, |_| SpcEvent::EmptyView(msg.clone()));
+                SpcEffect::SignAndBroadcastEmptyView { view, reported } => {
+                    let spc_ctx = spc_context(self.epoch);
+                    let msg =
+                        sign_empty_view_msg(&sk, sender, &self.network, &spc_ctx, view, *reported);
+                    self.deliver_to_all(&SpcEvent::EmptyView(Box::new(msg)));
                 }
                 SpcEffect::SetTimer { .. }
                 | SpcEffect::EmptyLowEvidence(_)

@@ -40,7 +40,6 @@
 //!   won't verify.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 use std::time::Duration;
 
 use blake3::Hasher;
@@ -642,11 +641,20 @@ pub enum SpcEffect {
     /// View `> 1` produced an empty low — surface evidence to the
     /// parent for downstream handling.
     EmptyLowEvidence(Box<SpcEmptyLowEvidence>),
-    /// Broadcast our own empty-view attestation to peers — we
-    /// produced a high output at `msg.view` but our local table
-    /// can't resolve its parent, so we fall back to the view-change
-    /// path.
-    BroadcastEmptyView(Box<SpcEmptyViewMsg>),
+    /// Sign an empty-view attestation reporting `reported` as our
+    /// max high triple and broadcast it — we produced a high output
+    /// at `view` but our local table can't resolve its parent, so
+    /// we fall back to the view-change path. The signed message
+    /// lands back on the FSM via the same `SpcEvent::EmptyView` path
+    /// peer messages use.
+    SignAndBroadcastEmptyView {
+        /// View this empty-view attestation skips.
+        view: SpcView,
+        /// Our locally-known max high triple at the time of emission.
+        /// Boxed to keep [`SpcEffect`] compact — `SpcHighTriple`
+        /// embeds a full `PcQc3`.
+        reported: Box<SpcHighTriple>,
+    },
     /// Schedule a view-timeout timer. The parent fires
     /// [`SpcEvent::TimerExpired`] when it elapses.
     SetTimer {
@@ -833,7 +841,6 @@ pub struct SpcInstance {
     spc_ctx: Vec<u8>,
     committee: Vec<(ValidatorId, Bls12381G1PublicKey)>,
     me: ValidatorId,
-    me_sk: Arc<Bls12381G1PrivateKey>,
     view_timeout: Duration,
 
     current_view: SpcView,
@@ -873,7 +880,6 @@ impl SpcInstance {
         epoch: Epoch,
         committee: Vec<(ValidatorId, Bls12381G1PublicKey)>,
         me: ValidatorId,
-        me_sk: Arc<Bls12381G1PrivateKey>,
         view_timeout: Duration,
     ) -> Self {
         let spc_ctx = spc_context(epoch);
@@ -888,7 +894,6 @@ impl SpcInstance {
             spc_ctx,
             committee,
             me,
-            me_sk,
             view_timeout,
             current_view: SpcView::new(1),
             views,
@@ -1046,10 +1051,12 @@ impl SpcInstance {
                 cert: Box::new(cert),
             });
         } else {
-            // Empty-view path: our high has no known parent. Sign an
-            // empty-view attestation reporting our current `max_high`
-            // and broadcast; self-process so our own attestation
-            // counts toward the `f + 1` quorum.
+            // Empty-view path: our high has no known parent. Emit a
+            // sign-and-broadcast intent reporting our current
+            // `max_high`; the signed message lands back on the FSM
+            // via `SpcEvent::EmptyView` and gets pooled toward the
+            // `f + 1` indirect-cert quorum the same way peer
+            // attestations are.
             let reported = self.max_high.clone();
             let should_broadcast = self
                 .views
@@ -1061,16 +1068,10 @@ impl SpcInstance {
                 if let Some(vs) = self.views.get_mut(&view) {
                     vs.empty_view_broadcast = true;
                 }
-                let msg = sign_empty_view_msg(
-                    &self.me_sk,
-                    self.me,
-                    &self.network,
-                    &self.spc_ctx,
+                out.push(SpcEffect::SignAndBroadcastEmptyView {
                     view,
-                    reported,
-                );
-                out.extend(self.process_empty_view(msg.clone()));
-                out.push(SpcEffect::BroadcastEmptyView(Box::new(msg)));
+                    reported: Box::new(reported),
+                });
             }
         }
         out
@@ -1361,6 +1362,8 @@ impl SpcInstance {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use hyperscale_types::{
         Bls12381G2Signature, Epoch, PcQc2, PcXpProof, SignerBitfield, generate_bls_keypair,
         spc_context,
@@ -1598,13 +1601,12 @@ mod tests {
     }
 
     fn fsm_instance(idx: usize) -> SpcInstance {
-        let (sks, members) = fsm_committee(4);
+        let (_, members) = fsm_committee(4);
         SpcInstance::new(
             net(),
             Epoch::new(1),
             members.clone(),
             members[idx].0,
-            Arc::clone(&sks[idx]),
             Duration::from_millis(100),
         )
     }
