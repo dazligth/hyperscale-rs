@@ -18,4 +18,3 @@ pub mod recovery;
 pub mod sampling;
 pub mod spc;
 pub mod state;
-pub mod state_root;

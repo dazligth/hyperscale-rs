@@ -13,6 +13,12 @@
 //!   messages, view-entry certificates).
 //! - [`ready_signal`]: [`ReadySignal`] validator-emitted "ready on shard"
 //!   attestation that proposers pull into the block manifest.
+//! - [`state`]: [`BeaconState`] and its components (validator records,
+//!   pool aggregates, committee tables, the epoch-effect bundle). Pure
+//!   data shapes — the application logic that mutates these lives in
+//!   `hyperscale_beacon::state`.
+//! - [`state_root`]: SSZ-style tagged-Merkle commitment over
+//!   [`BeaconState`] plus light-client field proofs.
 //! - [`witness`]: [`Witness`] / [`ShardWitness`] / [`ShardWitnessPayload`] /
 //!   [`ShardWitnessProof`] / [`BeaconWitnessEvent`] (observations the
 //!   beacon applies per slot).
@@ -25,6 +31,8 @@ pub mod proposal;
 pub mod ready_signal;
 pub mod recovery;
 pub mod spc;
+pub mod state;
+pub mod state_root;
 pub mod witness;
 
 pub use block::BeaconBlock;
@@ -47,6 +55,11 @@ pub use recovery::{
 pub use spc::{
     SpcCert, SpcEmptyLowEvidence, SpcEmptyViewMsg, SpcHighTriple, SpcProposalObject, SpcSkipSig,
 };
+pub use state::{
+    BeaconState, CommitteeTransition, JailReason, PendingWithdrawal, ShardCommittee, SlotEffects,
+    StakePool, TransitionCause, ValidatorRecord, ValidatorStatus,
+};
+pub use state_root::{StateKey, StateProof, StateValue, SubtreePath, prove, state_root, verify};
 pub use witness::{
     BeaconWitness, BeaconWitnessEvent, EquivocationEvidence, SHARD_WITNESS_LEAF_DOMAIN_TAG,
     ShardWitness, ShardWitnessPayload, ShardWitnessProof, Witness,

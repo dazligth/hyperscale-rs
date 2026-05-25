@@ -50,14 +50,11 @@
 
 use std::collections::BTreeSet;
 
-use hyperscale_types::{
-    BeaconStateRoot, Bls12381G1PublicKey, Epoch, Hash, LeafIndex, Randomness, RecoveryCertificate,
-    ShardGroupId, Stake, StakePoolId, ValidatorId, compute_merkle_root,
+use crate::{
+    BeaconState, BeaconStateRoot, Bls12381G1PublicKey, Epoch, Hash, JailReason, LeafIndex,
+    PendingWithdrawal, Randomness, RecoveryCertificate, ShardGroupId, Stake, StakePool,
+    StakePoolId, ValidatorId, ValidatorRecord, ValidatorStatus, compute_merkle_root,
     compute_merkle_root_with_proof, recovery_cert_hash,
-};
-
-use crate::state::{
-    BeaconState, JailReason, PendingWithdrawal, StakePool, ValidatorRecord, ValidatorStatus,
 };
 
 // ─── leaf-encoder domain tags ────────────────────────────────────────────────
@@ -784,12 +781,11 @@ const _PUBKEY_DEP: Option<Bls12381G1PublicKey> = None;
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use hyperscale_types::{
-        BeaconBlockHash, Bls12381G2Signature, RecoveryRound, SignerBitfield, bls_keypair_from_seed,
-    };
-
     use super::*;
-    use crate::state::ShardCommittee;
+    use crate::{
+        BeaconBlockHash, Bls12381G2Signature, RecoveryRound, ShardCommittee, SignerBitfield,
+        bls_keypair_from_seed,
+    };
 
     fn pubkey(seed: u64) -> Bls12381G1PublicKey {
         let mut s = [0u8; 32];

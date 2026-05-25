@@ -15,11 +15,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use hyperscale_types::{
-    Bls12381G1PublicKey, Epoch, Randomness, ShardGroupId, Stake, StakePoolId, ValidatorId,
+    BeaconState, Bls12381G1PublicKey, Epoch, Randomness, ShardCommittee, ShardGroupId, Stake,
+    StakePool, StakePoolId, ValidatorId, ValidatorRecord, ValidatorStatus,
 };
 
 use crate::constants::{BEACON_SIGNER_COUNT, MIN_STAKE_FLOOR, SHARD_CAPACITY};
-use crate::state::{BeaconState, ShardCommittee, StakePool, ValidatorRecord, ValidatorStatus};
 
 // ─── config shape ──────────────────────────────────────────────────────────
 

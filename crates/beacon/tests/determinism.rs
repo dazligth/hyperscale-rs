@@ -22,13 +22,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use hyperscale_beacon::constants::MIN_STAKE_FLOOR;
-use hyperscale_beacon::state::{
-    BeaconState, ShardCommittee, StakePool, ValidatorRecord, ValidatorStatus, apply_epoch,
-};
-use hyperscale_beacon::state_root::state_root;
+use hyperscale_beacon::state::apply_epoch;
 use hyperscale_types::{
-    Bls12381G1PublicKey, Epoch, NetworkDefinition, Randomness, ShardGroupId, Stake, StakePoolId,
-    ValidatorId, bls_keypair_from_seed,
+    BeaconState, Bls12381G1PublicKey, Epoch, NetworkDefinition, Randomness, ShardCommittee,
+    ShardGroupId, Stake, StakePool, StakePoolId, ValidatorId, ValidatorRecord, ValidatorStatus,
+    bls_keypair_from_seed, state_root,
 };
 
 const V: usize = 3;

@@ -9,15 +9,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use hyperscale_beacon::constants::{BEACON_SIGNER_COUNT, MIN_STAKE_FLOOR};
 use hyperscale_beacon::recovery::select_winning_block;
-use hyperscale_beacon::state::{
-    BeaconState, ShardCommittee, StakePool, TransitionCause, ValidatorRecord, ValidatorStatus,
-    apply_epoch,
-};
+use hyperscale_beacon::state::apply_epoch;
 use hyperscale_types::{
-    BeaconBlock, BeaconBlockHash, BeaconBlockHeader, BeaconProposalsRoot, BeaconStateRoot,
-    Bls12381G1PrivateKey, Bls12381G1PublicKey, Bls12381G2Signature, Epoch, Hash, NetworkDefinition,
-    Randomness, RecoveryCertHash, RecoveryCertificate, RecoveryRound, ShardGroupId, SignerBitfield,
-    Stake, StakePoolId, ValidatorId, bls_keypair_from_seed, recovery_cert_hash,
+    BeaconBlock, BeaconBlockHash, BeaconBlockHeader, BeaconProposalsRoot, BeaconState,
+    BeaconStateRoot, Bls12381G1PrivateKey, Bls12381G1PublicKey, Bls12381G2Signature, Epoch, Hash,
+    NetworkDefinition, Randomness, RecoveryCertHash, RecoveryCertificate, RecoveryRound,
+    ShardCommittee, ShardGroupId, SignerBitfield, Stake, StakePool, StakePoolId, TransitionCause,
+    ValidatorId, ValidatorRecord, ValidatorStatus, bls_keypair_from_seed, recovery_cert_hash,
     recovery_request_message,
 };
 
