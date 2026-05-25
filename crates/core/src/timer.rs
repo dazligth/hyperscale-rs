@@ -13,4 +13,12 @@ pub enum TimerId {
     /// Periodic tick for the fetch protocol (retry pending fetches).
     /// Process-scoped — fans out across all hosted shards on fire.
     FetchTick,
+    /// Beacon committee-start timer. Fires at the upcoming epoch's
+    /// wall-clock boundary if the local vnode is on the next
+    /// committee and that block isn't committed yet. Process-scoped.
+    BeaconCommitteeStart,
+    /// Beacon recovery-trigger timer. Fires `RECOVERY_TIMEOUT` past
+    /// the expected block time when the local vnode hasn't observed
+    /// the expected commit. Process-scoped.
+    BeaconRecoveryTrigger,
 }

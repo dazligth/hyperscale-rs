@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use hyperscale_beacon::action_handlers::handle_action as handle_beacon_action;
 use hyperscale_core::{
     Action, ActionContext, ActionOwner, CommitSource, FetchAbandon, FetchRequest, ProtocolEvent,
 };
@@ -77,7 +78,13 @@ where
             | Action::SignAndBroadcastBlockVote { .. }
             | Action::BroadcastCommittedBlockHeader { .. }
             | Action::SignAndSendExecutionVote { .. }
-            | Action::BroadcastExecutionCertificate { .. } => {
+            | Action::BroadcastExecutionCertificate { .. }
+            | Action::SignAndBroadcastPcVote { .. }
+            | Action::SignAndBroadcastSpcMessage { .. }
+            | Action::BroadcastBeaconBlock { .. }
+            | Action::BroadcastRecoveryRequest { .. }
+            | Action::FetchShardWitnesses { .. }
+            | Action::VerifyBeaconRoot { .. } => {
                 self.dispatch_delegated_action(vnode_idx, action);
             }
 
@@ -104,6 +111,14 @@ where
             Action::CancelTimer { id } => {
                 let shard = self.shard;
                 self.pending_timer_ops.push(TimerOp::Cancel { shard, id });
+            }
+
+            // ─── Beacon-local effects (B.9 wires the runner side) ──────────
+            Action::CommitBeaconBlock { block, .. } => {
+                warn!(
+                    epoch = block.epoch().inner(),
+                    "Action::CommitBeaconBlock ignored; runner-side wiring lands in B.9",
+                );
             }
             Action::Continuation(pe) => self.handle_continuation(pe),
             Action::RestoreCommittedState => self.handle_restore_committed_state(),
@@ -623,6 +638,7 @@ where
                 ActionOwner::Shard => handle_shard_action(action, &ctx),
                 ActionOwner::Execution => handle_execution_action(action, &ctx),
                 ActionOwner::Provisions => handle_provisions_action(action, &ctx),
+                ActionOwner::Beacon => handle_beacon_action(action, &ctx),
                 ActionOwner::Local => unreachable!(
                     "dispatch_delegated_action called with Local-owned action — \
                      process_action's outer match should have routed inline"

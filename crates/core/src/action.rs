@@ -7,17 +7,37 @@ use std::time::Duration;
 use hyperscale_dispatch::DispatchPool;
 use hyperscale_storage::BeaconWitnessCommit;
 use hyperscale_types::{
-    BeaconWitnessLeafCount, BeaconWitnessRoot, Block, BlockHash, BlockHeader, BlockHeight,
-    BlockManifest, BlockVote, Bls12381G1PublicKey, CertificateRoot, CommittedBlockHeader,
-    ExecutionCertificate, ExecutionVote, FinalizedWave, GlobalReceiptRoot, Hash, InFlightCount,
-    LocalReceiptRoot, NodeId, ProposerTimestamp, ProvisionHash, ProvisionTxRoot, Provisions,
-    ProvisionsRoot, QuorumCertificate, ReadySignal, Round, RoutableTransaction, ShardGroupId,
-    SharedCertificates, SharedTransactions, StateRoot, SubstateEntry, TopologySnapshot,
+    BeaconBlock, BeaconState, BeaconWitnessLeafCount, BeaconWitnessRoot, Block, BlockHash,
+    BlockHeader, BlockHeight, BlockManifest, BlockVote, Bls12381G1PublicKey, CertificateRoot,
+    CommittedBlockHeader, Epoch, ExecutionCertificate, ExecutionVote, FinalizedWave,
+    GlobalReceiptRoot, Hash, InFlightCount, LeafIndex, LocalReceiptRoot, NodeId, PcVector,
+    PcVoteRound, ProposerTimestamp, ProvisionHash, ProvisionTxRoot, Provisions, ProvisionsRoot,
+    QuorumCertificate, ReadySignal, RecoveryRequest, Round, RoutableTransaction, ShardGroupId,
+    SharedCertificates, SharedTransactions, SpcView, StateRoot, SubstateEntry, TopologySnapshot,
     TransactionRoot, TransactionStatus, TxHash, TxOutcome, ValidatorId, VotePower, WaveId,
     WeightedTimestamp,
 };
 
 use crate::{CommitSource, FetchAbandon, FetchRequest, ProtocolEvent, TimerId};
+
+/// Kind of beacon-side cryptographic verification dispatched via
+/// [`Action::VerifyBeaconRoot`] and reported back via
+/// [`ProtocolEvent::BeaconVerificationResult`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum BeaconVerificationKind {
+    /// PC 3-round QC signature.
+    PcQc3,
+    /// SPC certificate signature.
+    SpcCert,
+    /// Recovery certificate signature.
+    RecoveryCert,
+    /// Committee aggregate signature over a beacon block header.
+    BeaconBlockAggregate,
+    /// VRF reveal (output + proof) from a beacon proposal.
+    VrfReveal,
+    /// Merkle proof path into a shard's witness accumulator.
+    ShardWitnessProof,
+}
 
 /// A request to execute a cross-shard transaction with its provisions.
 #[derive(Debug, Clone)]
@@ -767,6 +787,91 @@ pub enum Action {
     /// coordinators at every expected-set drop site (verification
     /// succeeded, retention-horizon orphan cleanup, deadline eviction).
     AbandonFetch(FetchAbandon),
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Beacon consensus
+    // ═══════════════════════════════════════════════════════════════════════
+    /// Sign a PC inner-consensus vote with the local BLS key and ship it
+    /// to the SPC committee.
+    SignAndBroadcastPcVote {
+        /// Epoch the PC instance belongs to.
+        epoch: Epoch,
+        /// SPC view this vote belongs to.
+        view: SpcView,
+        /// Inner-PC round of the vote.
+        round: PcVoteRound,
+        /// PC vector value being signed.
+        value: PcVector,
+        /// SPC committee members the vote ships to.
+        recipients: Vec<ValidatorId>,
+    },
+
+    /// Sign an SPC-level message and broadcast it. Payload is the
+    /// SBOR-encoded `SpcMessage` from `hyperscale_beacon::spc` — kept
+    /// opaque at the core layer so beacon-internal message types
+    /// don't bleed across the crate boundary.
+    SignAndBroadcastSpcMessage {
+        /// Epoch the SPC instance belongs to.
+        epoch: Epoch,
+        /// Wire-form `SpcMessage` payload (SBOR-encoded by beacon).
+        payload: Vec<u8>,
+        /// SPC committee members the message ships to.
+        recipients: Vec<ValidatorId>,
+    },
+
+    /// Broadcast a finalized beacon block (post-SPC commit) over the
+    /// beacon gossip topic.
+    BroadcastBeaconBlock {
+        /// Block to broadcast.
+        block: Arc<BeaconBlock>,
+    },
+
+    /// Broadcast a locally-signed [`RecoveryRequest`] to the active-duty
+    /// pool. Quorum aggregation happens off-chain inside
+    /// `RecoveryTracker`.
+    BroadcastRecoveryRequest {
+        /// Request to broadcast.
+        request: Arc<RecoveryRequest>,
+        /// Active-pool validators the request ships to.
+        recipients: Vec<ValidatorId>,
+    },
+
+    /// Fetch a batch of shard witnesses by leaf index from a remote
+    /// shard's committee.
+    FetchShardWitnesses {
+        /// Source shard whose witnesses we want.
+        shard_id: ShardGroupId,
+        /// Hash of the source-shard block whose `beacon_witness_root`
+        /// anchors the requested leaves.
+        committed_block_hash: BlockHash,
+        /// Leaf indices to fetch.
+        leaf_indices: Vec<LeafIndex>,
+        /// Source-shard committee members; any can serve.
+        peers: Vec<ValidatorId>,
+    },
+
+    /// Dispatch a beacon-side cryptographic verification to the crypto
+    /// pool. Result returns via
+    /// [`ProtocolEvent::BeaconVerificationResult`] keyed on `(kind, key)`.
+    VerifyBeaconRoot {
+        /// What kind of verification this is.
+        kind: BeaconVerificationKind,
+        /// 32-byte slot identifier the verifier reports back as.
+        key: Hash,
+        /// Wire-form payload the kind-specific verifier interprets
+        /// (canonical signing bytes, sig, pubkeys, Merkle path, etc.,
+        /// per kind). Kept opaque at the core layer.
+        payload: Vec<u8>,
+    },
+
+    /// Persist a committed beacon block + its resulting `BeaconState`
+    /// to `BeaconStorage`. Both writes go in one atomic batch.
+    CommitBeaconBlock {
+        /// Committed block.
+        block: Arc<BeaconBlock>,
+        /// State the block advances to. Boxed to bound enum size.
+        state: Box<BeaconState>,
+    },
 }
 
 impl Action {
@@ -783,8 +888,9 @@ impl Action {
     pub const fn dispatch_pool(&self) -> Option<DispatchPool> {
         use hyperscale_dispatch::DispatchPool;
         match self {
-            // Liveness-critical: QC verify/build, state root, proposal
-            // building, sign-and-broadcast for consensus.
+            // Liveness-critical: shard QC verify/build, state root,
+            // proposal building, sign-and-broadcast for shard
+            // consensus; plus beacon per-epoch crypto + sign work.
             Self::VerifyAndBuildQuorumCertificate { .. }
             | Self::VerifyQcSignature { .. }
             | Self::VerifyRemoteHeaderQc { .. }
@@ -797,7 +903,13 @@ impl Action {
             | Self::BuildProposal { .. }
             | Self::BroadcastBlockHeader { .. }
             | Self::SignAndBroadcastBlockVote { .. }
-            | Self::BroadcastCommittedBlockHeader { .. } => Some(DispatchPool::Consensus),
+            | Self::BroadcastCommittedBlockHeader { .. }
+            | Self::SignAndBroadcastPcVote { .. }
+            | Self::SignAndBroadcastSpcMessage { .. }
+            | Self::BroadcastBeaconBlock { .. }
+            | Self::BroadcastRecoveryRequest { .. }
+            | Self::FetchShardWitnesses { .. }
+            | Self::VerifyBeaconRoot { .. } => Some(DispatchPool::Consensus),
 
             // Throughput-bound: provision/cert/wave verification,
             // execution-vote crypto, and Radix Engine execution.
@@ -847,6 +959,13 @@ impl Action {
                 ActionOwner::Provisions
             }
 
+            Self::SignAndBroadcastPcVote { .. }
+            | Self::SignAndBroadcastSpcMessage { .. }
+            | Self::BroadcastBeaconBlock { .. }
+            | Self::BroadcastRecoveryRequest { .. }
+            | Self::FetchShardWitnesses { .. }
+            | Self::VerifyBeaconRoot { .. } => ActionOwner::Beacon,
+
             _ => ActionOwner::Local,
         }
     }
@@ -864,6 +983,10 @@ pub enum ActionOwner {
     /// Provision-coordinator actions: state-provision verification,
     /// outbound provision fetch + broadcast.
     Provisions,
+    /// Beacon-coordinator actions: PC/SPC sign-and-broadcast,
+    /// beacon-block / recovery-request gossip, shard-witness fetch
+    /// dispatch, beacon-side crypto verification.
+    Beacon,
     /// I/O-loop-internal effects (timers, commits, status emission,
     /// fetch driving, topology plumbing). Not delegated to a worker
     /// pool.

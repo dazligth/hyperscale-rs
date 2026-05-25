@@ -5,6 +5,7 @@ edition.workspace = true
 description = "Combined node state machine"
 
 [dependencies]
+hyperscale-beacon.workspace = true
 hyperscale-core.workspace = true
 hyperscale-shard.workspace = true
 hyperscale-metrics.workspace = true

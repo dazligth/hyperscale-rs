@@ -124,6 +124,12 @@ pub fn timer_event(id: &TimerId, shard: ShardGroupId) -> ShardEvent {
         TimerId::ViewChange => ShardEvent::protocol(shard, ProtocolEvent::ViewChangeTimer),
         TimerId::Cleanup => ShardEvent::protocol(shard, ProtocolEvent::CleanupTimer),
         TimerId::FetchTick => ShardEvent::shard(shard, ShardScopedInput::FetchTick),
+        TimerId::BeaconCommitteeStart => {
+            ShardEvent::protocol(shard, ProtocolEvent::BeaconCommitteeStartTimer)
+        }
+        TimerId::BeaconRecoveryTrigger => {
+            ShardEvent::protocol(shard, ProtocolEvent::BeaconRecoveryTimer)
+        }
     }
 }
 

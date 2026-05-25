@@ -8,11 +8,14 @@
 use std::sync::Arc;
 
 use hyperscale_types::{
-    Block, BlockHash, BlockHeader, BlockHeight, BlockManifest, BlockVote, CertifiedBlock,
-    CommittedBlockHeader, ExecutionCertificate, ExecutionVote, FinalizedWave, Provisions,
-    QuorumCertificate, ReadySignal, Round, RoutableTransaction, ShardGroupId, StoredReceipt,
-    TxOutcome, ValidatorId, VotePower, WaveId, WeightedTimestamp,
+    BeaconBlock, Block, BlockHash, BlockHeader, BlockHeight, BlockManifest, BlockVote,
+    CertifiedBlock, CommittedBlockHeader, Epoch, ExecutionCertificate, ExecutionVote,
+    FinalizedWave, Hash, Provisions, QuorumCertificate, ReadySignal, RecoveryRequest, Round,
+    RoutableTransaction, ShardGroupId, ShardWitness, StoredReceipt, TxOutcome, ValidatorId,
+    VotePower, WaveId, WeightedTimestamp,
 };
+
+use crate::BeaconVerificationKind;
 
 /// How a node learned about the certifying QC that commits a given block.
 ///
@@ -508,6 +511,79 @@ pub enum ProtocolEvent {
         source_shard: ShardGroupId,
         /// Height the sync caught up to.
         height: BlockHeight,
+    },
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Beacon consensus
+    // ═══════════════════════════════════════════════════════════════════════
+    /// PC inner-consensus vote received from a peer. Payload is the
+    /// wire-form `PcVote` SBOR-encoded by the gossip decoder;
+    /// `BeaconCoordinator` decodes and routes into the per-epoch
+    /// `SpcInstance`.
+    PcVoteReceived {
+        /// Sender id (transport-level).
+        from: ValidatorId,
+        /// SBOR-encoded `VpcMsgPayload`.
+        payload: Vec<u8>,
+    },
+
+    /// SPC-level message received from a peer.
+    SpcMessageReceived {
+        /// Sender id (transport-level).
+        from: ValidatorId,
+        /// SBOR-encoded `SpcMessage`.
+        payload: Vec<u8>,
+    },
+
+    /// A beacon block arrived via gossip.
+    BeaconBlockReceived {
+        /// Received block.
+        block: Arc<BeaconBlock>,
+    },
+
+    /// A `RecoveryRequest` arrived via gossip.
+    RecoveryRequestReceived {
+        /// Received request.
+        request: Arc<RecoveryRequest>,
+    },
+
+    /// A shard-witness fetch response landed. `BeaconCoordinator`
+    /// validates the per-leaf Merkle proofs against the relevant
+    /// `shard_header_records` entry and admits to the witness pool.
+    ShardWitnessesReceived {
+        /// Source shard that served the response.
+        shard_id: ShardGroupId,
+        /// Witnesses returned by the peer.
+        witnesses: Vec<Arc<ShardWitness>>,
+    },
+
+    /// Result of an [`Action::VerifyBeaconRoot`] dispatch.
+    /// `BeaconCoordinator` routes back into the verification pipeline
+    /// keyed on `(kind, key)`.
+    BeaconVerificationResult {
+        /// What kind of verification finished.
+        kind: BeaconVerificationKind,
+        /// Slot key that the dispatching action carried.
+        key: Hash,
+        /// Whether the crypto check passed.
+        valid: bool,
+    },
+
+    /// Beacon committee-start timer fired — the upcoming epoch's
+    /// wall-clock boundary has been reached.
+    BeaconCommitteeStartTimer,
+
+    /// Beacon recovery-trigger timer fired — the local vnode hasn't
+    /// observed the expected commit within `RECOVERY_TIMEOUT` of its
+    /// expected block time.
+    BeaconRecoveryTimer,
+
+    /// A committed beacon block + its state have been persisted to
+    /// `BeaconStorage`. `BeaconCoordinator` can now drop in-memory
+    /// state tied to the pre-commit world.
+    BeaconBlockPersisted {
+        /// Epoch that was persisted.
+        epoch: Epoch,
     },
 }
 

@@ -270,6 +270,19 @@ impl StateMachine for NodeStateMachine {
             | ProtocolEvent::BlockSyncComplete { .. }
             | ProtocolEvent::RemoteHeaderSyncComplete { .. }
             | ProtocolEvent::CommittedStateRestored { .. }) => self.handle_sync(evt),
+
+            // ── Beacon ───────────────────────────────────────────────────
+            // B.8 wires these into BeaconCoordinator handlers; stubbed
+            // here so the workspace compiles.
+            ProtocolEvent::PcVoteReceived { .. }
+            | ProtocolEvent::SpcMessageReceived { .. }
+            | ProtocolEvent::BeaconBlockReceived { .. }
+            | ProtocolEvent::RecoveryRequestReceived { .. }
+            | ProtocolEvent::ShardWitnessesReceived { .. }
+            | ProtocolEvent::BeaconVerificationResult { .. }
+            | ProtocolEvent::BeaconCommitteeStartTimer
+            | ProtocolEvent::BeaconRecoveryTimer
+            | ProtocolEvent::BeaconBlockPersisted { .. } => Vec::new(),
         };
 
         // Drain any state root verifications that became ready during this event.
