@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use hyperscale_types::{
     BeaconBlock, BeaconState, Bls12381G1PrivateKey, Epoch, LocalTimestamp, NetworkDefinition,
-    ValidatorId, state_root,
+    RECOVERY_TIMEOUT, ValidatorId, state_root,
 };
 
 use crate::block_sync::BeaconBlockSyncManager;
@@ -147,6 +147,26 @@ impl BeaconCoordinator {
     /// so every handler in the batch reads a consistent `now`.
     pub const fn set_now(&mut self, now: LocalTimestamp) {
         self.now = now;
+    }
+
+    /// Whether the committee-start timer is due — i.e. wall-clock
+    /// time has reached the upcoming epoch's wall-clock boundary.
+    /// The runner combines this with its own "block not yet
+    /// committed" + "local on next committee" checks before actually
+    /// bootstrapping an SPC instance.
+    #[must_use]
+    pub const fn committee_start_due(&self, epoch_boundary: LocalTimestamp) -> bool {
+        self.now.as_millis() >= epoch_boundary.as_millis()
+    }
+
+    /// Whether the recovery-trigger timer is due — i.e. wall-clock
+    /// time has reached `expected_block_time + RECOVERY_TIMEOUT`.
+    /// The runner combines this with its own "expected block hasn't
+    /// arrived" + "local on active pool" checks before actually
+    /// broadcasting a `RecoveryRequest`.
+    #[must_use]
+    pub fn recovery_trigger_due(&self, expected_block_time: LocalTimestamp) -> bool {
+        self.now.as_millis() >= expected_block_time.plus(RECOVERY_TIMEOUT).as_millis()
     }
 }
 
@@ -330,6 +350,48 @@ mod tests {
             signing_key(0),
             NetworkDefinition::simulator(),
         );
+    }
+
+    #[test]
+    fn committee_start_due_fires_at_or_after_boundary() {
+        let (block, state) = genesis_pair();
+        let mut coord = BeaconCoordinator::new(
+            block,
+            state,
+            ValidatorId::new(0),
+            signing_key(0),
+            NetworkDefinition::simulator(),
+        );
+        let boundary = LocalTimestamp::from_millis(10_000);
+        coord.set_now(LocalTimestamp::from_millis(9_999));
+        assert!(!coord.committee_start_due(boundary));
+        coord.set_now(LocalTimestamp::from_millis(10_000));
+        assert!(coord.committee_start_due(boundary));
+        coord.set_now(LocalTimestamp::from_millis(10_001));
+        assert!(coord.committee_start_due(boundary));
+    }
+
+    #[test]
+    fn recovery_trigger_due_fires_one_timeout_past_expected() {
+        use hyperscale_types::RECOVERY_TIMEOUT;
+        let (block, state) = genesis_pair();
+        let mut coord = BeaconCoordinator::new(
+            block,
+            state,
+            ValidatorId::new(0),
+            signing_key(0),
+            NetworkDefinition::simulator(),
+        );
+        let expected = LocalTimestamp::from_millis(100_000);
+        let timeout_ms: u64 = RECOVERY_TIMEOUT
+            .as_millis()
+            .try_into()
+            .expect("RECOVERY_TIMEOUT fits in u64 millis");
+
+        coord.set_now(LocalTimestamp::from_millis(100_000 + timeout_ms - 1));
+        assert!(!coord.recovery_trigger_due(expected));
+        coord.set_now(LocalTimestamp::from_millis(100_000 + timeout_ms));
+        assert!(coord.recovery_trigger_due(expected));
     }
 
     #[test]

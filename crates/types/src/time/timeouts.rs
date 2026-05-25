@@ -102,3 +102,14 @@ pub const MAX_PROGRESS_WAIT: Duration = Duration::from_secs(9);
 /// is includable in a beacon proposal during epoch `E` if its source
 /// block's `weighted_timestamp ≤ t_end_E`.
 pub const EPOCH_DURATION: Duration = Duration::from_mins(5);
+
+/// Wall-clock interval an active validator waits past an epoch's
+/// expected block time before broadcasting a `RecoveryRequest`.
+///
+/// Consensus-critical: every validator must derive the same trigger
+/// instant or the cert-assembly quorum splits across rounds. Sized so
+/// a normal SPC commit (well under 10 s on a healthy network) never
+/// trips the timer, while a genuine stall doesn't burn an entire
+/// epoch waiting. Starting value picked mid-range against the
+/// 30–60 s envelope; tune from operational data.
+pub const RECOVERY_TIMEOUT: Duration = Duration::from_secs(45);
