@@ -18,8 +18,8 @@ use std::sync::Arc;
 
 use hyperscale_core::{Action, TimerId};
 use hyperscale_types::{
-    BeaconBlock, BeaconState, Bls12381G1PublicKey, Epoch, LocalTimestamp, NetworkDefinition,
-    RECOVERY_TIMEOUT, SpcMessage, ValidatorId, VpcMsgPayload, state_root,
+    BeaconBlock, BeaconProposal, BeaconState, Bls12381G1PublicKey, Epoch, LocalTimestamp,
+    NetworkDefinition, RECOVERY_TIMEOUT, SpcMessage, ValidatorId, VpcMsgPayload, state_root,
 };
 use tracing::{trace, warn};
 
@@ -27,6 +27,7 @@ use crate::block_sync::BeaconBlockSyncManager;
 use crate::constants::SPC_VIEW_TIMEOUT;
 use crate::equivocations::EquivocationObservations;
 use crate::pending_blocks::PendingBeaconBlocks;
+use crate::proposal_pool::BeaconProposalPool;
 use crate::recovery_tracker::RecoveryTracker;
 use crate::spc::{SpcEffect, SpcEvent, SpcInstance};
 use crate::verification::BeaconVerificationPipeline;
@@ -78,6 +79,11 @@ pub struct BeaconCoordinator {
     /// their turn through `apply_epoch`, in-flight fetches.
     sync: BeaconBlockSyncManager,
 
+    /// Per-epoch cache of committee members' `BeaconProposal`s.
+    /// Scoped to the in-flight epoch (`state.current_epoch.next()`);
+    /// reset on commit.
+    proposal_pool: BeaconProposalPool,
+
     me: ValidatorId,
 
     /// Mixed into every signing helper's domain bytes; carried so
@@ -116,6 +122,7 @@ impl BeaconCoordinator {
             "BeaconCoordinator::new: header.state_root != state_root(&state); \
              runner must verify the binding before construction",
         );
+        let next_epoch = latest_state.current_epoch.next();
         Self {
             state: latest_state,
             latest_block,
@@ -126,6 +133,7 @@ impl BeaconCoordinator {
             recovery_tracker: RecoveryTracker::new(),
             equivocations: EquivocationObservations::new(),
             sync: BeaconBlockSyncManager::new(),
+            proposal_pool: BeaconProposalPool::new(next_epoch),
             me,
             network,
             now: LocalTimestamp::ZERO,
@@ -197,6 +205,36 @@ impl BeaconCoordinator {
         };
         let view = spc.current_view();
         self.dispatch_spc_event(self.me, SpcEvent::TimerExpired { view })
+    }
+
+    /// A peer committee member's `BeaconProposal` arrived. Admit it
+    /// to the pool gated on committee membership at `epoch`. The
+    /// `IoLoop` has already authenticated `from` and verified the
+    /// proposal's VRF reveal against `(network.id, epoch)` under
+    /// `from`'s pubkey, so admission here is a pure pool insert.
+    pub fn on_beacon_proposal_received(
+        &mut self,
+        from: ValidatorId,
+        epoch: Epoch,
+        proposal: Arc<BeaconProposal>,
+    ) -> Vec<Action> {
+        if !self.state.committee.contains(&from) {
+            trace!(
+                ?from,
+                epoch = epoch.inner(),
+                "BeaconProposalReceived from non-committee sender — dropping",
+            );
+            return Vec::new();
+        }
+        if !self.proposal_pool.admit(from, epoch, proposal) {
+            trace!(
+                ?from,
+                epoch = epoch.inner(),
+                pool_epoch = self.proposal_pool.epoch().inner(),
+                "BeaconProposalReceived rejected — wrong epoch or duplicate sender",
+            );
+        }
+        Vec::new()
     }
 
     /// `TimerId::BeaconCommitteeStart` fired — the upcoming epoch's
@@ -674,5 +712,48 @@ mod tests {
         coord.on_beacon_committee_start_timer();
         let spc_view_second = coord.spc.as_ref().unwrap().current_view();
         assert_eq!(spc_view_first, spc_view_second);
+    }
+
+    fn sample_proposal(seed: u8) -> Arc<BeaconProposal> {
+        use hyperscale_types::{VrfOutput, VrfProof};
+        Arc::new(BeaconProposal::vrf_only(
+            VrfOutput([seed; 32]),
+            VrfProof([seed; 96]),
+        ))
+    }
+
+    #[test]
+    fn on_proposal_received_admits_in_flight_epoch_from_committee_member() {
+        let mut coord = fresh_coord();
+        let from = ValidatorId::new(1);
+        let in_flight = Epoch::GENESIS.next();
+        let actions = coord.on_beacon_proposal_received(from, in_flight, sample_proposal(0xAB));
+        assert!(actions.is_empty());
+        assert!(coord.proposal_pool.contains(from));
+    }
+
+    #[test]
+    fn on_proposal_received_drops_non_committee_sender() {
+        let mut coord = fresh_coord();
+        let actions = coord.on_beacon_proposal_received(
+            ValidatorId::new(99), // not on committee
+            Epoch::GENESIS.next(),
+            sample_proposal(0xAB),
+        );
+        assert!(actions.is_empty());
+        assert!(coord.proposal_pool.is_empty());
+    }
+
+    #[test]
+    fn on_proposal_received_drops_wrong_epoch() {
+        let mut coord = fresh_coord();
+        let actions = coord.on_beacon_proposal_received(
+            ValidatorId::new(1),
+            // Stale epoch: not the in-flight one.
+            Epoch::GENESIS,
+            sample_proposal(0xAB),
+        );
+        assert!(actions.is_empty());
+        assert!(coord.proposal_pool.is_empty());
     }
 }

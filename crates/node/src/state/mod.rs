@@ -275,6 +275,7 @@ impl StateMachine for NodeStateMachine {
             ProtocolEvent::PcVoteReceived { .. }
             | ProtocolEvent::SpcMessageReceived { .. }
             | ProtocolEvent::BeaconBlockReceived { .. }
+            | ProtocolEvent::BeaconProposalReceived { .. }
             | ProtocolEvent::RecoveryRequestReceived { .. }
             | ProtocolEvent::ShardWitnessesReceived { .. }
             | ProtocolEvent::BeaconVerificationResult { .. }

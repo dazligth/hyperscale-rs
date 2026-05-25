@@ -8,8 +8,8 @@
 use std::sync::Arc;
 
 use hyperscale_types::{
-    BeaconBlock, Block, BlockHash, BlockHeader, BlockHeight, BlockManifest, BlockVote,
-    CertifiedBlock, CommittedBlockHeader, Epoch, ExecutionCertificate, ExecutionVote,
+    BeaconBlock, BeaconProposal, Block, BlockHash, BlockHeader, BlockHeight, BlockManifest,
+    BlockVote, CertifiedBlock, CommittedBlockHeader, Epoch, ExecutionCertificate, ExecutionVote,
     FinalizedWave, Hash, Provisions, QuorumCertificate, ReadySignal, RecoveryRequest, Round,
     RoutableTransaction, ShardGroupId, ShardWitness, StoredReceipt, TxOutcome, ValidatorId,
     VotePower, WaveId, WeightedTimestamp,
@@ -539,6 +539,21 @@ pub enum ProtocolEvent {
     BeaconBlockReceived {
         /// Received block.
         block: Arc<BeaconBlock>,
+    },
+
+    /// A peer committee member's `BeaconProposal` arrived via gossip.
+    /// `IoLoop` has already authenticated the sender and verified the
+    /// proposal's VRF reveal against `(network.id, epoch)` — the
+    /// coordinator gates admission on committee membership at the
+    /// `epoch` and stores the proposal in its pool.
+    BeaconProposalReceived {
+        /// Authenticated sender id.
+        from: ValidatorId,
+        /// Epoch the proposal targets — bound by the verified VRF
+        /// reveal inside `proposal`.
+        epoch: Epoch,
+        /// Received proposal.
+        proposal: Arc<BeaconProposal>,
     },
 
     /// A `RecoveryRequest` arrived via gossip.

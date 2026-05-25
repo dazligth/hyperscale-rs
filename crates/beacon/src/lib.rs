@@ -19,6 +19,7 @@ pub mod genesis;
 pub mod pc;
 pub mod pending_blocks;
 pub mod prefix_ops;
+pub mod proposal_pool;
 pub mod recovery;
 pub mod recovery_tracker;
 pub mod sampling;

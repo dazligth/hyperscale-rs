@@ -47,7 +47,7 @@ pub use pc::{
     PcQc3, PcValueElement, PcVector, PcVote1, PcVote2, PcVote3, PcVoteEquivocation, PcVoteRound,
     PcXpProof,
 };
-pub use proposal::BeaconProposal;
+pub use proposal::{BeaconProposal, compute_proposals_root};
 pub use ready_signal::ReadySignal;
 pub use recovery::{
     RecoveryCertificate, RecoveryEquivocation, RecoveryRequest, recovery_cert_hash,
