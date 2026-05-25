@@ -11,10 +11,11 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
+use hyperscale_beacon::pc::{sign_vote1, sign_vote2, sign_vote3};
 use hyperscale_beacon::spc::{SpcEffect, SpcEvent, SpcInstance, VpcMsgPayload};
 use hyperscale_types::{
-    Bls12381G1PrivateKey, Bls12381G1PublicKey, Epoch, NetworkDefinition, PcVector, ValidatorId,
-    bls_keypair_from_seed,
+    Bls12381G1PrivateKey, Bls12381G1PublicKey, Epoch, NetworkDefinition, PcVector, SpcView,
+    ValidatorId, bls_keypair_from_seed, pc_context, spc_context,
 };
 
 /// One pending event in the network: an `SpcEvent` addressed to a
@@ -28,6 +29,8 @@ pub struct SpcSim {
     pub instances: Vec<SpcInstance>,
     pub members: Vec<(ValidatorId, Bls12381G1PublicKey)>,
     pub sks: Vec<Arc<Bls12381G1PrivateKey>>,
+    network: NetworkDefinition,
+    epoch: Epoch,
     pending: VecDeque<Envelope>,
     pub outputs: Vec<Option<PcVector>>,
 }
@@ -66,6 +69,8 @@ impl SpcSim {
             instances,
             members,
             sks,
+            network,
+            epoch,
             pending: VecDeque::new(),
             outputs,
         }
@@ -124,13 +129,36 @@ impl SpcSim {
     }
 
     fn absorb(&mut self, sender_idx: usize, effects: Vec<SpcEffect>) {
+        let sender = self.members[sender_idx].0;
+        let sk = Arc::clone(&self.sks[sender_idx]);
         for effect in effects {
             match effect {
-                SpcEffect::BroadcastVpcMsg(payload) => {
-                    self.fanout(sender_idx, |_| SpcEvent::VpcMsg(payload.clone()));
+                SpcEffect::SignAndBroadcastPcVote1 { view, v_in } => {
+                    let pc_ctx = pc_context(&spc_context(self.epoch), view);
+                    let vote = sign_vote1(&sk, sender, &self.network, &pc_ctx, v_in);
+                    let payload = Box::new(VpcMsgPayload::Vote1 { view, vote });
+                    self.deliver_to_all(&SpcEvent::VpcMsg(payload));
+                }
+                SpcEffect::SignAndBroadcastPcVote2 { view, qc1 } => {
+                    let pc_ctx = pc_context(&spc_context(self.epoch), view);
+                    let vote = sign_vote2(&sk, sender, &self.network, &pc_ctx, *qc1);
+                    let payload = Box::new(VpcMsgPayload::Vote2 {
+                        view,
+                        vote: Box::new(vote),
+                    });
+                    self.deliver_to_all(&SpcEvent::VpcMsg(payload));
+                }
+                SpcEffect::SignAndBroadcastPcVote3 { view, qc2 } => {
+                    let pc_ctx = pc_context(&spc_context(self.epoch), view);
+                    let vote = sign_vote3(&sk, sender, &self.network, &pc_ctx, *qc2);
+                    let payload = Box::new(VpcMsgPayload::Vote3 {
+                        view,
+                        vote: Box::new(vote),
+                    });
+                    self.deliver_to_all(&SpcEvent::VpcMsg(payload));
                 }
                 SpcEffect::BroadcastNewView { view, cert } => {
-                    let from = self.members[sender_idx].0;
+                    let from = sender;
                     self.fanout(sender_idx, |_| SpcEvent::NewView {
                         from,
                         view,
@@ -157,6 +185,19 @@ impl SpcSim {
                     self.outputs[sender_idx] = Some(v);
                 }
             }
+        }
+    }
+
+    /// Deliver `event` to every party in the committee, including the
+    /// sender — the production action handler feeds locally-signed
+    /// PC votes back into the state machine, so the sim's own vote
+    /// lands the same way.
+    fn deliver_to_all(&mut self, event: &SpcEvent) {
+        for (id, _) in &self.members {
+            self.pending.push_back(Envelope {
+                to: *id,
+                event: event.clone(),
+            });
         }
     }
 

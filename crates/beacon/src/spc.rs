@@ -46,10 +46,10 @@ use std::time::Duration;
 use blake3::Hasher;
 use hyperscale_types::{
     Bls12381G1PrivateKey, Bls12381G1PublicKey, DOMAIN_PC_EMPTY_VIEW, Epoch, Hash,
-    NetworkDefinition, PC_VALUE_ELEMENT_BYTES, PcQc3, PcValueElement, PcVector, PcVote1, PcVote2,
-    PcVote3, PcVoteEquivocation, SpcCert, SpcEmptyLowEvidence, SpcEmptyViewMsg, SpcHighTriple,
-    SpcProposalObject, SpcSkipSig, SpcView, ValidatorId, aggregate_verify_bls_different_messages,
-    pc_context, pc_vote_signing_message, spc_context,
+    NetworkDefinition, PC_VALUE_ELEMENT_BYTES, PcQc1, PcQc2, PcQc3, PcValueElement, PcVector,
+    PcVote1, PcVote2, PcVote3, PcVoteEquivocation, SpcCert, SpcEmptyLowEvidence, SpcEmptyViewMsg,
+    SpcHighTriple, SpcProposalObject, SpcSkipSig, SpcView, ValidatorId,
+    aggregate_verify_bls_different_messages, pc_context, pc_vote_signing_message, spc_context,
 };
 use sbor::basic_encode;
 
@@ -591,10 +591,28 @@ fn referenced_triple(cert: &SpcCert) -> SpcHighTriple {
 /// further effects.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpcEffect {
-    /// Relay an inner-PC vote to peers, tagged with the SPC view it
-    /// belongs to so the receiver routes it back into the right view's
-    /// PC instance.
-    BroadcastVpcMsg(Box<VpcMsgPayload>),
+    /// Sign a round-1 inner-PC vote over `v_in` (under `view`'s PC
+    /// context) and broadcast it to the SPC committee.
+    SignAndBroadcastPcVote1 {
+        /// SPC view the vote belongs to.
+        view: SpcView,
+        /// Input vector to be signed as `v_in`.
+        v_in: PcVector,
+    },
+    /// Sign a round-2 inner-PC vote derived from `qc1` and broadcast.
+    SignAndBroadcastPcVote2 {
+        /// SPC view the vote belongs to.
+        view: SpcView,
+        /// Source round-1 QC the round-2 vote is built from.
+        qc1: Box<PcQc1>,
+    },
+    /// Sign a round-3 inner-PC vote derived from `qc2` and broadcast.
+    SignAndBroadcastPcVote3 {
+        /// SPC view the vote belongs to.
+        view: SpcView,
+        /// Source round-2 QC the round-3 vote is built from.
+        qc2: Box<PcQc2>,
+    },
     /// Broadcast a `new-view` to peers — we just entered `view` under
     /// `cert`.
     BroadcastNewView {
@@ -784,11 +802,9 @@ impl ViewState {
         epoch: Epoch,
         view: SpcView,
         committee: Vec<(ValidatorId, Bls12381G1PublicKey)>,
-        me: ValidatorId,
-        me_sk: Arc<Bls12381G1PrivateKey>,
     ) -> Self {
         Self {
-            vpc: PcInstance::new(network, epoch, view, committee, me, me_sk),
+            vpc: PcInstance::new(network, epoch, view, committee),
             proposal_objects: BTreeMap::new(),
             vpc_input_fed: false,
             empty_views: BTreeMap::new(),
@@ -864,14 +880,7 @@ impl SpcInstance {
         let mut views = BTreeMap::new();
         views.insert(
             SpcView::new(1),
-            ViewState::new(
-                network.clone(),
-                epoch,
-                SpcView::new(1),
-                committee.clone(),
-                me,
-                Arc::clone(&me_sk),
-            ),
+            ViewState::new(network.clone(), epoch, SpcView::new(1), committee.clone()),
         );
         Self {
             network,
@@ -957,23 +966,14 @@ impl SpcInstance {
         let mut out = vec![];
         for effect in pc_effects {
             match effect {
-                PcEffect::BroadcastVote1(vote) => {
-                    out.push(SpcEffect::BroadcastVpcMsg(Box::new(VpcMsgPayload::Vote1 {
-                        view,
-                        vote: *vote,
-                    })));
+                PcEffect::SignAndBroadcastVote1 { v_in } => {
+                    out.push(SpcEffect::SignAndBroadcastPcVote1 { view, v_in });
                 }
-                PcEffect::BroadcastVote2(vote) => {
-                    out.push(SpcEffect::BroadcastVpcMsg(Box::new(VpcMsgPayload::Vote2 {
-                        view,
-                        vote,
-                    })));
+                PcEffect::SignAndBroadcastVote2 { qc1 } => {
+                    out.push(SpcEffect::SignAndBroadcastPcVote2 { view, qc1 });
                 }
-                PcEffect::BroadcastVote3(vote) => {
-                    out.push(SpcEffect::BroadcastVpcMsg(Box::new(VpcMsgPayload::Vote3 {
-                        view,
-                        vote,
-                    })));
+                PcEffect::SignAndBroadcastVote3 { qc2 } => {
+                    out.push(SpcEffect::SignAndBroadcastPcVote3 { view, qc2 });
                 }
                 PcEffect::EquivocationObserved(ev) => {
                     out.push(SpcEffect::Equivocation { view, evidence: ev });
@@ -1158,8 +1158,6 @@ impl SpcInstance {
                 self.epoch,
                 view,
                 self.committee.clone(),
-                self.me,
-                Arc::clone(&self.me_sk),
             )
         });
         // Last-write-wins on `(view, sender)` for proposal objects.
@@ -1244,8 +1242,6 @@ impl SpcInstance {
                 self.epoch,
                 view,
                 self.committee.clone(),
-                self.me,
-                Arc::clone(&self.me_sk),
             )
         });
         if view_state.indirect_cert_built {
@@ -1624,18 +1620,19 @@ mod tests {
     }
 
     /// Feeding `Input` at view 1 emits exactly one
-    /// `BroadcastVpcMsg(Vote1)` — the inner PC produces a Vote1
-    /// broadcast as its first effect.
+    /// `SignAndBroadcastPcVote1` at the local view — the inner PC
+    /// surfaces a sign intent as its first effect.
     #[test]
-    fn spc_input_emits_vote1_broadcast() {
+    fn spc_input_emits_vote1_sign_intent() {
         let mut fsm = fsm_instance(0);
         let v = PcVector::new(std::iter::once(PcValueElement::new([7u8; 32])));
-        let effects = fsm.handle(SpcEvent::Input(v));
+        let effects = fsm.handle(SpcEvent::Input(v.clone()));
         assert_eq!(effects.len(), 1);
-        assert!(matches!(
-            effects[0],
-            SpcEffect::BroadcastVpcMsg(ref payload) if matches!(**payload, VpcMsgPayload::Vote1 { .. })
-        ));
+        let SpcEffect::SignAndBroadcastPcVote1 { view, v_in } = &effects[0] else {
+            panic!("expected SignAndBroadcastPcVote1, got {:?}", effects[0]);
+        };
+        assert_eq!(*view, SpcView::new(1));
+        assert_eq!(*v_in, v);
     }
 
     /// Subsequent `Input` events at view 1 are idempotent — already

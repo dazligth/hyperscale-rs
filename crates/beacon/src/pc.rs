@@ -29,7 +29,6 @@
 //!   decode.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 
 use hyperscale_types::{
     Bls12381G1PrivateKey, Bls12381G1PublicKey, Bls12381G2Signature, DOMAIN_PC_VOTE1,
@@ -804,14 +803,30 @@ fn mcp_two(a: &PcVector, b: &PcVector) -> usize {
 /// Sub-machine-local — the parent (SPC) drains these and lifts them
 /// into either internal state mutations or further effects bubbling
 /// up to the `BeaconCoordinator`.
+///
+/// Signing happens off the state-machine thread: the FSM emits
+/// `SignAndBroadcastVote*` carrying the unsigned input the signer
+/// needs (vector for round 1, QC for rounds 2/3), and accepts the
+/// resulting signed vote back via `PcEvent::Vote*Received` on the
+/// same path peer votes use.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PcEffect {
-    /// Broadcast a freshly-signed round-1 vote.
-    BroadcastVote1(Box<PcVote1>),
-    /// Broadcast a freshly-signed round-2 vote.
-    BroadcastVote2(Box<PcVote2>),
-    /// Broadcast a freshly-signed round-3 vote.
-    BroadcastVote3(Box<PcVote3>),
+    /// Sign a round-1 vote over `v_in` and broadcast it to the
+    /// committee.
+    SignAndBroadcastVote1 {
+        /// The local input vector to be signed as `v_in`.
+        v_in: PcVector,
+    },
+    /// Sign a round-2 vote over `qc1.x()` and broadcast it.
+    SignAndBroadcastVote2 {
+        /// Source QC; `v2.x == qc1.x` is enforced at the signer.
+        qc1: Box<PcQc1>,
+    },
+    /// Sign a round-3 vote over `qc2.x_p()` and broadcast it.
+    SignAndBroadcastVote3 {
+        /// Source QC; `v3.x_p == qc2.x_p` is enforced at the signer.
+        qc2: Box<PcQc2>,
+    },
     /// Slim wire-form evidence that a peer double-signed at the same
     /// `(epoch, view, round)`. The parent assembles this into beacon
     /// witnesses for inclusion in a future beacon proposal.
@@ -849,8 +864,6 @@ pub struct PcInstance {
     view: SpcView,
     pc_ctx: Vec<u8>,
     committee: Vec<(ValidatorId, Bls12381G1PublicKey)>,
-    me: ValidatorId,
-    me_sk: Arc<Bls12381G1PrivateKey>,
 
     vote1_pool: BTreeMap<ValidatorId, PcVote1>,
     vote2_pool: BTreeMap<ValidatorId, PcVote2>,
@@ -875,8 +888,6 @@ impl PcInstance {
         epoch: Epoch,
         view: SpcView,
         committee: Vec<(ValidatorId, Bls12381G1PublicKey)>,
-        me: ValidatorId,
-        me_sk: Arc<Bls12381G1PrivateKey>,
     ) -> Self {
         assert!(
             committee.len() >= 4,
@@ -890,8 +901,6 @@ impl PcInstance {
             view,
             pc_ctx,
             committee,
-            me,
-            me_sk,
             vote1_pool: BTreeMap::new(),
             vote2_pool: BTreeMap::new(),
             vote3_pool: BTreeMap::new(),
@@ -935,10 +944,8 @@ impl PcInstance {
         if self.input.is_some() {
             return vec![];
         }
-        let vote1 = sign_vote1(&self.me_sk, self.me, &self.network, &self.pc_ctx, v.clone());
-        self.input = Some(v);
-        self.vote1_pool.insert(self.me, vote1.clone());
-        let mut effects = vec![PcEffect::BroadcastVote1(Box::new(vote1))];
+        self.input = Some(v.clone());
+        let mut effects = vec![PcEffect::SignAndBroadcastVote1 { v_in: v }];
         effects.extend(self.maybe_advance_to_round2());
         effects
     }
@@ -1027,10 +1034,8 @@ impl PcInstance {
         let n = self.committee.len();
         let vote1s: Vec<&PcVote1> = self.vote1_pool.values().take(q).collect();
         let qc1 = build_qc1(&vote1s, n);
-        let our_vote2 = sign_vote2(&self.me_sk, self.me, &self.network, &self.pc_ctx, qc1);
         self.sent_vote2 = true;
-        self.vote2_pool.insert(self.me, our_vote2.clone());
-        let mut effects = vec![PcEffect::BroadcastVote2(Box::new(our_vote2))];
+        let mut effects = vec![PcEffect::SignAndBroadcastVote2 { qc1: Box::new(qc1) }];
         effects.extend(self.maybe_advance_to_round3());
         effects
     }
@@ -1042,10 +1047,8 @@ impl PcInstance {
         let q = self.quorum();
         let vote2s: Vec<&PcVote2> = self.vote2_pool.values().take(q).collect();
         let qc2 = build_qc2(&vote2s, &self.committee);
-        let our_vote3 = sign_vote3(&self.me_sk, self.me, &self.network, &self.pc_ctx, qc2);
         self.sent_vote3 = true;
-        self.vote3_pool.insert(self.me, our_vote3.clone());
-        let mut effects = vec![PcEffect::BroadcastVote3(Box::new(our_vote3))];
+        let mut effects = vec![PcEffect::SignAndBroadcastVote3 { qc2: Box::new(qc2) }];
         effects.extend(self.maybe_finalize());
         effects
     }
@@ -1099,6 +1102,8 @@ fn vote2_top_sig(v: &PcVote2) -> Bls12381G2Signature {
 #[cfg(test)]
 mod tests {
     //! Structural-rejection smoke tests for the verifier gates.
+
+    use std::sync::Arc;
 
     use hyperscale_types::{
         PC_VALUE_ELEMENT_BYTES, PcCompactLenSigner, PcCompactVote, PcQc1, PcQc2, PcQc3,
@@ -1358,16 +1363,9 @@ mod tests {
         (sks, members)
     }
 
-    fn fsm_instance(idx: usize) -> PcInstance {
-        let (sks, members) = fsm_committee(4);
-        PcInstance::new(
-            net(),
-            Epoch::new(1),
-            SpcView::new(0),
-            members.clone(),
-            members[idx].0,
-            Arc::clone(&sks[idx]),
-        )
+    fn fsm_instance() -> PcInstance {
+        let (_, members) = fsm_committee(4);
+        PcInstance::new(net(), Epoch::new(1), SpcView::new(0), members)
     }
 
     /// `PcInstance::new` panics when the committee is too small for
@@ -1377,26 +1375,22 @@ mod tests {
     #[test]
     #[should_panic(expected = "PC requires n >= 4")]
     fn pc_instance_rejects_undersized_committee() {
-        let (sks, members) = fsm_committee(3);
-        let _ = PcInstance::new(
-            net(),
-            Epoch::new(1),
-            SpcView::new(0),
-            members,
-            ValidatorId::new(0),
-            Arc::clone(&sks[0]),
-        );
+        let (_, members) = fsm_committee(3);
+        let _ = PcInstance::new(net(), Epoch::new(1), SpcView::new(0), members);
     }
 
-    /// First `Input` event emits a `BroadcastVote1` and seeds the
-    /// local vote-1 pool. Subsequent inputs are idempotent.
+    /// First `Input` event emits a sign-and-broadcast intent for
+    /// round 1. Subsequent inputs are idempotent.
     #[test]
-    fn pc_input_emits_single_broadcast_then_idempotent() {
-        let mut fsm = fsm_instance(0);
+    fn pc_input_emits_single_sign_intent_then_idempotent() {
+        let mut fsm = fsm_instance();
         let v = PcVector::new(std::iter::once(elem(7)));
         let effects = fsm.handle(PcEvent::Input(v.clone()));
         assert_eq!(effects.len(), 1);
-        assert!(matches!(effects[0], PcEffect::BroadcastVote1(_)));
+        let PcEffect::SignAndBroadcastVote1 { v_in } = &effects[0] else {
+            panic!("expected SignAndBroadcastVote1, got {:?}", effects[0]);
+        };
+        assert_eq!(*v_in, v);
         assert!(fsm.has_input());
 
         // Second input — already set, no effects.
@@ -1410,14 +1404,7 @@ mod tests {
     #[test]
     fn pc_observes_round1_equivocation() {
         let (sks, members) = fsm_committee(4);
-        let mut fsm = PcInstance::new(
-            net(),
-            Epoch::new(1),
-            SpcView::new(0),
-            members.clone(),
-            members[0].0,
-            Arc::clone(&sks[0]),
-        );
+        let mut fsm = PcInstance::new(net(), Epoch::new(1), SpcView::new(0), members.clone());
 
         // Two distinct v_ins signed by validator 1 (the equivocator).
         let pc_ctx_bytes = pc_context(&spc_context(Epoch::new(1)), SpcView::new(0));

@@ -10,10 +10,10 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use hyperscale_beacon::pc::{PcEffect, PcEvent, PcInstance};
+use hyperscale_beacon::pc::{PcEffect, PcEvent, PcInstance, sign_vote1, sign_vote2, sign_vote3};
 use hyperscale_types::{
     Bls12381G1PrivateKey, Bls12381G1PublicKey, Epoch, NetworkDefinition, PcQc3, PcVector, SpcView,
-    ValidatorId, bls_keypair_from_seed,
+    ValidatorId, bls_keypair_from_seed, pc_context, spc_context,
 };
 
 /// One pending message in the network: a vote event addressed to a
@@ -27,6 +27,8 @@ pub struct PcSim {
     pub instances: Vec<PcInstance>,
     pub members: Vec<(ValidatorId, Bls12381G1PublicKey)>,
     pub sks: Vec<Arc<Bls12381G1PrivateKey>>,
+    network: NetworkDefinition,
+    pc_ctx: Vec<u8>,
     pending: VecDeque<Envelope>,
     pub decided: Vec<Option<Box<PcQc3>>>,
 }
@@ -49,22 +51,16 @@ impl PcSim {
             sks.push(Arc::new(sk));
         }
         let instances: Vec<PcInstance> = (0..n)
-            .map(|i| {
-                PcInstance::new(
-                    network.clone(),
-                    epoch,
-                    view,
-                    members.clone(),
-                    members[i].0,
-                    Arc::clone(&sks[i]),
-                )
-            })
+            .map(|_| PcInstance::new(network.clone(), epoch, view, members.clone()))
             .collect();
         let decided = vec![None; n];
+        let pc_ctx = pc_context(&spc_context(epoch), view);
         Self {
             instances,
             members,
             sks,
+            network,
+            pc_ctx,
             pending: VecDeque::new(),
             decided,
         }
@@ -139,40 +135,21 @@ impl PcSim {
     }
 
     fn absorb(&mut self, sender_idx: usize, effects: Vec<PcEffect>) {
+        let sender = self.members[sender_idx].0;
+        let sk = Arc::clone(&self.sks[sender_idx]);
         for effect in effects {
             match effect {
-                PcEffect::BroadcastVote1(vote) => {
-                    for (id, _) in &self.members {
-                        if self.members[sender_idx].0 == *id {
-                            continue;
-                        }
-                        self.pending.push_back(Envelope {
-                            to: *id,
-                            event: PcEvent::Vote1Received((*vote).clone()),
-                        });
-                    }
+                PcEffect::SignAndBroadcastVote1 { v_in } => {
+                    let vote = sign_vote1(&sk, sender, &self.network, &self.pc_ctx, v_in);
+                    self.deliver_to_all(&PcEvent::Vote1Received(vote));
                 }
-                PcEffect::BroadcastVote2(vote) => {
-                    for (id, _) in &self.members {
-                        if self.members[sender_idx].0 == *id {
-                            continue;
-                        }
-                        self.pending.push_back(Envelope {
-                            to: *id,
-                            event: PcEvent::Vote2Received(vote.clone()),
-                        });
-                    }
+                PcEffect::SignAndBroadcastVote2 { qc1 } => {
+                    let vote = sign_vote2(&sk, sender, &self.network, &self.pc_ctx, *qc1);
+                    self.deliver_to_all(&PcEvent::Vote2Received(Box::new(vote)));
                 }
-                PcEffect::BroadcastVote3(vote) => {
-                    for (id, _) in &self.members {
-                        if self.members[sender_idx].0 == *id {
-                            continue;
-                        }
-                        self.pending.push_back(Envelope {
-                            to: *id,
-                            event: PcEvent::Vote3Received(vote.clone()),
-                        });
-                    }
+                PcEffect::SignAndBroadcastVote3 { qc2 } => {
+                    let vote = sign_vote3(&sk, sender, &self.network, &self.pc_ctx, *qc2);
+                    self.deliver_to_all(&PcEvent::Vote3Received(Box::new(vote)));
                 }
                 PcEffect::EquivocationObserved(_) => {
                     // Honest path: no equivocations to absorb.
@@ -181,6 +158,19 @@ impl PcSim {
                     self.decided[sender_idx] = Some(qc3);
                 }
             }
+        }
+    }
+
+    /// Deliver `event` to every party in the committee, including the
+    /// sender — the production action handler feeds locally-signed
+    /// votes back into the state machine, so the sim's own vote lands
+    /// the same way.
+    fn deliver_to_all(&mut self, event: &PcEvent) {
+        for (id, _) in &self.members {
+            self.pending.push_back(Envelope {
+                to: *id,
+                event: event.clone(),
+            });
         }
     }
 }
