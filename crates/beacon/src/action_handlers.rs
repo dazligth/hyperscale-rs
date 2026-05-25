@@ -14,12 +14,13 @@ use hyperscale_types::network::notification::{
     PcVote1Notification, PcVote2Notification, PcVote3Notification, SpcEmptyViewMsgNotification,
     SpcNewCommitNotification, SpcNewViewNotification,
 };
-use hyperscale_types::{SpcHighTriple, SpcProposalObject, pc_context, spc_context};
-use sbor::basic_encode;
+use hyperscale_types::{
+    SpcHighTriple, SpcMessage, SpcProposalObject, VpcMsgPayload, pc_context, spc_context,
+};
 use tracing::warn;
 
 use crate::pc::{sign_vote1, sign_vote2, sign_vote3};
-use crate::spc::{SpcMessage, VpcMsgPayload, sign_empty_view_msg};
+use crate::spc::sign_empty_view_msg;
 
 /// Dispatch a beacon-owned [`Action`] on the consensus pool. Panics on
 /// non-beacon variants — the node's owner-keyed dispatch is the gate.
@@ -44,7 +45,7 @@ where
             ctx.network
                 .notify(&recipients, &PcVote1Notification::new(vote.clone()));
             let payload = VpcMsgPayload::Vote1 { view, vote };
-            let bytes = basic_encode(&payload).expect("VpcMsgPayload SBOR-encode");
+            let bytes = payload.encode_bytes();
             ctx.notify_protocol(ProtocolEvent::PcVoteReceived {
                 from: me,
                 payload: bytes,
@@ -64,7 +65,7 @@ where
                 view,
                 vote: Box::new(vote),
             };
-            let bytes = basic_encode(&payload).expect("VpcMsgPayload SBOR-encode");
+            let bytes = payload.encode_bytes();
             ctx.notify_protocol(ProtocolEvent::PcVoteReceived {
                 from: me,
                 payload: bytes,
@@ -84,7 +85,7 @@ where
                 view,
                 vote: Box::new(vote),
             };
-            let bytes = basic_encode(&payload).expect("VpcMsgPayload SBOR-encode");
+            let bytes = payload.encode_bytes();
             ctx.notify_protocol(ProtocolEvent::PcVoteReceived {
                 from: me,
                 payload: bytes,
@@ -101,7 +102,7 @@ where
             ctx.network
                 .notify(&recipients, &SpcEmptyViewMsgNotification::new(msg.clone()));
             let wire = SpcMessage::EmptyView(Box::new(msg));
-            let bytes = basic_encode(&wire).expect("SpcMessage SBOR-encode");
+            let bytes = wire.encode_bytes();
             ctx.notify_protocol(ProtocolEvent::SpcMessageReceived {
                 from: me,
                 payload: bytes,

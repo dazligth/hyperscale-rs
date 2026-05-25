@@ -16,16 +16,18 @@
 
 use std::sync::Arc;
 
+use hyperscale_core::{Action, TimerId};
 use hyperscale_types::{
     BeaconBlock, BeaconState, Epoch, LocalTimestamp, NetworkDefinition, RECOVERY_TIMEOUT,
-    ValidatorId, state_root,
+    SpcMessage, ValidatorId, VpcMsgPayload, state_root,
 };
+use tracing::{trace, warn};
 
 use crate::block_sync::BeaconBlockSyncManager;
 use crate::equivocations::EquivocationObservations;
 use crate::pending_blocks::PendingBeaconBlocks;
 use crate::recovery_tracker::RecoveryTracker;
-use crate::spc::SpcInstance;
+use crate::spc::{SpcEffect, SpcEvent, SpcInstance};
 use crate::verification::BeaconVerificationPipeline;
 use crate::witness_fetcher::ShardWitnessFetchTracker;
 
@@ -161,6 +163,152 @@ impl BeaconCoordinator {
     #[must_use]
     pub fn recovery_trigger_due(&self, expected_block_time: LocalTimestamp) -> bool {
         self.now.as_millis() >= expected_block_time.plus(RECOVERY_TIMEOUT).as_millis()
+    }
+
+    /// A peer's PC vote arrived. SBOR-decode and route into the
+    /// current epoch's `SpcInstance`; drop with a trace if no
+    /// instance is bootstrapped.
+    pub fn on_pc_vote_received(&mut self, from: ValidatorId, payload: &[u8]) -> Vec<Action> {
+        let Some(msg) = VpcMsgPayload::decode(payload) else {
+            warn!(?from, "PC vote payload SBOR-decode failed");
+            return Vec::new();
+        };
+        self.dispatch_spc_event(from, SpcEvent::VpcMsg(Box::new(msg)))
+    }
+
+    /// A peer's SPC message arrived (new-view / new-commit /
+    /// empty-view / inner-PC vote). SBOR-decode and route in.
+    pub fn on_spc_message_received(&mut self, from: ValidatorId, payload: &[u8]) -> Vec<Action> {
+        let Some(msg) = SpcMessage::decode(payload) else {
+            warn!(?from, "SPC message payload SBOR-decode failed");
+            return Vec::new();
+        };
+        self.dispatch_spc_event(from, SpcEvent::from_message(msg, from))
+    }
+
+    /// `TimerId::BeaconSpcView` fired. Route a synthesized
+    /// `TimerExpired` into SPC against its current view — the FSM's
+    /// stale-view guard no-ops if the view has already advanced.
+    pub fn on_beacon_spc_view_timer(&mut self) -> Vec<Action> {
+        let Some(spc) = self.spc.as_ref() else {
+            trace!("BeaconSpcViewTimer fired but no SPC instance bootstrapped");
+            return Vec::new();
+        };
+        let view = spc.current_view();
+        self.dispatch_spc_event(self.me, SpcEvent::TimerExpired { view })
+    }
+
+    /// Drive `event` through the current `SpcInstance` and lift the
+    /// resulting effects. The `from` argument is logged on the
+    /// not-bootstrapped path so dropped messages are attributable.
+    fn dispatch_spc_event(&mut self, from: ValidatorId, event: SpcEvent) -> Vec<Action> {
+        if self.spc.is_none() {
+            trace!(?from, "SPC event received but no SPC instance bootstrapped");
+            return Vec::new();
+        }
+        let recipients = self.spc_recipients();
+        let spc = self.spc.as_mut().expect("checked is_none above");
+        let epoch = spc.epoch();
+        let effects = spc.handle(event);
+        self.lift_spc_effects(epoch, &recipients, effects)
+    }
+
+    /// Beacon-committee members excluding the local validator —
+    /// recipient list for outbound SPC traffic.
+    fn spc_recipients(&self) -> Vec<ValidatorId> {
+        self.state
+            .committee
+            .iter()
+            .filter(|v| **v != self.me)
+            .copied()
+            .collect()
+    }
+
+    /// Translate the sub-machine's local effect enum into beacon
+    /// actions plus internal state mutations (equivocation pool,
+    /// future commit pipeline).
+    fn lift_spc_effects(
+        &mut self,
+        epoch: Epoch,
+        recipients: &[ValidatorId],
+        effects: Vec<SpcEffect>,
+    ) -> Vec<Action> {
+        let mut actions = Vec::with_capacity(effects.len());
+        for effect in effects {
+            match effect {
+                SpcEffect::SignAndBroadcastPcVote1 { view, v_in } => {
+                    actions.push(Action::SignAndBroadcastPcVote1 {
+                        epoch,
+                        view,
+                        v_in,
+                        recipients: recipients.to_vec(),
+                    });
+                }
+                SpcEffect::SignAndBroadcastPcVote2 { view, qc1 } => {
+                    actions.push(Action::SignAndBroadcastPcVote2 {
+                        epoch,
+                        view,
+                        qc1,
+                        recipients: recipients.to_vec(),
+                    });
+                }
+                SpcEffect::SignAndBroadcastPcVote3 { view, qc2 } => {
+                    actions.push(Action::SignAndBroadcastPcVote3 {
+                        epoch,
+                        view,
+                        qc2,
+                        recipients: recipients.to_vec(),
+                    });
+                }
+                SpcEffect::SignAndBroadcastEmptyView { view, reported } => {
+                    actions.push(Action::SignAndBroadcastEmptyView {
+                        epoch,
+                        view,
+                        reported,
+                        recipients: recipients.to_vec(),
+                    });
+                }
+                SpcEffect::BroadcastNewView { view, cert } => {
+                    actions.push(Action::BroadcastSpcNewView {
+                        epoch,
+                        view,
+                        cert,
+                        recipients: recipients.to_vec(),
+                    });
+                }
+                SpcEffect::BroadcastNewCommit { view, value, proof } => {
+                    actions.push(Action::BroadcastSpcNewCommit {
+                        epoch,
+                        view,
+                        value,
+                        proof,
+                        recipients: recipients.to_vec(),
+                    });
+                }
+                SpcEffect::SetTimer { view: _, duration } => {
+                    actions.push(Action::SetTimer {
+                        id: TimerId::BeaconSpcView,
+                        duration,
+                    });
+                }
+                SpcEffect::Equivocation { view: _, evidence } => {
+                    self.equivocations.record_pc_equivocation(*evidence);
+                }
+                SpcEffect::EmptyLowEvidence(evidence) => {
+                    warn!(
+                        view = evidence.view.inner(),
+                        "SPC empty-low evidence — downstream handling deferred",
+                    );
+                }
+                SpcEffect::OutputHigh(_value) => {
+                    warn!(
+                        epoch = epoch.inner(),
+                        "SPC OutputHigh — beacon commit pipeline pending",
+                    );
+                }
+            }
+        }
+        actions
     }
 }
 
@@ -387,5 +535,54 @@ mod tests {
         );
         assert_eq!(coord.current_state(), &original);
         assert_eq!(coord.current_state().miss_counters, BTreeMap::new());
+    }
+
+    fn fresh_coord() -> BeaconCoordinator {
+        let (block, state) = genesis_pair();
+        BeaconCoordinator::new(
+            block,
+            state,
+            ValidatorId::new(0),
+            NetworkDefinition::simulator(),
+        )
+    }
+
+    #[test]
+    fn on_pc_vote_received_drops_when_no_spc_instance() {
+        use hyperscale_types::{Bls12381G2Signature, PcVector, PcVote1, SpcView};
+        let mut coord = fresh_coord();
+        // Build a real SBOR-encoded VpcMsgPayload so the decode side
+        // succeeds; the no-SPC drop path is what we're pinning.
+        let payload = VpcMsgPayload::Vote1 {
+            view: SpcView::new(1),
+            vote: PcVote1::new(
+                ValidatorId::new(1),
+                PcVector::empty(),
+                vec![Bls12381G2Signature([0u8; 96])],
+            ),
+        }
+        .encode_bytes();
+        let actions = coord.on_pc_vote_received(ValidatorId::new(1), &payload);
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn on_pc_vote_received_drops_on_malformed_payload() {
+        let mut coord = fresh_coord();
+        let actions = coord.on_pc_vote_received(ValidatorId::new(1), &[0xFF; 8]);
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn on_spc_message_received_drops_on_malformed_payload() {
+        let mut coord = fresh_coord();
+        let actions = coord.on_spc_message_received(ValidatorId::new(1), &[0xFF; 8]);
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn on_beacon_spc_view_timer_drops_when_no_spc_instance() {
+        let mut coord = fresh_coord();
+        assert!(coord.on_beacon_spc_view_timer().is_empty());
     }
 }

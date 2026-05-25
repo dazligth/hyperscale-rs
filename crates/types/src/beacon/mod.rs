@@ -53,7 +53,8 @@ pub use recovery::{
     RecoveryCertificate, RecoveryEquivocation, RecoveryRequest, recovery_cert_hash,
 };
 pub use spc::{
-    SpcCert, SpcEmptyLowEvidence, SpcEmptyViewMsg, SpcHighTriple, SpcProposalObject, SpcSkipSig,
+    SpcCert, SpcEmptyLowEvidence, SpcEmptyViewMsg, SpcHighTriple, SpcMessage, SpcProposalObject,
+    SpcSkipSig, VpcMsgPayload,
 };
 pub use state::{
     BeaconState, CommitteeTransition, JailReason, PendingWithdrawal, ShardCommittee, SlotEffects,

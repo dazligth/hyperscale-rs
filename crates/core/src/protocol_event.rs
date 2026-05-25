@@ -578,6 +578,12 @@ pub enum ProtocolEvent {
     /// expected block time.
     BeaconRecoveryTimer,
 
+    /// Beacon SPC view-timeout timer fired. The coordinator routes
+    /// `SpcEvent::TimerExpired { view: spc.current_view() }` into
+    /// the FSM — the inner PC instance fires its input even if the
+    /// view's leader hasn't surfaced one.
+    BeaconSpcViewTimer,
+
     /// A committed beacon block + its state have been persisted to
     /// `BeaconStorage`. `BeaconCoordinator` can now drop in-memory
     /// state tied to the pre-commit world.

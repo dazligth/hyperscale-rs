@@ -280,6 +280,7 @@ impl StateMachine for NodeStateMachine {
             | ProtocolEvent::BeaconVerificationResult { .. }
             | ProtocolEvent::BeaconCommitteeStartTimer
             | ProtocolEvent::BeaconRecoveryTimer
+            | ProtocolEvent::BeaconSpcViewTimer
             | ProtocolEvent::BeaconBlockPersisted { .. } => Vec::new(),
         };
 

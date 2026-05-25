@@ -15,7 +15,8 @@
 use sbor::prelude::*;
 
 use crate::{
-    Bls12381G2Signature, BoundedVec, Hash, MAX_SKIP_SIGS, PcQc3, PcVector, SpcView, ValidatorId,
+    Bls12381G2Signature, BoundedVec, Hash, MAX_SKIP_SIGS, PcQc3, PcVector, PcVote1, PcVote2,
+    PcVote3, SpcView, ValidatorId,
 };
 
 /// `(view, value, proof)` — a verifiable high triple.
@@ -140,6 +141,119 @@ pub struct SpcProposalObject {
     pub view: SpcView,
     /// Cert backing the authorization.
     pub cert: SpcCert,
+}
+
+impl SpcCert {
+    /// SBOR-encoded canonical bytes of this cert. Used by SPC
+    /// proposal-object hashing to bind the cert into the input vector.
+    ///
+    /// # Panics
+    ///
+    /// Never in practice: every field is `BasicSbor` and the enum is
+    /// closed, so encoding is total.
+    #[must_use]
+    pub fn encode_bytes(&self) -> Vec<u8> {
+        basic_encode(self).expect("SpcCert SBOR encoding is infallible")
+    }
+}
+
+/// One inner-PC vote tagged with its SPC view.
+///
+/// The body of an SPC participant's inner-PC broadcast — the FSM
+/// routes the wrapped vote back into the right view's PC instance on
+/// receipt.
+#[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
+pub enum VpcMsgPayload {
+    /// Round-1 vote.
+    Vote1 {
+        /// SPC view this vote belongs to.
+        view: SpcView,
+        /// The vote payload.
+        vote: PcVote1,
+    },
+    /// Round-2 vote.
+    Vote2 {
+        /// SPC view this vote belongs to.
+        view: SpcView,
+        /// The vote payload.
+        vote: Box<PcVote2>,
+    },
+    /// Round-3 vote.
+    Vote3 {
+        /// SPC view this vote belongs to.
+        view: SpcView,
+        /// The vote payload.
+        vote: Box<PcVote3>,
+    },
+}
+
+impl VpcMsgPayload {
+    /// SBOR-encoded canonical bytes for the wire.
+    ///
+    /// # Panics
+    ///
+    /// Never in practice: every field is `BasicSbor` and the enum is
+    /// closed, so encoding is total.
+    #[must_use]
+    pub fn encode_bytes(&self) -> Vec<u8> {
+        basic_encode(self).expect("VpcMsgPayload SBOR encoding is infallible")
+    }
+
+    /// Decode SBOR-encoded bytes. Returns `None` on malformed input —
+    /// callers (the beacon coordinator on a peer-message path) drop
+    /// with a trace rather than propagating an opaque error.
+    #[must_use]
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        basic_decode(bytes).ok()
+    }
+}
+
+/// Wire-form SPC message — the sender-implicit shape that rides
+/// between participants.
+///
+/// The receiving coordinator reconstructs the FSM-level event by
+/// pairing the wire form with the transport-level sender id.
+#[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
+pub enum SpcMessage {
+    /// Inner-PC vote tagged with its SPC view.
+    VpcMsg(Box<VpcMsgPayload>),
+    /// `new-view` authorising entry to `view` under `cert`.
+    NewView {
+        /// View this notification authorises entry to.
+        view: SpcView,
+        /// Cert backing the authorisation.
+        cert: Box<SpcCert>,
+    },
+    /// `new-commit` for `view`.
+    NewCommit {
+        /// View whose inner PC produced this commit.
+        view: SpcView,
+        /// Committed low value.
+        value: PcVector,
+        /// PC round-3 cert anchoring `value` as `proof.x_pp`.
+        proof: Box<PcQc3>,
+    },
+    /// Empty-view attestation.
+    EmptyView(Box<SpcEmptyViewMsg>),
+}
+
+impl SpcMessage {
+    /// SBOR-encoded canonical bytes for the wire.
+    ///
+    /// # Panics
+    ///
+    /// Never in practice: every field is `BasicSbor` and the enum is
+    /// closed, so encoding is total.
+    #[must_use]
+    pub fn encode_bytes(&self) -> Vec<u8> {
+        basic_encode(self).expect("SpcMessage SBOR encoding is infallible")
+    }
+
+    /// Decode SBOR-encoded bytes. Returns `None` on malformed input.
+    #[must_use]
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        basic_decode(bytes).ok()
+    }
 }
 
 #[cfg(test)]

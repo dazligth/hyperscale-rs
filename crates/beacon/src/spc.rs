@@ -46,11 +46,10 @@ use blake3::Hasher;
 use hyperscale_types::{
     Bls12381G1PrivateKey, Bls12381G1PublicKey, DOMAIN_PC_EMPTY_VIEW, Epoch, Hash,
     NetworkDefinition, PC_VALUE_ELEMENT_BYTES, PcQc1, PcQc2, PcQc3, PcValueElement, PcVector,
-    PcVote1, PcVote2, PcVote3, PcVoteEquivocation, SpcCert, SpcEmptyLowEvidence, SpcEmptyViewMsg,
-    SpcHighTriple, SpcProposalObject, SpcSkipSig, SpcView, ValidatorId,
+    PcVoteEquivocation, SpcCert, SpcEmptyLowEvidence, SpcEmptyViewMsg, SpcHighTriple, SpcMessage,
+    SpcProposalObject, SpcSkipSig, SpcView, ValidatorId, VpcMsgPayload,
     aggregate_verify_bls_different_messages, pc_context, pc_vote_signing_message, spc_context,
 };
-use sbor::basic_encode;
 
 use crate::pc::{PcEffect, PcEvent, PcInstance, verify_qc3};
 
@@ -479,8 +478,7 @@ fn proposal_object_message(po: &SpcProposalObject) -> Vec<u8> {
     let mut buf = Vec::with_capacity(DOMAIN.len() + 4 + 256);
     buf.extend_from_slice(DOMAIN);
     buf.extend_from_slice(&po.view.to_le_bytes());
-    let cert_bytes = basic_encode(&po.cert).expect("SpcCert SBOR encoding should never fail");
-    buf.extend_from_slice(&cert_bytes);
+    buf.extend_from_slice(&po.cert.encode_bytes());
     buf
 }
 
@@ -667,32 +665,6 @@ pub enum SpcEffect {
     OutputHigh(PcVector),
 }
 
-/// One inner-PC vote tagged with its SPC view.
-#[derive(Debug, Clone, PartialEq, Eq, sbor::BasicSbor)]
-pub enum VpcMsgPayload {
-    /// Round-1 vote.
-    Vote1 {
-        /// SPC view this vote belongs to.
-        view: SpcView,
-        /// The vote payload.
-        vote: PcVote1,
-    },
-    /// Round-2 vote.
-    Vote2 {
-        /// SPC view this vote belongs to.
-        view: SpcView,
-        /// The vote payload.
-        vote: Box<PcVote2>,
-    },
-    /// Round-3 vote.
-    Vote3 {
-        /// SPC view this vote belongs to.
-        view: SpcView,
-        /// The vote payload.
-        vote: Box<PcVote3>,
-    },
-}
-
 /// Events [`SpcInstance::handle`] consumes.
 #[derive(Debug, Clone)]
 pub enum SpcEvent {
@@ -737,54 +709,18 @@ pub enum SpcEvent {
     },
 }
 
-/// Wire-form SPC message — the sender-implicit shape that rides
-/// between participants.
-///
-/// Distinct from [`SpcEvent`] (the FSM input form, which carries
-/// `from` for [`Self::NewView`] dispatch) and [`SpcEffect`] (the FSM
-/// output form, which has effect variants beyond the four broadcast
-/// shapes).
-///
-/// The `BeaconCoordinator` lifts these into network broadcast effects
-/// for outbound, and reconstructs an `SpcEvent` via
-/// [`Self::into_event`] when a peer message arrives at the IO layer
-/// (which knows the sender id).
-#[derive(Debug, Clone, PartialEq, Eq, sbor::BasicSbor)]
-pub enum SpcMessage {
-    /// Inner-PC vote tagged with its SPC view.
-    VpcMsg(Box<VpcMsgPayload>),
-    /// `new-view` authorising entry to `view` under `cert`.
-    NewView {
-        /// View this notification authorises entry to.
-        view: SpcView,
-        /// Cert backing the authorisation.
-        cert: Box<SpcCert>,
-    },
-    /// `new-commit` for `view`.
-    NewCommit {
-        /// View whose inner PC produced this commit.
-        view: SpcView,
-        /// Committed low value.
-        value: PcVector,
-        /// PC round-3 cert anchoring `value` as `proof.x_pp`.
-        proof: Box<PcQc3>,
-    },
-    /// Empty-view attestation.
-    EmptyView(Box<SpcEmptyViewMsg>),
-}
-
-impl SpcMessage {
-    /// Reconstruct an [`SpcEvent`] from this wire message and the
+impl SpcEvent {
+    /// Reconstruct a [`SpcEvent`] from a wire [`SpcMessage`] and the
     /// transport-level sender id. `from` only affects routing of
     /// `NewView` (it determines which validator's proposal-object
     /// epoch to fill); the other variants are sender-independent.
     #[must_use]
-    pub fn into_event(self, from: ValidatorId) -> SpcEvent {
-        match self {
-            Self::VpcMsg(payload) => SpcEvent::VpcMsg(payload),
-            Self::NewView { view, cert } => SpcEvent::NewView { from, view, cert },
-            Self::NewCommit { view, value, proof } => SpcEvent::NewCommit { view, value, proof },
-            Self::EmptyView(msg) => SpcEvent::EmptyView(msg),
+    pub fn from_message(msg: SpcMessage, from: ValidatorId) -> Self {
+        match msg {
+            SpcMessage::VpcMsg(payload) => Self::VpcMsg(payload),
+            SpcMessage::NewView { view, cert } => Self::NewView { from, view, cert },
+            SpcMessage::NewCommit { view, value, proof } => Self::NewCommit { view, value, proof },
+            SpcMessage::EmptyView(msg) => Self::EmptyView(msg),
         }
     }
 }
@@ -904,6 +840,12 @@ impl SpcInstance {
             low_output: None,
             high_output: None,
         }
+    }
+
+    /// Epoch this SPC instance drives consensus for.
+    #[must_use]
+    pub const fn epoch(&self) -> Epoch {
+        self.epoch
     }
 
     /// Highest view this instance has entered.
@@ -1365,8 +1307,8 @@ mod tests {
     use std::sync::Arc;
 
     use hyperscale_types::{
-        Bls12381G2Signature, Epoch, PcQc2, PcXpProof, SignerBitfield, generate_bls_keypair,
-        spc_context,
+        Bls12381G2Signature, Epoch, PcQc2, PcVote1, PcXpProof, SignerBitfield,
+        generate_bls_keypair, spc_context,
     };
 
     use super::*;

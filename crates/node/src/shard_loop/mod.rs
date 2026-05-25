@@ -130,6 +130,7 @@ pub fn timer_event(id: &TimerId, shard: ShardGroupId) -> ShardEvent {
         TimerId::BeaconRecoveryTrigger => {
             ShardEvent::protocol(shard, ProtocolEvent::BeaconRecoveryTimer)
         }
+        TimerId::BeaconSpcView => ShardEvent::protocol(shard, ProtocolEvent::BeaconSpcViewTimer),
     }
 }
 

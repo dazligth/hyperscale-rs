@@ -21,4 +21,9 @@ pub enum TimerId {
     /// the expected block time when the local vnode hasn't observed
     /// the expected commit. Process-scoped.
     BeaconRecoveryTrigger,
+    /// Beacon SPC view-timeout timer. Set by the SPC FSM when
+    /// entering a view; on fire, the coordinator drives the inner
+    /// PC instance with the current view's input even if the view's
+    /// leader hasn't surfaced one. Process-scoped.
+    BeaconSpcView,
 }
