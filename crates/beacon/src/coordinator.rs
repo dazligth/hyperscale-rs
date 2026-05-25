@@ -478,31 +478,41 @@ impl BeaconCoordinator {
     }
 
     /// A peer-aggregated [`BeaconBlock`] arrived via the beacon gossip
-    /// topic. Validate the block; if it matches the local pending
-    /// commit, adopt the peer's aggregate sig and advance state
-    /// instead of waiting on the local header-sig quorum. Otherwise
-    /// buffer in [`PendingBeaconBlocks`] for a future apply path.
+    /// topic. Three terminal branches after validation:
     ///
-    /// Adoption is the missed-quorum branch: pending commit's derived
-    /// `new_state` is already byte-identical to the new committed
-    /// state (the header binds it via `state_root`), so the local
-    /// sig pool just gets discarded.
+    /// 1. **Adoption** — local has a matching `commit_in_progress`. The
+    ///    peer beat us to quorum; swap in their aggregate-sig'd block
+    ///    and advance state from the locally-derived `new_state`.
+    /// 2. **Header-only tracking** — local is off the beacon committee
+    ///    and never runs SPC. Extend `latest_block` so chain tracking
+    ///    follows the tip; `self.state` stays where the coordinator
+    ///    last derived it. Topology consumers reading from off-committee
+    ///    vnodes are responsible for fetching state field-proofs against
+    ///    `latest_block.header.state_root` via the light-client surface
+    ///    in [`hyperscale_types::state_root`].
+    /// 3. **Buffering** — committee member whose local SPC hasn't yet
+    ///    reached `OutputHigh`, or any other case where the local view
+    ///    can't yet decide what to do with the block. Stash in
+    ///    `pending_blocks` for a future apply path.
     ///
-    /// The passive-observer apply-epoch-from-peer-block path (for
-    /// vnodes not on the committee, which never set `commit_in_progress`)
-    /// stays unbuilt: those blocks land in `pending_blocks` and a
-    /// follow-up sub-commit will drive `apply_epoch` from the peer
-    /// block's proposals once the proposal-fetch protocol exists.
+    /// Aggregate-sig verification uses `self.state.committee`. Committee
+    /// rotation across epochs means an off-committee observer whose
+    /// state has fallen behind the actual signing committee will reject
+    /// otherwise-valid blocks. Resolving that without `apply_epoch` is
+    /// a state-fetch problem: pull a `CommitteeMember` field proof
+    /// against the previous block's `state_root`, verify, then redrive
+    /// admission. Out of scope here.
     pub fn on_beacon_block_received(&mut self, block: Arc<BeaconBlock>) -> Vec<Action> {
         let epoch = block.epoch();
-        if epoch <= self.state.current_epoch {
+        let tip_epoch = self.latest_block.epoch();
+        if epoch <= tip_epoch {
             trace!(
                 epoch = epoch.inner(),
                 "BeaconBlockReceived for past/current epoch — dropping",
             );
             return Vec::new();
         }
-        let expected_epoch = self.state.current_epoch.next();
+        let expected_epoch = tip_epoch.next();
         if epoch > expected_epoch {
             trace!(
                 epoch = epoch.inner(),
@@ -529,12 +539,16 @@ impl BeaconCoordinator {
         }
 
         let Some(pending) = self.commit_in_progress.as_ref() else {
-            trace!(
-                epoch = epoch.inner(),
-                "BeaconBlockReceived without local pending commit — buffering",
-            );
-            self.pending_blocks.insert(block);
-            return Vec::new();
+            return if self.is_on_committee() {
+                trace!(
+                    epoch = epoch.inner(),
+                    "BeaconBlockReceived without local pending commit — buffering",
+                );
+                self.pending_blocks.insert(block);
+                Vec::new()
+            } else {
+                self.track_peer_block(block)
+            };
         };
         if block.block_hash() != pending.header.hash() {
             warn!(
@@ -545,6 +559,27 @@ impl BeaconCoordinator {
         }
 
         self.adopt_peer_block(block)
+    }
+
+    /// Off-committee header tracking: extend `latest_block` to the
+    /// committee-attested peer block without advancing `BeaconState`.
+    ///
+    /// The local `self.state` stays at whatever epoch the coordinator
+    /// last derived (the off-committee observer never runs `apply_epoch`).
+    /// `latest_block.header.state_root` is the authoritative commitment
+    /// to current state; consumers materialise specific fields via
+    /// [`hyperscale_types::prove`] / [`hyperscale_types::verify`] against
+    /// it.
+    ///
+    /// No [`Action::CommitBeaconBlock`] — that action persists a
+    /// `(block, state)` pair, and the pair would violate the
+    /// `state_root(&state) == block.header.state_root` invariant. The
+    /// off-committee storage path lands with the state-fetch protocol.
+    fn track_peer_block(&mut self, block: Arc<BeaconBlock>) -> Vec<Action> {
+        self.latest_block = block;
+        self.pending_blocks
+            .prune_committed(self.latest_block.epoch());
+        Vec::new()
     }
 
     /// Verify a `BeaconBlock`'s committee-aggregate signature against
@@ -1624,17 +1659,117 @@ mod tests {
     }
 
     #[test]
-    fn on_beacon_block_received_buffers_when_no_pending_commit() {
+    fn on_beacon_block_received_buffers_when_committee_member_has_no_pending_commit() {
         let mut coord = fresh_coord();
         let prev = coord.latest_block.block_hash();
         let block = valid_block_at(&coord, Epoch::new(1), prev);
         let block_hash = block.block_hash();
-        // No commit_in_progress (we haven't reached OutputHigh) — block
-        // is valid but can't be adopted into the local apply path yet.
+        // Committee member without commit_in_progress (hasn't reached
+        // OutputHigh yet) — buffer for a future apply path.
         let actions = coord.on_beacon_block_received(block);
         assert!(actions.is_empty());
         assert_eq!(coord.pending_blocks.len(), 1);
         assert!(coord.pending_blocks.contains_key(block_hash));
+    }
+
+    /// Build a coordinator whose local validator id sits OFF the
+    /// committee. Same genesis state otherwise — committee resolves
+    /// to validators 0..4 from `sample_genesis`.
+    fn fresh_off_committee_coord() -> BeaconCoordinator {
+        let (block, state) = genesis_pair();
+        let coord = BeaconCoordinator::new(
+            block,
+            state,
+            ValidatorId::new(99),
+            NetworkDefinition::simulator(),
+        );
+        assert!(!coord.is_on_committee());
+        coord
+    }
+
+    #[test]
+    fn off_committee_observer_tracks_header_without_advancing_state() {
+        let mut observer = fresh_off_committee_coord();
+        let genesis_hash = observer.latest_block.block_hash();
+        let block = valid_block_at(&observer, Epoch::new(1), genesis_hash);
+        let block_hash = block.block_hash();
+
+        let actions = observer.on_beacon_block_received(Arc::clone(&block));
+
+        // No state advance, no commit, no SPC bootstrap.
+        assert!(actions.is_empty());
+        assert_eq!(observer.current_epoch(), Epoch::GENESIS);
+        assert!(observer.commit_in_progress.is_none());
+        assert!(observer.spc.is_none());
+
+        // But `latest_block` followed the tip.
+        assert_eq!(observer.latest_block().block_hash(), block_hash);
+        assert_eq!(observer.latest_block().epoch(), Epoch::new(1));
+    }
+
+    #[test]
+    fn off_committee_observer_chain_tracks_across_multiple_epochs() {
+        let mut observer = fresh_off_committee_coord();
+
+        // Epoch 1: chains off genesis.
+        let genesis_hash = observer.latest_block.block_hash();
+        let block1 = valid_block_at(&observer, Epoch::new(1), genesis_hash);
+        let block1_hash = block1.block_hash();
+        let actions = observer.on_beacon_block_received(Arc::clone(&block1));
+        assert!(actions.is_empty());
+        assert_eq!(observer.latest_block().block_hash(), block1_hash);
+
+        // Epoch 2: chains off epoch 1's tip. This only works because
+        // `on_beacon_block_received`'s epoch reference is
+        // `latest_block.epoch().next()`, not `state.current_epoch.next()`
+        // — off-committee observers don't advance state.
+        let block2 = valid_block_at(&observer, Epoch::new(2), block1_hash);
+        let block2_hash = block2.block_hash();
+        let actions = observer.on_beacon_block_received(Arc::clone(&block2));
+        assert!(actions.is_empty());
+        assert_eq!(observer.latest_block().block_hash(), block2_hash);
+        assert_eq!(observer.latest_block().epoch(), Epoch::new(2));
+
+        // State untouched — still at genesis after two header advances.
+        assert_eq!(observer.current_epoch(), Epoch::GENESIS);
+    }
+
+    #[test]
+    fn off_committee_observer_rejects_wrong_prev_hash() {
+        use hyperscale_types::BeaconBlockHash;
+        let mut observer = fresh_off_committee_coord();
+        // Wrong prev_hash — drop, don't track.
+        let block = valid_block_at(&observer, Epoch::new(1), BeaconBlockHash::ZERO);
+        let actions = observer.on_beacon_block_received(block);
+        assert!(actions.is_empty());
+        assert_eq!(observer.latest_block().epoch(), Epoch::GENESIS);
+    }
+
+    #[test]
+    fn off_committee_observer_rejects_invalid_aggregate() {
+        use hyperscale_types::{BeaconProposalsRoot, BeaconStateRoot, RecoveryCertHash};
+        let mut observer = fresh_off_committee_coord();
+        let prev = observer.latest_block.block_hash();
+        let header = BeaconBlockHeader::new(
+            Epoch::new(1),
+            prev,
+            BeaconProposalsRoot::ZERO,
+            BeaconStateRoot::ZERO,
+            RecoveryCertHash::ZERO,
+        );
+        let mut signers = SignerBitfield::new(observer.state.committee.len());
+        for i in 0..observer.state.committee.len() {
+            signers.set(i);
+        }
+        let block = Arc::new(BeaconBlock::new(
+            header,
+            signers,
+            Bls12381G2Signature([0u8; 96]),
+            None,
+        ));
+        let actions = observer.on_beacon_block_received(block);
+        assert!(actions.is_empty());
+        assert_eq!(observer.latest_block().epoch(), Epoch::GENESIS);
     }
 
     /// Drive a coordinator to `OutputHigh` + `commit_in_progress` using
