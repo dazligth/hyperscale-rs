@@ -78,6 +78,7 @@ pub use primitives::identifiers::{
 pub use primitives::merkle::{
     compute_merkle_root, compute_merkle_root_with_proof, verify_merkle_inclusion,
 };
+pub use primitives::positional_bundle::PositionalBundle;
 pub use primitives::signer_bitfield::SignerBitfield;
 pub use provisioning::entry::ProvisionEntry;
 pub use provisioning::limits::{
