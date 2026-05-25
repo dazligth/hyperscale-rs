@@ -21,6 +21,7 @@ use hyperscale_types::{
     ValidatorId, state_root,
 };
 
+use crate::equivocations::EquivocationObservations;
 use crate::pending_blocks::PendingBeaconBlocks;
 use crate::recovery_tracker::RecoveryTracker;
 use crate::spc::SpcInstance;
@@ -64,6 +65,10 @@ pub struct BeaconCoordinator {
     /// Buckets observed recovery requests and aggregates them into
     /// a `RecoveryCertificate` once quorum lands.
     recovery_tracker: RecoveryTracker,
+
+    /// Equivocation evidence the local vnode has observed but not
+    /// yet proposed for inclusion.
+    equivocations: EquivocationObservations,
 
     me: ValidatorId,
 
@@ -116,6 +121,7 @@ impl BeaconCoordinator {
             verification: BeaconVerificationPipeline::new(),
             witness_fetcher: ShardWitnessFetchTracker::new(),
             recovery_tracker: RecoveryTracker::new(),
+            equivocations: EquivocationObservations::new(),
             me,
             me_sk,
             network,
@@ -181,6 +187,7 @@ impl std::fmt::Debug for BeaconCoordinator {
             )
             .field("witness_pool", &self.witness_fetcher.total_pool_len())
             .field("recovery_buckets", &self.recovery_tracker.bucket_count())
+            .field("equivocations", &self.equivocations.len())
             .finish_non_exhaustive()
     }
 }

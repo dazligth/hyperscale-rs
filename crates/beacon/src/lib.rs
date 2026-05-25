@@ -12,6 +12,7 @@
 
 pub mod constants;
 pub mod coordinator;
+pub mod equivocations;
 pub mod genesis;
 pub mod pc;
 pub mod pending_blocks;
