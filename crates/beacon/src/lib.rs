@@ -21,3 +21,4 @@ pub mod sampling;
 pub mod spc;
 pub mod state;
 pub mod verification;
+pub mod witness_fetcher;

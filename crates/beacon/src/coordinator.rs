@@ -24,6 +24,7 @@ use hyperscale_types::{
 use crate::pending_blocks::PendingBeaconBlocks;
 use crate::spc::SpcInstance;
 use crate::verification::BeaconVerificationPipeline;
+use crate::witness_fetcher::ShardWitnessFetchTracker;
 
 /// Per-vnode beacon-chain coordinator.
 ///
@@ -53,6 +54,11 @@ pub struct BeaconCoordinator {
     /// (block aggregate sigs, cert sigs, VRF reveals, witness
     /// Merkle paths).
     verification: BeaconVerificationPipeline,
+
+    /// Per-shard header records, validated-witness pool, and
+    /// in-flight fetches; drives proposal-readiness and the
+    /// witness drain.
+    witness_fetcher: ShardWitnessFetchTracker,
 
     me: ValidatorId,
 
@@ -103,6 +109,7 @@ impl BeaconCoordinator {
             spc: None,
             pending_blocks: PendingBeaconBlocks::new(),
             verification: BeaconVerificationPipeline::new(),
+            witness_fetcher: ShardWitnessFetchTracker::new(),
             me,
             me_sk,
             network,
@@ -166,6 +173,7 @@ impl std::fmt::Debug for BeaconCoordinator {
                 "verifications_in_flight",
                 &self.verification.in_flight_count(),
             )
+            .field("witness_pool", &self.witness_fetcher.total_pool_len())
             .finish_non_exhaustive()
     }
 }
