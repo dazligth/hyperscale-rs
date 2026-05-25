@@ -137,6 +137,28 @@ pub fn beacon_eligible(state: &BeaconState) -> Vec<ValidatorId> {
         .collect()
 }
 
+/// Resolve the beacon committee from a [`BeaconState`] into
+/// `(validator_id, pubkey)` pairs in committee-declaration order.
+///
+/// The order matches `state.committee` exactly, which is the same
+/// positional enumeration `SignerBitfield` is indexed against. SPC
+/// cert verifiers, beacon-block verifiers, and the SPC FSM all
+/// consume this resolved form.
+///
+/// Validators present in `state.committee` but missing from
+/// `state.validators` are silently dropped. The caller should treat
+/// any length mismatch from `state.committee.len()` as a state
+/// invariant violation; this function does not panic so callers can
+/// make their own decision.
+#[must_use]
+pub fn derive_beacon_committee(state: &BeaconState) -> Vec<(ValidatorId, Bls12381G1PublicKey)> {
+    state
+        .committee
+        .iter()
+        .filter_map(|id| state.validators.get(id).map(|r| (*id, r.pubkey)))
+        .collect()
+}
+
 /// Dynamic per-validator minimum stake.
 ///
 /// Pure function of state — no stored "current `min_stake`" field.
