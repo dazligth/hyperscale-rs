@@ -14,6 +14,7 @@ pub mod constants;
 pub mod coordinator;
 pub mod genesis;
 pub mod pc;
+pub mod pending_blocks;
 pub mod prefix_ops;
 pub mod recovery;
 pub mod sampling;

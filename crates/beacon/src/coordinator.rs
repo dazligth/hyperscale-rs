@@ -21,6 +21,7 @@ use hyperscale_types::{
     ValidatorId, state_root,
 };
 
+use crate::pending_blocks::PendingBeaconBlocks;
 use crate::spc::SpcInstance;
 
 /// Per-vnode beacon-chain coordinator.
@@ -42,6 +43,10 @@ pub struct BeaconCoordinator {
     /// trigger, and again briefly between an epoch's commit and the
     /// next instance's bootstrap.
     spc: Option<SpcInstance>,
+
+    /// Gossip-arrival cache for beacon blocks awaiting verification.
+    /// Pruned past `state.current_epoch` after every committed epoch.
+    pending_blocks: PendingBeaconBlocks,
 
     me: ValidatorId,
 
@@ -90,6 +95,7 @@ impl BeaconCoordinator {
             state: latest_state,
             latest_block,
             spc: None,
+            pending_blocks: PendingBeaconBlocks::new(),
             me,
             me_sk,
             network,
@@ -148,6 +154,7 @@ impl std::fmt::Debug for BeaconCoordinator {
             .field("latest_block_hash", &self.latest_block.block_hash())
             .field("me", &self.me)
             .field("spc_active", &self.spc.is_some())
+            .field("pending_blocks", &self.pending_blocks.len())
             .finish_non_exhaustive()
     }
 }
