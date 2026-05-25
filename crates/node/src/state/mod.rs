@@ -272,8 +272,6 @@ impl StateMachine for NodeStateMachine {
             | ProtocolEvent::CommittedStateRestored { .. }) => self.handle_sync(evt),
 
             // ── Beacon ───────────────────────────────────────────────────
-            // B.8 wires these into BeaconCoordinator handlers; stubbed
-            // here so the workspace compiles.
             ProtocolEvent::PcVoteReceived { .. }
             | ProtocolEvent::SpcMessageReceived { .. }
             | ProtocolEvent::BeaconBlockReceived { .. }
