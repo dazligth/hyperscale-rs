@@ -11,6 +11,7 @@
 //! [`network::request`](crate::network::request)).
 
 mod empty_view;
+mod header_sig;
 mod new_commit;
 mod new_view;
 mod pc_vote1;
@@ -18,6 +19,7 @@ mod pc_vote2;
 mod pc_vote3;
 
 pub use empty_view::SpcEmptyViewMsgNotification;
+pub use header_sig::BeaconBlockHeaderSigNotification;
 pub use new_commit::SpcNewCommitNotification;
 pub use new_view::SpcNewViewNotification;
 pub use pc_vote1::PcVote1Notification;

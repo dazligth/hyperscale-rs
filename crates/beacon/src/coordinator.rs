@@ -18,9 +18,10 @@ use std::sync::Arc;
 
 use hyperscale_core::{Action, TimerId};
 use hyperscale_types::{
-    BeaconBlock, BeaconProposal, BeaconState, Bls12381G1PublicKey, Epoch, LocalTimestamp,
-    NetworkDefinition, PcValueElement, PcVector, RECOVERY_TIMEOUT, SpcMessage, ValidatorId,
-    VpcMsgPayload, state_root,
+    BeaconBlock, BeaconBlockHeader, BeaconProposal, BeaconState, Bls12381G1PublicKey, Epoch,
+    LocalTimestamp, NetworkDefinition, PcValueElement, PcVector, RECOVERY_TIMEOUT,
+    RecoveryCertificate, SpcMessage, ValidatorId, VpcMsgPayload, compute_proposals_root,
+    recovery_cert_hash, state_root,
 };
 use tracing::{trace, warn};
 
@@ -31,8 +32,22 @@ use crate::pending_blocks::PendingBeaconBlocks;
 use crate::proposal_pool::BeaconProposalPool;
 use crate::recovery_tracker::RecoveryTracker;
 use crate::spc::{SpcEffect, SpcEvent, SpcInstance};
+use crate::state::apply_epoch;
 use crate::verification::BeaconVerificationPipeline;
 use crate::witness_fetcher::ShardWitnessFetchTracker;
+
+/// Held between SPC commit (`OutputHigh`) and block assembly (quorum
+/// of header sigs). Carries the post-`apply_epoch` state and the
+/// header the committee is signing so the aggregator can build the
+/// `BeaconBlock` without re-running the apply pipeline.
+#[derive(Debug)]
+#[allow(dead_code)] // header / new_state / recovery_cert read by the sig-quorum assembler
+struct PendingCommit {
+    epoch: Epoch,
+    header: BeaconBlockHeader,
+    new_state: Box<BeaconState>,
+    recovery_cert: Option<Box<RecoveryCertificate>>,
+}
 
 /// Per-vnode beacon-chain coordinator.
 ///
@@ -85,6 +100,12 @@ pub struct BeaconCoordinator {
     /// reset on commit.
     proposal_pool: BeaconProposalPool,
 
+    /// Set after SPC's `OutputHigh` lands and `apply_epoch` has run:
+    /// the post-apply state, the header derived from it, and any
+    /// attached recovery cert. The aggregator (B.8.c.iv) uses this
+    /// once the committee's header sigs gather to quorum.
+    commit_in_progress: Option<PendingCommit>,
+
     me: ValidatorId,
 
     /// Mixed into every signing helper's domain bytes; carried so
@@ -135,6 +156,7 @@ impl BeaconCoordinator {
             equivocations: EquivocationObservations::new(),
             sync: BeaconBlockSyncManager::new(),
             proposal_pool: BeaconProposalPool::new(next_epoch),
+            commit_in_progress: None,
             me,
             network,
             now: LocalTimestamp::ZERO,
@@ -381,6 +403,106 @@ impl BeaconCoordinator {
         self.lift_spc_effects(epoch, &recipients, effects)
     }
 
+    /// SPC has decided this epoch — apply the committed proposal
+    /// set to `state` on a clone, derive the resulting header, stash
+    /// it as the pending commit, and emit
+    /// [`Action::SignAndBroadcastBeaconBlockHeader`].
+    ///
+    /// The local-state mutation lives on `commit_in_progress` until
+    /// quorum sigs land (B.8.c.iv); `self.state` and
+    /// `self.latest_block` aren't touched yet so a sig-stall doesn't
+    /// half-advance the chain.
+    fn on_spc_output_high(
+        &mut self,
+        epoch: Epoch,
+        output: &PcVector,
+        recipients: &[ValidatorId],
+    ) -> Vec<Action> {
+        if self.commit_in_progress.is_some() {
+            warn!(
+                epoch = epoch.inner(),
+                "OutputHigh fired with a commit already pending — ignoring duplicate",
+            );
+            return Vec::new();
+        }
+        let committed = self.decode_committed_proposals(epoch, output);
+        // Recovery-cert assembly (`RecoveryTracker::try_assemble`) lands in a
+        // follow-up; for now every commit is plain-path with no attached cert.
+        let recovery_cert: Option<RecoveryCertificate> = None;
+        let mut new_state = self.state.clone();
+        apply_epoch(
+            &mut new_state,
+            &self.network,
+            epoch,
+            &committed,
+            recovery_cert.as_ref(),
+        );
+        let header = BeaconBlockHeader::new(
+            epoch,
+            self.latest_block.block_hash(),
+            compute_proposals_root(&committed),
+            state_root(&new_state),
+            recovery_cert_hash(recovery_cert.as_ref()),
+        );
+        self.commit_in_progress = Some(PendingCommit {
+            epoch,
+            header: header.clone(),
+            new_state: Box::new(new_state),
+            recovery_cert: recovery_cert.map(Box::new),
+        });
+        vec![Action::SignAndBroadcastBeaconBlockHeader {
+            epoch,
+            header: Box::new(header),
+            recipients: recipients.to_vec(),
+        }]
+    }
+
+    /// Read the committed `BeaconProposal` list from the proposal
+    /// pool, in committee order, matching each non-`ZERO` `PcVector`
+    /// element against the corresponding validator's
+    /// [`BeaconProposal::pc_element_hash`].
+    ///
+    /// Mismatches and pool misses get a warn — eventually those want
+    /// a fetch path, but for the all-honest case the local pool has
+    /// every accepted proposal already.
+    fn decode_committed_proposals(
+        &self,
+        epoch: Epoch,
+        output: &PcVector,
+    ) -> Vec<(ValidatorId, BeaconProposal)> {
+        let mut committed = Vec::new();
+        for (i, element) in output.iter().enumerate() {
+            if *element == PcValueElement::ZERO {
+                continue;
+            }
+            let Some(validator) = self.state.committee.get(i).copied() else {
+                warn!(
+                    pos = i,
+                    "OutputHigh element past committee bounds — skipping",
+                );
+                continue;
+            };
+            let Some(pooled) = self.proposal_pool.get(validator) else {
+                warn!(
+                    ?validator,
+                    epoch = epoch.inner(),
+                    "OutputHigh includes proposal we haven't seen — skipping",
+                );
+                continue;
+            };
+            if pooled.pc_element_hash(epoch) != *element {
+                warn!(
+                    ?validator,
+                    epoch = epoch.inner(),
+                    "OutputHigh hash mismatches pooled proposal — skipping",
+                );
+                continue;
+            }
+            committed.push((validator, (**pooled).clone()));
+        }
+        committed
+    }
+
     /// Beacon-committee members excluding the local validator —
     /// recipient list for outbound SPC traffic.
     fn spc_recipients(&self) -> Vec<ValidatorId> {
@@ -468,11 +590,8 @@ impl BeaconCoordinator {
                         "SPC empty-low evidence — downstream handling deferred",
                     );
                 }
-                SpcEffect::OutputHigh(_value) => {
-                    warn!(
-                        epoch = epoch.inner(),
-                        "SPC OutputHigh — beacon commit pipeline pending",
-                    );
+                SpcEffect::OutputHigh(output) => {
+                    actions.extend(self.on_spc_output_high(epoch, &output, recipients));
                 }
             }
         }
@@ -922,5 +1041,75 @@ mod tests {
         );
         assert!(actions.is_empty(), "peer proposal alone doesn't kick PC");
         assert!(!coord.spc.as_ref().unwrap().view_one_input_fed());
+    }
+
+    #[test]
+    fn output_high_builds_header_and_emits_sig_request() {
+        use hyperscale_types::PcVector;
+        let mut coord = fresh_coord();
+        coord.bootstrap_spc_for_next_epoch();
+        let in_flight = Epoch::GENESIS.next();
+        // Populate the pool with every committee member's proposal
+        // so decode_committed_proposals can resolve every non-bottom
+        // element. Then synthesize an OutputHigh that selects them.
+        let committee = coord.state.committee.clone();
+        let mut elements = Vec::with_capacity(committee.len());
+        for id in &committee {
+            let p = sample_proposal(id.inner().try_into().unwrap_or(0u8));
+            elements.push(p.pc_element_hash(in_flight));
+            coord.proposal_pool.admit(*id, in_flight, p);
+        }
+        let output = PcVector::new(elements);
+
+        let recipients = coord.spc_recipients();
+        let actions = coord.on_spc_output_high(in_flight, &output, &recipients);
+
+        // One sign-request action emitted.
+        let [
+            Action::SignAndBroadcastBeaconBlockHeader {
+                epoch,
+                header,
+                recipients: _,
+            },
+        ] = actions.as_slice()
+        else {
+            panic!("expected SignAndBroadcastBeaconBlockHeader, got {actions:?}");
+        };
+        assert_eq!(*epoch, in_flight);
+        assert_eq!(header.epoch(), in_flight);
+        assert_eq!(header.prev_block_hash(), coord.latest_block.block_hash());
+
+        // Pending commit captures the post-apply state + header.
+        let pending = coord.commit_in_progress.as_ref().expect("pending stashed");
+        assert_eq!(pending.epoch, in_flight);
+        assert_eq!(pending.new_state.current_epoch, in_flight);
+        assert!(pending.recovery_cert.is_none());
+
+        // The pre-commit state on the coordinator is untouched.
+        assert_eq!(coord.state.current_epoch, Epoch::GENESIS);
+    }
+
+    #[test]
+    fn output_high_drops_duplicate_commit() {
+        use hyperscale_types::PcVector;
+        let mut coord = fresh_coord();
+        coord.bootstrap_spc_for_next_epoch();
+        let in_flight = Epoch::GENESIS.next();
+        let committee = coord.state.committee.clone();
+        let mut elements = Vec::with_capacity(committee.len());
+        for id in &committee {
+            let p = sample_proposal(id.inner().try_into().unwrap_or(0u8));
+            elements.push(p.pc_element_hash(in_flight));
+            coord.proposal_pool.admit(*id, in_flight, p);
+        }
+        let output = PcVector::new(elements);
+        let recipients = coord.spc_recipients();
+
+        let first = coord.on_spc_output_high(in_flight, &output, &recipients);
+        assert!(!first.is_empty());
+        // A second OutputHigh for the same epoch (shouldn't happen
+        // under honest execution, but defensive guard) is a no-op.
+        let second = coord.on_spc_output_high(in_flight, &output, &recipients);
+        assert!(second.is_empty());
     }
 }
