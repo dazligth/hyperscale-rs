@@ -1,14 +1,17 @@
-//! Multi-epoch determinism for [`apply_epoch`].
+//! Multi-epoch determinism for [`apply_epoch`] and [`state_root`].
 //!
 //! Drives V parallel `BeaconState` instances starting from byte-identical
-//! input through 50 epochs and asserts byte-identical state at every
-//! epoch boundary.
+//! input through 50 epochs and asserts both byte-identical state AND
+//! byte-identical `state_root` at every epoch boundary.
 //!
 //! Determinism is load-bearing for the beacon coordinator: multi-vnode
 //! processes share input streams but run independent `BeaconState`
 //! instances, and a `HashMap`-iteration leak (or any non-deterministic
 //! ordering source) would let derived `TopologySnapshot`s diverge
-//! silently. This test pins the property against future refactors.
+//! silently. The paired `state_root` assertion catches the failure mode
+//! where two replicas land at byte-identical states but the commitment
+//! function reads them in a non-deterministic order (e.g. via a future
+//! refactor toward parallel sub-tree assembly).
 //!
 //! Coverage at empty `committed`: `filter_and_roll_randomness` rolls
 //! randomness via the chained BLAKE3 mix, `auto_*` stages re-evaluate
@@ -22,6 +25,7 @@ use hyperscale_beacon::constants::MIN_STAKE_FLOOR;
 use hyperscale_beacon::state::{
     BeaconState, ShardCommittee, StakePool, ValidatorRecord, ValidatorStatus, apply_epoch,
 };
+use hyperscale_beacon::state_root::state_root;
 use hyperscale_types::{
     Bls12381G1PublicKey, Epoch, NetworkDefinition, Randomness, ShardGroupId, Stake, StakePoolId,
     ValidatorId, bls_keypair_from_seed,
@@ -126,9 +130,15 @@ fn fifty_epochs_byte_identical_across_replicas() {
     let network = NetworkDefinition::simulator();
     let mut replicas: Vec<BeaconState> = (0..V).map(|_| initial_state()).collect();
 
-    // Sanity: replicas start byte-identical.
+    // Sanity: replicas start byte-identical and agree on state_root.
+    let genesis_root = state_root(&replicas[0]);
     for i in 1..V {
         assert_eq!(replicas[0], replicas[i], "replicas diverged at genesis");
+        assert_eq!(
+            state_root(&replicas[i]),
+            genesis_root,
+            "state_root diverged at genesis",
+        );
     }
 
     for e in 1..=EPOCHS {
@@ -136,18 +146,29 @@ fn fifty_epochs_byte_identical_across_replicas() {
         for replica in &mut replicas {
             apply_epoch(replica, &network, target, &[], None);
         }
+        let root_0 = state_root(&replicas[0]);
         for i in 1..V {
             assert_eq!(replicas[0], replicas[i], "replicas diverged at epoch {e}");
+            assert_eq!(
+                state_root(&replicas[i]),
+                root_0,
+                "state_root diverged at epoch {e}",
+            );
         }
         assert_eq!(replicas[0].current_epoch, target);
     }
 
     // Sanity: 50 epochs of apply_epoch should have evolved state — at
     // minimum, randomness has been rolled 50 times and the shuffle has
-    // fired at epochs 16, 32, 48.
+    // fired at epochs 16, 32, 48. state_root must move with it.
+    let final_root = state_root(&replicas[0]);
     assert_ne!(
         replicas[0],
         initial_state(),
         "50 epochs of apply_epoch left state byte-identical to genesis",
+    );
+    assert_ne!(
+        final_root, genesis_root,
+        "50 epochs of apply_epoch left state_root unchanged",
     );
 }
