@@ -33,13 +33,23 @@ pub const RANDOMNESS_BYTES: usize = 32;
 /// derivation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BasicSbor)]
 #[sbor(transparent)]
-pub struct VrfOutput(pub [u8; VRF_OUTPUT_BYTES]);
+pub struct VrfOutput([u8; VRF_OUTPUT_BYTES]);
 
 impl VrfOutput {
     /// All-zero VRF output — used as a placeholder where no VRF reveal
     /// is present (e.g. genesis randomness seed before any committee
     /// has signed).
     pub const ZERO: Self = Self([0u8; VRF_OUTPUT_BYTES]);
+
+    /// Build a `VrfOutput` from a raw 32-byte digest. The
+    /// proof-to-output binding lives in
+    /// [`vrf_output_from_proof`](crate::vrf_output_from_proof); this
+    /// constructor takes the digest directly for wire deserialisation
+    /// and adversarial test setup.
+    #[must_use]
+    pub const fn new(bytes: [u8; VRF_OUTPUT_BYTES]) -> Self {
+        Self(bytes)
+    }
 
     /// Get the underlying bytes.
     #[must_use]
@@ -62,12 +72,21 @@ impl VrfOutput {
 /// tags and verify against different message constructions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BasicSbor)]
 #[sbor(transparent)]
-pub struct VrfProof(pub [u8; VRF_PROOF_BYTES]);
+pub struct VrfProof([u8; VRF_PROOF_BYTES]);
 
 impl VrfProof {
     /// All-zero VRF proof — used as a placeholder (genesis block has
     /// no signing committee yet, so it carries a sentinel).
     pub const ZERO: Self = Self([0u8; VRF_PROOF_BYTES]);
+
+    /// Build a `VrfProof` from a raw 96-byte compressed BLS signature.
+    /// Honest construction goes through [`vrf_sign`](crate::vrf_sign);
+    /// this constructor takes the bytes directly for wire deserialisation
+    /// and adversarial test setup.
+    #[must_use]
+    pub const fn new(bytes: [u8; VRF_PROOF_BYTES]) -> Self {
+        Self(bytes)
+    }
 
     /// Get the underlying bytes.
     #[must_use]
@@ -88,12 +107,18 @@ impl VrfProof {
 /// about which 32-byte input the PRNG seed actually is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BasicSbor)]
 #[sbor(transparent)]
-pub struct Randomness(pub [u8; RANDOMNESS_BYTES]);
+pub struct Randomness([u8; RANDOMNESS_BYTES]);
 
 impl Randomness {
     /// All-zero randomness — bootstrap value used as the genesis seed
     /// before any VRF reveal has been folded in.
     pub const ZERO: Self = Self([0u8; RANDOMNESS_BYTES]);
+
+    /// Build a `Randomness` from a raw 32-byte digest.
+    #[must_use]
+    pub const fn new(bytes: [u8; RANDOMNESS_BYTES]) -> Self {
+        Self(bytes)
+    }
 
     /// Get the underlying bytes.
     #[must_use]
@@ -108,7 +133,7 @@ mod tests {
 
     #[test]
     fn vrf_output_sbor_round_trip() {
-        let original = VrfOutput([0xAB; VRF_OUTPUT_BYTES]);
+        let original = VrfOutput::new([0xAB; VRF_OUTPUT_BYTES]);
         let bytes = basic_encode(&original).unwrap();
         let decoded: VrfOutput = basic_decode(&bytes).unwrap();
         assert_eq!(original, decoded);
@@ -116,7 +141,7 @@ mod tests {
 
     #[test]
     fn vrf_proof_sbor_round_trip() {
-        let original = VrfProof([0xCD; VRF_PROOF_BYTES]);
+        let original = VrfProof::new([0xCD; VRF_PROOF_BYTES]);
         let bytes = basic_encode(&original).unwrap();
         let decoded: VrfProof = basic_decode(&bytes).unwrap();
         assert_eq!(original, decoded);
@@ -131,7 +156,7 @@ mod tests {
 
     #[test]
     fn randomness_sbor_round_trip() {
-        let original = Randomness([0x42; RANDOMNESS_BYTES]);
+        let original = Randomness::new([0x42; RANDOMNESS_BYTES]);
         let bytes = basic_encode(&original).unwrap();
         let decoded: Randomness = basic_decode(&bytes).unwrap();
         assert_eq!(original, decoded);
@@ -140,7 +165,7 @@ mod tests {
     #[test]
     fn sbor_encoding_is_transparent_to_inner_bytes() {
         let raw: [u8; VRF_OUTPUT_BYTES] = [0xAB; VRF_OUTPUT_BYTES];
-        let wrapped = VrfOutput(raw);
+        let wrapped = VrfOutput::new(raw);
         let raw_bytes = basic_encode(&raw).unwrap();
         let wrapped_bytes = basic_encode(&wrapped).unwrap();
         assert_eq!(

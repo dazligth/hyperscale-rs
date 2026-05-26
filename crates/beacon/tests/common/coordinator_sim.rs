@@ -168,7 +168,7 @@ impl CoordinatorSim {
                 members.iter().map(|(id, _)| *id).collect(),
             ))
             .collect(),
-            initial_randomness: Randomness([0x42; 32]),
+            initial_randomness: Randomness::new([0x42; 32]),
         };
 
         let initial_state = build_genesis_beacon_state(&config);

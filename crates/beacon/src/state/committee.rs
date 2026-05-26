@@ -590,8 +590,8 @@ mod tests {
         // Same non-zero seed on both — the Fisher–Yates path activates
         // only when the eligible set exceeds `BEACON_SIGNER_COUNT`,
         // which is true here (8 > 4).
-        a.randomness = Randomness([0x5A; 32]);
-        b.randomness = Randomness([0x5A; 32]);
+        a.randomness = Randomness::new([0x5A; 32]);
+        b.randomness = Randomness::new([0x5A; 32]);
 
         apply_next_epoch(&mut a, &[]);
         apply_next_epoch(&mut b, &[]);

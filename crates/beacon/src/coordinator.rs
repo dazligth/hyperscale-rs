@@ -1020,7 +1020,7 @@ mod tests {
             }],
             initial_beacon_committee: members.clone(),
             initial_shard_committees: std::iter::once((shard, members)).collect(),
-            initial_randomness: Randomness([0xAB; 32]),
+            initial_randomness: Randomness::new([0xAB; 32]),
         }
     }
 
@@ -1213,8 +1213,8 @@ mod tests {
     fn sample_proposal(seed: u8) -> Arc<BeaconProposal> {
         use hyperscale_types::{VrfOutput, VrfProof};
         Arc::new(BeaconProposal::vrf_only(
-            VrfOutput([seed; 32]),
-            VrfProof([seed; 96]),
+            VrfOutput::new([seed; 32]),
+            VrfProof::new([seed; 96]),
         ))
     }
 

@@ -111,7 +111,7 @@ fn initial_state() -> BeaconState {
         current_epoch: Epoch::GENESIS,
         validators,
         pools,
-        randomness: Randomness([0x42; 32]),
+        randomness: Randomness::new([0x42; 32]),
         committee: (0u64..4).map(ValidatorId::new).collect(),
         shard_committees,
         consumed_through: BTreeMap::new(),

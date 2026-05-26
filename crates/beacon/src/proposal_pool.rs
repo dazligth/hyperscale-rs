@@ -112,8 +112,8 @@ mod tests {
 
     fn proposal(seed: u8) -> Arc<BeaconProposal> {
         Arc::new(BeaconProposal::vrf_only(
-            VrfOutput([seed; 32]),
-            VrfProof([seed; 96]),
+            VrfOutput::new([seed; 32]),
+            VrfProof::new([seed; 96]),
         ))
     }
 
@@ -149,7 +149,7 @@ mod tests {
         assert!(!pool.admit(ValidatorId::new(0), Epoch::new(1), proposal(0xCD)));
         assert_eq!(pool.len(), 1);
         let kept = pool.get(ValidatorId::new(0)).expect("first entry kept");
-        assert_eq!(kept.vrf_output(), VrfOutput([0xAB; 32]));
+        assert_eq!(kept.vrf_output(), VrfOutput::new([0xAB; 32]));
     }
 
     #[test]

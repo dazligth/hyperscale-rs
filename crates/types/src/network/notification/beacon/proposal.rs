@@ -70,7 +70,7 @@ mod tests {
     use crate::{VrfOutput, VrfProof};
 
     fn sample_proposal() -> BeaconProposal {
-        BeaconProposal::vrf_only(VrfOutput([0x11; 32]), VrfProof([0x22; 96]))
+        BeaconProposal::vrf_only(VrfOutput::new([0x11; 32]), VrfProof::new([0x22; 96]))
     }
 
     #[test]

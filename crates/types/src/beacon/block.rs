@@ -168,8 +168,8 @@ mod tests {
     fn sample_proposal(seed: u8) -> BeaconProposal {
         BeaconProposal::new(
             Vec::new(),
-            VrfOutput([seed; 32]),
-            VrfProof([seed; VRF_PROOF_BYTES]),
+            VrfOutput::new([seed; 32]),
+            VrfProof::new([seed; VRF_PROOF_BYTES]),
         )
     }
 

@@ -257,7 +257,7 @@ mod tests {
             }],
             initial_beacon_committee: beacon_members,
             initial_shard_committees: std::iter::once((shard, shard_members)).collect(),
-            initial_randomness: Randomness([0xAB; 32]),
+            initial_randomness: Randomness::new([0xAB; 32]),
         }
     }
 

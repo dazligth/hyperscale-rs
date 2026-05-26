@@ -100,7 +100,7 @@ pub(super) fn filter_and_roll_randomness<'a>(
     for o in &accepted_outputs {
         h.update(o.as_bytes());
     }
-    state.randomness = Randomness(*h.finalize().as_bytes());
+    state.randomness = Randomness::new(*h.finalize().as_bytes());
 
     // Cascade jail for rejected proposers currently `OnShard`.
     let mut jailed = Vec::new();

@@ -139,8 +139,8 @@ mod tests {
     fn sample_proposal() -> BeaconProposal {
         BeaconProposal::new(
             vec![sample_witness(0), sample_witness(1), sample_witness(2)],
-            VrfOutput([0xAB; 32]),
-            VrfProof([0xCD; 96]),
+            VrfOutput::new([0xAB; 32]),
+            VrfProof::new([0xCD; 96]),
         )
     }
 
@@ -194,8 +194,8 @@ mod tests {
     fn accessors_return_built_values() {
         let p = sample_proposal();
         assert_eq!(p.witnesses().len(), 3);
-        assert_eq!(p.vrf_output(), VrfOutput([0xAB; 32]));
-        assert_eq!(p.vrf_proof(), VrfProof([0xCD; 96]));
+        assert_eq!(p.vrf_output(), VrfOutput::new([0xAB; 32]));
+        assert_eq!(p.vrf_proof(), VrfProof::new([0xCD; 96]));
     }
 
     #[test]

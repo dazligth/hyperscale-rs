@@ -218,7 +218,7 @@ pub fn make_test_beacon_state(epoch: u64, tag: &[u8]) -> Arc<BeaconState> {
         current_epoch: Epoch::new(epoch),
         validators: BTreeMap::new(),
         pools: BTreeMap::new(),
-        randomness: Randomness(randomness),
+        randomness: Randomness::new(randomness),
         committee: Vec::new(),
         shard_committees: BTreeMap::new(),
         consumed_through: BTreeMap::new(),

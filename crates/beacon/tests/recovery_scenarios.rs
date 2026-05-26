@@ -81,7 +81,7 @@ fn ready_state(n: u64) -> BeaconState {
         current_epoch: Epoch::GENESIS,
         validators,
         pools,
-        randomness: Randomness([0x42; 32]),
+        randomness: Randomness::new([0x42; 32]),
         committee: Vec::new(),
         shard_committees,
         consumed_through: BTreeMap::new(),

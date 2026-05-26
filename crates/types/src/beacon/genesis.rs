@@ -139,7 +139,7 @@ mod tests {
             }],
             initial_beacon_committee: members.clone(),
             initial_shard_committees: std::iter::once((shard, members)).collect(),
-            initial_randomness: Randomness([0xAB; 32]),
+            initial_randomness: Randomness::new([0xAB; 32]),
         }
     }
 
@@ -170,7 +170,7 @@ mod tests {
         let base_hash = genesis_config_hash(&base, &net());
 
         let mut diff_randomness = base.clone();
-        diff_randomness.initial_randomness = Randomness([0xCD; 32]);
+        diff_randomness.initial_randomness = Randomness::new([0xCD; 32]);
         assert_ne!(genesis_config_hash(&diff_randomness, &net()), base_hash);
 
         let mut diff_pool_stake = base.clone();

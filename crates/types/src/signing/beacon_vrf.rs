@@ -53,7 +53,7 @@ pub fn vrf_output_from_proof(proof: &VrfProof) -> VrfOutput {
     let mut h = Hasher::new();
     h.update(DOMAIN_VRF_OUTPUT);
     h.update(proof.as_bytes());
-    VrfOutput(*h.finalize().as_bytes())
+    VrfOutput::new(*h.finalize().as_bytes())
 }
 
 /// Sign `(network, epoch)` and return the resulting `(VrfOutput,
@@ -70,7 +70,7 @@ pub fn vrf_sign(
 ) -> (VrfOutput, VrfProof) {
     let msg = vrf_reveal_message(network, epoch);
     let sig = sk.sign_v1(&msg);
-    let proof = VrfProof(sig.0);
+    let proof = VrfProof::new(sig.0);
     let output = vrf_output_from_proof(&proof);
     (output, proof)
 }
@@ -93,7 +93,7 @@ pub fn vrf_verify(
     proof: &VrfProof,
 ) -> bool {
     let msg = vrf_reveal_message(network, epoch);
-    let sig = Bls12381G2Signature(proof.0);
+    let sig = Bls12381G2Signature(*proof.as_bytes());
     if !verify_bls12381_v1(&msg, pk, &sig) {
         return false;
     }
@@ -244,8 +244,10 @@ mod tests {
     #[test]
     fn vrf_verify_rejects_tampered_output() {
         let sk = keypair(3);
-        let (mut output, proof) = vrf_sign(&sk, &net(), Epoch::new(42));
-        output.0[0] ^= 1;
+        let (output, proof) = vrf_sign(&sk, &net(), Epoch::new(42));
+        let mut bytes = *output.as_bytes();
+        bytes[0] ^= 1;
+        let output = VrfOutput::new(bytes);
         assert!(!vrf_verify(
             &sk.public_key(),
             &net(),
@@ -260,8 +262,10 @@ mod tests {
     #[test]
     fn vrf_verify_rejects_tampered_proof() {
         let sk = keypair(3);
-        let (output, mut proof) = vrf_sign(&sk, &net(), Epoch::new(42));
-        proof.0[0] ^= 1;
+        let (output, proof) = vrf_sign(&sk, &net(), Epoch::new(42));
+        let mut bytes = *proof.as_bytes();
+        bytes[0] ^= 1;
+        let proof = VrfProof::new(bytes);
         assert!(!vrf_verify(
             &sk.public_key(),
             &net(),

@@ -33,15 +33,31 @@ pub const PC_VALUE_ELEMENT_BYTES: usize = 32;
 /// than the ~2^32 a truncated `u64` would give.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, BasicSbor)]
 #[sbor(transparent)]
-pub struct PcValueElement(pub [u8; PC_VALUE_ELEMENT_BYTES]);
+pub struct PcValueElement([u8; PC_VALUE_ELEMENT_BYTES]);
 
 impl PcValueElement {
-    /// All-zero element.
+    /// All-zero element. Used as the `HASH_BOTTOM` sentinel in
+    /// view-1 PC inputs when a proposal slot is absent.
     pub const ZERO: Self = Self([0u8; PC_VALUE_ELEMENT_BYTES]);
 
     /// Build a `PcValueElement` from a raw 32-byte array.
     #[must_use]
     pub const fn new(bytes: [u8; PC_VALUE_ELEMENT_BYTES]) -> Self {
+        Self(bytes)
+    }
+
+    /// Pack a 64-bit view number into a `PcValueElement`. Used by SPC's
+    /// `skip_target` encoding to pin empty-view skip statements to a
+    /// specific `(empty_view, reported_view)` pair.
+    #[must_use]
+    pub const fn from_view_number(n: u64) -> Self {
+        let mut bytes = [0u8; PC_VALUE_ELEMENT_BYTES];
+        let le = n.to_le_bytes();
+        let mut i = 0;
+        while i < 8 {
+            bytes[i] = le[i];
+            i += 1;
+        }
         Self(bytes)
     }
 
@@ -971,7 +987,7 @@ mod tests {
     #[test]
     fn value_element_sbor_transparent() {
         let raw: [u8; PC_VALUE_ELEMENT_BYTES] = [0xAB; PC_VALUE_ELEMENT_BYTES];
-        let wrapped = PcValueElement(raw);
+        let wrapped = PcValueElement::new(raw);
         let raw_bytes = basic_encode(&raw).unwrap();
         let wrapped_bytes = basic_encode(&wrapped).unwrap();
         assert_eq!(raw_bytes, wrapped_bytes);

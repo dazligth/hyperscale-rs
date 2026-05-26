@@ -79,23 +79,6 @@ const fn byzantine_threshold(n: usize) -> usize {
     n.saturating_sub(1) / 3
 }
 
-/// Encode a `u64` as a 32-byte [`PcValueElement`] — little-endian in
-/// the low 8 bytes, zero-padded. The exact byte layout has to match
-/// what signers produced, so don't change it.
-const fn pc_element_from_u64(n: u64) -> PcValueElement {
-    let mut bytes = [0u8; PC_VALUE_ELEMENT_BYTES];
-    let le = n.to_le_bytes();
-    bytes[0] = le[0];
-    bytes[1] = le[1];
-    bytes[2] = le[2];
-    bytes[3] = le[3];
-    bytes[4] = le[4];
-    bytes[5] = le[5];
-    bytes[6] = le[6];
-    bytes[7] = le[7];
-    PcValueElement::new(bytes)
-}
-
 /// Build the canonical "skip target" vector each [`SpcSkipSig`] signs.
 ///
 /// Layout: `[empty_view as u64, reported_view as u64,
@@ -112,8 +95,8 @@ pub fn skip_target(
 ) -> PcVector {
     let hash_element = PcValueElement::new(*reported_value_hash.as_bytes());
     PcVector::new([
-        pc_element_from_u64(u64::from(empty_view.inner())),
-        pc_element_from_u64(u64::from(reported_view.inner())),
+        PcValueElement::from_view_number(u64::from(empty_view.inner())),
+        PcValueElement::from_view_number(u64::from(reported_view.inner())),
         hash_element,
     ])
 }

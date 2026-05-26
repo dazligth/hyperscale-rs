@@ -12,7 +12,7 @@ use hyperscale_types::{
     BeaconProposal, BeaconState, BlockHash, Bls12381G1PrivateKey, Bls12381G1PublicKey, BoundedVec,
     Epoch, LeafIndex, NetworkDefinition, PendingWithdrawal, Randomness, ShardCommittee,
     ShardGroupId, ShardWitness, ShardWitnessPayload, ShardWitnessProof, SlotEffects, Stake,
-    StakePool, StakePoolId, ValidatorId, ValidatorRecord, ValidatorStatus, Witness,
+    StakePool, StakePoolId, ValidatorId, ValidatorRecord, ValidatorStatus, VrfProof, Witness,
     bls_keypair_from_seed, vrf_output_from_proof, vrf_sign,
 };
 
@@ -47,8 +47,9 @@ pub fn vrf_proposal(id: u64, epoch: Epoch) -> BeaconProposal {
 /// consistent by hash binding, but the BLS sig is broken.
 pub fn malformed_vrf_proposal(id: u64, epoch: Epoch) -> BeaconProposal {
     let p = vrf_proposal(id, epoch);
-    let mut proof = p.vrf_proof();
-    proof.0[0] ^= 1;
+    let mut bytes = *p.vrf_proof().as_bytes();
+    bytes[0] ^= 1;
+    let proof = VrfProof::new(bytes);
     // Output binding still matches the tampered proof (so we get
     // past the binding check); only the BLS verify fails.
     let output = vrf_output_from_proof(&proof);
