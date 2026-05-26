@@ -167,6 +167,21 @@ impl ShardWitnessFetchTracker {
         self.pool.clear();
         self.pending_fetches.clear();
     }
+
+    /// Look up the source-shard header record by `committed_block_hash`.
+    /// Linear scan over the shard's stored records — bounded by the
+    /// sliding window held in `shard_header_records`.
+    #[must_use]
+    pub fn find_record_by_block_hash(
+        &self,
+        shard: ShardGroupId,
+        block_hash: BlockHash,
+    ) -> Option<&ShardHeaderRecord> {
+        self.shard_header_records
+            .get(&shard)?
+            .values()
+            .find(|r| r.committed_block_hash == block_hash)
+    }
 }
 
 /// Largest `leaf_count_at_block_end` from records whose

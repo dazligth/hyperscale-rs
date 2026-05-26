@@ -23,8 +23,8 @@ use hyperscale_core::{Action, TimerId};
 use hyperscale_types::{
     BeaconBlock, BeaconProposal, BeaconState, Epoch, GenesisConfigHash, LocalTimestamp,
     NetworkDefinition, PcValueElement, PcVector, RECOVERY_TIMEOUT, RecoveryCertificate,
-    RecoveryRequest, SpcCert, SpcMessage, ValidatorId, VpcMsgPayload, recovery_request_message,
-    spc_context, verify_bls12381_v1,
+    RecoveryRequest, ShardGroupId, ShardWitness, SpcCert, SpcMessage, ValidatorId, VpcMsgPayload,
+    recovery_request_message, spc_context, verify_bls12381_v1, verify_merkle_inclusion,
 };
 use tracing::{trace, warn};
 
@@ -542,6 +542,69 @@ impl BeaconCoordinator {
         Vec::new()
     }
 
+    /// A shard-witness fetch response arrived. For each witness:
+    /// look up the source-shard committed block's
+    /// `beacon_witness_root` via the local
+    /// [`ShardWitnessFetchTracker`](crate::ShardWitnessFetchTracker)
+    /// header records, verify Merkle inclusion under that root, and
+    /// admit to the validated pool. Witnesses that fail any check are
+    /// dropped silently; the fetch protocol retries on its own cadence.
+    ///
+    /// Off-committee vnodes don't initiate fetches, so this handler
+    /// no-ops there — the pool is empty by design for those nodes.
+    pub fn on_shard_witnesses_received(
+        &mut self,
+        shard_id: ShardGroupId,
+        witnesses: Vec<Arc<ShardWitness>>,
+    ) -> Vec<Action> {
+        if !self.is_on_committee() {
+            return Vec::new();
+        }
+        for witness in witnesses {
+            if witness.proof.shard_id != shard_id {
+                warn!(
+                    expected = ?shard_id,
+                    got = ?witness.proof.shard_id,
+                    "ShardWitness shard_id mismatches enclosing fetch response — dropping",
+                );
+                continue;
+            }
+            let Some(record) = self
+                .witness_fetcher
+                .find_record_by_block_hash(shard_id, witness.proof.committed_block_hash)
+            else {
+                warn!(
+                    shard = ?shard_id,
+                    "ShardWitness committed_block_hash has no header record yet — dropping",
+                );
+                continue;
+            };
+            let leaf_hash = witness.payload.leaf_hash();
+            let Ok(leaf_index_u32) = u32::try_from(witness.proof.leaf_index.inner()) else {
+                warn!(
+                    leaf = witness.proof.leaf_index.inner(),
+                    "ShardWitness leaf_index exceeds u32 — dropping",
+                );
+                continue;
+            };
+            if !verify_merkle_inclusion(
+                *record.beacon_witness_root.as_raw(),
+                leaf_hash,
+                &witness.proof.siblings,
+                leaf_index_u32,
+            ) {
+                warn!(
+                    shard = ?shard_id,
+                    leaf = witness.proof.leaf_index.inner(),
+                    "ShardWitness Merkle inclusion check failed — dropping",
+                );
+                continue;
+            }
+            self.witness_fetcher.admit_witness(witness);
+        }
+        Vec::new()
+    }
+
     /// Advance `self.state` / `self.latest_block` to `block` after
     /// running `apply_epoch` over its committed proposals. Resets
     /// per-epoch caches, bootstraps next epoch's SPC if local is on
@@ -811,10 +874,10 @@ mod tests {
 
     use hyperscale_types::{
         BeaconBlock, BeaconBlockHash, BeaconGenesisConfig, Bls12381G1PrivateKey,
-        Bls12381G1PublicKey, Epoch, GenesisConfigHash, GenesisPool, GenesisValidator,
-        NetworkDefinition, PcVector, Randomness, RecoveryRound, ShardGroupId, SpcCert, SpcView,
-        Stake, StakePoolId, ValidatorId, bls_keypair_from_seed, genesis_config_hash, pc_context,
-        recovery_request_message, spc_context,
+        Bls12381G1PublicKey, CommittedBlockHeader, Epoch, GenesisConfigHash, GenesisPool,
+        GenesisValidator, NetworkDefinition, PcVector, Randomness, RecoveryRound, ShardGroupId,
+        ShardWitness, SpcCert, SpcView, Stake, StakePoolId, ValidatorId, bls_keypair_from_seed,
+        genesis_config_hash, pc_context, recovery_request_message, spc_context,
     };
 
     use super::*;
@@ -1578,5 +1641,158 @@ mod tests {
         assert!(actions.is_empty());
         // Pending cert unchanged.
         assert!(coord.has_pending_recovery_cert());
+    }
+
+    /// Build a (witness, source-shard header) pair where the witness's
+    /// Merkle proof verifies under the header's `beacon_witness_root`.
+    /// `total_leaves` controls the accumulator size; `leaf_index` picks
+    /// which slot belongs to our witness.
+    fn make_verifiable_witness_and_record(
+        shard: ShardGroupId,
+        height: u64,
+        leaf_index: u64,
+        total_leaves: u64,
+    ) -> (Arc<ShardWitness>, CommittedBlockHeader) {
+        use hyperscale_types::{
+            BeaconWitnessLeafCount, BeaconWitnessRoot, BlockHash, BlockHeader, BlockHeight,
+            CertificateRoot, Hash, InFlightCount, LeafIndex, LocalReceiptRoot, ProposerTimestamp,
+            ProvisionsRoot, QuorumCertificate, Round, ShardWitnessPayload, ShardWitnessProof,
+            SignerBitfield, StateRoot, TransactionRoot, WeightedTimestamp,
+            compute_merkle_root_with_proof, zero_bls_signature,
+        };
+        let payload = ShardWitnessPayload::StakeDeposit {
+            pool_id: StakePoolId::new(0),
+            amount: Stake::from_whole_tokens(1),
+        };
+        let our_leaf = payload.leaf_hash();
+        let mut leaves: Vec<Hash> = (0..total_leaves)
+            .map(|i| Hash::from_bytes(format!("leaf-{i}").as_bytes()))
+            .collect();
+        let leaf_idx_usize = usize::try_from(leaf_index).unwrap();
+        leaves[leaf_idx_usize] = our_leaf;
+        let (root, siblings, _) = compute_merkle_root_with_proof(&leaves, leaf_idx_usize);
+        let beacon_root = BeaconWitnessRoot::from_raw(root);
+
+        let parent_qc = QuorumCertificate::genesis(shard);
+        let parent_block_hash = BlockHash::ZERO;
+        let header = BlockHeader::new(
+            shard,
+            BlockHeight::new(height),
+            parent_block_hash,
+            parent_qc,
+            ValidatorId::new(0),
+            ProposerTimestamp::ZERO,
+            Round::INITIAL,
+            false,
+            StateRoot::ZERO,
+            TransactionRoot::ZERO,
+            CertificateRoot::ZERO,
+            LocalReceiptRoot::ZERO,
+            ProvisionsRoot::ZERO,
+            Vec::new(),
+            BTreeMap::new(),
+            InFlightCount::ZERO,
+            beacon_root,
+            BeaconWitnessLeafCount::new(total_leaves),
+        );
+        let block_hash = header.hash();
+        let qc = QuorumCertificate::new(
+            block_hash,
+            shard,
+            BlockHeight::new(height),
+            parent_block_hash,
+            Round::INITIAL,
+            SignerBitfield::new(4),
+            zero_bls_signature(),
+            WeightedTimestamp::from_millis(1_000),
+        );
+        let committed_header = CommittedBlockHeader::new(header, qc);
+
+        let proof = ShardWitnessProof {
+            shard_id: shard,
+            committed_block_hash: block_hash,
+            leaf_index: LeafIndex::new(leaf_index),
+            siblings: siblings.into(),
+        };
+        let witness = Arc::new(ShardWitness { payload, proof });
+        (witness, committed_header)
+    }
+
+    #[test]
+    fn on_shard_witnesses_received_admits_valid_witness() {
+        use hyperscale_types::ShardGroupId;
+        let mut coord = fresh_coord();
+        let shard = ShardGroupId::new(0);
+        let (witness, header) = make_verifiable_witness_and_record(shard, 1, 2, 4);
+        coord.witness_fetcher.on_verified_remote_header(&header);
+
+        let actions = coord.on_shard_witnesses_received(shard, vec![Arc::clone(&witness)]);
+        assert!(actions.is_empty());
+        assert_eq!(coord.witness_fetcher.pool_len(shard), 1);
+    }
+
+    #[test]
+    fn on_shard_witnesses_received_drops_mismatched_shard_id() {
+        use hyperscale_types::ShardGroupId;
+        let mut coord = fresh_coord();
+        let shard = ShardGroupId::new(0);
+        let other = ShardGroupId::new(1);
+        let (witness, header) = make_verifiable_witness_and_record(shard, 1, 2, 4);
+        coord.witness_fetcher.on_verified_remote_header(&header);
+
+        // Witness is for `shard` but envelope claims `other`.
+        let actions = coord.on_shard_witnesses_received(other, vec![witness]);
+        assert!(actions.is_empty());
+        assert_eq!(coord.witness_fetcher.total_pool_len(), 0);
+    }
+
+    #[test]
+    fn on_shard_witnesses_received_drops_unknown_committed_block() {
+        use hyperscale_types::ShardGroupId;
+        let mut coord = fresh_coord();
+        let shard = ShardGroupId::new(0);
+        // Build a witness pointing at a block hash that no header
+        // record exists for (we never call on_verified_remote_header).
+        let (witness, _header) = make_verifiable_witness_and_record(shard, 1, 0, 1);
+
+        let actions = coord.on_shard_witnesses_received(shard, vec![witness]);
+        assert!(actions.is_empty());
+        assert_eq!(coord.witness_fetcher.total_pool_len(), 0);
+    }
+
+    #[test]
+    fn on_shard_witnesses_received_drops_bad_merkle_proof() {
+        use hyperscale_types::{LeafIndex, ShardGroupId};
+        let mut coord = fresh_coord();
+        let shard = ShardGroupId::new(0);
+        let (witness, header) = make_verifiable_witness_and_record(shard, 1, 2, 4);
+        coord.witness_fetcher.on_verified_remote_header(&header);
+
+        // Tamper with the witness's leaf_index so the path no longer
+        // reconstructs the committed root.
+        let mut tampered_proof = witness.proof.clone();
+        tampered_proof.leaf_index = LeafIndex::new(0);
+        let bad = Arc::new(ShardWitness {
+            payload: witness.payload.clone(),
+            proof: tampered_proof,
+        });
+        let actions = coord.on_shard_witnesses_received(shard, vec![bad]);
+        assert!(actions.is_empty());
+        assert_eq!(coord.witness_fetcher.total_pool_len(), 0);
+    }
+
+    #[test]
+    fn on_shard_witnesses_received_off_committee_drops_all() {
+        use hyperscale_types::ShardGroupId;
+        // Validator 99 isn't on the committee.
+        let mut observer = new_coord(ValidatorId::new(99));
+        let shard = ShardGroupId::new(0);
+        let (witness, header) = make_verifiable_witness_and_record(shard, 1, 0, 1);
+        observer.witness_fetcher.on_verified_remote_header(&header);
+
+        let actions = observer.on_shard_witnesses_received(shard, vec![witness]);
+        assert!(actions.is_empty());
+        // Pool stays empty — off-committee never admits witnesses.
+        assert_eq!(observer.witness_fetcher.total_pool_len(), 0);
     }
 }
