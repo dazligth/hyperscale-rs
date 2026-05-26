@@ -194,3 +194,448 @@ pub(super) fn diff_shard_committees(
     }
     transitions
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use hyperscale_types::{
+        BeaconState, Epoch, JailReason, Randomness, ShardCommittee, ShardGroupId, Stake, StakePool,
+        StakePoolId, TransitionCause, ValidatorId, ValidatorStatus,
+    };
+
+    use super::super::test_fixtures::{
+        apply_next_epoch, empty_state, single_pool_state, validator_record,
+    };
+    use super::*;
+    use crate::constants::{BEACON_SIGNER_COUNT, MIN_STAKE_FLOOR, SHUFFLE_INTERVAL_EPOCHS};
+    use crate::state::pooled_validators;
+    // ─── run_shuffle_step + shard_committee_transitions diff ─────────────
+
+    /// Two shards, `per_shard` ready members each, `pool_extras`
+    /// `Pooled` validators kept in reserve so refills have stock.
+    /// Pool stake is sized generously to keep `min_stake` at the floor.
+    fn multi_shard_state(shard_count: u64, per_shard: u64, pool_extras: u64) -> BeaconState {
+        let mut state = empty_state();
+        let pool_id = StakePoolId::new(0);
+        let total = shard_count * per_shard + pool_extras;
+        let mut pool_validators = BTreeSet::new();
+        let mut next_id = 0u64;
+        for s in 0..shard_count {
+            let shard = ShardGroupId::new(s);
+            let mut members = Vec::new();
+            for _ in 0..per_shard {
+                let id = ValidatorId::new(next_id);
+                pool_validators.insert(id);
+                members.push(id);
+                state.validators.insert(
+                    id,
+                    validator_record(
+                        next_id,
+                        0,
+                        ValidatorStatus::OnShard {
+                            shard,
+                            ready: true,
+                            placed_at_epoch: Epoch::GENESIS,
+                        },
+                    ),
+                );
+                next_id += 1;
+            }
+            state
+                .shard_committees
+                .insert(shard, ShardCommittee { members });
+        }
+        for _ in 0..pool_extras {
+            let id = ValidatorId::new(next_id);
+            pool_validators.insert(id);
+            state
+                .validators
+                .insert(id, validator_record(next_id, 0, ValidatorStatus::Pooled));
+            next_id += 1;
+        }
+        state.pools.insert(
+            pool_id,
+            StakePool {
+                id: pool_id,
+                // Generous stake so `min_stake` stays clamped at the
+                // floor and no admission gate trips during the test.
+                total_stake: Stake::from_attos(u128::from(total) * MIN_STAKE_FLOOR.attos() * 4),
+                validators: pool_validators,
+                pending_withdrawals: Vec::new(),
+            },
+        );
+        state
+    }
+
+    /// Off-interval epoch: shard committees and the pool stay
+    /// byte-identical; no transition emitted.
+    #[test]
+    fn shuffle_doesnt_fire_off_interval() {
+        // Land at epoch 1 — not a multiple of SHUFFLE_INTERVAL_EPOCHS.
+        let mut state = single_pool_state(4);
+        state.committee = (0u64..4).map(ValidatorId::new).collect();
+        // Park a Pooled extra so a hypothetical refill would have stock.
+        state.validators.insert(
+            ValidatorId::new(99),
+            validator_record(99, 0, ValidatorStatus::Pooled),
+        );
+        state
+            .pools
+            .get_mut(&StakePoolId::new(0))
+            .unwrap()
+            .validators
+            .insert(ValidatorId::new(99));
+        state
+            .pools
+            .get_mut(&StakePoolId::new(0))
+            .unwrap()
+            .total_stake = Stake::from_attos(10 * MIN_STAKE_FLOOR.attos());
+        let initial_members = state.shard_committees[&ShardGroupId::new(0)]
+            .members
+            .clone();
+        let initial_pool = pooled_validators(&state);
+
+        let effects = apply_next_epoch(&mut state, &[]);
+
+        assert_eq!(
+            state.shard_committees[&ShardGroupId::new(0)].members,
+            initial_members
+        );
+        assert_eq!(pooled_validators(&state), initial_pool);
+        assert!(effects.shard_committee_transitions.is_empty());
+    }
+
+    /// On a `SHUFFLE_INTERVAL_EPOCHS` boundary, each shard rotates one
+    /// of its ready `OnShard` validators back to `Pooled` and refills
+    /// the freed slot via `pool_draw`.
+    #[test]
+    fn shuffle_rotates_one_validator_per_shard_at_interval() {
+        // 2 shards × 4 ready actives + 2 pool extras = 10 validators.
+        let mut state = multi_shard_state(2, 4, 2);
+        state.committee = (0u64..4).map(ValidatorId::new).collect();
+        state.current_epoch = Epoch::new(SHUFFLE_INTERVAL_EPOCHS - 1);
+
+        let initial_shard_0 = state.shard_committees[&ShardGroupId::new(0)]
+            .members
+            .clone();
+        let initial_shard_1 = state.shard_committees[&ShardGroupId::new(1)]
+            .members
+            .clone();
+
+        apply_next_epoch(&mut state, &[]);
+
+        let final_shard_0 = state.shard_committees[&ShardGroupId::new(0)]
+            .members
+            .clone();
+        let final_shard_1 = state.shard_committees[&ShardGroupId::new(1)]
+            .members
+            .clone();
+
+        // Capacity preserved.
+        assert_eq!(final_shard_0.len(), 4);
+        assert_eq!(final_shard_1.len(), 4);
+        // Each shard saw at most one membership change (zero is
+        // possible if a cross-shard rotation lands the same set
+        // back).
+        let shard_0_diff = final_shard_0
+            .iter()
+            .filter(|id| !initial_shard_0.contains(id))
+            .count();
+        let shard_1_diff = final_shard_1
+            .iter()
+            .filter(|id| !initial_shard_1.contains(id))
+            .count();
+        assert!(shard_0_diff <= 1, "shard 0 churned by {shard_0_diff}");
+        assert!(shard_1_diff <= 1, "shard 1 churned by {shard_1_diff}");
+    }
+
+    /// Not-ready members are ineligible to be rotated out — only
+    /// `OnShard { ready: true }` validators are picked.
+    #[test]
+    fn shuffle_picks_only_from_ready_members() {
+        let shard = ShardGroupId::new(0);
+        let mut state = single_pool_state(4);
+        // Mark validators 2 and 3 as not-yet-ready.
+        for id in [2u64, 3] {
+            state
+                .validators
+                .get_mut(&ValidatorId::new(id))
+                .unwrap()
+                .status = ValidatorStatus::OnShard {
+                shard,
+                ready: false,
+                placed_at_epoch: Epoch::GENESIS,
+            };
+        }
+        state.committee = vec![ValidatorId::new(0), ValidatorId::new(1)];
+        // Pool extra and headroom so refill has stock and admission
+        // gates stay clear.
+        state.validators.insert(
+            ValidatorId::new(99),
+            validator_record(99, 0, ValidatorStatus::Pooled),
+        );
+        let pool = state.pools.get_mut(&StakePoolId::new(0)).unwrap();
+        pool.validators.insert(ValidatorId::new(99));
+        pool.total_stake = Stake::from_attos(10 * MIN_STAKE_FLOOR.attos());
+        state.current_epoch = Epoch::new(SHUFFLE_INTERVAL_EPOCHS - 1);
+
+        let initial_members = state.shard_committees[&shard].members.clone();
+        apply_next_epoch(&mut state, &[]);
+
+        // Not-ready validators must still be on the shard.
+        for not_ready_id in [2u64, 3] {
+            assert!(
+                state.shard_committees[&shard]
+                    .members
+                    .contains(&ValidatorId::new(not_ready_id)),
+                "not-ready validator {not_ready_id} got shuffled out"
+            );
+        }
+        // Exactly one of the ready members (0 or 1) was rotated out.
+        let rotated = initial_members
+            .iter()
+            .filter(|id| !state.shard_committees[&shard].members.contains(id))
+            .count();
+        assert_eq!(rotated, 1, "exactly one ready member rotates out");
+    }
+
+    /// With the pool empty before the shuffle, the per-shard
+    /// `pool_draw` must not pick the just-rotated victim and restore
+    /// them. Victim flips to `Pooled` *after* the draw, so the draw
+    /// sees an empty pool and returns `None` — the shard shrinks by
+    /// one (no validator was available to fill).
+    #[test]
+    fn shuffle_avoids_self_replacement() {
+        let mut state = single_pool_state(4);
+        state.committee = (0u64..4).map(ValidatorId::new).collect();
+        state.current_epoch = Epoch::new(SHUFFLE_INTERVAL_EPOCHS - 1);
+        assert!(pooled_validators(&state).is_empty());
+
+        let initial_members = state.shard_committees[&ShardGroupId::new(0)]
+            .members
+            .clone();
+        apply_next_epoch(&mut state, &[]);
+
+        // Shard shrunk by one — empty pool, no refill possible.
+        assert_eq!(
+            state.shard_committees[&ShardGroupId::new(0)].members.len(),
+            3
+        );
+        // Victim ended up in the pool, not back on the shard.
+        let pool_now = pooled_validators(&state);
+        assert_eq!(pool_now.len(), 1);
+        let victim = pool_now[0];
+        assert!(initial_members.contains(&victim));
+        assert!(
+            !state.shard_committees[&ShardGroupId::new(0)]
+                .members
+                .contains(&victim)
+        );
+        assert!(matches!(
+            state.validators[&victim].status,
+            ValidatorStatus::Pooled,
+        ));
+    }
+
+    /// On a shuffle-boundary epoch, any shard membership change is
+    /// attributed to `NaturalShuffle` (the dominant cause on those
+    /// epochs).
+    #[test]
+    fn shuffle_emits_shard_committee_transition_with_natural_shuffle_cause() {
+        let mut state = single_pool_state(4);
+        state.committee = (0u64..4).map(ValidatorId::new).collect();
+        // Pool extra so the rotation swaps in a fresh validator
+        // rather than just shrinking the shard.
+        state.validators.insert(
+            ValidatorId::new(99),
+            validator_record(99, 0, ValidatorStatus::Pooled),
+        );
+        let pool = state.pools.get_mut(&StakePoolId::new(0)).unwrap();
+        pool.validators.insert(ValidatorId::new(99));
+        pool.total_stake = Stake::from_attos(10 * MIN_STAKE_FLOOR.attos());
+        state.current_epoch = Epoch::new(SHUFFLE_INTERVAL_EPOCHS - 1);
+
+        let effects = apply_next_epoch(&mut state, &[]);
+        let transition = effects
+            .shard_committee_transitions
+            .get(&ShardGroupId::new(0))
+            .expect("shuffle on shard 0 emits a transition");
+        assert_eq!(transition.cause, TransitionCause::NaturalShuffle);
+        assert_eq!(transition.at_slot, Epoch::new(SHUFFLE_INTERVAL_EPOCHS));
+    }
+
+    /// Empty epoch with no witnesses and no shuffle boundary leaves
+    /// shard committees untouched and emits no transitions.
+    #[test]
+    fn no_membership_change_emits_no_transition() {
+        let mut state = single_pool_state(4);
+        state.committee = (0u64..4).map(ValidatorId::new).collect();
+        let effects = apply_next_epoch(&mut state, &[]);
+        assert!(effects.shard_committee_transitions.is_empty());
+    }
+
+    // ─── beacon_eligible + resample_beacon_committee ─────────────────────
+
+    /// `beacon_eligible` returns exactly the `OnShard { ready: true }`
+    /// validators; `Pooled`, `Jailed`, `InsufficientStake`, and
+    /// not-yet-ready `OnShard` validators are all excluded.
+    #[test]
+    fn beacon_eligible_filters_to_on_shard_ready() {
+        let shard = ShardGroupId::new(0);
+        let mut state = empty_state();
+        let ready_id = ValidatorId::new(1);
+        state.validators.insert(
+            ready_id,
+            validator_record(
+                1,
+                0,
+                ValidatorStatus::OnShard {
+                    shard,
+                    ready: true,
+                    placed_at_epoch: Epoch::GENESIS,
+                },
+            ),
+        );
+        state.validators.insert(
+            ValidatorId::new(2),
+            validator_record(
+                2,
+                0,
+                ValidatorStatus::OnShard {
+                    shard,
+                    ready: false,
+                    placed_at_epoch: Epoch::GENESIS,
+                },
+            ),
+        );
+        state.validators.insert(
+            ValidatorId::new(3),
+            validator_record(3, 0, ValidatorStatus::Pooled),
+        );
+        state.validators.insert(
+            ValidatorId::new(4),
+            validator_record(
+                4,
+                0,
+                ValidatorStatus::Jailed {
+                    since_epoch: Epoch::GENESIS,
+                    reason: JailReason::Performance,
+                },
+            ),
+        );
+        state.validators.insert(
+            ValidatorId::new(5),
+            validator_record(5, 0, ValidatorStatus::InsufficientStake),
+        );
+
+        assert_eq!(beacon_eligible(&state), vec![ready_id]);
+    }
+
+    /// `apply_epoch` always populates `committee_changed = true` and a
+    /// `beacon_committee_transition` with `NaturalShuffle` cause anchored
+    /// at the applied epoch.
+    #[test]
+    fn apply_epoch_populates_committee_changed_and_transition() {
+        let mut state = single_pool_state(4);
+        state.committee = vec![]; // start empty to make the handover visible
+
+        let effects = apply_next_epoch(&mut state, &[]);
+
+        assert!(effects.committee_changed);
+        let transition = effects
+            .beacon_committee_transition
+            .expect("resample populates the transition");
+        assert_eq!(transition.from, vec![]);
+        assert_eq!(
+            transition.to,
+            (0u64..4).map(ValidatorId::new).collect::<Vec<_>>()
+        );
+        assert_eq!(transition.cause, TransitionCause::NaturalShuffle);
+        assert_eq!(transition.at_slot, Epoch::new(1));
+        // State carries the resampled committee.
+        assert_eq!(state.committee, transition.to);
+    }
+
+    /// When `beacon_eligible` exceeds `BEACON_SIGNER_COUNT`, the
+    /// resample returns exactly `BEACON_SIGNER_COUNT` validators, all
+    /// drawn from the eligible set.
+    #[test]
+    fn resample_picks_subset_when_eligible_oversize() {
+        // 2 shards × 4 ready actives = 8 eligible, BEACON_SIGNER_COUNT = 4.
+        let mut state = multi_shard_state(2, 4, 0);
+        let eligible: BTreeSet<ValidatorId> = beacon_eligible(&state).into_iter().collect();
+        assert!(eligible.len() > BEACON_SIGNER_COUNT);
+
+        apply_next_epoch(&mut state, &[]);
+
+        assert_eq!(state.committee.len(), BEACON_SIGNER_COUNT);
+        for id in &state.committee {
+            assert!(eligible.contains(id), "{id:?} not in eligible set");
+        }
+        // Sorted output (sample_committee's contract).
+        let mut sorted = state.committee.clone();
+        sorted.sort();
+        assert_eq!(state.committee, sorted);
+    }
+
+    /// Two states with byte-identical inputs (validators, pools,
+    /// randomness, `current_epoch`) produce byte-identical committees
+    /// after `apply_epoch`. Pins the cross-replica determinism property
+    /// the resample relies on.
+    #[test]
+    fn resample_is_deterministic_across_replicas() {
+        let mut a = multi_shard_state(2, 4, 0);
+        let mut b = multi_shard_state(2, 4, 0);
+        // Same non-zero seed on both — the Fisher–Yates path activates
+        // only when the eligible set exceeds `BEACON_SIGNER_COUNT`,
+        // which is true here (8 > 4).
+        a.randomness = Randomness([0x5A; 32]);
+        b.randomness = Randomness([0x5A; 32]);
+
+        apply_next_epoch(&mut a, &[]);
+        apply_next_epoch(&mut b, &[]);
+
+        assert_eq!(a.committee, b.committee);
+        assert_eq!(a.randomness, b.randomness);
+    }
+
+    /// A validator jailed during the epoch must not appear in the
+    /// resampled committee — the resample reads the post-pipeline
+    /// `beacon_eligible` set.
+    #[test]
+    fn resample_excludes_jailed_validators() {
+        let mut state = single_pool_state(4);
+        state.committee = (0u64..4).map(ValidatorId::new).collect();
+        // Pre-jail validator 0 — `beacon_eligible` excludes them on the
+        // next apply.
+        state
+            .validators
+            .get_mut(&ValidatorId::new(0))
+            .unwrap()
+            .status = ValidatorStatus::Jailed {
+            since_epoch: Epoch::GENESIS,
+            reason: JailReason::Performance,
+        };
+        // Drop validator 0 from the shard committee too, matching the
+        // global invariant.
+        state
+            .shard_committees
+            .get_mut(&ShardGroupId::new(0))
+            .unwrap()
+            .members
+            .retain(|v| *v != ValidatorId::new(0));
+
+        apply_next_epoch(&mut state, &[]);
+
+        assert!(!state.committee.contains(&ValidatorId::new(0)));
+        assert_eq!(
+            state.committee,
+            vec![
+                ValidatorId::new(1),
+                ValidatorId::new(2),
+                ValidatorId::new(3),
+            ]
+        );
+    }
+}

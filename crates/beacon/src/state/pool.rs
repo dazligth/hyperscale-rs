@@ -55,3 +55,134 @@ pub fn pool_draw(state: &mut BeaconState, shard: ShardGroupId) -> Option<Validat
         .push(chosen);
     Some(chosen)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use hyperscale_types::{
+        BeaconState, Epoch, Randomness, ShardCommittee, ShardGroupId, Stake, StakePool,
+        StakePoolId, ValidatorId, ValidatorStatus,
+    };
+
+    use super::super::test_fixtures::{empty_state, validator_record};
+    use super::*;
+    use crate::constants::MIN_STAKE_FLOOR;
+
+    // ─── pool_draw ───────────────────────────────────────────────────────
+
+    /// Build a state with `n` validators all sitting in the global pool
+    /// (status `Pooled`), one empty shard, and the given randomness +
+    /// `current_epoch`. `pool_draw` reads `state.current_epoch` and
+    /// `state.current_epoch` so the caller sets it up explicitly.
+    fn state_with_pool(n: u64, randomness: Randomness, current_epoch: Epoch) -> BeaconState {
+        let mut state = empty_state();
+        state.current_epoch = current_epoch;
+        state.randomness = randomness;
+        let pool_id = StakePoolId::new(0);
+        let mut pool_validators = BTreeSet::new();
+        for i in 0..n {
+            let id = ValidatorId::new(i);
+            pool_validators.insert(id);
+            state
+                .validators
+                .insert(id, validator_record(i, 0, ValidatorStatus::Pooled));
+        }
+        state.pools.insert(
+            pool_id,
+            StakePool {
+                id: pool_id,
+                total_stake: Stake::from_attos(u128::from(n) * MIN_STAKE_FLOOR.attos()),
+                validators: pool_validators,
+                pending_withdrawals: Vec::new(),
+            },
+        );
+        state
+            .shard_committees
+            .insert(ShardGroupId::new(0), ShardCommittee::default());
+        state
+    }
+
+    #[test]
+    fn pool_draw_returns_none_when_pool_empty() {
+        let mut state = empty_state();
+        state
+            .shard_committees
+            .insert(ShardGroupId::new(0), ShardCommittee::default());
+        assert_eq!(pool_draw(&mut state, ShardGroupId::new(0)), None);
+        assert!(
+            state.shard_committees[&ShardGroupId::new(0)]
+                .members
+                .is_empty()
+        );
+    }
+
+    /// Two states built from byte-identical inputs must produce the
+    /// same pick. Determinism is what lets every honest replica
+    /// converge after a pool-draw event.
+    #[test]
+    fn pool_draw_is_deterministic_across_replicas() {
+        let mut a = state_with_pool(8, Randomness([0x5A; 32]), Epoch::new(1));
+        let mut b = state_with_pool(8, Randomness([0x5A; 32]), Epoch::new(1));
+        let pick_a = pool_draw(&mut a, ShardGroupId::new(0)).unwrap();
+        let pick_b = pool_draw(&mut b, ShardGroupId::new(0)).unwrap();
+        assert_eq!(pick_a, pick_b);
+        assert_eq!(a.shard_committees, b.shard_committees);
+        assert_eq!(pooled_validators(&a), pooled_validators(&b));
+    }
+
+    /// Two draws at the same `(epoch, shard)` pick distinct validators
+    /// even though the PRNG seed re-derives identically. The first
+    /// draw flips its chosen validator to `OnShard`; the second draw's
+    /// `pooled_validators` re-derivation excludes them, so the second
+    /// draw indexes into a strictly smaller pool of different members.
+    #[test]
+    fn pool_draw_two_calls_same_slot_shard_pick_distinct_validators() {
+        let mut state = state_with_pool(8, Randomness([0x42; 32]), Epoch::new(1));
+        let first = pool_draw(&mut state, ShardGroupId::new(0)).unwrap();
+        let second = pool_draw(&mut state, ShardGroupId::new(0)).unwrap();
+        assert_ne!(first, second);
+        let members = &state.shard_committees[&ShardGroupId::new(0)].members;
+        assert_eq!(members.len(), 2);
+        assert!(members.contains(&first));
+        assert!(members.contains(&second));
+        assert_eq!(pooled_validators(&state).len(), 8 - 2);
+    }
+
+    /// Chosen validator transitions to `OnShard { ready: false }` with
+    /// `placed_at_epoch` set to `state.current_epoch`.
+    #[test]
+    fn pool_draw_places_chosen_validator_with_current_epoch() {
+        let placed_epoch = Epoch::new(5);
+        let mut state = state_with_pool(4, Randomness([0x99; 32]), placed_epoch);
+        let chosen = pool_draw(&mut state, ShardGroupId::new(0)).unwrap();
+        let status = state.validators.get(&chosen).unwrap().status;
+        assert_eq!(
+            status,
+            ValidatorStatus::OnShard {
+                shard: ShardGroupId::new(0),
+                ready: false,
+                placed_at_epoch: placed_epoch,
+            },
+        );
+    }
+
+    /// Different shards within the same `(state, epoch)` use distinct
+    /// PRNG streams. Across multiple randomness values at least one
+    /// pair must differ — if the shard id were collapsed out of the
+    /// seed, no pair would ever differ.
+    #[test]
+    fn pool_draw_across_shards_uses_distinct_seeds() {
+        let any_differ = (0u8..16).any(|i| {
+            let mut a = state_with_pool(8, Randomness([i; 32]), Epoch::GENESIS);
+            // Add a second shard so the draw target exists.
+            a.shard_committees
+                .insert(ShardGroupId::new(1), ShardCommittee::default());
+            let mut b = a.clone();
+            let pick_a = pool_draw(&mut a, ShardGroupId::new(0)).unwrap();
+            let pick_b = pool_draw(&mut b, ShardGroupId::new(1)).unwrap();
+            pick_a != pick_b
+        });
+        assert!(any_differ);
+    }
+}

@@ -310,3 +310,172 @@ pub(super) fn admit_threshold(state: &BeaconState) -> Stake {
     offerings.sort_unstable_by(|a, b| b.cmp(a));
     Stake::from_attos(offerings[target - 1])
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use hyperscale_types::{
+        Epoch, JailReason, PendingWithdrawal, Stake, StakePool, StakePoolId, ValidatorId,
+        ValidatorStatus,
+    };
+
+    use super::super::test_fixtures::{empty_state, single_pool_state, validator_record};
+    use super::*;
+    use crate::constants::MIN_STAKE_FLOOR;
+    // ─── effective_stake ──────────────────────────────────────────────────
+
+    #[test]
+    fn effective_stake_subtracts_pending_withdrawals() {
+        let pool = StakePool {
+            id: StakePoolId::new(0),
+            total_stake: Stake::from_whole_tokens(1_000),
+            validators: BTreeSet::new(),
+            pending_withdrawals: vec![
+                PendingWithdrawal {
+                    amount: Stake::from_whole_tokens(100),
+                    initiated_at_epoch: Epoch::new(1),
+                },
+                PendingWithdrawal {
+                    amount: Stake::from_whole_tokens(250),
+                    initiated_at_epoch: Epoch::new(2),
+                },
+            ],
+        };
+        assert_eq!(effective_stake(&pool), Stake::from_whole_tokens(650));
+    }
+
+    /// Defense-in-depth: an over-withdrawal (bookkeeping drift, hostile
+    /// shard) clamps `effective_stake` to zero rather than wrapping.
+    #[test]
+    fn effective_stake_saturates_when_pending_exceeds_total() {
+        let pool = StakePool {
+            id: StakePoolId::new(0),
+            total_stake: Stake::from_whole_tokens(100),
+            validators: BTreeSet::new(),
+            pending_withdrawals: vec![PendingWithdrawal {
+                amount: Stake::from_whole_tokens(500),
+                initiated_at_epoch: Epoch::GENESIS,
+            }],
+        };
+        assert_eq!(effective_stake(&pool), Stake::ZERO);
+    }
+
+    // ─── current_active_count ────────────────────────────────────────────
+
+    #[test]
+    fn current_active_count_includes_pooled_and_on_shard() {
+        let state = single_pool_state(4);
+        let pool = state.pools.get(&StakePoolId::new(0)).unwrap();
+        assert_eq!(current_active_count(pool, &state), 4);
+    }
+
+    #[test]
+    fn current_active_count_excludes_jailed_and_insufficient_stake() {
+        let mut state = single_pool_state(4);
+        // Jail one, mark another InsufficientStake — both must drop out.
+        state
+            .validators
+            .get_mut(&ValidatorId::new(0))
+            .unwrap()
+            .status = ValidatorStatus::Jailed {
+            since_epoch: Epoch::GENESIS,
+            reason: JailReason::Performance,
+        };
+        state
+            .validators
+            .get_mut(&ValidatorId::new(1))
+            .unwrap()
+            .status = ValidatorStatus::InsufficientStake;
+        let pool = state.pools.get(&StakePoolId::new(0)).unwrap();
+        assert_eq!(current_active_count(pool, &state), 2);
+    }
+
+    // ─── pooled_validators ───────────────────────────────────────────────
+
+    #[test]
+    fn pooled_validators_returns_only_pooled_in_id_order() {
+        let mut state = single_pool_state(0);
+        // Insert out of id order to confirm BTreeMap iteration sorts.
+        for id in [3u64, 0, 2, 1] {
+            state.validators.insert(
+                ValidatorId::new(id),
+                validator_record(id, 0, ValidatorStatus::Pooled),
+            );
+        }
+        // Insert a non-Pooled validator that must be filtered out.
+        state.validators.insert(
+            ValidatorId::new(99),
+            validator_record(99, 0, ValidatorStatus::InsufficientStake),
+        );
+        assert_eq!(
+            pooled_validators(&state),
+            vec![
+                ValidatorId::new(0),
+                ValidatorId::new(1),
+                ValidatorId::new(2),
+                ValidatorId::new(3),
+            ]
+        );
+    }
+
+    // ─── min_stake ───────────────────────────────────────────────────────
+
+    /// Empty state — no pools, no active validators. `t_no_eject` and
+    /// `admit_threshold` both default high; `min_stake` clamps to
+    /// `MIN_STAKE_FLOOR`.
+    #[test]
+    fn min_stake_floor_on_empty_state() {
+        let state = empty_state();
+        assert_eq!(min_stake(&state), MIN_STAKE_FLOOR);
+    }
+
+    /// One pool, four active validators, total stake exactly `4 ×
+    /// MIN_STAKE_FLOOR`. `t_no_eject = MIN_STAKE_FLOOR` (tightest
+    /// pool's ratio), so `min_stake` lands at the floor.
+    #[test]
+    fn min_stake_clamps_to_floor_at_tight_pool() {
+        let state = single_pool_state(4);
+        assert_eq!(min_stake(&state), MIN_STAKE_FLOOR);
+    }
+
+    // ─── max_active_count ────────────────────────────────────────────────
+
+    #[test]
+    fn max_active_count_equals_effective_over_min_stake() {
+        let state = single_pool_state(4);
+        let pool = state.pools.get(&StakePoolId::new(0)).unwrap();
+        // 4 floors of stake, `min_stake = floor` ⇒ cap of 4.
+        assert_eq!(max_active_count(pool, &state), 4);
+    }
+
+    /// A pending withdrawal that empties the pool's effective stake
+    /// drops `max_active_count` to zero, even though `total_stake`
+    /// remains funded.
+    #[test]
+    fn max_active_count_respects_pending_withdrawals() {
+        let mut state = single_pool_state(4);
+        let pool_mut = state.pools.get_mut(&StakePoolId::new(0)).unwrap();
+        pool_mut.pending_withdrawals.push(PendingWithdrawal {
+            amount: pool_mut.total_stake,
+            initiated_at_epoch: Epoch::GENESIS,
+        });
+        let pool = state.pools.get(&StakePoolId::new(0)).unwrap();
+        assert_eq!(max_active_count(pool, &state), 0);
+    }
+
+    // ─── miss counter sanity ──────────────────────────────────────────────
+
+    /// Pins the `miss_counters` field shape (per-validator `u32`
+    /// counter) so a future refactor that changes the value type is
+    /// caught. The scoping invariants (per-epoch reset, status-
+    /// transition reset) live with `apply_epoch`, not the type.
+    #[test]
+    fn miss_counters_field_is_per_validator_u32_map() {
+        let mut state = empty_state();
+        state.miss_counters.insert(ValidatorId::new(5), 3);
+        state.miss_counters.insert(ValidatorId::new(7), 12);
+        assert_eq!(state.miss_counters.get(&ValidatorId::new(5)), Some(&3));
+        assert_eq!(state.miss_counters.get(&ValidatorId::new(7)), Some(&12));
+    }
+}
