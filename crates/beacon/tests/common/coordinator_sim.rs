@@ -284,6 +284,30 @@ impl CoordinatorSim {
         true
     }
 
+    /// Drive `step()` up to `max_steps` times or until both queues
+    /// drain, whichever comes first. Returns the number of steps
+    /// actually taken. Never panics on quiescence — used by tests that
+    /// expect some replicas not to make progress (silent-voter,
+    /// partition scenarios).
+    pub fn run_for_at_most(&mut self, max_steps: usize) -> usize {
+        let mut steps = 0;
+        while steps < max_steps && self.step() {
+            steps += 1;
+        }
+        steps
+    }
+
+    /// Fire `on_beacon_spc_view_timer` on every replica and absorb the
+    /// resulting actions. Models the synchronous wall-clock expiry of
+    /// the SPC view timer that the production runner would have
+    /// delivered as a `TimerExpired { view }` event.
+    pub fn fire_spc_view_timer_all(&mut self) {
+        for idx in 0..self.coordinators.len() {
+            let actions = self.coordinators[idx].on_beacon_spc_view_timer();
+            self.absorb(idx, actions);
+        }
+    }
+
     /// Run until every replica has committed at least `target_commits`
     /// blocks, or `max_steps` elapses without reaching that goal.
     ///

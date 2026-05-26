@@ -149,7 +149,7 @@ fn adoption_path_advances_non_participating_replica() {
 
 #[test]
 fn drop_for_consumes_envelopes_addressed_to_target_without_delivery() {
-    let mut sim = CoordinatorSim::new(4, 0xD_0_0_0);
+    let mut sim = CoordinatorSim::new(4, 0xD000);
     // Schedule 10 drops for replica 1 — comfortably more than will land
     // during a kick-off-only run, so the counter must end below the
     // budget by however many envelopes the network queue routed there.
@@ -174,7 +174,7 @@ fn drop_for_consumes_envelopes_addressed_to_target_without_delivery() {
 
 #[test]
 fn with_byzantine_equivocate_proposal_fires_once_and_clears() {
-    let mut sim = CoordinatorSim::new(4, 0xEB_AD);
+    let mut sim = CoordinatorSim::new(4, 0xEBAD);
     sim.with_byzantine(ValidatorId::new(0), ByzantineBehaviour::EquivocateProposal);
     sim.kick_off();
     // Kick-off triggers each replica's epoch-1 `BuildAndBroadcastBeaconProposal`,
@@ -218,7 +218,7 @@ fn with_byzantine_equivocate_pc_vote1_fires_once() {
 
 #[test]
 fn inject_topology_change_splices_witnesses_into_epoch_one_proposal() {
-    let mut sim = CoordinatorSim::new(4, 0x_E_1_C_4);
+    let mut sim = CoordinatorSim::new(4, 0xE1C4);
     // Use a Ready witness for validator 0 — purely structural; the
     // assertion is on the witness being present in the committed
     // block's proposal set, not on its semantic effect.
@@ -261,5 +261,152 @@ fn witness_leaf_index_of(w: &Witness) -> LeafIndex {
     match w {
         Witness::Shard(sw) => sw.proof.leaf_index,
         Witness::Beacon(_) => panic!("expected a shard witness"),
+    }
+}
+
+// ─── Phase 3 Byzantine + topology-change scenarios ────────────────────────────
+//
+// Each test exercises one adversarial-or-degraded path end-to-end through the
+// coordinator state machine.
+//
+// Deferred from the plan's original five:
+//
+// * Concurrent recovery certs — disjoint-quorum cert collision is impossible
+//   by pigeonhole at the cluster sizes the sim supports (each quorum needs
+//   `(2n)/3 + 1` signers, so two strictly-disjoint quorums require more
+//   distinct signers than `n`). `select_winning_block`'s tiebreak is unit-
+//   tested directly in `crates/beacon/src/recovery.rs`.
+//
+// * View-1 PC-mid timeout — `SpcInstance::on_timer_expired` ignores
+//   `view <= 1`. The view-1 timer is a runner-level no-op today; the only
+//   timeout-driven recovery path the FSM models is view ≥ 2, which the silent-
+//   voter scenario below exercises.
+
+/// Scenario 1: a Byzantine proposer broadcasts two beacon proposals at the
+/// same epoch with different witness sets. The honest replicas accept the
+/// first, reject the second as a duplicate-sender admit, and still converge
+/// on a single committed state per epoch.
+#[test]
+fn equivocating_proposer_does_not_block_consensus() {
+    let mut sim = CoordinatorSim::new(4, 0xEC01);
+    sim.with_byzantine(ValidatorId::new(0), ByzantineBehaviour::EquivocateProposal);
+    sim.kick_off();
+    sim.run_until_committed(1, MAX_STEPS);
+
+    assert_eq!(
+        sim.byzantine_fires[0], 1,
+        "byzantine transform must have fired exactly once",
+    );
+    let reference = &sim.commits[0][0];
+    for r in 1..sim.n() {
+        let cmp = &sim.commits[r][0];
+        assert_eq!(
+            cmp.state, reference.state,
+            "replica {r} diverged from replica 0 under proposal equivocation",
+        );
+    }
+}
+
+/// Scenario 2: deafen one replica so it never hears outbound traffic, then
+/// verify the remaining `2f + 1` still reach quorum and commit. The deafened
+/// replica's own proposals reach the others' inboxes, so quorum on the honest
+/// side completes naturally — the deafened replica itself never makes
+/// progress.
+/// Scenario 2: one replica is silenced (all inbound envelopes dropped) so it
+/// never enters its own view 2. Honest view-1 PC completes, replicas enter
+/// view 2, and view-2 PC stalls waiting for the silenced replica's
+/// `NewView`/`NewCommit` relay (view ≥ 2 requires all `n` proposal objects
+/// before its PC fires). The view-2 timer is the recovery path: firing it
+/// forces PC with the partial buffer, the chain advances, and the
+/// `2f + 1`-honest set commits without the silenced replica.
+#[test]
+fn silenced_replica_recovers_via_view_2_timeout() {
+    let mut sim = CoordinatorSim::new(4, 0x5113);
+    sim.drop_for(ValidatorId::new(3), 10_000);
+    sim.kick_off();
+    // Drain view-1 PC + the SPC NewView/NewCommit broadcasts that
+    // transition the honest replicas into view 2. After this, view 2's
+    // PC is created but waiting for `n = 4` proposal objects; only 3
+    // ever arrive.
+    sim.run_for_at_most(MAX_STEPS);
+    // Fire the view-2 timer on every replica. SPC's `on_timer_expired`
+    // forces RunVPC with the partial proposal-object buffer; the three
+    // honest replicas' input lines up and view-2 PC closes.
+    sim.fire_spc_view_timer_all();
+    sim.run_for_at_most(MAX_STEPS);
+
+    for r in 0..3 {
+        assert!(
+            !sim.commits[r].is_empty(),
+            "honest replica {r} failed to commit after view-2 timeout recovery",
+        );
+    }
+    assert!(
+        sim.commits[3].is_empty(),
+        "silenced replica unexpectedly committed",
+    );
+    let reference = &sim.commits[0][0];
+    for r in 1..3 {
+        assert_eq!(
+            sim.commits[r][0].state, reference.state,
+            "honest replica {r} diverged from replica 0",
+        );
+    }
+}
+
+/// Scenario 4: a witness-driven topology change is spliced into the epoch-1
+/// proposal and the effect surfaces in the committed state. Uses a
+/// `StakeDeposit` witness rather than `DeactivateValidator`: the sim is
+/// pinned at `BEACON_SIGNER_COUNT = 4` and PC requires `n >= 4`, so
+/// shrinking the committee mid-test would crash the next-epoch SPC
+/// bootstrap. `StakeDeposit` exercises the same flow (witness rides
+/// proposal → admitted into block → `apply_epoch` mutates state) without
+/// touching the committee size.
+#[test]
+fn injected_topology_witness_mutates_state_at_commit() {
+    use hyperscale_beacon::constants::MIN_STAKE_FLOOR;
+    use hyperscale_types::{Stake, StakePoolId};
+
+    let mut sim = CoordinatorSim::new(4, 0x7010);
+    let pool_id = StakePoolId::new(0);
+    let bump = Stake::from_whole_tokens(500);
+    let witness = Witness::Shard(ShardWitness {
+        payload: ShardWitnessPayload::StakeDeposit {
+            pool_id,
+            amount: bump,
+        },
+        proof: ShardWitnessProof {
+            shard_id: ShardGroupId::new(0),
+            committed_block_hash: BlockHash::ZERO,
+            leaf_index: LeafIndex::new(1),
+            siblings: BoundedVec::new(),
+        },
+    });
+    sim.inject_topology_change(Epoch::new(1), vec![witness]);
+    sim.kick_off();
+    sim.run_until_committed(1, MAX_STEPS);
+
+    // Genesis pool stake is `n * MIN_STAKE_FLOOR` per `CoordinatorSim::new`.
+    // Post-epoch-1 it should be the genesis stake plus the deposit (and the
+    // epoch's rewards emission — which we account for by checking strict
+    // inequality rather than equality, since `EMISSIONS_PER_EPOCH` isn't part
+    // of the topology-change story this test pins).
+    let genesis_stake = Stake::from_attos(4u128 * MIN_STAKE_FLOOR.attos());
+    let post = &sim.commits[0][0].state;
+    let post_pool = post.pools.get(&pool_id).expect("pool still present");
+    assert!(
+        post_pool.total_stake >= genesis_stake.saturating_add(bump),
+        "StakeDeposit didn't credit pool: post={:?} expected >= {:?}",
+        post_pool.total_stake,
+        genesis_stake.saturating_add(bump),
+    );
+    // Every honest replica sees the same post-commit pool state.
+    for r in 1..sim.n() {
+        let cmp = &sim.commits[r][0].state;
+        assert_eq!(
+            cmp.pools.get(&pool_id).unwrap().total_stake,
+            post_pool.total_stake,
+            "replica {r} pool state diverged",
+        );
     }
 }
