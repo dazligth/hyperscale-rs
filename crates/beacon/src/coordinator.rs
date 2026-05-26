@@ -24,8 +24,8 @@ use hyperscale_types::{
     BeaconBlock, BeaconProposal, BeaconState, EPOCH_DURATION, Epoch, GenesisConfigHash,
     LocalTimestamp, MAX_WITNESSES_PER_PROPOSER, NetworkDefinition, PcValueElement, PcVector,
     RECOVERY_TIMEOUT, RecoveryCertificate, RecoveryRequest, ShardGroupId, ShardWitness, SpcCert,
-    SpcMessage, ValidatorId, VpcMsgPayload, WeightedTimestamp, Witness, recovery_request_message,
-    spc_context, verify_bls12381_v1, verify_merkle_inclusion,
+    SpcMessage, TopologySnapshot, ValidatorId, VpcMsgPayload, WeightedTimestamp, Witness,
+    recovery_request_message, spc_context, verify_bls12381_v1, verify_merkle_inclusion,
 };
 use tracing::{trace, warn};
 
@@ -37,7 +37,9 @@ use crate::proposal_pool::BeaconProposalPool;
 use crate::recovery::verify_recovery_cert;
 use crate::recovery_tracker::RecoveryTracker;
 use crate::spc::{SpcEffect, SpcEvent, SpcInstance, verify_block_cert};
-use crate::state::{apply_epoch, derive_active_pool, derive_beacon_committee};
+use crate::state::{
+    apply_epoch, derive_active_pool, derive_beacon_committee, derive_topology_snapshot,
+};
 use crate::verification::BeaconVerificationPipeline;
 use crate::witness_fetcher::ShardWitnessFetchTracker;
 
@@ -98,6 +100,12 @@ pub struct BeaconCoordinator {
     /// rides on-chain and `apply_epoch` resamples the committee.
     pending_recovery_cert: Option<RecoveryCertificate>,
 
+    /// Read-only topology view derived from the current `BeaconState`.
+    /// Refreshed on every `adopt_block` so consumers (shard
+    /// coordinators reading via `io_loop`'s `ArcSwap`) see the
+    /// post-`apply_epoch` placement immediately after commit.
+    topology_snapshot: Arc<TopologySnapshot>,
+
     me: ValidatorId,
 
     /// Mixed into every signing helper's domain bytes; carried so
@@ -138,6 +146,8 @@ impl BeaconCoordinator {
             );
         }
         let next_epoch = latest_state.current_epoch.next();
+        let topology_snapshot =
+            Arc::new(derive_topology_snapshot(&latest_state, network.clone(), me));
         Self {
             state: latest_state,
             latest_block,
@@ -150,6 +160,7 @@ impl BeaconCoordinator {
             sync: BeaconBlockSyncManager::new(),
             proposal_pool: BeaconProposalPool::new(next_epoch),
             pending_recovery_cert: None,
+            topology_snapshot,
             me,
             network,
             now: LocalTimestamp::ZERO,
@@ -659,16 +670,29 @@ impl BeaconCoordinator {
         self.state = new_state;
         self.latest_block = Arc::clone(&block);
         self.spc = None;
+        self.topology_snapshot = Arc::new(derive_topology_snapshot(
+            &self.state,
+            self.network.clone(),
+            self.me,
+        ));
 
         let next_epoch = self.state.current_epoch.next();
         self.proposal_pool.reset(next_epoch);
         self.pending_blocks
             .prune_committed(self.state.current_epoch);
 
-        let mut actions = vec![Action::CommitBeaconBlock {
-            block,
-            state: Box::new(self.state.clone()),
-        }];
+        // Emit on every commit. Suppression for no-op transitions
+        // (committee unchanged) is a future optimisation — at n=128
+        // production it'd matter, at n=4 dev it's noise.
+        let mut actions = vec![
+            Action::CommitBeaconBlock {
+                block,
+                state: Box::new(self.state.clone()),
+            },
+            Action::TopologyChanged {
+                topology_snapshot: Arc::clone(&self.topology_snapshot),
+            },
+        ];
 
         if self.is_on_committee() {
             self.bootstrap_spc_for_next_epoch();
@@ -887,6 +911,11 @@ impl BeaconCoordinator {
     #[must_use]
     pub const fn has_pending_recovery_cert(&self) -> bool {
         self.pending_recovery_cert.is_some()
+    }
+
+    #[must_use]
+    pub const fn current_topology_snapshot(&self) -> &Arc<TopologySnapshot> {
+        &self.topology_snapshot
     }
 }
 
@@ -1614,12 +1643,18 @@ mod tests {
         let recipients = coord.spc_recipients();
         let actions = coord.on_spc_output_high(in_flight, &output, cert, &recipients);
 
-        // Exactly two actions, in this order: Commit then Broadcast.
+        // Cert-as-authenticator: no header-sig collection round.
+        // OutputHigh produces Commit + TopologyChanged + Broadcast
+        // directly. (The next-epoch BuildAndBroadcastBeaconProposal
+        // also tails on since the genesis committee doesn't rotate.)
         let kinds: Vec<&str> = actions.iter().map(Action::type_name).collect();
-        assert_eq!(
-            kinds,
-            vec!["CommitBeaconBlock", "BroadcastBeaconBlock"],
-            "expected [CommitBeaconBlock, BroadcastBeaconBlock] from OutputHigh, got {kinds:?}",
+        assert!(
+            kinds.starts_with(&["CommitBeaconBlock", "TopologyChanged"]),
+            "expected commit-then-topology prefix, got {kinds:?}",
+        );
+        assert!(
+            kinds.contains(&"BroadcastBeaconBlock"),
+            "expected BroadcastBeaconBlock in {kinds:?}",
         );
         assert_eq!(coord.state.current_epoch, in_flight);
         assert_eq!(coord.latest_block.epoch(), in_flight);
@@ -1949,5 +1984,81 @@ mod tests {
         assert!(actions.is_empty());
         // Pool stays empty — off-committee never admits witnesses.
         assert_eq!(observer.witness_fetcher.total_pool_len(), 0);
+    }
+
+    #[test]
+    fn current_topology_snapshot_reflects_genesis_state() {
+        let coord = fresh_coord();
+        let snap = coord.current_topology_snapshot();
+        // 4 validators all on shard 0.
+        assert_eq!(snap.num_shards(), 1);
+        assert_eq!(snap.local_validator_id(), ValidatorId::new(0));
+        assert_eq!(snap.local_shard(), ShardGroupId::new(0));
+    }
+
+    #[test]
+    fn off_committee_observer_topology_snapshot_falls_back_to_shard_zero() {
+        let observer = new_coord(ValidatorId::new(99));
+        let snap = observer.current_topology_snapshot();
+        // Validator 99 isn't in `state.validators`, so the shard
+        // resolver falls through to `ShardGroupId::new(0)`.
+        assert_eq!(snap.local_validator_id(), ValidatorId::new(99));
+        assert_eq!(snap.local_shard(), ShardGroupId::new(0));
+    }
+
+    #[test]
+    fn adopt_block_refreshes_topology_snapshot_and_emits_topology_changed() {
+        let mut coord = fresh_coord();
+        let pre_snap = Arc::clone(coord.current_topology_snapshot());
+
+        coord.bootstrap_spc_for_next_epoch();
+        let in_flight = Epoch::GENESIS.next();
+        let committee = coord.state.committee.clone();
+        let n = committee.len();
+        let mut elements = Vec::with_capacity(n);
+        for id in &committee {
+            let p = sample_proposal(u8::try_from(id.inner()).unwrap_or(0));
+            elements.push(p.pc_element_hash(in_flight));
+            coord.proposal_pool.admit(*id, in_flight, p);
+        }
+        let output = PcVector::new(elements);
+
+        let keys: Vec<_> = (0..n as u64).map(keypair).collect();
+        let cert_committee: Vec<_> = coord
+            .state
+            .committee
+            .iter()
+            .copied()
+            .zip(keys.iter().map(Bls12381G1PrivateKey::public_key))
+            .collect();
+        let f = n.saturating_sub(1) / 3;
+        let q = n - f;
+        let signer_positions: Vec<usize> = (0..q).collect();
+        let cert = build_direct_cert(
+            SpcView::new(1),
+            in_flight,
+            &keys,
+            &cert_committee,
+            &signer_positions,
+        );
+
+        let recipients = coord.spc_recipients();
+        let actions = coord.on_spc_output_high(in_flight, &output, cert, &recipients);
+
+        let topology_changed: Vec<&Action> = actions
+            .iter()
+            .filter(|a| matches!(a, Action::TopologyChanged { .. }))
+            .collect();
+        assert_eq!(
+            topology_changed.len(),
+            1,
+            "expected exactly one TopologyChanged per commit, got {}",
+            topology_changed.len(),
+        );
+
+        // Cached snapshot was rebuilt — Arc pointer differs from the
+        // pre-commit one (both Arcs wrap freshly-derived snapshots).
+        let post_snap = Arc::clone(coord.current_topology_snapshot());
+        assert!(!Arc::ptr_eq(&pre_snap, &post_snap));
     }
 }

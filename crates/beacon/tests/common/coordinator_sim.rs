@@ -420,7 +420,9 @@ impl CoordinatorSim {
                     state: *state,
                 });
             }
-            Action::SetTimer { .. } | Action::CancelTimer { .. } => {}
+            Action::SetTimer { .. }
+            | Action::CancelTimer { .. }
+            | Action::TopologyChanged { .. } => {}
             other => panic!(
                 "CoordinatorSim received unmodelled action variant: {}",
                 other.type_name(),

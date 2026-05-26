@@ -17,8 +17,8 @@ use hyperscale_types::{
     BeaconProposal, BeaconState, Bls12381G1PublicKey, CommitteeTransition, Epoch,
     EquivocationEvidence, JailReason, LeafIndex, NetworkDefinition, PendingWithdrawal, Randomness,
     RecoveryCertificate, ShardGroupId, ShardWitnessPayload, SlotEffects, Stake, StakePool,
-    StakePoolId, TransitionCause, ValidatorId, ValidatorRecord, ValidatorStatus, VrfOutput,
-    vrf_verify,
+    StakePoolId, TopologySnapshot, TransitionCause, ValidatorId, ValidatorInfo, ValidatorRecord,
+    ValidatorSet, ValidatorStatus, VotePower, VrfOutput, vrf_verify,
 };
 use rand::RngExt;
 
@@ -157,6 +157,69 @@ pub fn derive_beacon_committee(state: &BeaconState) -> Vec<(ValidatorId, Bls1238
         .iter()
         .filter_map(|id| state.validators.get(id).map(|r| (*id, r.pubkey)))
         .collect()
+}
+
+/// Derive an immutable [`TopologySnapshot`] from a `BeaconState`.
+///
+/// The snapshot is the read-only consumer-facing view of validator
+/// placement: shard committees, per-validator pubkeys, the local
+/// vnode's shard, and the global validator set. Re-derived on every
+/// epoch commit and shared via `ArcSwap` with the `io_loop`.
+///
+/// `local_shard` resolves from the local validator's
+/// [`ValidatorStatus`]:
+/// - `OnShard { shard, .. }` → that shard.
+/// - any other status → `ShardGroupId::new(0)` as a placeholder. The
+///   value is informational for off-shard vnodes (pooled, jailed,
+///   etc.) — they don't participate in shard consensus and
+///   downstream consumers ignore it.
+///
+/// All validators are assigned uniform [`VotePower::new(1)`] until
+/// stake-weighted voting power lands.
+#[must_use]
+pub fn derive_topology_snapshot(
+    state: &BeaconState,
+    network: NetworkDefinition,
+    local_validator_id: ValidatorId,
+) -> TopologySnapshot {
+    use std::collections::HashMap;
+
+    let validators: Vec<ValidatorInfo> = state
+        .validators
+        .values()
+        .map(|r| ValidatorInfo {
+            validator_id: r.id,
+            public_key: r.pubkey,
+            voting_power: VotePower::new(1),
+        })
+        .collect();
+    let validator_set = ValidatorSet::new(validators);
+
+    let shard_committees: HashMap<ShardGroupId, Vec<ValidatorId>> = state
+        .shard_committees
+        .iter()
+        .map(|(sid, sc)| (*sid, sc.members.clone()))
+        .collect();
+
+    let local_shard = state
+        .validators
+        .get(&local_validator_id)
+        .and_then(|r| match r.status {
+            ValidatorStatus::OnShard { shard, .. } => Some(shard),
+            _ => None,
+        })
+        .unwrap_or_else(|| ShardGroupId::new(0));
+
+    let num_shards = u64::try_from(state.shard_committees.len()).unwrap_or(u64::MAX);
+
+    TopologySnapshot::with_shard_committees(
+        network,
+        local_validator_id,
+        local_shard,
+        num_shards,
+        &validator_set,
+        shard_committees,
+    )
 }
 
 /// Active-duty validator pool: every validator `OnShard { ready: true }`
