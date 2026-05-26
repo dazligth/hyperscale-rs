@@ -21,10 +21,11 @@ use std::sync::Arc;
 
 use hyperscale_core::{Action, TimerId};
 use hyperscale_types::{
-    BeaconBlock, BeaconProposal, BeaconState, Epoch, GenesisConfigHash, LocalTimestamp,
-    NetworkDefinition, PcValueElement, PcVector, RECOVERY_TIMEOUT, RecoveryCertificate,
-    RecoveryRequest, ShardGroupId, ShardWitness, SpcCert, SpcMessage, ValidatorId, VpcMsgPayload,
-    recovery_request_message, spc_context, verify_bls12381_v1, verify_merkle_inclusion,
+    BeaconBlock, BeaconProposal, BeaconState, EPOCH_DURATION, Epoch, GenesisConfigHash,
+    LocalTimestamp, MAX_WITNESSES_PER_PROPOSER, NetworkDefinition, PcValueElement, PcVector,
+    RECOVERY_TIMEOUT, RecoveryCertificate, RecoveryRequest, ShardGroupId, ShardWitness, SpcCert,
+    SpcMessage, ValidatorId, VpcMsgPayload, WeightedTimestamp, Witness, recovery_request_message,
+    spc_context, verify_bls12381_v1, verify_merkle_inclusion,
 };
 use tracing::{trace, warn};
 
@@ -305,6 +306,19 @@ impl BeaconCoordinator {
     /// handler can VRF-sign and gossip. The signed proposal arrives
     /// back via `on_beacon_proposal_received` which feeds SPC's
     /// view-1 input.
+    ///
+    /// Witness payload assembly:
+    /// - Equivocations drain first (small, capped at one entry per
+    ///   validator). They're the highest-value inclusions — each
+    ///   permanently jails its target.
+    /// - Shard witnesses fill the remaining
+    ///   [`MAX_WITNESSES_PER_PROPOSER`] budget, drained from
+    ///   [`ShardWitnessFetchTracker`] under the in-flight epoch's
+    ///   eligibility window
+    ///   (`weighted_timestamp ≤ epoch.inner() × EPOCH_DURATION`,
+    ///   `leaf_index > consumed_through[shard]`).
+    /// - Overflow shard witnesses are re-admitted to the pool so the
+    ///   next epoch can drain them.
     pub fn try_propose(&mut self) -> Vec<Action> {
         if self.spc.is_none() {
             trace!("try_propose: no SPC instance — deferring");
@@ -314,21 +328,43 @@ impl BeaconCoordinator {
             return Vec::new();
         }
         if self.proposal_pool.contains(self.me) {
-            // Already proposed this epoch; admission feedback path
-            // will (or did) feed SPC's input.
             return Vec::new();
         }
         let epoch = self.proposal_pool.epoch();
         let recipients = self.spc_recipients();
-        // Witness + equivocation draining lands with the proposer-
-        // assembly wiring in a follow-up sub-commit. For now ship a
-        // VRF-only proposal so the FSM still has byte-distinct
-        // per-validator entries to commit on.
+        let witnesses = self.drain_witnesses_for(epoch);
         vec![Action::BuildAndBroadcastBeaconProposal {
             epoch,
-            witnesses: Vec::new(),
+            witnesses,
             recipients,
         }]
+    }
+
+    /// Drain equivocations and eligible shard witnesses for inclusion
+    /// in the proposal for `epoch`, capped at
+    /// [`MAX_WITNESSES_PER_PROPOSER`]. Overflow shard witnesses are
+    /// re-admitted to the pool for a future epoch's drain.
+    fn drain_witnesses_for(&mut self, epoch: Epoch) -> Vec<Witness> {
+        let equivocations = self.equivocations.drain_for_proposal();
+        let cap = MAX_WITNESSES_PER_PROPOSER.saturating_sub(equivocations.len());
+
+        let epoch_end_wt = epoch_end_weighted_timestamp(epoch);
+        let mut shard_witnesses = self
+            .witness_fetcher
+            .drain_for_proposal(epoch_end_wt, &self.state.consumed_through);
+        if shard_witnesses.len() > cap {
+            for excess in shard_witnesses.split_off(cap) {
+                self.witness_fetcher.admit_witness(excess);
+            }
+        }
+
+        let mut witnesses: Vec<Witness> = equivocations.into_iter().map(Witness::Beacon).collect();
+        witnesses.extend(
+            shard_witnesses
+                .into_iter()
+                .map(|sw| Witness::Shard((*sw).clone())),
+        );
+        witnesses
     }
 
     /// `TimerId::BeaconCommitteeStart` fired — the upcoming epoch's
@@ -810,6 +846,16 @@ impl BeaconCoordinator {
     }
 }
 
+/// Canonical end-of-epoch [`WeightedTimestamp`] derived from `epoch` and
+/// [`EPOCH_DURATION`]. Beacon blocks carry no explicit
+/// `weighted_timestamp` field; the value is `epoch.inner() ×
+/// EPOCH_DURATION` by construction (slot-epoch refactor item 5),
+/// matching how shards stamp their accumulators' eligibility windows.
+fn epoch_end_weighted_timestamp(epoch: Epoch) -> WeightedTimestamp {
+    let epoch_ms = u64::try_from(EPOCH_DURATION.as_millis()).unwrap_or(u64::MAX);
+    WeightedTimestamp::from_millis(epoch.inner().saturating_mul(epoch_ms))
+}
+
 // Flat accessors; their names and return types are the documentation.
 #[allow(missing_docs)]
 impl BeaconCoordinator {
@@ -1192,6 +1238,115 @@ mod tests {
         let in_flight = Epoch::GENESIS.next();
         coord.on_beacon_proposal_received(me, in_flight, sample_proposal(0xAB));
         assert!(coord.try_propose().is_empty());
+    }
+
+    fn proposal_witnesses(actions: &[Action]) -> &[Witness] {
+        match actions {
+            [Action::BuildAndBroadcastBeaconProposal { witnesses, .. }] => witnesses.as_slice(),
+            other => panic!("expected single BuildAndBroadcastBeaconProposal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn try_propose_drains_buffered_equivocations_into_witnesses() {
+        use hyperscale_types::{
+            BeaconWitness, Bls12381G2Signature, PcVoteEquivocation, PcVoteRound,
+        };
+        let mut coord = fresh_coord();
+        coord.bootstrap_spc_for_next_epoch();
+
+        let evidence = PcVoteEquivocation {
+            validator: ValidatorId::new(2),
+            epoch: Epoch::new(1),
+            view: SpcView::new(1),
+            round: PcVoteRound::Vote1,
+            value_a: PcVector::empty(),
+            sig_a: Bls12381G2Signature([0x11; 96]),
+            value_b: PcVector::empty(),
+            sig_b: Bls12381G2Signature([0x22; 96]),
+        };
+        assert!(coord.equivocations.record_pc_equivocation(evidence));
+
+        let actions = coord.try_propose();
+        let witnesses = proposal_witnesses(&actions);
+        assert_eq!(witnesses.len(), 1);
+        assert!(matches!(
+            witnesses[0],
+            Witness::Beacon(BeaconWitness::Equivocation { .. }),
+        ));
+        assert!(coord.equivocations.is_empty());
+    }
+
+    /// Build a `ShardWitness` for `(shard, leaf_index)` with no real
+    /// Merkle proof. `admit_witness` doesn't verify the path — the
+    /// drain tests bypass admission to focus on the eligibility-window
+    /// filter.
+    fn simple_shard_witness(shard: ShardGroupId, leaf_index: u64) -> Arc<ShardWitness> {
+        use hyperscale_types::{
+            BlockHash, BoundedVec, LeafIndex, ShardWitnessPayload, ShardWitnessProof,
+        };
+        Arc::new(ShardWitness {
+            payload: ShardWitnessPayload::StakeDeposit {
+                pool_id: StakePoolId::new(0),
+                amount: Stake::from_whole_tokens(1),
+            },
+            proof: ShardWitnessProof {
+                shard_id: shard,
+                committed_block_hash: BlockHash::ZERO,
+                leaf_index: LeafIndex::new(leaf_index),
+                siblings: BoundedVec::new(),
+            },
+        })
+    }
+
+    #[test]
+    fn try_propose_drains_eligible_shard_witnesses_into_witnesses() {
+        let mut coord = fresh_coord();
+        coord.bootstrap_spc_for_next_epoch();
+        let shard = ShardGroupId::new(0);
+
+        // Header with leaf_count_at_block_end=1; witness at leaf_index=1
+        // (the protocol's 1-indexed accumulator — leaf_index 0 is the
+        // watermark sentinel for "nothing consumed yet").
+        let (_anchor, header) = make_verifiable_witness_and_record(shard, 1, 0, 1);
+        coord.witness_fetcher.on_verified_remote_header(&header);
+        coord
+            .witness_fetcher
+            .admit_witness(simple_shard_witness(shard, 1));
+        assert_eq!(coord.witness_fetcher.pool_len(shard), 1);
+
+        let actions = coord.try_propose();
+        let witnesses = proposal_witnesses(&actions);
+        assert_eq!(witnesses.len(), 1);
+        assert!(matches!(witnesses[0], Witness::Shard(_)));
+        assert_eq!(coord.witness_fetcher.pool_len(shard), 0);
+    }
+
+    #[test]
+    fn try_propose_caps_at_max_witnesses_and_readmits_overflow() {
+        use hyperscale_types::MAX_WITNESSES_PER_PROPOSER;
+        let mut coord = fresh_coord();
+        coord.bootstrap_spc_for_next_epoch();
+        let shard = ShardGroupId::new(0);
+
+        // Header announces `MAX + 5` accumulator leaves at block-end.
+        let total = MAX_WITNESSES_PER_PROPOSER + 5;
+        let total_u64 = u64::try_from(total).unwrap();
+        let (_anchor, header) = make_verifiable_witness_and_record(shard, 1, 0, total_u64);
+        coord.witness_fetcher.on_verified_remote_header(&header);
+        // Admit one witness per leaf_index 1..=total.
+        for i in 1..=total_u64 {
+            coord
+                .witness_fetcher
+                .admit_witness(simple_shard_witness(shard, i));
+        }
+        assert_eq!(coord.witness_fetcher.pool_len(shard), total);
+
+        let actions = coord.try_propose();
+        let witnesses = proposal_witnesses(&actions);
+        assert_eq!(witnesses.len(), MAX_WITNESSES_PER_PROPOSER);
+        // The 5 overflow witnesses got re-admitted to the pool.
+        assert_eq!(coord.witness_fetcher.pool_len(shard), 5);
     }
 
     #[test]
