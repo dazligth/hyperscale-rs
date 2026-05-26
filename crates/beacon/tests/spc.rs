@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use common::{PcSim, SpcSim};
 use hyperscale_beacon::spc::{
-    build_indirect_cert, sign_empty_view_msg, verify_cert, verify_empty_view_msg,
-    verify_proposal_object,
+    build_indirect_cert, sign_empty_view_msg, verify_block_cert, verify_cert,
+    verify_empty_view_msg, verify_proposal_object,
 };
 use hyperscale_types::{
     Epoch, NetworkDefinition, PC_VALUE_ELEMENT_BYTES, PcQc3, PcValueElement, PcVector, SpcCert,
@@ -231,4 +231,68 @@ fn sim_n7_honest_path_converges_on_high() {
     for i in 1..7 {
         assert_eq!(*sim.output(i).unwrap(), baseline);
     }
+}
+
+// ─── Cross-network signature rejection ────────────────────────────────────────
+
+/// A signed empty-view message must reject under a different
+/// `NetworkDefinition` — the network byte feeds into the embedded
+/// `PcQc3`'s signing context and the empty-view's own skip-statement
+/// signature.
+#[test]
+fn spc_empty_view_rejected_under_different_network() {
+    let network = NetworkDefinition::simulator();
+    let other_network = NetworkDefinition::mainnet();
+    let epoch = Epoch::new(1);
+    let spc_ctx = spc_context(epoch);
+    let value = PcVector::new([elem(7)]);
+    let (sim, qc3) = harvest_real_qc3(0xE0, 3, &value);
+
+    let reported = SpcHighTriple {
+        view: SpcView::new(3),
+        value: qc3.x_pe().clone(),
+        proof: qc3,
+    };
+    let empty_view = SpcView::new(5);
+    let (sk, validator) = sim.sks_for_indices(&[0]).into_iter().next().unwrap();
+    let msg = sign_empty_view_msg(&sk, validator, &network, &spc_ctx, empty_view, reported);
+
+    assert!(verify_empty_view_msg(
+        &msg,
+        &network,
+        &spc_ctx,
+        &sim.members
+    ));
+    assert!(!verify_empty_view_msg(
+        &msg,
+        &other_network,
+        &spc_ctx,
+        &sim.members
+    ));
+}
+
+/// A beacon-block `SpcCert::Direct` must reject under a different
+/// `NetworkDefinition` — the embedded `PcQc3`'s prefix sigs and round-2
+/// aggregate are bound to the signer's `(network, pc_ctx)` pair.
+#[test]
+fn spc_block_cert_rejected_under_different_network() {
+    let network = NetworkDefinition::simulator();
+    let other_network = NetworkDefinition::mainnet();
+    let epoch = Epoch::new(1);
+    let spc_ctx = spc_context(epoch);
+    let value = PcVector::new([elem(3), elem(5)]);
+    let (sim, qc3) = harvest_real_qc3(0xE1, 3, &value);
+
+    let cert = SpcCert::Direct {
+        prev_view: SpcView::new(3),
+        value: qc3.x_pe().clone(),
+        proof: qc3,
+    };
+    assert!(verify_block_cert(&cert, &network, &spc_ctx, &sim.members));
+    assert!(!verify_block_cert(
+        &cert,
+        &other_network,
+        &spc_ctx,
+        &sim.members
+    ));
 }

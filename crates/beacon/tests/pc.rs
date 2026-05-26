@@ -94,6 +94,54 @@ fn qc1_rejected_under_different_network() {
     assert!(!verify_qc1(&qc1, &other_network, &ctx, &cm.members));
 }
 
+/// QC2 verification must reject the same QC2 under a different
+/// network — cross-network replay defense at round 2.
+#[test]
+fn qc2_rejected_under_different_network() {
+    let cm = Committee::new(4, 0xB2);
+    let network = NetworkDefinition::simulator();
+    let other_network = NetworkDefinition::mainnet();
+    let ctx = pc_ctx(2, 0);
+    let v_in = PcVector::new([elem(1), elem(2)]);
+
+    let v1s = round1_quorum(&cm, &network, &ctx, 3, &v_in);
+    let v1_refs: Vec<&PcVote1> = v1s.iter().collect();
+    let qc1 = build_qc1(&v1_refs, &cm.members);
+
+    let v2s = round2_quorum(&cm, &network, &ctx, 3, &qc1);
+    let v2_refs: Vec<&PcVote2> = v2s.iter().collect();
+    let qc2 = build_qc2(&v2_refs, &cm.members);
+
+    assert!(verify_qc2(&qc2, &network, &ctx, &cm.members));
+    assert!(!verify_qc2(&qc2, &other_network, &ctx, &cm.members));
+}
+
+/// QC3 verification must reject the same QC3 under a different
+/// network — cross-network replay defense at round 3.
+#[test]
+fn qc3_rejected_under_different_network() {
+    let cm = Committee::new(4, 0xB3);
+    let network = NetworkDefinition::simulator();
+    let other_network = NetworkDefinition::mainnet();
+    let ctx = pc_ctx(3, 0);
+    let v_in = PcVector::new([elem(1), elem(2)]);
+
+    let v1s = round1_quorum(&cm, &network, &ctx, 3, &v_in);
+    let v1_refs: Vec<&PcVote1> = v1s.iter().collect();
+    let qc1 = build_qc1(&v1_refs, &cm.members);
+
+    let v2s = round2_quorum(&cm, &network, &ctx, 3, &qc1);
+    let v2_refs: Vec<&PcVote2> = v2s.iter().collect();
+    let qc2 = build_qc2(&v2_refs, &cm.members);
+
+    let v3s = round3_quorum(&cm, &network, &ctx, 3, &qc2);
+    let v3_refs: Vec<&PcVote3> = v3s.iter().collect();
+    let qc3 = build_qc3(&v3_refs, &cm.members);
+
+    assert!(verify_qc3(&qc3, &network, &ctx, &cm.members));
+    assert!(!verify_qc3(&qc3, &other_network, &ctx, &cm.members));
+}
+
 /// QC1 verification must reject the same QC1 under a different PC
 /// context (epoch or view) — cross-view replay defense.
 #[test]

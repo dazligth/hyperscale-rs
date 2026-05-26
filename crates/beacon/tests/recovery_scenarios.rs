@@ -15,7 +15,7 @@ use hyperscale_types::{
     Bls12381G2Signature, Epoch, GenesisConfigHash, Hash, NetworkDefinition, Randomness,
     RecoveryCertificate, RecoveryRound, ShardCommittee, ShardGroupId, SignerBitfield, SpcCert,
     Stake, StakePool, StakePoolId, TransitionCause, ValidatorId, ValidatorRecord, ValidatorStatus,
-    bls_keypair_from_seed, recovery_request_message,
+    aggregate_verify_bls_different_messages, bls_keypair_from_seed, recovery_request_message,
 };
 
 const fn net() -> NetworkDefinition {
@@ -319,4 +319,36 @@ fn cert_bearing_block_wins_against_competing_no_cert_block() {
         select_winning_block(&original_block, &cert_block).block_hash(),
         cert_block.block_hash(),
     );
+}
+
+/// A signed `RecoveryRequest` message must reject when re-verified
+/// against a different network's domain — cross-network replay
+/// defense on the recovery path. Pin the property at the signing
+/// layer so a future caller that bypasses `verify_recovery_cert`
+/// still inherits cross-network rejection from the message builder.
+#[test]
+fn recovery_request_rejected_under_different_network() {
+    let sk = keypair(1);
+    let pk = sk.public_key();
+    let anchor = BeaconBlockHash::from_raw(Hash::from_bytes(b"anchor-recovery"));
+    let epoch = Epoch::new(5);
+    let round = RecoveryRound::new(0);
+
+    let msg_sim = recovery_request_message(&net(), &anchor, epoch, round);
+    let sig = sk.sign_v1(&msg_sim);
+
+    // Signature verifies under the network the message was built for.
+    assert!(aggregate_verify_bls_different_messages(
+        &[msg_sim.as_slice()],
+        &sig,
+        &[pk],
+    ));
+    // Same signature against the mainnet-rebuilt message — different
+    // bytes by the network-id byte — must reject.
+    let msg_other = recovery_request_message(&NetworkDefinition::mainnet(), &anchor, epoch, round);
+    assert!(!aggregate_verify_bls_different_messages(
+        &[msg_other.as_slice()],
+        &sig,
+        &[pk],
+    ));
 }
