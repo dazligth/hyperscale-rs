@@ -314,20 +314,19 @@ fn equivocating_proposer_does_not_block_consensus() {
 /// progress.
 /// Scenario 2: one replica is silenced (all inbound envelopes dropped) so it
 /// never enters its own view 2. Honest view-1 PC completes, replicas enter
-/// view 2, and view-2 PC stalls waiting for the silenced replica's
-/// `NewView`/`NewCommit` relay (view ≥ 2 requires all `n` proposal objects
-/// before its PC fires). The view-2 timer is the recovery path: firing it
-/// forces PC with the partial buffer, the chain advances, and the
-/// `2f + 1`-honest set commits without the silenced replica.
+/// view 2, and view-2 PC stalls waiting for the silenced replica's `NewView`
+/// relay (view ≥ 2 requires all `n` proposal objects before its PC fires).
+/// The view-2 timer is the recovery path: firing it forces PC with the
+/// partial buffer, the chain advances, and the `2f + 1`-honest set commits
+/// without the silenced replica.
 #[test]
 fn silenced_replica_recovers_via_view_2_timeout() {
     let mut sim = CoordinatorSim::new(4, 0x5113);
     sim.drop_for(ValidatorId::new(3), 10_000);
     sim.kick_off();
-    // Drain view-1 PC + the SPC NewView/NewCommit broadcasts that
-    // transition the honest replicas into view 2. After this, view 2's
-    // PC is created but waiting for `n = 4` proposal objects; only 3
-    // ever arrive.
+    // Drain view-1 PC + the SPC NewView broadcasts that transition the
+    // honest replicas into view 2. After this, view 2's PC is created
+    // but waiting for `n = 4` proposal objects; only 3 ever arrive.
     sim.run_for_at_most(MAX_STEPS);
     // Fire the view-2 timer on every replica. SPC's `on_timer_expired`
     // forces RunVPC with the partial proposal-object buffer; the three

@@ -654,7 +654,9 @@ pub enum SpcEffect {
         cert: Box<SpcCert>,
     },
     /// Broadcast a `new-commit` to peers — `view`'s inner PC produced
-    /// the (low, proof) pair, anchoring the commit walk.
+    /// the (low, proof) pair, anchoring the commit walk. Emitted only
+    /// for `view ≥ 2`; view 1's low is computed but not broadcast,
+    /// since peers learn view-1's QC3 from view-2's direct cert.
     BroadcastNewCommit {
         /// View whose inner PC produced this commit.
         view: SpcView,
@@ -835,7 +837,6 @@ pub struct SpcInstance {
     /// the gap closes.
     pending_empty_views: BTreeMap<SpcView, BTreeMap<ValidatorId, SpcEmptyViewMsg>>,
 
-    low_output: Option<PcVector>,
     high_output: Option<PcVector>,
     /// Cert authenticating the eventual high output — stashed in
     /// `on_vpc_output_high` for view 1's PC output, retrieved by
@@ -884,7 +885,6 @@ impl SpcInstance {
             new_commit_broadcast: BTreeSet::new(),
             max_high: None,
             pending_empty_views: BTreeMap::new(),
-            low_output: None,
             high_output: None,
             high_decisive_cert: None,
         }
@@ -911,12 +911,6 @@ impl SpcInstance {
         self.views
             .get(&SpcView::new(1))
             .is_some_and(|v| v.vpc_input_fed)
-    }
-
-    /// Latched low output, if any. View-1's inner PC produces this.
-    #[must_use]
-    pub const fn low_output(&self) -> Option<&PcVector> {
-        self.low_output.as_ref()
     }
 
     /// Latched high output, if any. The commit walk surfaces this on
@@ -996,9 +990,19 @@ impl SpcInstance {
     }
 
     fn on_vpc_output_low(&mut self, view: SpcView, low: &PcVector, proof: PcQc3) -> Vec<SpcEffect> {
+        // View 1's PC low is the paper's `v_low` — Upper Bound only, no
+        // Agreement across honest parties. Nothing in the FSM acts on it,
+        // and peers learn the view-1 QC3 from view-2's NewView (which
+        // embeds it in the direct cert), so the broadcast would be
+        // redundant. Skip the new-commit / commit() path entirely at
+        // view 1; OutputHigh drives epoch finalisation through the
+        // parent walk at view ≥ 2.
+        if view.inner() == 1 {
+            return vec![];
+        }
         let mut out = vec![];
         // Empty low at view > 1 → record evidence.
-        if view.inner() > 1 && low.is_empty() {
+        if low.is_empty() {
             out.push(SpcEffect::EmptyLowEvidence(Box::new(SpcEmptyLowEvidence {
                 view,
                 proof: proof.clone(),
@@ -1109,6 +1113,14 @@ impl SpcInstance {
     }
 
     fn on_new_commit(&mut self, view: SpcView, value: &PcVector, proof: PcQc3) -> Vec<SpcEffect> {
+        // View-1 new-commits carry no information the local FSM acts on
+        // — peers learn view 1 from view-2 NewView, which embeds the
+        // view-1 QC3 in its direct cert. Defensive drop; honest peers
+        // stop emitting view-1 new-commits, so this only fires on
+        // misbehaving or out-of-date peers.
+        if view.inner() == 1 {
+            return vec![];
+        }
         // `new-commit` is self-authenticating via the embedded
         // `PcQc3` whose low is the committed value. Verify under the
         // view's PC context, then walk the parent chain.
@@ -1320,10 +1332,10 @@ impl SpcInstance {
 
     fn commit(&mut self, view: SpcView, value: &PcVector) -> Vec<SpcEffect> {
         let mut out = vec![];
+        // View-1 commit is a no-op locally: `v_low` is computed by PC
+        // but the FSM doesn't act on it. The view-1 high is what view-2
+        // entry consumes via the direct cert path in on_vpc_output_high.
         if view.inner() == 1 {
-            if self.low_output.is_none() {
-                self.low_output = Some(value.clone());
-            }
             return out;
         }
         if let Some((parent_view, parent_value)) = parent_of(view, value, &self.proposals_by_hash) {
@@ -1608,12 +1620,11 @@ mod tests {
     }
 
     /// Fresh `SpcInstance` constructs with view 1 as current and no
-    /// outputs latched.
+    /// high output latched.
     #[test]
     fn spc_instance_initial_state() {
         let fsm = fsm_instance(0);
         assert_eq!(fsm.current_view(), SpcView::new(1));
-        assert!(fsm.low_output().is_none());
         assert!(fsm.high_output().is_none());
     }
 
