@@ -10,9 +10,12 @@ mod common;
 
 use std::sync::Arc;
 
-use common::CoordinatorSim;
+use common::{ByzantineBehaviour, CoordinatorSim};
 use hyperscale_core::Action;
-use hyperscale_types::Epoch;
+use hyperscale_types::{
+    BlockHash, BoundedVec, Epoch, LeafIndex, ShardGroupId, ShardWitness, ShardWitnessPayload,
+    ShardWitnessProof, ValidatorId, Witness,
+};
 
 /// Three epochs is enough to exercise the closed loop more than once:
 /// the first epoch's commit chains into the second epoch's
@@ -136,4 +139,127 @@ fn adoption_path_advances_non_participating_replica() {
     let adopted = &sim_b.commits[0][0];
     assert_eq!(adopted.block.block_hash(), peer_block.block_hash());
     assert_eq!(adopted.state, expected_state);
+}
+
+// ─── Byzantine + topology-change primitive hooks ──────────────────────────────
+//
+// These tests prove each adversarial hook fires when set; the protocol-level
+// scenarios that exercise the resulting Byzantine state machine paths live in
+// the broader Phase 3 sim suite.
+
+#[test]
+fn drop_for_consumes_envelopes_addressed_to_target_without_delivery() {
+    let mut sim = CoordinatorSim::new(4, 0xD_0_0_0);
+    // Schedule 10 drops for replica 1 — comfortably more than will land
+    // during a kick-off-only run, so the counter must end below the
+    // budget by however many envelopes the network queue routed there.
+    sim.drop_for(ValidatorId::new(1), 10);
+    sim.kick_off();
+    // Step a few times to drain proposals addressed to replica 1.
+    for _ in 0..8 {
+        if !sim.step() {
+            break;
+        }
+    }
+    assert!(
+        sim.drop_counters[1] < 10,
+        "drop_for didn't fire — drop_counters[1] = {} (expected < 10)",
+        sim.drop_counters[1],
+    );
+    assert_eq!(
+        sim.drop_counters[0], 0,
+        "untargeted replica's counter moved"
+    );
+}
+
+#[test]
+fn with_byzantine_equivocate_proposal_fires_once_and_clears() {
+    let mut sim = CoordinatorSim::new(4, 0xEB_AD);
+    sim.with_byzantine(ValidatorId::new(0), ByzantineBehaviour::EquivocateProposal);
+    sim.kick_off();
+    // Kick-off triggers each replica's epoch-1 `BuildAndBroadcastBeaconProposal`,
+    // so the byzantine transform fires inside replica 0's `absorb_one`.
+    assert_eq!(
+        sim.byzantine_fires[0], 1,
+        "equivocating proposer didn't fire on kick-off",
+    );
+    assert_eq!(
+        sim.byzantine_fires[1], 0,
+        "byzantine fire counter leaked to a non-flagged replica",
+    );
+    // Second kick-off-equivalent event would NOT re-fire — the
+    // transform is one-shot. Re-flag and verify a second fire is
+    // possible.
+    sim.with_byzantine(ValidatorId::new(0), ByzantineBehaviour::EquivocateProposal);
+    // Drain the queue so a fresh `BuildAndBroadcastBeaconProposal` for
+    // epoch 2 surfaces via the natural commit-and-roll-forward path.
+    sim.run_until_committed(2, 10_000);
+    assert_eq!(
+        sim.byzantine_fires[0], 2,
+        "re-flagged byzantine didn't fire on the next proposal",
+    );
+}
+
+#[test]
+fn with_byzantine_equivocate_pc_vote1_fires_once() {
+    let mut sim = CoordinatorSim::new(4, 0xEBE1);
+    sim.with_byzantine(ValidatorId::new(0), ByzantineBehaviour::EquivocatePcVote1);
+    sim.kick_off();
+    // Run until replica 0 has emitted a round-1 vote — usually within
+    // a few steps after the SPC instance bootstraps view 1.
+    let mut steps = 0;
+    while sim.byzantine_fires[0] == 0 {
+        assert!(steps < 200, "byzantine PC vote1 never fired");
+        assert!(sim.step(), "sim went quiescent before vote1 emission");
+        steps += 1;
+    }
+    assert_eq!(sim.byzantine_fires[0], 1, "fired more than once");
+}
+
+#[test]
+fn inject_topology_change_splices_witnesses_into_epoch_one_proposal() {
+    let mut sim = CoordinatorSim::new(4, 0x_E_1_C_4);
+    // Use a Ready witness for validator 0 — purely structural; the
+    // assertion is on the witness being present in the committed
+    // block's proposal set, not on its semantic effect.
+    let witness = Witness::Shard(make_dummy_ready_witness(0));
+    sim.inject_topology_change(Epoch::new(1), vec![witness.clone()]);
+    sim.kick_off();
+    sim.run_until_committed(1, 10_000);
+
+    let commit = &sim.commits[0][0];
+    let any_proposal_has_witness = commit
+        .block
+        .committed_proposals()
+        .iter()
+        .any(|(_, prop)| {
+            prop.witnesses()
+                .iter()
+                .any(|w| matches!(w, Witness::Shard(sw) if sw.proof.leaf_index == witness_leaf_index_of(&witness)))
+        });
+    assert!(
+        any_proposal_has_witness,
+        "scheduled witness didn't survive into any committed proposal at epoch 1",
+    );
+}
+
+const fn make_dummy_ready_witness(leaf_index: u64) -> ShardWitness {
+    ShardWitness {
+        payload: ShardWitnessPayload::Ready {
+            id: ValidatorId::new(0),
+        },
+        proof: ShardWitnessProof {
+            shard_id: ShardGroupId::new(0),
+            committed_block_hash: BlockHash::ZERO,
+            leaf_index: LeafIndex::new(leaf_index),
+            siblings: BoundedVec::new(),
+        },
+    }
+}
+
+fn witness_leaf_index_of(w: &Witness) -> LeafIndex {
+    match w {
+        Witness::Shard(sw) => sw.proof.leaf_index,
+        Witness::Beacon(_) => panic!("expected a shard witness"),
+    }
 }

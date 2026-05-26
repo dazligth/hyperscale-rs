@@ -13,7 +13,7 @@
 //! PC commits all-`HASH_BOTTOM`s every epoch — the honest path still
 //! terminates but exercises an uninteresting branch.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 use hyperscale_beacon::constants::{BEACON_SIGNER_COUNT, MIN_STAKE_FLOOR};
@@ -24,10 +24,31 @@ use hyperscale_beacon::spc::sign_empty_view_msg;
 use hyperscale_core::Action;
 use hyperscale_types::{
     BeaconBlock, BeaconGenesisConfig, BeaconProposal, BeaconState, Bls12381G1PrivateKey,
-    Bls12381G1PublicKey, Epoch, GenesisPool, GenesisValidator, NetworkDefinition, Randomness,
-    ShardGroupId, SpcMessage, Stake, StakePoolId, ValidatorId, VpcMsgPayload,
-    bls_keypair_from_seed, genesis_config_hash, pc_context, spc_context, vrf_sign,
+    Bls12381G1PublicKey, Epoch, GenesisPool, GenesisValidator, NetworkDefinition, PcValueElement,
+    PcVector, Randomness, ShardGroupId, SpcMessage, Stake, StakePoolId, ValidatorId, VpcMsgPayload,
+    Witness, bls_keypair_from_seed, genesis_config_hash, pc_context, spc_context, vrf_sign,
 };
+
+/// Adversarial transform a flagged replica applies to its next matching
+/// outbound action. Each variant fires once, then clears.
+#[derive(Clone, Debug)]
+pub enum ByzantineBehaviour {
+    /// On the next `BuildAndBroadcastBeaconProposal`, also emit a
+    /// second proposal at the same `(epoch, VRF reveal)` carrying an
+    /// empty witness list. Both proposals are signed by the same
+    /// validator, so an honest replica that receives both records a
+    /// proposal-level equivocation.
+    EquivocateProposal,
+    /// On the next `SignAndBroadcastPcVote1`, also sign and broadcast
+    /// a second round-1 vote over a perturbed `v_in`. Both votes are
+    /// well-formed signatures from the same validator at the same
+    /// `(epoch, view, round)`, which is the PC double-sign condition.
+    ///
+    /// Round-2 and round-3 equivocation are not modelled: they require
+    /// fabricating divergent embedded QC1/QC2s, which the protocol's
+    /// pool aggregation makes structurally hard to forge.
+    EquivocatePcVote1,
+}
 
 /// One captured commit event from a replica's `Action::CommitBeaconBlock`.
 #[derive(Clone)]
@@ -77,6 +98,22 @@ pub struct CoordinatorSim {
     pub commits: Vec<Vec<CapturedCommit>>,
     network_q: VecDeque<Envelope>,
     loopback_q: VecDeque<Envelope>,
+    /// Per-replica counter of inbound envelopes to silently drop on
+    /// delivery. Decremented each time `step()` is about to deliver to
+    /// a replica with a non-zero counter. Exposed for test
+    /// introspection.
+    pub drop_counters: Vec<usize>,
+    /// Per-replica one-shot Byzantine transform applied inside
+    /// `absorb_one`. Cleared once fired.
+    byzantine: Vec<Option<ByzantineBehaviour>>,
+    /// Number of Byzantine transforms each replica has applied so far —
+    /// test introspection.
+    pub byzantine_fires: Vec<usize>,
+    /// Witnesses scheduled to splice into the next `BuildAndBroadcastBeaconProposal`
+    /// at the keyed epoch, regardless of which replica emits it.
+    /// Consumed (drained) the first time a proposal at that epoch is
+    /// absorbed.
+    pending_topology_changes: BTreeMap<Epoch, Vec<Witness>>,
 }
 
 impl CoordinatorSim {
@@ -158,7 +195,40 @@ impl CoordinatorSim {
             commits: (0..n).map(|_| Vec::new()).collect(),
             network_q: VecDeque::new(),
             loopback_q: VecDeque::new(),
+            drop_counters: vec![0; n],
+            byzantine: vec![None; n],
+            byzantine_fires: vec![0; n],
+            pending_topology_changes: BTreeMap::new(),
         }
+    }
+
+    /// Drop the next `n` envelopes addressed to `replica`. Decrements
+    /// the per-replica counter inside `step()` *before* delivery, so
+    /// `step()` still returns `true` (it consumed an envelope's worth
+    /// of work) but the coordinator never sees it.
+    pub fn drop_for(&mut self, replica: ValidatorId, n: usize) {
+        let idx = self.idx_of(replica);
+        self.drop_counters[idx] += n;
+    }
+
+    /// Flag `replica` to apply `behaviour` to its next matching
+    /// outbound action. Fires exactly once, then clears. Overwrites
+    /// any previously-set unfired behaviour for that replica.
+    pub fn with_byzantine(&mut self, replica: ValidatorId, behaviour: ByzantineBehaviour) {
+        let idx = self.idx_of(replica);
+        self.byzantine[idx] = Some(behaviour);
+    }
+
+    /// Splice `witnesses` into the next `BuildAndBroadcastBeaconProposal`
+    /// at `epoch` that the sim absorbs. Tests use this to inject
+    /// topology-mutating witnesses (e.g. `DeactivateValidator`) that the
+    /// natural sim driver wouldn't otherwise produce. Witnesses for a
+    /// given epoch are drained on first fire.
+    pub fn inject_topology_change(&mut self, epoch: Epoch, witnesses: Vec<Witness>) {
+        self.pending_topology_changes
+            .entry(epoch)
+            .or_default()
+            .extend(witnesses);
     }
 
     /// Hand `block` directly to `replica_idx` via
@@ -192,6 +262,10 @@ impl CoordinatorSim {
 
     /// Drain one envelope through its addressee. Network-priority
     /// before loopback. Returns `false` once both queues empty.
+    ///
+    /// If the addressee has a non-zero drop counter, the envelope is
+    /// silently consumed without delivery and the counter decrements —
+    /// `step()` still returns `true` to reflect that work happened.
     pub fn step(&mut self) -> bool {
         let env = self
             .network_q
@@ -200,6 +274,10 @@ impl CoordinatorSim {
         let Some(env) = env else {
             return false;
         };
+        if self.drop_counters[env.to_idx] > 0 {
+            self.drop_counters[env.to_idx] -= 1;
+            return true;
+        }
         let emitter_idx = env.to_idx;
         let actions = self.deliver(env);
         self.absorb(emitter_idx, actions);
@@ -274,9 +352,16 @@ impl CoordinatorSim {
         match action {
             Action::BuildAndBroadcastBeaconProposal {
                 epoch,
-                witnesses,
+                mut witnesses,
                 recipients,
             } => {
+                // Splice in any test-scheduled witnesses for this epoch
+                // before the proposal's VRF reveal is signed. Consumed
+                // on first fire so only one replica's broadcast picks
+                // them up — that's enough to carry them to commit.
+                if let Some(extras) = self.pending_topology_changes.remove(&epoch) {
+                    witnesses.extend(extras);
+                }
                 let sk = &self.sks[emitter_idx];
                 let (vrf_output, vrf_proof) = vrf_sign(sk, &self.network, epoch);
                 let proposal = Arc::new(BeaconProposal::new(witnesses, vrf_output, vrf_proof));
@@ -299,6 +384,39 @@ impl CoordinatorSim {
                         proposal,
                     },
                 });
+                // Byzantine equivocation: emit a second proposal at the
+                // same epoch with an empty witness list. The VRF reveal
+                // is the same — deterministic in `(sk, network, epoch)` —
+                // so honest replicas see two distinct proposals from one
+                // signer at the same epoch.
+                if matches!(
+                    self.byzantine[emitter_idx],
+                    Some(ByzantineBehaviour::EquivocateProposal),
+                ) {
+                    self.byzantine[emitter_idx] = None;
+                    self.byzantine_fires[emitter_idx] += 1;
+                    let conflicting =
+                        Arc::new(BeaconProposal::new(Vec::new(), vrf_output, vrf_proof));
+                    for rcpt in &recipients {
+                        let to_idx = self.idx_of(*rcpt);
+                        self.network_q.push_back(Envelope {
+                            to_idx,
+                            event: SimEvent::BeaconProposal {
+                                from: me,
+                                epoch,
+                                proposal: Arc::clone(&conflicting),
+                            },
+                        });
+                    }
+                    self.loopback_q.push_back(Envelope {
+                        to_idx: emitter_idx,
+                        event: SimEvent::BeaconProposal {
+                            from: me,
+                            epoch,
+                            proposal: conflicting,
+                        },
+                    });
+                }
             }
             Action::SignAndBroadcastPcVote1 {
                 epoch,
@@ -307,10 +425,42 @@ impl CoordinatorSim {
                 recipients,
             } => {
                 let pc_ctx = pc_context(&spc_context(epoch), view);
-                let vote = sign_vote1(&self.sks[emitter_idx], me, &self.network, &pc_ctx, v_in);
+                let vote = sign_vote1(
+                    &self.sks[emitter_idx],
+                    me,
+                    &self.network,
+                    &pc_ctx,
+                    v_in.clone(),
+                );
                 let payload = VpcMsgPayload::Vote1 { view, vote };
                 let bytes = payload.encode_bytes();
                 self.queue_pc_vote(emitter_idx, me, &recipients, bytes);
+                // Byzantine equivocation at round 1: sign and broadcast
+                // a second vote over a perturbed `v_in` so the same
+                // signer attests to two distinct vectors at the same
+                // `(epoch, view, round)`. The honest replica's PC
+                // instance records the equivocation evidence.
+                if matches!(
+                    self.byzantine[emitter_idx],
+                    Some(ByzantineBehaviour::EquivocatePcVote1),
+                ) {
+                    self.byzantine[emitter_idx] = None;
+                    self.byzantine_fires[emitter_idx] += 1;
+                    let conflicting_v_in = perturb_pc_vector(&v_in);
+                    let conflicting_vote = sign_vote1(
+                        &self.sks[emitter_idx],
+                        me,
+                        &self.network,
+                        &pc_ctx,
+                        conflicting_v_in,
+                    );
+                    let conflicting_payload = VpcMsgPayload::Vote1 {
+                        view,
+                        vote: conflicting_vote,
+                    };
+                    let conflicting_bytes = conflicting_payload.encode_bytes();
+                    self.queue_pc_vote(emitter_idx, me, &recipients, conflicting_bytes);
+                }
             }
             Action::SignAndBroadcastPcVote2 {
                 epoch,
@@ -488,4 +638,22 @@ impl CoordinatorSim {
             .position(|(v, _)| *v == id)
             .expect("validator id present in sim committee")
     }
+}
+
+/// Build a `PcVector` guaranteed to differ from `v`. Used for round-1
+/// equivocation: the Byzantine fork signs over this perturbed input so
+/// the resulting vote has a distinct signed value at the same
+/// `(epoch, view, round)`.
+fn perturb_pc_vector(v: &PcVector) -> PcVector {
+    // Sentinel element unlikely to collide with any natural input.
+    let sentinel = PcValueElement::new([0xCC; 32]);
+    let mut elements: Vec<PcValueElement> = v.iter().copied().collect();
+    if elements.first() == Some(&sentinel) {
+        // Vanishingly unlikely, but defends the property "result !=
+        // input" against a worst-case collision.
+        elements.insert(0, PcValueElement::new([0xDD; 32]));
+    } else {
+        elements.insert(0, sentinel);
+    }
+    PcVector::new(elements)
 }
