@@ -40,7 +40,8 @@ mod timer;
 mod traits;
 
 pub use action::{
-    Action, ActionOwner, BeaconVerificationKind, CrossShardExecutionRequest, ProvisionsRequest,
+    Action, ActionOwner, BeaconVerificationKind, BeaconVerifyPayload, CrossShardExecutionRequest,
+    ProvisionsRequest,
 };
 pub use action_context::{ActionContext, PreparedBlock};
 pub use fetch_abandon::FetchAbandon;

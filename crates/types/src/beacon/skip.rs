@@ -74,6 +74,19 @@ impl SkipRequest {
     pub const fn sig(&self) -> Bls12381G2Signature {
         self.sig
     }
+
+    /// SBOR-encoded canonical bytes of this request. Used as the
+    /// content-hash basis for the beacon verification pipeline's
+    /// per-request dedup slot.
+    ///
+    /// # Panics
+    ///
+    /// Never in practice: every field is `BasicSbor` and the struct is
+    /// closed, so encoding is total.
+    #[must_use]
+    pub fn encode_bytes(&self) -> Vec<u8> {
+        basic_encode(self).expect("SkipRequest SBOR encoding is infallible")
+    }
 }
 
 /// Pool-quorum certificate: ⌈2M/3⌉ + 1 active signers attested that

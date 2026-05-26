@@ -13,9 +13,10 @@ use hyperscale_types::{
     FinalizedWave, GlobalReceiptRoot, Hash, InFlightCount, LeafIndex, LocalReceiptRoot, NodeId,
     PcQc1, PcQc2, PcQc3, PcVector, ProposerTimestamp, ProvisionHash, ProvisionTxRoot, Provisions,
     ProvisionsRoot, QuorumCertificate, ReadySignal, Round, RoutableTransaction, ShardGroupId,
-    SharedCertificates, SharedTransactions, SkipEpochCert, SkipRequest, SpcCert, SpcHighTriple,
-    SpcView, StateRoot, SubstateEntry, TopologySnapshot, TransactionRoot, TransactionStatus,
-    TxHash, TxOutcome, ValidatorId, VotePower, WaveId, WeightedTimestamp, Witness,
+    SharedCertificates, SharedTransactions, SkipEpochCert, SkipRequest, SpcCert, SpcContext,
+    SpcHighTriple, SpcView, StateRoot, SubstateEntry, TopologySnapshot, TransactionRoot,
+    TransactionStatus, TxHash, TxOutcome, ValidatorId, VotePower, WaveId, WeightedTimestamp,
+    Witness,
 };
 
 use crate::{CommitSource, FetchAbandon, FetchRequest, ProtocolEvent, TimerId};
@@ -27,7 +28,7 @@ use crate::{CommitSource, FetchAbandon, FetchRequest, ProtocolEvent, TimerId};
 pub enum BeaconVerificationKind {
     /// PC 3-round QC signature.
     PcQc3,
-    /// SPC certificate signature.
+    /// SPC certificate signature on a Normal beacon block.
     SpcCert,
     /// Committee aggregate signature over a beacon block header.
     BeaconBlockAggregate,
@@ -35,6 +36,60 @@ pub enum BeaconVerificationKind {
     VrfReveal,
     /// Merkle proof path into a shard's witness accumulator.
     ShardWitnessProof,
+    /// Pool-quorum aggregate signature on a [`SkipEpochCert`].
+    SkipCert,
+    /// Per-validator BLS signature on a [`SkipRequest`].
+    SkipRequest,
+}
+
+/// Typed payload for an [`Action::VerifyBeaconRoot`] dispatch.
+///
+/// The action handler matches on the variant, runs the corresponding
+/// verifier on the consensus pool, and emits
+/// [`ProtocolEvent::BeaconVerificationResult`] with the matching
+/// [`BeaconVerificationKind`].
+#[derive(Debug, Clone)]
+pub enum BeaconVerifyPayload {
+    /// SPC cert authenticating a Normal beacon block. Verifier inputs:
+    /// the cert plus the per-epoch signing context and committee.
+    SpcCert {
+        /// Cert to verify.
+        cert: Box<SpcCert>,
+        /// Per-epoch SPC signing context.
+        spc_ctx: SpcContext,
+        /// Beacon committee at the cert's epoch — positional ordering
+        /// matches the cert's signer bitfields.
+        committee: Vec<(ValidatorId, Bls12381G1PublicKey)>,
+    },
+    /// Pool-quorum cert authenticating a Skip beacon block.
+    SkipCert {
+        /// Cert to verify.
+        cert: Box<SkipEpochCert>,
+        /// Active validator pool at verification time — positional
+        /// ordering matches the cert's signer bitfield.
+        active_pool: Vec<(ValidatorId, Bls12381G1PublicKey)>,
+    },
+    /// Single-signer attestation that the chain should abandon an
+    /// epoch at the named anchor.
+    SkipRequest {
+        /// Request to verify.
+        request: Box<SkipRequest>,
+        /// Active validator pool used to look up the signer's pubkey.
+        active_pool: Vec<(ValidatorId, Bls12381G1PublicKey)>,
+    },
+}
+
+impl BeaconVerifyPayload {
+    /// The [`BeaconVerificationKind`] this payload variant corresponds
+    /// to. Used by the action handler to tag the result event.
+    #[must_use]
+    pub const fn kind(&self) -> BeaconVerificationKind {
+        match self {
+            Self::SpcCert { .. } => BeaconVerificationKind::SpcCert,
+            Self::SkipCert { .. } => BeaconVerificationKind::SkipCert,
+            Self::SkipRequest { .. } => BeaconVerificationKind::SkipRequest,
+        }
+    }
 }
 
 /// A request to execute a cross-shard transaction with its provisions.
@@ -940,16 +995,14 @@ pub enum Action {
 
     /// Dispatch a beacon-side cryptographic verification to the crypto
     /// pool. Result returns via
-    /// [`ProtocolEvent::BeaconVerificationResult`] keyed on `(kind, key)`.
+    /// [`ProtocolEvent::BeaconVerificationResult`] keyed on `(kind, key)`,
+    /// where `kind` is derived from the payload's variant.
     VerifyBeaconRoot {
-        /// What kind of verification this is.
-        kind: BeaconVerificationKind,
         /// 32-byte slot identifier the verifier reports back as.
         key: Hash,
-        /// Wire-form payload the kind-specific verifier interprets
-        /// (canonical signing bytes, sig, pubkeys, Merkle path, etc.,
-        /// per kind). Kept opaque at the core layer.
-        payload: Vec<u8>,
+        /// Typed payload — the variant selects both the verifier and
+        /// the [`BeaconVerificationKind`] tagged on the result event.
+        payload: Box<BeaconVerifyPayload>,
     },
 
     /// Persist a committed beacon block + its resulting `BeaconState`
@@ -1084,8 +1137,8 @@ pub enum ActionOwner {
     /// outbound provision fetch + broadcast.
     Provisions,
     /// Beacon-coordinator actions: PC/SPC sign-and-broadcast,
-    /// beacon-block / recovery-request gossip, shard-witness fetch
-    /// dispatch, beacon-side crypto verification.
+    /// beacon-block / skip-request / skip-cert gossip, shard-witness
+    /// fetch dispatch, beacon-side crypto verification.
     Beacon,
     /// I/O-loop-internal effects (timers, commits, status emission,
     /// fetch driving, topology plumbing). Not delegated to a worker

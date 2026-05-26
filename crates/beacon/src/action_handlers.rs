@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use hyperscale_core::{Action, ActionContext, ProtocolEvent};
+use hyperscale_core::{Action, ActionContext, BeaconVerifyPayload, ProtocolEvent};
 use hyperscale_network::Network;
 use hyperscale_storage::ShardStorage;
 use hyperscale_types::network::notification::{
@@ -23,7 +23,8 @@ use hyperscale_types::{
 use tracing::warn;
 
 use crate::pc::{sign_vote1, sign_vote2, sign_vote3};
-use crate::spc::sign_empty_view_msg;
+use crate::skip::{verify_skip_cert, verify_skip_request};
+use crate::spc::{sign_empty_view_msg, verify_block_cert};
 
 /// Dispatch a beacon-owned [`Action`] on the consensus pool. Panics on
 /// non-beacon variants — the node's owner-keyed dispatch is the gate.
@@ -188,12 +189,23 @@ where
                 "FetchShardWitnesses",
             );
         }
-        Action::VerifyBeaconRoot {
-            kind,
-            key: _,
-            payload: _,
-        } => {
-            warn!(kind = ?kind, "VerifyBeaconRoot");
+        Action::VerifyBeaconRoot { key, payload } => {
+            let kind = payload.kind();
+            let valid = match *payload {
+                BeaconVerifyPayload::SpcCert {
+                    cert,
+                    spc_ctx,
+                    committee,
+                } => verify_block_cert(&cert, network, &spc_ctx, &committee),
+                BeaconVerifyPayload::SkipCert { cert, active_pool } => {
+                    verify_skip_cert(&cert, network, &active_pool)
+                }
+                BeaconVerifyPayload::SkipRequest {
+                    request,
+                    active_pool,
+                } => verify_skip_request(&request, network, &active_pool),
+            };
+            ctx.notify_protocol(ProtocolEvent::BeaconVerificationResult { kind, key, valid });
         }
         _ => unreachable!("hyperscale_beacon::handle_action called with non-beacon action"),
     }
