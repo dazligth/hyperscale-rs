@@ -66,6 +66,6 @@ pub use state::{
     StakePool, TransitionCause, ValidatorRecord, ValidatorStatus,
 };
 pub use witness::{
-    BeaconWitness, BeaconWitnessEvent, EquivocationEvidence, SHARD_WITNESS_LEAF_DOMAIN_TAG,
-    ShardWitness, ShardWitnessPayload, ShardWitnessProof, Witness,
+    BeaconWitnessEvent, SHARD_WITNESS_LEAF_DOMAIN_TAG, ShardWitness, ShardWitnessPayload,
+    ShardWitnessProof, Witness,
 };

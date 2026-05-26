@@ -261,7 +261,7 @@ const fn make_dummy_ready_witness(leaf_index: u64) -> ShardWitness {
 fn witness_leaf_index_of(w: &Witness) -> LeafIndex {
     match w {
         Witness::Shard(sw) => sw.proof.leaf_index,
-        Witness::Beacon(_) => panic!("expected a shard witness"),
+        Witness::Equivocation(_) => panic!("expected a shard witness"),
     }
 }
 

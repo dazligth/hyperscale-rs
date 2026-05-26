@@ -13,13 +13,13 @@
 
 use std::collections::BTreeMap;
 
-use hyperscale_types::{BeaconWitness, EquivocationEvidence, PcVoteEquivocation, ValidatorId};
+use hyperscale_types::{PcVoteEquivocation, ValidatorId, Witness};
 
 /// Buffered equivocation evidence awaiting inclusion in a beacon
 /// proposal.
 #[derive(Debug, Default)]
 pub struct EquivocationObservations {
-    by_validator: BTreeMap<ValidatorId, EquivocationEvidence>,
+    by_validator: BTreeMap<ValidatorId, Box<PcVoteEquivocation>>,
 }
 
 impl EquivocationObservations {
@@ -36,21 +36,18 @@ impl EquivocationObservations {
         if self.by_validator.contains_key(&v) {
             return false;
         }
-        self.by_validator
-            .insert(v, EquivocationEvidence::Vote(Box::new(evidence)));
+        self.by_validator.insert(v, Box::new(evidence));
         true
     }
 
-    /// Drain all observed evidence into `BeaconWitness::Equivocation`
+    /// Drain all observed evidence into [`Witness::Equivocation`]
     /// entries and empty the buffer. The proposer caps the returned
     /// slice against `MAX_WITNESSES_PER_PROPOSER` and re-records
     /// anything it dropped if it wants to retry next epoch.
-    pub fn drain_for_proposal(&mut self) -> Vec<BeaconWitness> {
+    pub fn drain_for_proposal(&mut self) -> Vec<Witness> {
         std::mem::take(&mut self.by_validator)
             .into_values()
-            .map(|evidence| BeaconWitness::Equivocation {
-                evidence: Box::new(evidence),
-            })
+            .map(Witness::Equivocation)
             .collect()
     }
 
@@ -136,7 +133,7 @@ mod tests {
         let drained = e.drain_for_proposal();
         assert_eq!(drained.len(), 2);
         for witness in &drained {
-            let BeaconWitness::Equivocation { .. } = witness;
+            assert!(matches!(witness, Witness::Equivocation(_)));
         }
         assert!(e.is_empty());
     }
@@ -161,8 +158,10 @@ mod tests {
         let validators: Vec<ValidatorId> = drained
             .iter()
             .map(|w| {
-                let BeaconWitness::Equivocation { evidence } = w;
-                evidence.validator()
+                let Witness::Equivocation(evidence) = w else {
+                    panic!("expected Witness::Equivocation, got {w:?}")
+                };
+                evidence.validator
             })
             .collect();
         assert!(validators.contains(&ValidatorId::new(7)));

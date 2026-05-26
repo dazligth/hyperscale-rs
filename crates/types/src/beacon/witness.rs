@@ -9,9 +9,9 @@
 //! - [`Witness::Shard`] — lifted from a shard's VM via that shard's
 //!   monotonic beacon-witness accumulator. Carries a
 //!   [`ShardWitnessProof`] for provenance.
-//! - [`Witness::Beacon`] — beacon-internal evidence (cryptographic
-//!   equivocation). Self-authenticating from the embedded BLS sigs —
-//!   no shard proof, no replay set.
+//! - [`Witness::Equivocation`] — a PC double-sign observed locally.
+//!   Self-authenticating from the embedded BLS sigs — no shard proof,
+//!   no replay set.
 
 use sbor::prelude::*;
 
@@ -253,49 +253,17 @@ pub struct ShardWitness {
     pub proof: ShardWitnessProof,
 }
 
-/// Self-authenticating equivocation evidence — the cryptographic basis
-/// for a [`BeaconWitness::Equivocation`].
-///
-/// - [`Self::Vote`] — a single validator double-signed at the same
-///   `(epoch, view, round)` of an inner Prefix Consensus instance.
-///
-/// The equivocator is jailed permanently. The variant is boxed so this
-/// evidence enum can grow new variants without shifting stack layout.
-#[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
-pub enum EquivocationEvidence {
-    /// PC double-sign at the same round.
-    Vote(Box<PcVoteEquivocation>),
-}
-
-impl EquivocationEvidence {
-    /// The equivocator's `ValidatorId`.
-    #[must_use]
-    pub const fn validator(&self) -> ValidatorId {
-        match self {
-            Self::Vote(v) => v.validator,
-        }
-    }
-}
-
-/// Beacon-internal observation. Self-authenticating — the evidence
-/// itself is the proof, no shard accumulator needed.
-#[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
-pub enum BeaconWitness {
-    /// Cryptographic equivocation evidence. `apply_epoch` re-runs
-    /// verification and jails the equivocator permanently on success.
-    Equivocation {
-        /// The underlying evidence — a PC double-sign.
-        evidence: Box<EquivocationEvidence>,
-    },
-}
-
 /// Observation submitted in a [`BeaconProposal`](crate::BeaconProposal).
 #[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
 pub enum Witness {
-    /// Lifted from a shard's VM.
+    /// Lifted from a shard's VM via that shard's monotonic
+    /// beacon-witness accumulator.
     Shard(ShardWitness),
-    /// Beacon-internal evidence (today: cryptographic equivocation).
-    Beacon(BeaconWitness),
+    /// PC double-sign at the same `(epoch, view, round)` of an inner
+    /// Prefix Consensus instance. Self-authenticating — the embedded
+    /// BLS sigs are the proof. `apply_epoch` re-runs verification and
+    /// jails the equivocator permanently on success.
+    Equivocation(Box<PcVoteEquivocation>),
 }
 
 #[cfg(test)]
@@ -476,38 +444,8 @@ mod tests {
     }
 
     #[test]
-    fn equivocation_evidence_sbor_round_trip_vote_variant() {
-        let e = EquivocationEvidence::Vote(Box::new(sample_pc_vote_equivocation()));
-        let bytes = basic_encode(&e).unwrap();
-        let decoded: EquivocationEvidence = basic_decode(&bytes).unwrap();
-        assert_eq!(e, decoded);
-    }
-
-    #[test]
-    fn equivocation_evidence_validator_accessor_returns_inner_validator() {
-        let vote = EquivocationEvidence::Vote(Box::new(sample_pc_vote_equivocation()));
-        assert_eq!(vote.validator(), ValidatorId::new(5));
-    }
-
-    #[test]
-    fn beacon_witness_sbor_round_trip() {
-        let w = BeaconWitness::Equivocation {
-            evidence: Box::new(EquivocationEvidence::Vote(Box::new(
-                sample_pc_vote_equivocation(),
-            ))),
-        };
-        let bytes = basic_encode(&w).unwrap();
-        let decoded: BeaconWitness = basic_decode(&bytes).unwrap();
-        assert_eq!(w, decoded);
-    }
-
-    #[test]
-    fn witness_beacon_variant_sbor_round_trip() {
-        let w = Witness::Beacon(BeaconWitness::Equivocation {
-            evidence: Box::new(EquivocationEvidence::Vote(Box::new(
-                sample_pc_vote_equivocation(),
-            ))),
-        });
+    fn witness_equivocation_variant_sbor_round_trip() {
+        let w = Witness::Equivocation(Box::new(sample_pc_vote_equivocation()));
         let bytes = basic_encode(&w).unwrap();
         let decoded: Witness = basic_decode(&bytes).unwrap();
         assert_eq!(w, decoded);

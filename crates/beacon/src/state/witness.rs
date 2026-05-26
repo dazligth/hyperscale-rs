@@ -4,9 +4,9 @@
 use std::collections::BTreeSet;
 
 use hyperscale_types::{
-    BeaconProposal, BeaconState, BeaconWitness, Bls12381G1PublicKey, EquivocationEvidence,
-    JailReason, LeafIndex, NetworkDefinition, PendingWithdrawal, ShardGroupId, ShardWitness,
-    ShardWitnessPayload, Stake, StakePool, ValidatorId, ValidatorRecord, ValidatorStatus, Witness,
+    BeaconProposal, BeaconState, Bls12381G1PublicKey, JailReason, LeafIndex, NetworkDefinition,
+    PcVoteEquivocation, PendingWithdrawal, ShardGroupId, ShardWitness, ShardWitnessPayload, Stake,
+    StakePool, ValidatorId, ValidatorRecord, ValidatorStatus, Witness,
 };
 
 use crate::constants::{
@@ -84,7 +84,7 @@ pub(super) fn ingest_witnesses(
     // gate ("not already permanently jailed") provides the idempotence.
     let mut shard_seen: BTreeSet<(ShardGroupId, LeafIndex)> = BTreeSet::new();
     let mut shard_lifts: Vec<&ShardWitness> = Vec::new();
-    let mut equivocations: Vec<&BeaconWitness> = Vec::new();
+    let mut equivocations: Vec<&PcVoteEquivocation> = Vec::new();
     'collect: for (_, prop) in accepted {
         for w in prop.witnesses().iter() {
             if shard_lifts.len() + equivocations.len() >= MAX_WITNESSES_PER_SLOT {
@@ -97,8 +97,8 @@ pub(super) fn ingest_witnesses(
                     }
                     shard_lifts.push(sw);
                 }
-                Witness::Beacon(bw) => {
-                    equivocations.push(bw);
+                Witness::Equivocation(ev) => {
+                    equivocations.push(ev);
                 }
             }
         }
@@ -145,12 +145,11 @@ pub(super) fn ingest_witnesses(
             .iter()
             .map(|(id, rec)| (*id, rec.pubkey))
             .collect();
-        for bw in equivocations {
-            let BeaconWitness::Equivocation { evidence } = bw;
-            if !verify_equivocation_evidence(evidence, network, &lookup) {
+        for evidence in equivocations {
+            if !verify_vote_equivocation(evidence, network, &lookup) {
                 continue;
             }
-            let validator_id = evidence.validator();
+            let validator_id = evidence.validator;
             let Some(rec) = state.validators.get(&validator_id) else {
                 continue;
             };
@@ -180,18 +179,6 @@ pub(super) fn ingest_witnesses(
     }
 
     outcome
-}
-
-/// Re-validate an [`EquivocationEvidence`] under the current
-/// validator-set pubkey lookup. Re-runs the PC double-sign check.
-pub(super) fn verify_equivocation_evidence(
-    evidence: &EquivocationEvidence,
-    network: &NetworkDefinition,
-    lookup: &[(ValidatorId, Bls12381G1PublicKey)],
-) -> bool {
-    match evidence {
-        EquivocationEvidence::Vote(v) => verify_vote_equivocation(v, network, lookup),
-    }
 }
 
 /// Dispatch a single shard-witness payload to its handler.
@@ -1562,11 +1549,11 @@ mod tests {
         assert!(!state.miss_counters.contains_key(&ValidatorId::new(0)));
     }
 
-    // ─── BeaconWitness equivocation ──────────────────────────────────────
+    // ─── Equivocation witnesses ──────────────────────────────────────────
 
     use hyperscale_types::{
-        BeaconWitness, DOMAIN_PC_VOTE1, EquivocationEvidence as Evidence, PcValueElement, PcVector,
-        PcVoteEquivocation, PcVoteRound, SpcView, pc_context, pc_vote_signing_message, spc_context,
+        DOMAIN_PC_VOTE1, PcValueElement, PcVector, PcVoteEquivocation, PcVoteRound, SpcView,
+        pc_context, pc_vote_signing_message, spc_context,
     };
 
     /// Build a valid `PcVoteEquivocation` for `equivocator` at
@@ -1599,9 +1586,7 @@ mod tests {
 
     fn vote_equivocation_witness(equivocator: u64, epoch: Epoch, view: SpcView) -> Witness {
         let ev = build_vote_equivocation(equivocator, epoch, view);
-        Witness::Beacon(BeaconWitness::Equivocation {
-            evidence: Box::new(Evidence::Vote(Box::new(ev))),
-        })
+        Witness::Equivocation(Box::new(ev))
     }
 
     /// Verified PC vote equivocation against an `OnShard` validator
@@ -1758,9 +1743,7 @@ mod tests {
         state.committee = (0u64..4).map(ValidatorId::new).collect();
         let mut ev = build_vote_equivocation(1, Epoch::new(5), SpcView::new(0));
         ev.sig_a.0[0] ^= 1;
-        let w = Witness::Beacon(BeaconWitness::Equivocation {
-            evidence: Box::new(Evidence::Vote(Box::new(ev))),
-        });
+        let w = Witness::Equivocation(Box::new(ev));
         let committed = vec![(
             ValidatorId::new(0),
             vrf_proposal_with_witnesses(0, state.current_epoch.next(), vec![w]),

@@ -364,7 +364,7 @@ impl BeaconCoordinator {
             .drain_for_proposal(epoch_end_wt, &self.state.consumed_through);
         shard_witnesses.truncate(cap);
 
-        let mut witnesses: Vec<Witness> = equivocations.into_iter().map(Witness::Beacon).collect();
+        let mut witnesses = equivocations;
         witnesses.extend(
             shard_witnesses
                 .into_iter()
@@ -1465,9 +1465,7 @@ mod tests {
 
     #[test]
     fn try_propose_drains_buffered_equivocations_into_witnesses() {
-        use hyperscale_types::{
-            BeaconWitness, Bls12381G2Signature, PcVoteEquivocation, PcVoteRound,
-        };
+        use hyperscale_types::{Bls12381G2Signature, PcVoteEquivocation, PcVoteRound};
         let mut coord = fresh_coord();
         coord.bootstrap_spc_for_next_epoch();
 
@@ -1486,10 +1484,7 @@ mod tests {
         let actions = coord.try_propose();
         let witnesses = proposal_witnesses(&actions);
         assert_eq!(witnesses.len(), 1);
-        assert!(matches!(
-            witnesses[0],
-            Witness::Beacon(BeaconWitness::Equivocation { .. }),
-        ));
+        assert!(matches!(witnesses[0], Witness::Equivocation(_)));
         assert!(coord.equivocations.is_empty());
     }
 
