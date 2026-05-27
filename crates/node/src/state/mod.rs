@@ -266,7 +266,9 @@ impl StateMachine for NodeStateMachine {
 
             // ── Beacon ───────────────────────────────────────────────────
             ProtocolEvent::PcVoteReceived { .. }
-            | ProtocolEvent::SpcMessageReceived { .. }
+            | ProtocolEvent::SpcNewViewReceived { .. }
+            | ProtocolEvent::SpcNewCommitReceived { .. }
+            | ProtocolEvent::SpcEmptyViewReceived { .. }
             | ProtocolEvent::BeaconBlockReceived { .. }
             | ProtocolEvent::BeaconProposalReceived { .. }
             | ProtocolEvent::SkipRequestReceived { .. }

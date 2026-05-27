@@ -207,54 +207,6 @@ impl VpcMsgPayload {
     }
 }
 
-/// Wire-form SPC message — the sender-implicit shape that rides
-/// between participants.
-///
-/// The receiving coordinator reconstructs the FSM-level event by
-/// pairing the wire form with the transport-level sender id.
-#[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
-pub enum SpcMessage {
-    /// Inner-PC vote tagged with its SPC view.
-    VpcMsg(Box<VpcMsgPayload>),
-    /// `new-view` authorising entry to `view` under `cert`.
-    NewView {
-        /// View this notification authorises entry to.
-        view: SpcView,
-        /// Cert backing the authorisation.
-        cert: Box<SpcCert>,
-    },
-    /// `new-commit` for `view`.
-    NewCommit {
-        /// View whose inner PC produced this commit.
-        view: SpcView,
-        /// Committed low value.
-        value: PcVector,
-        /// PC round-3 cert anchoring `value` as `proof.x_pp`.
-        proof: Box<PcQc3>,
-    },
-    /// Empty-view attestation.
-    EmptyView(Box<SpcEmptyViewMsg>),
-}
-
-impl SpcMessage {
-    /// SBOR-encoded canonical bytes for the wire.
-    ///
-    /// # Panics
-    ///
-    /// Never in practice: every field is `BasicSbor` and the enum is
-    /// closed, so encoding is total.
-    #[must_use]
-    pub fn encode_bytes(&self) -> Vec<u8> {
-        basic_encode(self).expect("SpcMessage SBOR encoding is infallible")
-    }
-
-    /// Decode SBOR-encoded bytes. Returns `None` on malformed input.
-    #[must_use]
-    pub fn decode(bytes: &[u8]) -> Option<Self> {
-        basic_decode(bytes).ok()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

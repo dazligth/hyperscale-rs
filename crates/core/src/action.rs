@@ -818,8 +818,7 @@ pub enum Action {
 
     /// Sign an SPC empty-view attestation and broadcast it. Feeds the
     /// signed message back to the state machine via
-    /// `ProtocolEvent::SpcMessageReceived` with `from = local
-    /// validator`.
+    /// `ProtocolEvent::SpcEmptyViewReceived`.
     SignAndBroadcastEmptyView {
         /// Epoch the SPC instance belongs to.
         epoch: Epoch,

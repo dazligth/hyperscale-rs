@@ -25,8 +25,8 @@ use hyperscale_types::{
     CertifiedBeaconBlock, EPOCH_DURATION, Epoch, GenesisConfigHash, Hash, LeafIndex,
     LocalTimestamp, MAX_WITNESSES_PER_PROPOSER, NetworkDefinition, PcQc3, PcValueElement, PcVector,
     PcVoteMessage, SKIP_TIMEOUT, ShardGroupId, ShardWitness, SkipEpochCert, SkipRequest, SpcCert,
-    SpcEmptyViewMsg, SpcMessage, SpcView, TopologySnapshot, ValidatorId, VpcMsgPayload,
-    WeightedTimestamp, Witness, verify_merkle_inclusion,
+    SpcEmptyViewMsg, SpcView, TopologySnapshot, ValidatorId, VpcMsgPayload, WeightedTimestamp,
+    Witness, verify_merkle_inclusion,
 };
 use tracing::{trace, warn};
 
@@ -238,79 +238,104 @@ impl BeaconCoordinator {
         }]
     }
 
-    /// A peer's SPC message arrived (new-view / new-commit /
-    /// empty-view). SBOR-decode, validate non-crypto, and dispatch the
-    /// BLS check to the crypto pool. Admission happens in the matching
-    /// `on_spc_*_verified` handler. Inner-PC votes flow through
-    /// [`Self::on_pc_vote_received`] instead.
-    pub fn on_spc_message_received(&mut self, from: ValidatorId, payload: &[u8]) -> Vec<Action> {
-        let Some(msg) = SpcMessage::decode(payload) else {
-            warn!(?from, "SPC message payload SBOR-decode failed");
+    /// A peer's SPC `new-view` arrived. Gate on instance/skip-quorum,
+    /// mark the slot in-flight, and dispatch the cert BLS check to the
+    /// crypto pool. Admission happens in [`Self::on_spc_new_view_verified`]
+    /// when the result lands.
+    pub fn on_spc_new_view_received(
+        &mut self,
+        from: ValidatorId,
+        view: SpcView,
+        cert: Box<SpcCert>,
+    ) -> Vec<Action> {
+        let Some((epoch, committee)) = self.spc_admission_ctx(from, "NewView") else {
             return Vec::new();
         };
+        let key = (epoch, view, from, SpcMsgKind::NewView);
+        if !self.verification.mark_spc_msg_in_flight(key) {
+            return Vec::new();
+        }
+        vec![Action::VerifySpcNewView {
+            epoch,
+            from,
+            view,
+            cert,
+            committee,
+        }]
+    }
+
+    /// A peer's SPC `new-commit` arrived. Gate on instance/skip-quorum,
+    /// mark the slot in-flight, and dispatch the embedded QC3's BLS check
+    /// to the crypto pool. Admission happens in
+    /// [`Self::on_spc_new_commit_verified`] when the result lands.
+    pub fn on_spc_new_commit_received(
+        &mut self,
+        from: ValidatorId,
+        view: SpcView,
+        value: PcVector,
+        proof: Box<PcQc3>,
+    ) -> Vec<Action> {
+        let Some((epoch, committee)) = self.spc_admission_ctx(from, "NewCommit") else {
+            return Vec::new();
+        };
+        let key = (epoch, view, from, SpcMsgKind::NewCommit);
+        if !self.verification.mark_spc_msg_in_flight(key) {
+            return Vec::new();
+        }
+        vec![Action::VerifySpcNewCommit {
+            epoch,
+            from,
+            view,
+            value,
+            proof,
+            committee,
+        }]
+    }
+
+    /// A peer's SPC `empty-view` attestation arrived. Gate on
+    /// instance/skip-quorum, mark the slot in-flight (keyed by the
+    /// embedded signer), and dispatch the BLS check to the crypto pool.
+    /// Admission happens in [`Self::on_spc_empty_view_verified`] when
+    /// the result lands.
+    pub fn on_spc_empty_view_received(&mut self, msg: Box<SpcEmptyViewMsg>) -> Vec<Action> {
+        let Some((epoch, committee)) = self.spc_admission_ctx(msg.signer, "EmptyView") else {
+            return Vec::new();
+        };
+        let key = (epoch, msg.view, msg.signer, SpcMsgKind::EmptyView);
+        if !self.verification.mark_spc_msg_in_flight(key) {
+            return Vec::new();
+        }
+        vec![Action::VerifySpcEmptyView {
+            epoch,
+            msg,
+            committee,
+        }]
+    }
+
+    /// Common gating for the three SPC receive entries: returns the
+    /// `(epoch, committee)` pair if the local instance is bootstrapped
+    /// and skip-quorum hasn't been reached at the local tip; logs and
+    /// returns `None` otherwise.
+    fn spc_admission_ctx(
+        &self,
+        from: ValidatorId,
+        kind: &'static str,
+    ) -> Option<(Epoch, Vec<(ValidatorId, Bls12381G1PublicKey)>)> {
         let Some(spc) = self.spc.as_ref() else {
             trace!(
                 ?from,
-                "SPC message received but no SPC instance bootstrapped"
+                kind, "SPC message received but no SPC instance bootstrapped",
             );
-            return Vec::new();
+            return None;
         };
         if self.skip_quorum_at_tip() {
             trace!(
                 ?from,
-                "SPC message received but skip-quorum reached at local tip — dropping",
+                kind, "SPC message received but skip-quorum reached at local tip — dropping",
             );
-            return Vec::new();
+            return None;
         }
-        let epoch = spc.epoch();
-        let committee: Vec<(ValidatorId, Bls12381G1PublicKey)> = spc.committee().to_vec();
-        match msg {
-            SpcMessage::VpcMsg(_) => {
-                trace!(
-                    ?from,
-                    "SpcMessage::VpcMsg received via SPC channel — dropping; PC votes flow through on_pc_vote_received",
-                );
-                Vec::new()
-            }
-            SpcMessage::NewView { view, cert } => {
-                let key = (epoch, view, from, SpcMsgKind::NewView);
-                if !self.verification.mark_spc_msg_in_flight(key) {
-                    return Vec::new();
-                }
-                vec![Action::VerifySpcNewView {
-                    epoch,
-                    from,
-                    view,
-                    cert,
-                    committee,
-                }]
-            }
-            SpcMessage::NewCommit { view, value, proof } => {
-                let key = (epoch, view, from, SpcMsgKind::NewCommit);
-                if !self.verification.mark_spc_msg_in_flight(key) {
-                    return Vec::new();
-                }
-                vec![Action::VerifySpcNewCommit {
-                    epoch,
-                    from,
-                    view,
-                    value,
-                    proof,
-                    committee,
-                }]
-            }
-            SpcMessage::EmptyView(msg) => {
-                let key = (epoch, msg.view, msg.signer, SpcMsgKind::EmptyView);
-                if !self.verification.mark_spc_msg_in_flight(key) {
-                    return Vec::new();
-                }
-                vec![Action::VerifySpcEmptyView {
-                    epoch,
-                    msg,
-                    committee,
-                }]
-            }
-        }
+        Some((spc.epoch(), spc.committee().to_vec()))
     }
 
     /// Result of an [`Action::VerifySpcNewView`] dispatch.
@@ -1550,13 +1575,6 @@ mod tests {
     fn on_pc_vote_received_drops_on_malformed_payload() {
         let mut coord = fresh_coord();
         let actions = coord.on_pc_vote_received(ValidatorId::new(1), &[0xFF; 8]);
-        assert!(actions.is_empty());
-    }
-
-    #[test]
-    fn on_spc_message_received_drops_on_malformed_payload() {
-        let mut coord = fresh_coord();
-        let actions = coord.on_spc_message_received(ValidatorId::new(1), &[0xFF; 8]);
         assert!(actions.is_empty());
     }
 

@@ -31,9 +31,10 @@ use hyperscale_core::Action;
 use hyperscale_types::{
     BeaconCert, BeaconGenesisConfig, BeaconProposal, BeaconState, Bls12381G1PrivateKey,
     Bls12381G1PublicKey, CertifiedBeaconBlock, Epoch, GenesisPool, GenesisValidator,
-    NetworkDefinition, PcValueElement, PcVector, PcVoteMessage, Randomness, ShardGroupId,
-    SkipEpochCert, SkipRequest, SpcMessage, Stake, StakePoolId, ValidatorId, VpcMsgPayload,
-    Witness, bls_keypair_from_seed, genesis_config_hash, pc_context, spc_context, vrf_sign,
+    NetworkDefinition, PcQc3, PcValueElement, PcVector, PcVoteMessage, Randomness, ShardGroupId,
+    SkipEpochCert, SkipRequest, SpcCert, SpcEmptyViewMsg, SpcView, Stake, StakePoolId, ValidatorId,
+    VpcMsgPayload, Witness, bls_keypair_from_seed, genesis_config_hash, pc_context, spc_context,
+    vrf_sign,
 };
 
 /// Adversarial transform a flagged replica applies to its next matching
@@ -77,9 +78,19 @@ enum SimEvent {
         from: ValidatorId,
         payload: Vec<u8>,
     },
-    SpcMessage {
+    SpcNewView {
         from: ValidatorId,
-        payload: Vec<u8>,
+        view: SpcView,
+        cert: Box<SpcCert>,
+    },
+    SpcNewCommit {
+        from: ValidatorId,
+        view: SpcView,
+        value: PcVector,
+        proof: Box<PcQc3>,
+    },
+    SpcEmptyView {
+        msg: Box<SpcEmptyViewMsg>,
     },
     BeaconProposal {
         from: ValidatorId,
@@ -439,8 +450,17 @@ impl CoordinatorSim {
             SimEvent::PcVote { from, payload } => {
                 self.coordinators[env.to_idx].on_pc_vote_received(from, &payload)
             }
-            SimEvent::SpcMessage { from, payload } => {
-                self.coordinators[env.to_idx].on_spc_message_received(from, &payload)
+            SimEvent::SpcNewView { from, view, cert } => {
+                self.coordinators[env.to_idx].on_spc_new_view_received(from, view, cert)
+            }
+            SimEvent::SpcNewCommit {
+                from,
+                view,
+                value,
+                proof,
+            } => self.coordinators[env.to_idx].on_spc_new_commit_received(from, view, value, proof),
+            SimEvent::SpcEmptyView { msg } => {
+                self.coordinators[env.to_idx].on_spc_empty_view_received(msg)
             }
             SimEvent::BeaconProposal {
                 from,
@@ -630,9 +650,18 @@ impl CoordinatorSim {
                     view,
                     *reported,
                 );
-                let wire = SpcMessage::EmptyView(Box::new(msg));
-                let bytes = wire.encode_bytes();
-                self.queue_spc_message(emitter_idx, me, &recipients, bytes);
+                let msg = Box::new(msg);
+                for rcpt in &recipients {
+                    let to_idx = self.idx_of(*rcpt);
+                    self.network_q.push_back(Envelope {
+                        to_idx,
+                        event: SimEvent::SpcEmptyView { msg: msg.clone() },
+                    });
+                }
+                self.loopback_q.push_back(Envelope {
+                    to_idx: emitter_idx,
+                    event: SimEvent::SpcEmptyView { msg },
+                });
             }
             Action::BroadcastSpcNewView {
                 epoch: _,
@@ -640,15 +669,14 @@ impl CoordinatorSim {
                 cert,
                 recipients,
             } => {
-                let wire = SpcMessage::NewView { view, cert };
-                let bytes = wire.encode_bytes();
                 for rcpt in &recipients {
                     let to_idx = self.idx_of(*rcpt);
                     self.network_q.push_back(Envelope {
                         to_idx,
-                        event: SimEvent::SpcMessage {
+                        event: SimEvent::SpcNewView {
                             from: me,
-                            payload: bytes.clone(),
+                            view,
+                            cert: cert.clone(),
                         },
                     });
                 }
@@ -660,15 +688,15 @@ impl CoordinatorSim {
                 proof,
                 recipients,
             } => {
-                let wire = SpcMessage::NewCommit { view, value, proof };
-                let bytes = wire.encode_bytes();
                 for rcpt in &recipients {
                     let to_idx = self.idx_of(*rcpt);
                     self.network_q.push_back(Envelope {
                         to_idx,
-                        event: SimEvent::SpcMessage {
+                        event: SimEvent::SpcNewCommit {
                             from: me,
-                            payload: bytes.clone(),
+                            view,
+                            value: value.clone(),
+                            proof: proof.clone(),
                         },
                     });
                 }
@@ -839,32 +867,6 @@ impl CoordinatorSim {
         self.loopback_q.push_back(Envelope {
             to_idx: emitter_idx,
             event: SimEvent::PcVote {
-                from: me,
-                payload: bytes,
-            },
-        });
-    }
-
-    fn queue_spc_message(
-        &mut self,
-        emitter_idx: usize,
-        me: ValidatorId,
-        recipients: &[ValidatorId],
-        bytes: Vec<u8>,
-    ) {
-        for rcpt in recipients {
-            let to_idx = self.idx_of(*rcpt);
-            self.network_q.push_back(Envelope {
-                to_idx,
-                event: SimEvent::SpcMessage {
-                    from: me,
-                    payload: bytes.clone(),
-                },
-            });
-        }
-        self.loopback_q.push_back(Envelope {
-            to_idx: emitter_idx,
-            event: SimEvent::SpcMessage {
                 from: me,
                 payload: bytes,
             },

@@ -40,7 +40,7 @@ pub use beacon::{
     PcValueElement, PcVector, PcVote1, PcVote2, PcVote3, PcVoteEquivocation, PcVoteMessage,
     PcVoteRound, PcXpProof, PendingWithdrawal, ReadySignal, SHARD_WITNESS_LEAF_DOMAIN_TAG,
     ShardCommittee, ShardWitness, ShardWitnessPayload, ShardWitnessProof, SkipEpochCert,
-    SkipReport, SkipRequest, SlotEffects, SpcCert, SpcEmptyViewMsg, SpcHighTriple, SpcMessage,
+    SkipReport, SkipRequest, SlotEffects, SpcCert, SpcEmptyViewMsg, SpcHighTriple,
     SpcProposalObject, StakePool, TransitionCause, ValidatorRecord, ValidatorStatus, VpcMsgPayload,
     Witness, genesis_config_hash,
 };

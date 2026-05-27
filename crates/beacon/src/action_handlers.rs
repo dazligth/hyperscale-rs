@@ -17,8 +17,8 @@ use hyperscale_types::network::notification::{
     SpcEmptyViewMsgNotification, SpcNewCommitNotification, SpcNewViewNotification,
 };
 use hyperscale_types::{
-    BeaconProposal, PcVoteMessage, SpcHighTriple, SpcMessage, SpcProposalObject, VpcMsgPayload,
-    pc_context, spc_context, vrf_sign,
+    BeaconProposal, PcVoteMessage, SpcHighTriple, SpcProposalObject, VpcMsgPayload, pc_context,
+    spc_context, vrf_sign,
 };
 use tracing::warn;
 
@@ -32,7 +32,6 @@ use crate::verification::{verify_block_equivocations, verify_certified};
 /// Dispatch a beacon-owned [`Action`] on the consensus pool. Panics on
 /// non-beacon variants — the node's owner-keyed dispatch is the gate.
 #[allow(clippy::too_many_lines)] // single dispatch over beacon-owned Action variants
-#[allow(clippy::missing_panics_doc)] // basic_encode of typed SBOR enums is infallible
 pub fn handle_action<S, N>(action: Action, ctx: &ActionContext<'_, S, N>)
 where
     S: ShardStorage,
@@ -108,12 +107,7 @@ where
             let msg = sign_empty_view_msg(ctx.signing_key, me, network, &spc_ctx, view, *reported);
             ctx.network
                 .notify(&recipients, &SpcEmptyViewMsgNotification::new(msg.clone()));
-            let wire = SpcMessage::EmptyView(Box::new(msg));
-            let bytes = wire.encode_bytes();
-            ctx.notify_protocol(ProtocolEvent::SpcMessageReceived {
-                from: me,
-                payload: bytes,
-            });
+            ctx.notify_protocol(ProtocolEvent::SpcEmptyViewReceived { msg: Box::new(msg) });
         }
         Action::BroadcastSpcNewView {
             epoch: _,

@@ -58,8 +58,7 @@ pub use proposal::BeaconProposal;
 pub use ready_signal::ReadySignal;
 pub use skip::{SkipEpochCert, SkipRequest};
 pub use spc::{
-    SkipReport, SpcCert, SpcEmptyViewMsg, SpcHighTriple, SpcMessage, SpcProposalObject,
-    VpcMsgPayload,
+    SkipReport, SpcCert, SpcEmptyViewMsg, SpcHighTriple, SpcProposalObject, VpcMsgPayload,
 };
 pub use state::{
     BeaconState, CommitteeTransition, JailReason, PendingWithdrawal, ShardCommittee, SlotEffects,

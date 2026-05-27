@@ -526,12 +526,38 @@ pub enum ProtocolEvent {
         payload: Vec<u8>,
     },
 
-    /// SPC-level message received from a peer.
-    SpcMessageReceived {
+    /// SPC `new-view` notification received from a peer. The cert is
+    /// self-authenticating; `from` only determines which validator's
+    /// proposal-object slot the coordinator fills on admission.
+    SpcNewViewReceived {
         /// Sender id (transport-level).
         from: ValidatorId,
-        /// SBOR-encoded `SpcMessage`.
-        payload: Vec<u8>,
+        /// View the peer is entering.
+        view: SpcView,
+        /// Cert backing the entry.
+        cert: Box<SpcCert>,
+    },
+
+    /// SPC `new-commit` notification received from a peer.
+    /// Self-authenticating via the embedded `proof`; the sender label
+    /// is carried for verification-pipeline bookkeeping only.
+    SpcNewCommitReceived {
+        /// Sender id (transport-level).
+        from: ValidatorId,
+        /// SPC view whose inner PC produced this commit.
+        view: SpcView,
+        /// Committed low value.
+        value: PcVector,
+        /// PC round-3 cert anchoring `value` as `proof.x_pp`.
+        proof: Box<PcQc3>,
+    },
+
+    /// SPC `empty-view` attestation received from a peer. The signer
+    /// is carried inside `msg`; no separate transport-level sender id
+    /// is needed.
+    SpcEmptyViewReceived {
+        /// The empty-view attestation.
+        msg: Box<SpcEmptyViewMsg>,
     },
 
     /// A beacon block arrived via gossip.

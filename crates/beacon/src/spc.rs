@@ -47,8 +47,8 @@ use hyperscale_types::{
     Bls12381G1PrivateKey, Bls12381G1PublicKey, Bls12381G2Signature, DOMAIN_PC_EMPTY_VIEW, Epoch,
     Hash, NetworkDefinition, PC_VALUE_ELEMENT_BYTES, PcQc1, PcQc2, PcQc3, PcValueElement, PcVector,
     PcVoteEquivocation, PcVoteMessage, PositionalBundle, SignerBitfield, SkipReport, SpcCert,
-    SpcContext, SpcEmptyViewMsg, SpcHighTriple, SpcMessage, SpcProposalObject, SpcView,
-    ValidatorId, aggregate_verify_bls_different_messages, pc_context, pc_vote_signing_message,
+    SpcContext, SpcEmptyViewMsg, SpcHighTriple, SpcProposalObject, SpcView, ValidatorId,
+    aggregate_verify_bls_different_messages, pc_context, pc_vote_signing_message,
 };
 
 use crate::pc::{PcEffect, PcEvent, PcInstance, verify_qc3};
@@ -732,26 +732,6 @@ pub enum SpcEvent {
         /// View whose timer fired.
         view: SpcView,
     },
-}
-
-impl SpcEvent {
-    /// Reconstruct a non-vote [`SpcEvent`] from a wire [`SpcMessage`]
-    /// and the transport-level sender id. Returns `None` for
-    /// [`SpcMessage::VpcMsg`] — PC votes flow through the coordinator's
-    /// async-verify path
-    /// ([`BeaconCoordinator::on_pc_vote_received`](crate::coordinator::BeaconCoordinator::on_pc_vote_received)),
-    /// not through this FSM-event constructor.
-    #[must_use]
-    pub fn from_message(msg: SpcMessage, from: ValidatorId) -> Option<Self> {
-        Some(match msg {
-            SpcMessage::VpcMsg(_) => return None,
-            SpcMessage::NewView { view, cert } => Self::NewViewVerified { from, view, cert },
-            SpcMessage::NewCommit { view, value, proof } => {
-                Self::NewCommitVerified { view, value, proof }
-            }
-            SpcMessage::EmptyView(msg) => Self::EmptyViewVerified(msg),
-        })
-    }
 }
 
 /// Per-view local state owned by [`SpcInstance`].
