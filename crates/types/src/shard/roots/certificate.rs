@@ -57,7 +57,6 @@ impl Verified<CertificateRoot> {
 /// `compute_merkle_root` of each underlying wave certificate's
 /// `receipt_hash`, in block order.
 impl Verify<&CertificateRootContext<'_>> for CertificateRoot {
-    type Augment = ();
     type Error = CertRootVerifyError;
 
     fn verify(&self, ctx: &CertificateRootContext<'_>) -> Result<Verified<Self>, Self::Error> {

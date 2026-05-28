@@ -85,7 +85,6 @@ impl Verified<TransactionRoot> {
 ///    contains the block's `validity_anchor` (the parent QC's
 ///    weighted timestamp).
 impl Verify<&TransactionRootContext<'_>> for TransactionRoot {
-    type Augment = ();
     type Error = TxRootVerifyError;
 
     fn verify(&self, ctx: &TransactionRootContext<'_>) -> Result<Verified<Self>, Self::Error> {

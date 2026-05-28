@@ -444,7 +444,6 @@ pub struct BlockHeaderParentQcMismatch;
 ///   (e.g. storage-recovery). Every call site carries a `// SAFETY:`
 ///   comment naming the trust source.
 impl Verify<()> for BlockHeader {
-    type Augment = ();
     type Error = BlockHeaderVerifyError;
 
     fn verify(&self, _ctx: ()) -> Result<Verified<Self>, Self::Error> {

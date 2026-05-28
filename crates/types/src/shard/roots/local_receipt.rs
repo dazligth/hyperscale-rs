@@ -55,7 +55,6 @@ impl Verified<LocalReceiptRoot> {
 /// `compute_merkle_root` of each receipt's `local_receipt_hash`, in
 /// block order.
 impl Verify<&LocalReceiptRootContext<'_>> for LocalReceiptRoot {
-    type Augment = ();
     type Error = LocalReceiptRootVerifyError;
 
     fn verify(&self, ctx: &LocalReceiptRootContext<'_>) -> Result<Verified<Self>, Self::Error> {

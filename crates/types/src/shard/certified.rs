@@ -392,8 +392,7 @@ impl Verified<CertifiedBlock> {
     /// [`Verified<CertifiedBlock>`] predicate.
     #[must_use]
     pub fn into_verified_parts(self) -> (Verified<Block>, Verified<QuorumCertificate>) {
-        let (cb, ()) = self.into_parts();
-        let CertifiedBlock { block, qc } = cb;
+        let CertifiedBlock { block, qc } = self.into_inner();
         let qc = match qc {
             Verifiable::Verified(v) => v,
             Verifiable::Unverified(_) => {

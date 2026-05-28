@@ -15,7 +15,7 @@ use hyperscale_types::{
     LocalReceiptRootVerifyError, PcQc3, PcVector, PcVoteMessage, ProvisionRootVerifyError,
     ProvisionTxRootsMap, ProvisionTxRootsVerifyError, Provisions, ProvisionsRoot, QcVerifyError,
     QuorumCertificate, ReadySignal, Round, RoutableTransaction, ShardGroupId, ShardWitness,
-    SkipEpochCert, SkipRequest, SpcCert, SpcEmptyViewMsg, SpcView, StateRootVerifyError,
+    SkipEpochCert, SkipRequest, SpcCert, SpcEmptyViewMsg, SpcView, StateRoot, StateRootVerifyError,
     StoredReceipt, TransactionRoot, TxOutcome, TxRootVerifyError, ValidatorId, Verifiable,
     Verified, VotePower, WaveId, WeightedTimestamp,
 };
@@ -270,16 +270,16 @@ pub enum ProtocolEvent {
 
     /// State-root verification completed for a pending block.
     ///
-    /// The verified state root carries a `PreparedCommit` byproduct
-    /// that the commit pipeline needs; on success the action handler
-    /// side-channels that handle via `ActionContext::commit_prepared`
-    /// before emitting this event. The event payload carries only
-    /// success/failure of the JMT-replay check.
+    /// On success the action handler also routes the JMT replay's
+    /// `PreparedCommit` byproduct to the commit pipeline via
+    /// `ActionContext::commit_prepared`. That closure is vnode-private
+    /// `IoLoop` pipeline data — it doesn't belong on the fan-out
+    /// `ProtocolEvent` channel.
     StateRootVerified {
         /// Block whose root was verified.
         block_hash: BlockHash,
         /// Typed verification result.
-        result: Result<(), StateRootVerifyError>,
+        result: Result<Verified<StateRoot>, StateRootVerifyError>,
     },
 
     /// Proposal block built by the runner.

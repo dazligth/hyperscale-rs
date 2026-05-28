@@ -103,7 +103,6 @@ impl Verified<ProvisionTxRootsMap> {
 /// [`Verified::<ProvisionTxRootsMap>::compute`] of the block's
 /// transactions under the supplied topology.
 impl Verify<&ProvisionTxRootsContext<'_>> for ProvisionTxRootsMap {
-    type Augment = ();
     type Error = ProvisionTxRootsVerifyError;
 
     fn verify(&self, ctx: &ProvisionTxRootsContext<'_>) -> Result<Verified<Self>, Self::Error> {

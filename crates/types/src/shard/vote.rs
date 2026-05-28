@@ -191,7 +191,6 @@ pub enum BlockVoteVerifyError {
 /// - [`Verified::<BlockVote>::sign_local`] — signs a fresh vote with
 ///   the caller's key; the act of signing is the predicate witness.
 impl Verify<&BlockVoteContext<'_>> for BlockVote {
-    type Augment = ();
     type Error = BlockVoteVerifyError;
 
     fn verify(&self, ctx: &BlockVoteContext<'_>) -> Result<Verified<Self>, Self::Error> {

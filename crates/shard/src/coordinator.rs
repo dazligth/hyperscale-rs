@@ -1930,16 +1930,17 @@ impl ShardCoordinator {
 
     /// Handle a completed state-root verification. The `PreparedCommit`
     /// byproduct was already side-channelled inside the action handler;
-    /// the result here just signals success or failure of the JMT replay.
+    /// the verified handle here signals success or failure of the JMT replay.
     pub fn on_state_root_verified(
         &mut self,
         topology_snapshot: &TopologySnapshot,
         block_hash: BlockHash,
-        result: Result<(), StateRootVerifyError>,
+        result: Result<Verified<StateRoot>, StateRootVerifyError>,
     ) -> Vec<Action> {
         let valid = result.is_ok();
-        if result.is_ok() {
-            self.verification.record_state_root_result(block_hash);
+        if let Ok(verified) = result {
+            self.verification
+                .record_state_root_result(block_hash, verified);
         }
         self.on_root_verified_impl(
             topology_snapshot,
@@ -3974,7 +3975,13 @@ mod tests {
         );
 
         // State root completes — beacon witness root still pending.
-        let after_state = state.on_state_root_verified(&topology, block_hash, Ok(()));
+        let after_state = state.on_state_root_verified(
+            &topology,
+            block_hash,
+            Ok(Verified::<StateRoot>::new_unchecked_for_test(
+                StateRoot::ZERO,
+            )),
+        );
         assert!(
             !after_state
                 .iter()

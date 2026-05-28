@@ -82,7 +82,6 @@ pub enum SignedVerifyError {
 }
 
 impl<T: Signed + Clone> Verify<&SignedContext<'_>> for T {
-    type Augment = ();
     type Error = SignedVerifyError;
 
     fn verify(&self, ctx: &SignedContext<'_>) -> Result<Verified<Self>, Self::Error> {

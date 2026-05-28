@@ -334,7 +334,6 @@ pub enum RoutableTransactionVerifyError {
 ///   persistence; equivalent-attestation paths). Every call site
 ///   carries a `// SAFETY:` comment naming the trust source.
 impl Verify<&RoutableTransactionContext<'_>> for RoutableTransaction {
-    type Augment = ();
     type Error = RoutableTransactionVerifyError;
 
     fn verify(&self, ctx: &RoutableTransactionContext<'_>) -> Result<Verified<Self>, Self::Error> {

@@ -196,10 +196,8 @@ pub struct PendingAssembly {
     pub provision_tx_roots_result: Option<Verified<ProvisionTxRootsMap>>,
     /// Beacon-witness-root verification outcome.
     pub beacon_witness_root_result: Option<Verified<BeaconWitnessRoot>>,
-    /// State-root verification outcome. State-root's verified value
-    /// carries a `PreparedCommit` byproduct that the action handler
-    /// already side-channelled, so the slot only tracks success.
-    pub state_root_result: Option<()>,
+    /// State-root verification outcome.
+    pub state_root_result: Option<Verified<StateRoot>>,
 }
 
 impl PendingAssembly {
@@ -502,7 +500,8 @@ impl VerificationPipeline {
         let beacon_witness_root_result = beacon_done.then(|| {
             Verified::<BeaconWitnessRoot>::from_pipeline_attestation(h.beacon_witness_root())
         });
-        let state_root_result = state_done.then_some(());
+        let state_root_result =
+            state_done.then(|| Verified::<StateRoot>::from_pipeline_attestation(h.state_root()));
 
         self.pending_assemblies.insert(
             block_hash,
@@ -608,9 +607,10 @@ impl VerificationPipeline {
     pub fn record_state_root_result(
         &mut self,
         block_hash: BlockHash,
+        verified: Verified<StateRoot>,
     ) -> Option<Result<Arc<Verified<CertifiedBlock>>, AssemblyError>> {
         let entry = self.pending_assemblies.get_mut(&block_hash)?;
-        entry.state_root_result = Some(());
+        entry.state_root_result = Some(verified);
         self.try_complete_assembly(block_hash)
     }
 
@@ -2136,7 +2136,10 @@ mod tests {
         // per-root setter (not from `record_qc_assembly`), proving either
         // path can be the trigger.
         let linked = vp
-            .record_state_root_result(block_hash)
+            .record_state_root_result(
+                block_hash,
+                Verified::<StateRoot>::new_unchecked_for_test(StateRoot::ZERO),
+            )
             .expect("completion fires when every slot is Some")
             .expect("linkage check passes for the matching qc.block_hash");
         assert_eq!(linked.qc().block_hash(), block_hash);
@@ -2190,6 +2193,12 @@ mod tests {
     #[test]
     fn record_root_assembly_returns_none_for_unknown_block() {
         let mut vp = VerificationPipeline::new(BlockHeight::GENESIS);
-        assert!(vp.record_state_root_result(bh(b"no-such-block")).is_none());
+        assert!(
+            vp.record_state_root_result(
+                bh(b"no-such-block"),
+                Verified::<StateRoot>::new_unchecked_for_test(StateRoot::ZERO),
+            )
+            .is_none()
+        );
     }
 }

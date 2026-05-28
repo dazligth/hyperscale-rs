@@ -50,7 +50,6 @@ impl Verified<ProvisionsRoot> {
 /// Construction asserts: the wrapped [`ProvisionsRoot`] equals
 /// `compute_merkle_root` of the batch hashes in block order.
 impl Verify<&ProvisionsRootContext<'_>> for ProvisionsRoot {
-    type Augment = ();
     type Error = ProvisionRootVerifyError;
 
     fn verify(&self, ctx: &ProvisionsRootContext<'_>) -> Result<Verified<Self>, Self::Error> {

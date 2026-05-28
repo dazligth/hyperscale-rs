@@ -584,39 +584,32 @@ where
                 &pending_snapshots,
                 None,
             );
-            let state_root_ctx = StateRootContext {
-                computed_root,
-                prepared,
-            };
-            let verify_result = expected_root.verify(state_root_ctx);
+            let verify_result = expected_root.verify(StateRootContext { computed_root });
             record_signature_verification_latency("state_root", start.elapsed().as_secs_f64());
-            let event_result = match verify_result {
-                Ok(verified) => {
-                    let (_, prepared) = verified.into_parts();
-                    (ctx.commit_prepared)(PreparedBlock {
-                        block_hash,
-                        parent_block_hash,
-                        block_height,
-                        prepared,
-                        jmt_snapshot,
-                        receipts: collect_finalized_receipts(&finalized_waves),
-                    });
-                    Ok(())
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        block_hash = ?block_hash,
-                        block_height = block_height.inner(),
-                        parent_block_height = parent_block_height.inner(),
-                        reason = %e,
-                        "State root verification FAILED"
-                    );
-                    Err(e)
-                }
-            };
+            if verify_result.is_ok() {
+                // SAFETY: `prepared` belongs to the same JMT replay that just
+                // produced the matching `computed_root` — only routed when
+                // verification succeeds.
+                (ctx.commit_prepared)(PreparedBlock {
+                    block_hash,
+                    parent_block_hash,
+                    block_height,
+                    prepared,
+                    jmt_snapshot,
+                    receipts: collect_finalized_receipts(&finalized_waves),
+                });
+            } else if let Err(e) = &verify_result {
+                tracing::warn!(
+                    block_hash = ?block_hash,
+                    block_height = block_height.inner(),
+                    parent_block_height = parent_block_height.inner(),
+                    reason = %e,
+                    "State root verification FAILED"
+                );
+            }
             ctx.notify_protocol(ProtocolEvent::StateRootVerified {
                 block_hash,
-                result: event_result,
+                result: verify_result,
             });
         }
 

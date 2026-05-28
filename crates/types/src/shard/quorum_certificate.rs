@@ -390,7 +390,6 @@ impl Verified<QuorumCertificate> {
 ///   persistence runs only after [`<QuorumCertificate as Verify>::verify`](Verify::verify)
 ///   accepted the QC at admission.
 impl Verify<&QcContext<'_>> for QuorumCertificate {
-    type Augment = ();
     type Error = QcVerifyError;
 
     fn verify(&self, ctx: &QcContext<'_>) -> Result<Verified<Self>, Self::Error> {

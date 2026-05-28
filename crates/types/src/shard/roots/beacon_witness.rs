@@ -145,7 +145,6 @@ impl Verified<BeaconWitnessRoot> {
 /// that equals the header's claimed [`BeaconWitnessRoot`] **and** a
 /// leaf count that equals the header's claimed count.
 impl Verify<&BeaconWitnessRootContext<'_>> for BeaconWitnessRoot {
-    type Augment = ();
     type Error = BeaconWitnessRootVerifyError;
 
     fn verify(&self, ctx: &BeaconWitnessRootContext<'_>) -> Result<Verified<Self>, Self::Error> {

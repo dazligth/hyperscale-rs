@@ -4,12 +4,12 @@
 //! against the JMT rooted at the parent's state root and comparing the
 //! resulting root against the header's claim. The JMT replay itself
 //! happens inside the storage backend's `prepare_block_commit`; the
-//! verifier here is a thin equality check that wraps the byproduct —
-//! the prepared-commit closure — into the augment slot.
+//! verifier here is a thin equality check.
 //!
-//! Its verified form is `Verified<StateRoot, PreparedCommit>` — holding
-//! one is type-level proof that the JMT was actually replayed, not just
-//! that the claim was trusted. Predicate at
+//! The replay's other byproduct — the [`PreparedCommit`] closure — is
+//! orthogonal `IoLoop` pipeline data, not part of the verification
+//! predicate. The action handler routes it through `commit_prepared`
+//! separately from the verified handle. Predicate at
 //! [`impl Verify<StateRootContext>`](Verify::verify) below.
 //!
 //! [`StateRoot`]: crate::StateRoot
@@ -17,25 +17,15 @@
 
 use thiserror::Error;
 
-use crate::{PreparedCommit, StateRoot, Verified, Verify};
+use crate::{StateRoot, Verified, Verify};
 
 /// Inputs the [`StateRoot`] verifier checks against.
-///
-/// Built by the action handler after calling the backend's
-/// `prepare_block_commit` — that call computes both the speculative
-/// root and the [`PreparedCommit`] closure; the handler packs them in
-/// here so the verifier can return either an error or the typed
-/// `Verified<StateRoot, PreparedCommit>` augment.
 ///
 /// [`StateRoot`]: crate::StateRoot
 pub struct StateRootContext {
     /// Root produced by replaying the block's finalized waves against
     /// the JMT.
     pub computed_root: StateRoot,
-    /// Closure carrying the precomputed commit work. Moves into the
-    /// augment slot on success; the action handler hands it to the
-    /// commit pipeline.
-    pub prepared: PreparedCommit,
 }
 
 /// Failure modes of [`StateRoot`] verification.
@@ -57,22 +47,30 @@ pub enum StateRootVerifyError {
     },
 }
 
+impl Verified<StateRoot> {
+    /// Pipeline-attestation gate for slot prefill. The trust source is
+    /// the verification pipeline's per-root tracking: an earlier verifier
+    /// run already accepted `root` (success path of
+    /// [`<StateRoot as Verify>::verify`](Verify::verify)).
+    #[must_use]
+    pub const fn from_pipeline_attestation(root: StateRoot) -> Self {
+        Self::new_unchecked(root)
+    }
+}
+
 /// Construction asserts: the supplied `computed_root` (produced by
 /// replaying the block's finalized waves against the JMT rooted at the
-/// parent's state root) equals the wrapped [`StateRoot`]. The augment
-/// carries the [`PreparedCommit`] closure from that replay, ready for
-/// the commit pipeline to invoke without recomputing.
+/// parent's state root) equals the wrapped [`StateRoot`].
 impl Verify<StateRootContext> for StateRoot {
-    type Augment = PreparedCommit;
     type Error = StateRootVerifyError;
 
-    fn verify(&self, ctx: StateRootContext) -> Result<Verified<Self, Self::Augment>, Self::Error> {
+    fn verify(&self, ctx: StateRootContext) -> Result<Verified<Self>, Self::Error> {
         if ctx.computed_root != *self {
             return Err(StateRootVerifyError::Mismatch {
                 expected: *self,
                 computed: ctx.computed_root,
             });
         }
-        Ok(Verified::new_unchecked_with(*self, ctx.prepared))
+        Ok(Verified::new_unchecked(*self))
     }
 }
