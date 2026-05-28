@@ -22,10 +22,10 @@ use crate::{StateRoot, Verified, Verify};
 /// Inputs the [`StateRoot`] verifier checks against.
 ///
 /// [`StateRoot`]: crate::StateRoot
-pub struct StateRootContext {
+pub struct StateRootContext<'a> {
     /// Root produced by replaying the block's finalized waves against
     /// the JMT.
-    pub computed_root: StateRoot,
+    pub computed_root: &'a StateRoot,
 }
 
 /// Failure modes of [`StateRoot`] verification.
@@ -61,14 +61,14 @@ impl Verified<StateRoot> {
 /// Construction asserts: the supplied `computed_root` (produced by
 /// replaying the block's finalized waves against the JMT rooted at the
 /// parent's state root) equals the wrapped [`StateRoot`].
-impl Verify<StateRootContext> for StateRoot {
+impl Verify<&StateRootContext<'_>> for StateRoot {
     type Error = StateRootVerifyError;
 
-    fn verify(&self, ctx: StateRootContext) -> Result<Verified<Self>, Self::Error> {
-        if ctx.computed_root != *self {
+    fn verify(&self, ctx: &StateRootContext<'_>) -> Result<Verified<Self>, Self::Error> {
+        if *ctx.computed_root != *self {
             return Err(StateRootVerifyError::Mismatch {
                 expected: *self,
-                computed: ctx.computed_root,
+                computed: *ctx.computed_root,
             });
         }
         Ok(Verified::new_unchecked(*self))

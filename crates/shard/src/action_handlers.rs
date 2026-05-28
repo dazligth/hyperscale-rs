@@ -584,7 +584,9 @@ where
                 &pending_snapshots,
                 None,
             );
-            let verify_result = expected_root.verify(StateRootContext { computed_root });
+            let verify_result = expected_root.verify(&StateRootContext {
+                computed_root: &computed_root,
+            });
             record_signature_verification_latency("state_root", start.elapsed().as_secs_f64());
             if verify_result.is_ok() {
                 // SAFETY: `prepared` belongs to the same JMT replay that just
