@@ -265,7 +265,7 @@ impl FetchBinding for LocalProvisionBinding {
                         push_protocol_event(
                             &es,
                             local_shard,
-                            ProtocolEvent::ProvisionsReceived {
+                            ProtocolEvent::UnverifiedProvisionsReceived {
                                 provisions: entry.provisions,
                             },
                         );
@@ -542,7 +542,7 @@ impl FetchBinding for ProvisionBinding {
                 push_protocol_event(
                     &es,
                     local_shard,
-                    ProtocolEvent::ProvisionsReceived { provisions },
+                    ProtocolEvent::UnverifiedProvisionsReceived { provisions },
                 );
                 ResponseVerdict::Accept
             }),
@@ -636,7 +636,7 @@ mod tests {
     #[test]
     fn partition_filters_unsolicited_local_provisions() {
         // The LocalProvisionBinding admits each kept item as a separate
-        // ProvisionsReceived event, which buffers in the provision pipeline
+        // UnverifiedProvisionsReceived event, which buffers in the provision pipeline
         // before signature/merkle verification — so unsolicited deliveries
         // must be dropped at the response boundary.
         use hyperscale_types::{

@@ -18,8 +18,8 @@ use hyperscale_network::Network;
 use hyperscale_storage::{ShardStorage, SubstateStore, SubstateView, VersionedStore};
 use hyperscale_types::network::notification::ProvisionsNotification;
 use hyperscale_types::{
-    BlockHeight, Provisions, ProvisionsContext, ShardGroupId, ValidatorId, Verify,
-    state_provisions_message,
+    BlockHeight, Provisions, ProvisionsContext, ShardGroupId, ValidatorId, Verifiable, Verified,
+    Verify, state_provisions_message,
 };
 use tracing::warn;
 
@@ -124,6 +124,18 @@ where
             );
             let validator_id = ctx.topology_snapshot.local_validator_id();
             for (provisions, recipients) in batches {
+                // Provisions built from the local JMT view satisfy their
+                // own merkle-proof predicate by construction; wrap as
+                // `Verified` so the local-dispatch fast path can let a
+                // colocated target-shard vnode admit without re-running
+                // `Action::VerifyProvisions`.
+                let verified = Arc::new(Verified::<Provisions>::from_local(Arc::unwrap_or_clone(
+                    provisions,
+                )));
+
+                let msg = state_provisions_message(ctx.topology_snapshot.network(), &verified);
+                let sig = ctx.signing_key.sign_v1(&msg);
+
                 // Register with the outbound tracker (populates the
                 // serving cache) on the main thread. A peer's
                 // provision.request that arrives between this notify and
@@ -131,14 +143,15 @@ where
                 // either hit RocksDB regen (post-persist) or trigger a
                 // fetch retry (pre-persist) — recoverable both ways.
                 ctx.notify_protocol(ProtocolEvent::OutboundProvisionBroadcast {
-                    provisions: Arc::clone(&provisions),
-                    target_shard: provisions.target_shard(),
+                    provisions: Arc::clone(&verified),
+                    target_shard: verified.target_shard(),
                 });
 
-                let msg = state_provisions_message(ctx.topology_snapshot.network(), &provisions);
-                let sig = ctx.signing_key.sign_v1(&msg);
-                let notification =
-                    ProvisionsNotification::new(Arc::clone(&provisions), validator_id, sig);
+                let notification = ProvisionsNotification::new(
+                    Arc::new(Verifiable::from((*verified).clone())),
+                    validator_id,
+                    sig,
+                );
                 ctx.network.notify(&recipients, &notification);
             }
         }

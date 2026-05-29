@@ -321,13 +321,29 @@ pub enum ProtocolEvent {
     // ═══════════════════════════════════════════════════════════════════════
     // Provision
     // ═══════════════════════════════════════════════════════════════════════
-    /// Received provisions from a source shard (light-client path).
+    /// Received provisions from a source shard whose merkle proof still
+    /// needs to be checked. Produced by the gossip handler (wire decode
+    /// always lands in [`Verifiable::Unverified`]) and by fetch-response
+    /// drains.
     ///
     /// All transactions share the same `(source_shard, block_height)`
     /// because they originate from a single `FetchAndBroadcastProvisions` action.
-    ProvisionsReceived {
+    UnverifiedProvisionsReceived {
         /// Provisions batch received from a source shard.
         provisions: Arc<Provisions>,
+    },
+
+    /// Received provisions whose merkle proof predicate already holds —
+    /// produced only by the local-dispatch fast path when a colocated
+    /// source-shard vnode emits a notification carrying
+    /// [`Verifiable::Verified`]. The recipient skips
+    /// [`Action::VerifyProvisions`] and admits directly.
+    ///
+    /// [`Action::VerifyProvisions`]: crate::Action::VerifyProvisions
+    VerifiedProvisionsReceived {
+        /// Verified provisions batch sealed via
+        /// [`Verified::<Provisions>::from_local`].
+        provisions: Arc<Verified<Provisions>>,
     },
 
     /// Batch-level provision verification completed.
@@ -363,8 +379,10 @@ pub enum ProtocolEvent {
     /// (and served from cache) until the target shard's execution
     /// certificates acknowledge every transaction in them.
     OutboundProvisionBroadcast {
-        /// Provisions batch we just broadcast.
-        provisions: Arc<Provisions>,
+        /// Provisions batch we just broadcast. Wrapped as `Verified` —
+        /// the emitter built the bundle from a local JMT view so the
+        /// merkle-proof predicate holds by construction.
+        provisions: Arc<Verified<Provisions>>,
         /// Shard the batch was broadcast to.
         target_shard: ShardGroupId,
     },

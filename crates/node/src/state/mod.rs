@@ -243,7 +243,8 @@ impl StateMachine for NodeStateMachine {
             | ProtocolEvent::ReadySignalReceived { .. }) => self.handle_shard(evt),
 
             // ── Provisions ───────────────────────────────────────────────
-            evt @ (ProtocolEvent::ProvisionsReceived { .. }
+            evt @ (ProtocolEvent::VerifiedProvisionsReceived { .. }
+            | ProtocolEvent::UnverifiedProvisionsReceived { .. }
             | ProtocolEvent::StateProvisionsVerified { .. }
             | ProtocolEvent::ProvisionsAdmitted { .. }
             | ProtocolEvent::OutboundProvisionBroadcast { .. }

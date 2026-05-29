@@ -596,7 +596,7 @@ mod tests {
 
         // Register an outbound batch (local shard 0 → remote shard 1).
         // Deadline = self.now (ZERO) + RETENTION_HORIZON ≈ 5m24s.
-        let provisions = Arc::new(Provisions::new(
+        let provisions = Arc::new(Verified::new_unchecked_for_test(Provisions::new(
             ShardGroupId::new(0),
             ShardGroupId::new(1),
             BlockHeight::new(1),
@@ -607,7 +607,7 @@ mod tests {
                 vec![],
                 vec![],
             )],
-        ));
+        )));
         let _ = node.handle(
             LocalTimestamp::ZERO,
             ProtocolEvent::OutboundProvisionBroadcast {

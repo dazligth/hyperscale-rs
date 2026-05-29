@@ -6,7 +6,7 @@ use sbor::prelude::BasicSbor;
 
 use crate::{
     Bls12381G2Signature, MessageClass, NetworkDefinition, NetworkMessage, Provisions, Signed,
-    ValidatorId, state_provisions_message,
+    ValidatorId, Verifiable, state_provisions_message,
 };
 
 /// Cross-shard state provisions for one (`source_block`, `target_shard`) pair.
@@ -17,7 +17,10 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
 pub struct ProvisionsNotification {
     /// The provisions bundle being sent (one bundle per target shard).
-    pub provisions: Arc<Provisions>,
+    /// Wire bytes always land in [`Verifiable::Unverified`];
+    /// local-dispatched sends from a colocated proposer preserve
+    /// [`Verifiable::Verified`].
+    pub provisions: Arc<Verifiable<Provisions>>,
     /// The validator who sent this notification.
     pub sender: ValidatorId,
     /// BLS signature over the domain-separated signing message, by the sender.
@@ -28,7 +31,7 @@ impl ProvisionsNotification {
     /// Create a new signed provisions notification.
     #[must_use]
     pub fn new(
-        provisions: impl Into<Arc<Provisions>>,
+        provisions: impl Into<Arc<Verifiable<Provisions>>>,
         sender: ValidatorId,
         sender_signature: Bls12381G2Signature,
     ) -> Self {
@@ -50,7 +53,7 @@ impl Signed for ProvisionsNotification {
     }
 
     fn signing_message(&self, network: &NetworkDefinition) -> Vec<u8> {
-        state_provisions_message(network, &self.provisions)
+        state_provisions_message(network, self.provisions.as_unverified())
     }
 }
 

@@ -21,7 +21,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use hyperscale_types::{
-    BlockHeight, ProvisionHash, Provisions, ShardGroupId, TxHash, TxOutcome, WeightedTimestamp,
+    BlockHeight, ProvisionHash, Provisions, ShardGroupId, TxHash, TxOutcome, Verified,
+    WeightedTimestamp,
 };
 use tracing::{debug, warn};
 
@@ -88,7 +89,16 @@ impl OutboundProvisionTracker {
     /// Register provisions our proposer just broadcast. Inserts into the
     /// shared store (which maintains the `(source_block, target)` index
     /// used by cross-shard fast-path serving); idempotent.
-    pub fn on_broadcast(&mut self, provisions: &Arc<Provisions>, target_shard: ShardGroupId) {
+    ///
+    /// Takes a `Verified` handle — the proposer built the bundle from a
+    /// local JMT view so the merkle predicate holds. The shared
+    /// [`ProvisionStore`] holds raw bodies (wire-serving doesn't carry
+    /// the marker), so the body is cloned once at the seam.
+    pub fn on_broadcast(
+        &mut self,
+        provisions: &Arc<Verified<Provisions>>,
+        target_shard: ShardGroupId,
+    ) {
         let provision_hash = provisions.hash();
         if self.entries.contains_key(&provision_hash) {
             return;
@@ -108,7 +118,7 @@ impl OutboundProvisionTracker {
         }
 
         self.store
-            .insert_outbound(Arc::clone(provisions), target_shard);
+            .insert_outbound(Arc::new((***provisions).clone()), target_shard);
 
         self.entries.insert(
             provision_hash,
@@ -243,18 +253,18 @@ mod tests {
         TxHash::from_raw(Hash::from_bytes(label))
     }
 
-    fn make_provisions(source_block: BlockHeight, txs: &[TxHash]) -> Arc<Provisions> {
+    fn make_provisions(source_block: BlockHeight, txs: &[TxHash]) -> Arc<Verified<Provisions>> {
         let transactions = txs
             .iter()
             .map(|h| ProvisionEntry::new(*h, vec![], vec![], vec![]))
             .collect();
-        Arc::new(Provisions::new(
+        Arc::new(Verified::new_unchecked_for_test(Provisions::new(
             ShardGroupId::new(0),
             ShardGroupId::new(1),
             source_block,
             MerkleInclusionProof::dummy(),
             transactions,
-        ))
+        )))
     }
 
     fn executed(tx_hash: TxHash) -> TxOutcome {

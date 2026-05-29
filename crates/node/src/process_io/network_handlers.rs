@@ -1,5 +1,7 @@
 //! Network handler registration (gossip, notifications, requests).
 
+use std::sync::Arc;
+
 use hyperscale_core::ProtocolEvent;
 use hyperscale_dispatch::Dispatch;
 use hyperscale_metrics::record_fetch_response_sent;
@@ -501,7 +503,14 @@ where
                 },
             );
 
-        // ── provisions.broadcast → verify sender sig, then ProtocolEvent::ProvisionsReceived ─
+        // ── provisions.broadcast → ProtocolEvent::{Verified,Unverified}ProvisionsReceived ─
+        //
+        // Wire decode lands the wrapper as `Verifiable::Unverified`;
+        // local-dispatched sends from a colocated source-shard proposer
+        // arrive already verified and skip the state machine's
+        // `Action::VerifyProvisions` dispatch. The verified arm also
+        // skips the envelope BLS check — same-process delivery means
+        // the sender is us, and sender identity is already implicit.
 
         let senders = self.process.shard_event_senders.clone();
         let topology = self.process.topology_snapshot.clone();
@@ -521,25 +530,33 @@ where
                         return;
                     };
 
-                    let topo = topology.load();
                     let source_shard = notification.provisions.source_shard();
-                    if !verify_signed_by_committee(
-                        &topo,
-                        source_shard,
-                        &notification,
-                        "state_provisions",
-                        "state provision",
-                    ) {
-                        return;
-                    }
-
-                    push_protocol_event(
-                        tx,
-                        target_shard,
-                        ProtocolEvent::ProvisionsReceived {
-                            provisions: notification.provisions,
-                        },
-                    );
+                    let event = if notification.provisions.is_verified() {
+                        let verified = Arc::unwrap_or_clone(notification.provisions)
+                            .into_verified()
+                            .unwrap_or_else(|_| {
+                                unreachable!("is_verified() guards the verified arm")
+                            });
+                        ProtocolEvent::VerifiedProvisionsReceived {
+                            provisions: Arc::new(verified),
+                        }
+                    } else {
+                        let topo = topology.load();
+                        if !verify_signed_by_committee(
+                            &topo,
+                            source_shard,
+                            &notification,
+                            "state_provisions",
+                            "state provision",
+                        ) {
+                            return;
+                        }
+                        let raw = Arc::unwrap_or_clone(notification.provisions).into_unverified();
+                        ProtocolEvent::UnverifiedProvisionsReceived {
+                            provisions: Arc::new(raw),
+                        }
+                    };
+                    push_protocol_event(tx, target_shard, event);
                 },
             );
 

@@ -434,6 +434,90 @@ impl ProvisionCoordinator {
     // State Provision Lifecycle
     // ═══════════════════════════════════════════════════════════════════════
 
+    /// Handle provisions that arrived already verified — emitted by a
+    /// colocated source-shard proposer through the local-dispatch fast
+    /// path (see [`ProtocolEvent::VerifiedProvisionsReceived`]). Applies
+    /// the same admission guards as the unverified path and, if the
+    /// matching remote header is present, admits the bundle directly
+    /// without dispatching [`Action::VerifyProvisions`].
+    ///
+    /// Fast-path is conditional on the remote header having reached the
+    /// verified state. When the header is still pending (race against
+    /// `Action::VerifyRemoteHeaderQc`), the bundle falls back to the raw
+    /// buffer and will re-run merkle verification once the header lands —
+    /// correct, but suboptimal until the parallel remote-header
+    /// preservation lands.
+    pub fn on_verified_state_provisions_received(
+        &mut self,
+        topology: &TopologySnapshot,
+        provisions: Arc<Verified<Provisions>>,
+        now: LocalTimestamp,
+    ) -> Vec<Action> {
+        if provisions.transactions().is_empty() {
+            return vec![];
+        }
+
+        let source_shard = provisions.source_shard();
+        let block_height = provisions.block_height();
+
+        if source_shard == topology.local_shard() {
+            return vec![];
+        }
+
+        if provisions.target_shard() != topology.local_shard() {
+            warn!(
+                source_shard = source_shard.inner(),
+                target_shard = provisions.target_shard().inner(),
+                local_shard = topology.local_shard().inner(),
+                block_height = block_height.inner(),
+                "Dropping verified provisions: target_shard does not match local shard"
+            );
+            return vec![];
+        }
+
+        if self.committed_tombstones.contains(&provisions.hash()) {
+            return vec![];
+        }
+
+        if self.pipeline.has_verified(&provisions.hash()) {
+            return vec![];
+        }
+
+        let key = (source_shard, block_height);
+
+        if let Some(verified_header) = self.headers.get(key) {
+            let deadline = provisions.deadline(verified_header.qc().weighted_timestamp());
+            if deadline <= self.expected.local_ts() {
+                debug!(
+                    source_shard = source_shard.inner(),
+                    block_height = block_height.inner(),
+                    "Dropping verified provisions past deadline at receipt"
+                );
+                return vec![];
+            }
+            // Admit directly via the verified path; reuses the
+            // tombstone, queue, and `ProvisionsAdmitted` emission logic.
+            let header = Arc::clone(&verified_header);
+            return self.on_state_provisions_verified(Ok(provisions), &header, now);
+        }
+
+        // Header not yet verified — fall back to the raw buffer; the
+        // marker is dropped because the bundle will be re-verified
+        // once the header arrives. This is the rare race path.
+        debug!(
+            source_shard = source_shard.inner(),
+            block_height = block_height.inner(),
+            count = provisions.transactions().len(),
+            "Buffering verified provisions as raw (waiting for remote header)"
+        );
+        self.pipeline.buffer_pending(
+            key,
+            Arc::unwrap_or_clone(provisions).into_inner(),
+            self.expected.local_ts(),
+        );
+        vec![]
+    }
+
     /// Handle provisions received from a source shard proposer.
     ///
     /// All transactions in the entry share the same
