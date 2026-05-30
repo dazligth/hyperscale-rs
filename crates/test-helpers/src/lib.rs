@@ -189,11 +189,11 @@ impl TestCommittee {
     }
 
     /// Build a [`TopologySnapshot`] from this committee with uniform voting
-    /// power. `local_idx` picks which validator the snapshot represents;
-    /// `num_shards` sets the shard count for tx routing. Network defaults
-    /// to [`NetworkDefinition::simulator`].
+    /// power. `num_shards` sets the shard count for tx routing. Network
+    /// defaults to [`NetworkDefinition::simulator`]. Identity-agnostic —
+    /// callers carry their own `(me, shard)`.
     #[must_use]
-    pub fn topology_snapshot(&self, local_idx: usize, num_shards: u64) -> TopologySnapshot {
+    pub fn topology_snapshot(&self, num_shards: u64) -> TopologySnapshot {
         let validators: Vec<ValidatorInfo> = (0..self.size())
             .map(|i| ValidatorInfo {
                 validator_id: self.validator_id(i),
@@ -202,12 +202,7 @@ impl TestCommittee {
             })
             .collect();
         let validator_set = ValidatorSet::new(validators);
-        TopologySnapshot::new(
-            NetworkDefinition::simulator(),
-            self.validator_id(local_idx),
-            num_shards,
-            validator_set,
-        )
+        TopologySnapshot::new(NetworkDefinition::simulator(), num_shards, validator_set)
     }
 }
 

@@ -180,7 +180,7 @@ where
             state_root: _,
         } => {
             let start = std::time::Instant::now();
-            let local_shard = ctx.topology_snapshot.local_shard();
+            let local_shard = ctx.shard;
             let num_shards = ctx.topology_snapshot.num_shards();
             let view = ctx.pending_chain.view_at(block_hash, block_height);
             let view_snap = <SubstateView<_> as SubstateStore>::snapshot(&*view);
@@ -228,7 +228,7 @@ where
             requests,
         } => {
             let start = std::time::Instant::now();
-            let local_shard = ctx.topology_snapshot.local_shard();
+            let local_shard = ctx.shard;
             let num_shards = ctx.topology_snapshot.num_shards();
             let view = ctx.pending_chain.view_at(block_hash, block_height);
             let view_snap = <SubstateView<_> as SubstateStore>::snapshot(&*view);
@@ -317,8 +317,8 @@ where
             tx_outcomes,
             leader,
         } => {
-            let local_shard = ctx.topology_snapshot.local_shard();
-            let validator_id = ctx.topology_snapshot.local_validator_id();
+            let local_shard = ctx.shard;
+            let validator_id = ctx.me;
             let network = ctx.topology_snapshot.network();
 
             let verified = Verified::<ExecutionVote>::sign_local(
@@ -369,11 +369,7 @@ where
                 std::slice::from_ref(&cert),
             );
             let sig = ctx.signing_key.sign_v1(&msg);
-            let batch = ExecutionCertificatesNotification::new(
-                vec![cert],
-                ctx.topology_snapshot.local_validator_id(),
-                sig,
-            );
+            let batch = ExecutionCertificatesNotification::new(vec![cert], ctx.me, sig);
             ctx.network.notify(&recipients, &batch);
         }
 

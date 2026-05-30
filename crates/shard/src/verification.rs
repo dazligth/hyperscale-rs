@@ -17,8 +17,8 @@ use hyperscale_types::BeaconWitnessLeafCount;
 use hyperscale_types::{
     BeaconWitnessRoot, Block, BlockHash, BlockHeader, BlockHeight, BlockManifest, CertificateRoot,
     CertifiedBlock, FinalizedWave, InFlightCount, LinkageError, LocalReceiptRoot,
-    ProvisionTxRootsMap, ProvisionsRoot, QuorumCertificate, StateRoot, TopologySnapshot,
-    TransactionRoot, Verifiable, Verified, VerifiedBlockAssembleError,
+    ProvisionTxRootsMap, ProvisionsRoot, QuorumCertificate, ShardGroupId, StateRoot,
+    TopologySnapshot, TransactionRoot, Verifiable, Verified, VerifiedBlockAssembleError,
 };
 use thiserror::Error;
 use tracing::{debug, trace, warn};
@@ -1167,6 +1167,7 @@ impl VerificationPipeline {
     /// ancestor's own beacon-witness verification completes, or via
     /// [`Self::take_committed_beacon_witness_children`] when it
     /// commits.
+    #[allow(clippy::too_many_arguments)] // beacon-witness verification needs the chain prefix
     pub(crate) fn initiate_beacon_witness_root_verification(
         &mut self,
         block_hash: BlockHash,
@@ -1174,6 +1175,7 @@ impl VerificationPipeline {
         pending_blocks: &PendingBlocks,
         accumulator: &BeaconWitnessAccumulator,
         committed_hash: BlockHash,
+        local_shard: ShardGroupId,
         topology: &TopologySnapshot,
     ) -> Vec<Action> {
         let header = block.header();
@@ -1182,6 +1184,7 @@ impl VerificationPipeline {
             committed_hash,
             header.parent_block_hash(),
             pending_blocks,
+            local_shard,
             topology,
         ) {
             Ok(leaves) => leaves,
@@ -1284,9 +1287,11 @@ impl VerificationPipeline {
     /// so the beacon-witness initiator can resolve `parent_witness_leaves`
     /// by walking the pending chain — beacon-witness is the only root
     /// verifier whose inputs span the in-flight chain prefix.
+    #[allow(clippy::too_many_arguments)] // single dispatch over six per-root sub-verifications
     pub(crate) fn initiate_block_verifications(
         &mut self,
         topology: &TopologySnapshot,
+        local_shard: ShardGroupId,
         pending_blocks: &PendingBlocks,
         accumulator: &BeaconWitnessAccumulator,
         committed_hash: BlockHash,
@@ -1348,6 +1353,7 @@ impl VerificationPipeline {
                 pending_blocks,
                 accumulator,
                 committed_hash,
+                local_shard,
                 topology,
             ));
         }
@@ -1976,7 +1982,7 @@ mod tests {
         use crate::beacon_witnesses::BeaconWitnessAccumulator;
 
         let mut vp = VerificationPipeline::new(BlockHeight::GENESIS);
-        let topology = TestCommittee::new(4, 7).topology_snapshot(0, 1);
+        let topology = TestCommittee::new(4, 7).topology_snapshot(1);
         let accumulator = BeaconWitnessAccumulator::new();
         let pending = PendingBlocks::new();
 
@@ -1991,6 +1997,7 @@ mod tests {
             &pending,
             &accumulator,
             BlockHash::ZERO,
+            ShardGroupId::new(0),
             &topology,
         );
 
@@ -2013,7 +2020,7 @@ mod tests {
         use crate::beacon_witnesses::BeaconWitnessAccumulator;
 
         let mut vp = VerificationPipeline::new(BlockHeight::GENESIS);
-        let topology = TestCommittee::new(4, 7).topology_snapshot(0, 1);
+        let topology = TestCommittee::new(4, 7).topology_snapshot(1);
         let accumulator = BeaconWitnessAccumulator::new();
         let pending = PendingBlocks::new();
         let parent_block_hash = bh(b"missing-parent");
@@ -2030,6 +2037,7 @@ mod tests {
                 &pending,
                 &accumulator,
                 BlockHash::ZERO,
+                ShardGroupId::new(0),
                 &topology,
             );
         }
@@ -2056,7 +2064,7 @@ mod tests {
         use crate::beacon_witnesses::BeaconWitnessAccumulator;
 
         let mut vp = VerificationPipeline::new(BlockHeight::GENESIS);
-        let topology = TestCommittee::new(4, 7).topology_snapshot(0, 1);
+        let topology = TestCommittee::new(4, 7).topology_snapshot(1);
         let accumulator = BeaconWitnessAccumulator::new();
         let pending = PendingBlocks::new();
         let parent_block_hash = bh(b"to-fail");
@@ -2069,6 +2077,7 @@ mod tests {
             &pending,
             &accumulator,
             BlockHash::ZERO,
+            ShardGroupId::new(0),
             &topology,
         );
         assert!(vp.is_beacon_witness_deferred(child_hash));

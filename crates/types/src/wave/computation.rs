@@ -22,11 +22,11 @@ use crate::{
 /// Used in both block proposal (to populate `BlockHeader::waves`) and
 /// validation (to verify the header's waves field).
 pub fn compute_waves(
+    local_shard: ShardGroupId,
     topology: &TopologySnapshot,
     block_height: BlockHeight,
     transactions: &[Arc<Verifiable<RoutableTransaction>>],
 ) -> Vec<WaveId> {
-    let local_shard = topology.local_shard();
     let mut remote_shard_sets: BTreeSet<BTreeSet<ShardGroupId>> = BTreeSet::new();
 
     for tx in transactions {

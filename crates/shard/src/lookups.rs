@@ -6,7 +6,7 @@
 //! full driver fixture.
 
 use hyperscale_types::{
-    BlockHeight, Bls12381G1PublicKey, Round, TopologySnapshot, ValidatorId, VotePower,
+    BlockHeight, Bls12381G1PublicKey, Round, ShardGroupId, TopologySnapshot, ValidatorId, VotePower,
 };
 use tracing::warn;
 
@@ -22,23 +22,24 @@ use tracing::warn;
 /// the QC on view change without re-collection.
 pub fn vote_recipients(
     topology: &TopologySnapshot,
+    shard: ShardGroupId,
+    me: ValidatorId,
     height: BlockHeight,
     round: Round,
 ) -> Vec<ValidatorId> {
     const K: usize = 2;
-    let committee_len = topology.local_committee().len();
-    let self_id = topology.local_validator_id();
+    let committee_len = topology.committee_for_shard(shard).len();
     let mut recipients = Vec::with_capacity(K + 1);
 
-    let block_proposer = topology.proposer_for(height, round);
-    if block_proposer != self_id {
+    let block_proposer = topology.proposer_for(shard, height, round);
+    if block_proposer != me {
         recipients.push(block_proposer);
     }
 
     let mut next_count = 0;
     for offset in 0..committee_len as u64 {
-        let proposer = topology.proposer_for(height.next(), round + offset);
-        if proposer != self_id && !recipients.contains(&proposer) {
+        let proposer = topology.proposer_for(shard, height.next(), round + offset);
+        if proposer != me && !recipients.contains(&proposer) {
             recipients.push(proposer);
             next_count += 1;
             if next_count >= K {
@@ -58,20 +59,18 @@ pub fn vote_recipients(
 ///
 /// Returns `None` if any committee index fails to resolve to a public key
 /// — a topology corruption indicating the snapshot is unsafe to use.
-pub fn committee_public_keys(topology: &TopologySnapshot) -> Option<Vec<Bls12381G1PublicKey>> {
-    let committee_size = topology.local_committee_size();
-    let mut pubkeys = Vec::with_capacity(committee_size);
+pub fn committee_public_keys(
+    topology: &TopologySnapshot,
+    shard: ShardGroupId,
+) -> Option<Vec<Bls12381G1PublicKey>> {
+    let committee = topology.committee_for_shard(shard);
+    let mut pubkeys = Vec::with_capacity(committee.len());
 
-    for idx in 0..committee_size {
-        if let Some(validator_id) = topology.local_validator_at_index(idx) {
-            if let Some(pk) = topology.public_key(validator_id) {
-                pubkeys.push(pk);
-            } else {
-                warn!(validator_id = ?validator_id, "Missing public key for committee member");
-                return None;
-            }
+    for &validator_id in committee {
+        if let Some(pk) = topology.public_key(validator_id) {
+            pubkeys.push(pk);
         } else {
-            warn!(idx, "Invalid committee index");
+            warn!(validator_id = ?validator_id, "Missing public key for committee member");
             return None;
         }
     }
@@ -84,15 +83,14 @@ pub fn committee_public_keys(topology: &TopologySnapshot) -> Option<Vec<Bls12381
 ///
 /// Returns `None` if any committee index fails to resolve — same failure
 /// semantics as the public-key lookup.
-pub fn committee_voting_powers(topology: &TopologySnapshot) -> Option<Vec<VotePower>> {
-    let committee_size = topology.local_committee_size();
-    let mut powers = Vec::with_capacity(committee_size);
+pub fn committee_voting_powers(
+    topology: &TopologySnapshot,
+    shard: ShardGroupId,
+) -> Option<Vec<VotePower>> {
+    let committee = topology.committee_for_shard(shard);
+    let mut powers = Vec::with_capacity(committee.len());
 
-    for idx in 0..committee_size {
-        let Some(validator_id) = topology.local_validator_at_index(idx) else {
-            warn!(idx, "Invalid committee index for voting power lookup");
-            return None;
-        };
+    for &validator_id in committee {
         let Some(power) = topology.voting_power(validator_id) else {
             warn!(validator_id = ?validator_id, "Missing voting power for committee member");
             return None;
@@ -110,7 +108,7 @@ mod tests {
 
     use super::*;
 
-    fn topology_for(local_idx: usize, committee: &TestCommittee) -> TopologySnapshot {
+    fn topology_for(committee: &TestCommittee) -> TopologySnapshot {
         let validators: Vec<ValidatorInfo> = (0..committee.size())
             .map(|i| ValidatorInfo {
                 validator_id: committee.validator_id(i),
@@ -119,12 +117,7 @@ mod tests {
             })
             .collect();
         let validator_set = ValidatorSet::new(validators);
-        TopologySnapshot::new(
-            NetworkDefinition::simulator(),
-            committee.validator_id(local_idx),
-            1,
-            validator_set,
-        )
+        TopologySnapshot::new(NetworkDefinition::simulator(), 1, validator_set)
     }
 
     // ─── vote_recipients ────────────────────────────────────────────────
@@ -133,13 +126,15 @@ mod tests {
     fn vote_recipients_targets_next_proposers() {
         // 4 validators, self = V0. Proposer formula: committee[(height + round) % 4].
         let committee = TestCommittee::new(4, 42);
-        let topology = topology_for(0, &committee);
+        let topology = topology_for(&committee);
+        let me = committee.validator_id(0);
+        let shard = ShardGroupId::new(0);
 
         // Voting at (0, 0):
         //   Block proposer: (0+0)%4 = V0 (self, skipped)
         //   Next proposers for height 1: V1 (round 0), V2 (round 1)
         assert_eq!(
-            vote_recipients(&topology, BlockHeight::new(0), Round::new(0)),
+            vote_recipients(&topology, shard, me, BlockHeight::new(0), Round::new(0)),
             vec![ValidatorId::new(1), ValidatorId::new(2)]
         );
 
@@ -147,7 +142,7 @@ mod tests {
         //   Block proposer: V1 (included)
         //   Next proposers: V2 (round 0), V3 (round 1)
         assert_eq!(
-            vote_recipients(&topology, BlockHeight::new(1), Round::new(0)),
+            vote_recipients(&topology, shard, me, BlockHeight::new(1), Round::new(0)),
             vec![
                 ValidatorId::new(1),
                 ValidatorId::new(2),
@@ -162,9 +157,11 @@ mod tests {
         //   Block proposer: V3
         //   Next proposers: V0 (self, skipped), V1, V2
         let committee = TestCommittee::new(4, 42);
-        let topology = topology_for(0, &committee);
+        let topology = topology_for(&committee);
+        let me = committee.validator_id(0);
+        let shard = ShardGroupId::new(0);
         assert_eq!(
-            vote_recipients(&topology, BlockHeight::new(3), Round::new(0)),
+            vote_recipients(&topology, shard, me, BlockHeight::new(3), Round::new(0)),
             vec![
                 ValidatorId::new(3),
                 ValidatorId::new(1),
@@ -179,9 +176,11 @@ mod tests {
         //   Block proposer: (0+2)%4 = V2
         //   Next proposers: V3 (round 2), V0 (self, skipped), V1 (round 4)
         let committee = TestCommittee::new(4, 42);
-        let topology = topology_for(0, &committee);
+        let topology = topology_for(&committee);
+        let me = committee.validator_id(0);
+        let shard = ShardGroupId::new(0);
         assert_eq!(
-            vote_recipients(&topology, BlockHeight::new(0), Round::new(2)),
+            vote_recipients(&topology, shard, me, BlockHeight::new(0), Round::new(2)),
             vec![
                 ValidatorId::new(2),
                 ValidatorId::new(3),
@@ -193,8 +192,12 @@ mod tests {
     #[test]
     fn vote_recipients_empty_when_solo_validator() {
         let committee = TestCommittee::new(1, 42);
-        let topology = topology_for(0, &committee);
-        assert!(vote_recipients(&topology, BlockHeight::new(0), Round::new(0)).is_empty());
+        let topology = topology_for(&committee);
+        let me = committee.validator_id(0);
+        let shard = ShardGroupId::new(0);
+        assert!(
+            vote_recipients(&topology, shard, me, BlockHeight::new(0), Round::new(0)).is_empty()
+        );
     }
 
     // ─── committee_public_keys ──────────────────────────────────────────
@@ -202,9 +205,10 @@ mod tests {
     #[test]
     fn committee_public_keys_returns_all_keys_in_order() {
         let committee = TestCommittee::new(4, 42);
-        let topology = topology_for(0, &committee);
+        let topology = topology_for(&committee);
+        let shard = ShardGroupId::new(0);
 
-        let keys = committee_public_keys(&topology).expect("topology is well-formed");
+        let keys = committee_public_keys(&topology, shard).expect("topology is well-formed");
         assert_eq!(keys.len(), 4);
 
         // Canonical order: committee[i] corresponds to validator i.

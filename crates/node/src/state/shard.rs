@@ -98,11 +98,9 @@ impl NodeStateMachine {
             ProtocolEvent::VerifiedRemoteHeaderReceived {
                 certified_header,
                 sender,
-            } => {
-                let topology = &self.topology_snapshot;
-                self.remote_headers_coordinator
-                    .on_verified_remote_header_received(topology, certified_header, sender)
-            }
+            } => self
+                .remote_headers_coordinator
+                .on_verified_remote_header_received(certified_header, sender),
             ProtocolEvent::VerifiedBlockVoteReceived { vote } => self
                 .shard_coordinator
                 .on_verified_block_vote(&self.topology_snapshot, vote),
@@ -148,18 +146,16 @@ impl NodeStateMachine {
                 // Fan out the verified header to downstream consumers. Shard consensus
                 // already received the header in `RemoteHeaderQcVerified`
                 // (early insertion for deferral proof validation).
-                let topology = &self.topology_snapshot;
                 let shard = certified_header.shard_group_id();
 
                 self.execution_coordinator.on_verified_remote_header(
-                    topology,
                     shard,
                     certified_header.header().height(),
                     certified_header.header().waves(),
                 );
 
                 self.provisions_coordinator
-                    .on_verified_remote_header(topology, &certified_header)
+                    .on_verified_remote_header(&certified_header)
             }
             ProtocolEvent::TransactionRootVerified { block_hash, result } => self
                 .shard_coordinator
@@ -208,9 +204,7 @@ impl NodeStateMachine {
             // but an empty in-memory set, so child verifications of just-
             // persisted parents unblock here) and for auto-resume-from-sync.
             ProtocolEvent::BlockPersisted { height, .. } => {
-                let mut actions = self
-                    .shard_coordinator
-                    .on_block_persisted(&self.topology_snapshot, height);
+                let mut actions = self.shard_coordinator.on_block_persisted(height);
                 // If shard consensus just resumed from sync, reschedule the cleanup timer.
                 if !actions.is_empty() {
                     actions.push(Action::SetTimer {
@@ -509,7 +503,8 @@ mod tests {
         let TestNode { mut node, .. } = TestNode::builder().local_idx(1).build();
         assert!(
             node.topology()
-                .should_propose(BlockHeight::new(1), Round::INITIAL),
+                .proposer_for(node.shard_id(), BlockHeight::new(1), Round::INITIAL,)
+                == node.validator_id(),
             "local must be the round-0 height-1 proposer for this test",
         );
 
@@ -537,9 +532,9 @@ mod tests {
         // is the proposer, so we are not.
         let TestNode { mut node, .. } = TestNode::new();
         assert!(
-            !node
-                .topology()
-                .should_propose(BlockHeight::new(1), Round::INITIAL),
+            node.topology()
+                .proposer_for(node.shard_id(), BlockHeight::new(1), Round::INITIAL,)
+                != node.validator_id(),
             "local must NOT be the round-0 height-1 proposer for this test",
         );
 

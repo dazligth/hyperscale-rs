@@ -23,14 +23,17 @@ const fn verified(tx: RoutableTransaction) -> Verified<RoutableTransaction> {
 }
 
 fn test_topology() -> TopologySnapshot {
-    TestCommittee::new(4, 42).topology_snapshot(0, 1)
+    TestCommittee::new(4, 42).topology_snapshot(1)
 }
 
 fn coordinator_with_zero_dwell() -> MempoolCoordinator {
-    MempoolCoordinator::with_config(MempoolConfig {
-        min_dwell_time: Duration::ZERO,
-        ..MempoolConfig::default()
-    })
+    MempoolCoordinator::with_config(
+        ShardGroupId::new(0),
+        MempoolConfig {
+            min_dwell_time: Duration::ZERO,
+            ..MempoolConfig::default()
+        },
+    )
 }
 
 /// Destructures every field of `MempoolMemoryStats`, so adding a field
@@ -39,7 +42,7 @@ fn coordinator_with_zero_dwell() -> MempoolCoordinator {
 /// drifting.
 #[test]
 fn memory_stats_destructures_all_fields_for_fresh_coordinator() {
-    let coord = MempoolCoordinator::new();
+    let coord = MempoolCoordinator::new(ShardGroupId::new(0));
     let MempoolMemoryStats {
         pool,
         ready,
@@ -61,7 +64,7 @@ fn memory_stats_destructures_all_fields_for_fresh_coordinator() {
 
 #[test]
 fn fresh_coordinator_reports_empty_pool_and_ready_set() {
-    let coord = MempoolCoordinator::new();
+    let coord = MempoolCoordinator::new(ShardGroupId::new(0));
     assert_eq!(coord.len(), 0);
     assert!(coord.is_empty());
     assert_eq!(coord.in_flight(), 0);
@@ -71,19 +74,19 @@ fn fresh_coordinator_reports_empty_pool_and_ready_set() {
 
 #[test]
 fn at_in_flight_limit_is_false_on_fresh_coordinator() {
-    let coord = MempoolCoordinator::new();
+    let coord = MempoolCoordinator::new(ShardGroupId::new(0));
     assert!(!coord.at_in_flight_limit());
 }
 
 #[test]
 fn at_pending_limit_is_false_on_fresh_coordinator() {
-    let coord = MempoolCoordinator::new();
+    let coord = MempoolCoordinator::new(ShardGroupId::new(0));
     assert!(!coord.at_pending_limit());
 }
 
 #[test]
 fn has_transaction_is_false_on_fresh_coordinator() {
-    let coord = MempoolCoordinator::new();
+    let coord = MempoolCoordinator::new(ShardGroupId::new(0));
     assert!(!coord.has_transaction(&TxHash::from_raw(Hash::from_bytes(b"unknown"))));
     assert!(
         coord
@@ -99,7 +102,7 @@ fn has_transaction_is_false_on_fresh_coordinator() {
 
 #[test]
 fn ready_transactions_is_empty_on_fresh_coordinator() {
-    let coord = MempoolCoordinator::new();
+    let coord = MempoolCoordinator::new(ShardGroupId::new(0));
     assert!(
         coord
             .ready_transactions(100, 0, 0, LocalTimestamp::ZERO)
@@ -109,7 +112,7 @@ fn ready_transactions_is_empty_on_fresh_coordinator() {
 
 #[test]
 fn lock_contention_stats_zero_on_fresh_coordinator() {
-    let coord = MempoolCoordinator::new();
+    let coord = MempoolCoordinator::new(ShardGroupId::new(0));
     let stats = coord.lock_contention_stats();
     assert_eq!(stats.locked_nodes, 0);
     assert_eq!(stats.pending_count, 0);
@@ -120,7 +123,7 @@ fn lock_contention_stats_zero_on_fresh_coordinator() {
 
 #[test]
 fn is_tombstoned_is_false_on_fresh_coordinator() {
-    let coord = MempoolCoordinator::new();
+    let coord = MempoolCoordinator::new(ShardGroupId::new(0));
     assert!(!coord.is_tombstoned(&TxHash::from_raw(Hash::from_bytes(b"unknown"))));
 }
 
@@ -144,7 +147,7 @@ fn submit_then_ready_round_trips_a_transaction() {
 #[test]
 fn on_block_committed_transitions_pending_to_committed_and_bumps_in_flight() {
     let topology = test_topology();
-    let mut coord = MempoolCoordinator::new();
+    let mut coord = MempoolCoordinator::new(ShardGroupId::new(0));
 
     let tx = test_transaction(1);
     let tx_hash = tx.hash();
@@ -175,7 +178,7 @@ fn on_block_committed_transitions_pending_to_committed_and_bumps_in_flight() {
 #[test]
 fn on_block_committed_with_finalized_wave_tombstones_and_evicts() {
     let topology = test_topology();
-    let mut coord = MempoolCoordinator::new();
+    let mut coord = MempoolCoordinator::new(ShardGroupId::new(0));
 
     let tx = test_transaction(1);
     let tx_hash = tx.hash();

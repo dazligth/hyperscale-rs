@@ -13,6 +13,10 @@ use crate::{
 /// Inputs the provision-tx-roots verifier reads against.
 #[derive(Debug, Clone, Copy)]
 pub struct ProvisionTxRootsContext<'a> {
+    /// Source shard the block belongs to — excluded from the per-target
+    /// fan-out so each shard's own provision-tx root isn't included in
+    /// its own map.
+    pub local_shard: ShardGroupId,
     /// Topology snapshot anchoring shard routing — drives which target
     /// shards each cross-shard tx contributes to.
     pub topology: &'a TopologySnapshot,
@@ -68,10 +72,10 @@ impl Verified<ProvisionTxRootsMap> {
     /// more shards than the consensus configuration allows.
     #[must_use]
     pub fn compute(
+        local_shard: ShardGroupId,
         topology: &TopologySnapshot,
         transactions: &[Arc<Verifiable<RoutableTransaction>>],
     ) -> Self {
-        let local_shard = topology.local_shard();
         let mut per_target: BTreeMap<ShardGroupId, Vec<Hash>> = BTreeMap::new();
 
         for tx in transactions {
@@ -109,7 +113,11 @@ impl Verify<&ProvisionTxRootsContext<'_>> for ProvisionTxRootsMap {
     type Error = ProvisionTxRootsVerifyError;
 
     fn verify(&self, ctx: &ProvisionTxRootsContext<'_>) -> Result<Verified<Self>, Self::Error> {
-        let computed = Verified::<ProvisionTxRootsMap>::compute(ctx.topology, ctx.transactions);
+        let computed = Verified::<ProvisionTxRootsMap>::compute(
+            ctx.local_shard,
+            ctx.topology,
+            ctx.transactions,
+        );
         if computed.as_ref() != self {
             let expected: BTreeMap<_, _> = self.iter().map(|(k, v)| (*k, *v)).collect();
             let computed: BTreeMap<_, _> =

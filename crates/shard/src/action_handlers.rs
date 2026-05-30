@@ -232,10 +232,11 @@ pub fn build_proposal<S: ShardChainWriter>(
     let local_receipt_root = Verified::<LocalReceiptRoot>::compute(&receipts).into_inner();
     let raw_provision_hashes: Vec<Hash> = provision_hashes.iter().map(|h| h.into_raw()).collect();
     let provision_root = Verified::<ProvisionsRoot>::compute(&raw_provision_hashes).into_inner();
-    let waves = compute_waves(topology, height, &transactions);
-    let provision_tx_roots = Verified::<ProvisionTxRootsMap>::compute(topology, &transactions)
-        .into_inner()
-        .0;
+    let waves = compute_waves(local_shard, topology, height, &transactions);
+    let provision_tx_roots =
+        Verified::<ProvisionTxRootsMap>::compute(local_shard, topology, &transactions)
+            .into_inner()
+            .0;
 
     // in_flight is deterministic from chain state:
     // parent's in_flight + new transactions committed - transactions finalized by certificates.
@@ -449,6 +450,7 @@ where
         } => {
             let start = std::time::Instant::now();
             let ptx_ctx = ProvisionTxRootsContext {
+                local_shard: ctx.shard,
                 topology: &topology_snapshot,
                 transactions: &transactions,
             };
@@ -522,6 +524,7 @@ where
                 expected_leaf_count,
                 parent_witness_leaves,
                 parent_round,
+                shard: ctx.shard,
                 height,
                 round,
                 receipts: &receipts,
@@ -704,9 +707,9 @@ where
             let gossip = BlockHeaderNotification::new(*header, *manifest, sig);
             let local_peers: Vec<ValidatorId> = ctx
                 .topology_snapshot
-                .committee_for_shard(ctx.topology_snapshot.local_shard())
+                .committee_for_shard(ctx.shard)
                 .iter()
-                .filter(|&&v| v != ctx.topology_snapshot.local_validator_id())
+                .filter(|&&v| v != ctx.me)
                 .copied()
                 .collect();
             ctx.network.notify(&local_peers, &gossip);
@@ -722,10 +725,10 @@ where
             let verified = Verified::<BlockVote>::sign_local(
                 ctx.topology_snapshot.network(),
                 block_hash,
-                ctx.topology_snapshot.local_shard(),
+                ctx.shard,
                 height,
                 round,
-                ctx.topology_snapshot.local_validator_id(),
+                ctx.me,
                 ctx.signing_key,
                 timestamp,
             );
@@ -747,7 +750,7 @@ where
                 certified_header: Arc::new(Verifiable::<CertifiedBlockHeader>::from(
                     certified_header,
                 )),
-                sender: ctx.topology_snapshot.local_validator_id(),
+                sender: ctx.me,
                 sender_signature: sig,
             };
             ctx.network.broadcast_global(&gossip);

@@ -180,12 +180,18 @@ impl ProvisioningTracker {
     pub fn register_tx(
         &mut self,
         tx_hash: TxHash,
+        local_shard: ShardGroupId,
         topology: &TopologySnapshot,
         declared_reads: &[NodeId],
         declared_writes: &[NodeId],
     ) -> Vec<DetectedConflict> {
-        self.conflict_detector
-            .register_tx(tx_hash, topology, declared_reads, declared_writes)
+        self.conflict_detector.register_tx(
+            tx_hash,
+            local_shard,
+            topology,
+            declared_reads,
+            declared_writes,
+        )
     }
 
     /// Forward-detect conflicts as a remote provisions commits.

@@ -11,7 +11,7 @@ use hyperscale_core::Action;
 use hyperscale_types::{BeaconWitnessLeafCount, BeaconWitnessRoot};
 use hyperscale_types::{
     Block, BlockHash, BlockHeight, Bls12381G1PublicKey, CertifiedBlock, QuorumCertificate,
-    TopologySnapshot, Verified, VotePower,
+    ValidatorId, Verified, VotePower,
 };
 use tracing::{debug, info, warn};
 
@@ -665,7 +665,7 @@ impl BlockSyncManager {
     #[allow(clippy::too_many_arguments)] // `ShardCoordinator` owns each input; bundling them just adds a struct without consolidating ownership
     pub fn health_check(
         &mut self,
-        topology: &TopologySnapshot,
+        me: ValidatorId,
         committed_height: BlockHeight,
         latest_qc: Option<&QuorumCertificate>,
         has_next_block: bool,
@@ -709,7 +709,7 @@ impl BlockSyncManager {
         // than burning more rounds reactively.
         if view_changes_since_qc_advance >= SPIN_WITHOUT_QC_ADVANCE_THRESHOLD {
             warn!(
-                validator = ?topology.local_validator_id(),
+                validator = ?me,
                 committed_height = committed_height.inner(),
                 qc_height = qc_height.inner(),
                 gap = gap,
@@ -723,7 +723,7 @@ impl BlockSyncManager {
 
         if gap > 5 {
             warn!(
-                validator = ?topology.local_validator_id(),
+                validator = ?me,
                 committed_height = committed_height.inner(),
                 next_needed_height = next_needed_height.inner(),
                 qc_height = qc_height.inner(),
@@ -740,7 +740,7 @@ impl BlockSyncManager {
             if has_pending_commit {
                 if gap > 10 {
                     warn!(
-                        validator = ?topology.local_validator_id(),
+                        validator = ?me,
                         committed_height = committed_height.inner(),
                         next_needed_height = next_needed_height.inner(),
                         qc_height = qc_height.inner(),
@@ -756,7 +756,7 @@ impl BlockSyncManager {
 
             if gap > 3 {
                 warn!(
-                    validator = ?topology.local_validator_id(),
+                    validator = ?me,
                     committed_height = committed_height.inner(),
                     next_needed_height = next_needed_height.inner(),
                     qc_height = qc_height.inner(),
@@ -771,7 +771,7 @@ impl BlockSyncManager {
         }
 
         info!(
-            validator = ?topology.local_validator_id(),
+            validator = ?me,
             committed_height = committed_height.inner(),
             next_needed_height = next_needed_height.inner(),
             qc_height = qc_height.inner(),
@@ -789,32 +789,13 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
-    use hyperscale_test_helpers::TestCommittee;
     use hyperscale_types::{
         Block, BlockHeader, BoundedVec, CertificateRoot, Hash, InFlightCount, LocalReceiptRoot,
-        NetworkDefinition, ProposerTimestamp, ProvisionsRoot, Round, ShardGroupId, SignerBitfield,
-        StateRoot, TransactionRoot, ValidatorId, ValidatorInfo, ValidatorSet, VotePower,
-        WeightedTimestamp, zero_bls_signature,
+        ProposerTimestamp, ProvisionsRoot, Round, ShardGroupId, SignerBitfield, StateRoot,
+        TransactionRoot, ValidatorId, WeightedTimestamp, zero_bls_signature,
     };
 
     use super::*;
-
-    fn topology() -> TopologySnapshot {
-        let committee = TestCommittee::new(4, 42);
-        let validators: Vec<ValidatorInfo> = (0..committee.size())
-            .map(|i| ValidatorInfo {
-                validator_id: committee.validator_id(i),
-                public_key: *committee.public_key(i),
-                voting_power: VotePower::new(1),
-            })
-            .collect();
-        TopologySnapshot::new(
-            NetworkDefinition::simulator(),
-            ValidatorId::new(0),
-            1,
-            ValidatorSet::new(validators),
-        )
-    }
 
     fn header(height: BlockHeight, tag: &[u8]) -> BlockHeader {
         BlockHeader::new(
@@ -1013,7 +994,7 @@ mod tests {
         let mut sm = BlockSyncManager::new();
         let commits = CommitPipeline::new();
         let decision = sm.health_check(
-            &topology(),
+            ValidatorId::new(0),
             BlockHeight::new(0),
             None,
             false,
@@ -1030,7 +1011,7 @@ mod tests {
         let commits = CommitPipeline::new();
         let qc = qc_at(BlockHeight::new(10));
         let decision = sm.health_check(
-            &topology(),
+            ValidatorId::new(0),
             BlockHeight::new(10),
             Some(&qc),
             true,
@@ -1048,7 +1029,7 @@ mod tests {
         let commits = CommitPipeline::new();
         let qc = qc_at(BlockHeight::new(10));
         let decision = sm.health_check(
-            &topology(),
+            ValidatorId::new(0),
             BlockHeight::new(5),
             Some(&qc),
             false,
@@ -1065,7 +1046,7 @@ mod tests {
         let commits = CommitPipeline::new();
         let qc = qc_at(BlockHeight::new(10));
         let decision = sm.health_check(
-            &topology(),
+            ValidatorId::new(0),
             BlockHeight::new(5),
             Some(&qc),
             false,
@@ -1091,7 +1072,7 @@ mod tests {
         let commits = CommitPipeline::new();
         let qc = qc_at(BlockHeight::new(10));
         let decision = sm.health_check(
-            &topology(),
+            ValidatorId::new(0),
             BlockHeight::new(5),
             Some(&qc),
             true,
@@ -1112,7 +1093,7 @@ mod tests {
         let qc = qc_at(BlockHeight::new(7));
         // gap = 2, <= 3, view_changes=0 → wait for normal consensus.
         let decision = sm.health_check(
-            &topology(),
+            ValidatorId::new(0),
             BlockHeight::new(5),
             Some(&qc),
             true,
@@ -1134,7 +1115,7 @@ mod tests {
         let qc = qc_at(BlockHeight::new(7));
         // First call snapshots view_changes=10 against qc=7.
         let _ = sm.health_check(
-            &topology(),
+            ValidatorId::new(0),
             BlockHeight::new(5),
             Some(&qc),
             true,
@@ -1144,7 +1125,7 @@ mod tests {
         );
         // Second call: same QC, view_changes climbed by 3 → escalate.
         let decision = sm.health_check(
-            &topology(),
+            ValidatorId::new(0),
             BlockHeight::new(5),
             Some(&qc),
             true,
@@ -1166,7 +1147,7 @@ mod tests {
         let commits = CommitPipeline::new();
         let qc = qc_at(BlockHeight::new(7));
         let _ = sm.health_check(
-            &topology(),
+            ValidatorId::new(0),
             BlockHeight::new(5),
             Some(&qc),
             true,
@@ -1176,7 +1157,7 @@ mod tests {
         );
         // Only +2 view changes since snapshot — still under threshold.
         let decision = sm.health_check(
-            &topology(),
+            ValidatorId::new(0),
             BlockHeight::new(5),
             Some(&qc),
             true,
@@ -1196,7 +1177,7 @@ mod tests {
         for h in 5..15u64 {
             let qc = qc_at(BlockHeight::new(h));
             let decision = sm.health_check(
-                &topology(),
+                ValidatorId::new(0),
                 BlockHeight::new(h - 1),
                 Some(&qc),
                 true,

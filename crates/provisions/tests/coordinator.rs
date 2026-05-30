@@ -20,11 +20,11 @@ use hyperscale_types::{
 const TEST_BLOCK_INTERVAL_MS: u64 = 500;
 
 fn fresh_coordinator() -> ProvisionCoordinator {
-    ProvisionCoordinator::new()
+    ProvisionCoordinator::new(ShardGroupId::new(0))
 }
 
 fn fresh_coordinator_with_topology() -> (ProvisionCoordinator, TopologySnapshot) {
-    let topology = TestCommittee::new(4, 42).topology_snapshot(0, 2);
+    let topology = TestCommittee::new(4, 42).topology_snapshot(2);
     (fresh_coordinator(), topology)
 }
 
@@ -167,7 +167,7 @@ fn with_config_honours_dwell_time_setting() {
     let config = ProvisionConfig {
         min_dwell_time: std::time::Duration::from_millis(750),
     };
-    let coord = ProvisionCoordinator::with_config(config);
+    let coord = ProvisionCoordinator::with_config(ShardGroupId::new(0), config);
     // No queued provisions yet — but the constructor must accept the config
     // without panicking, and the queue must be live.
     assert!(coord.queued_provisions(LocalTimestamp::ZERO).is_empty());
@@ -189,11 +189,11 @@ fn flush_expected_provisions_with_no_expectations_yields_no_actions() {
 
 #[test]
 fn on_verified_remote_header_for_own_shard_is_no_op() {
-    let (mut coord, topology) = fresh_coordinator_with_topology();
-    let local = topology.local_shard();
+    let (mut coord, _topology) = fresh_coordinator_with_topology();
+    let local = ShardGroupId::new(0);
     // Header from our own shard must not register an expectation.
     let own_header = make_remote_header_targeting(local, BlockHeight::new(5), local);
-    let actions = coord.on_verified_remote_header(&topology, &own_header);
+    let actions = coord.on_verified_remote_header(&own_header);
     assert!(actions.is_empty());
     assert_eq!(coord.memory_stats().expected_provisions, 0);
     assert_eq!(coord.verified_remote_header_count(), 0);
@@ -201,11 +201,11 @@ fn on_verified_remote_header_for_own_shard_is_no_op() {
 
 #[test]
 fn on_verified_remote_header_targeting_local_shard_registers_expectation() {
-    let (mut coord, topology) = fresh_coordinator_with_topology();
-    let local = topology.local_shard();
+    let (mut coord, _topology) = fresh_coordinator_with_topology();
+    let local = ShardGroupId::new(0);
     let remote = ShardGroupId::new(u64::from(local == ShardGroupId::new(0)));
     let header = make_remote_header_targeting(remote, BlockHeight::new(5), local);
-    coord.on_verified_remote_header(&topology, &header);
+    coord.on_verified_remote_header(&header);
 
     let stats = coord.memory_stats();
     assert_eq!(
@@ -228,11 +228,11 @@ fn first_commit_retro_stamps_pre_genesis_expectations() {
     // must have its discovered_at retro-stamped on commit, otherwise the
     // immediate timeout sweep would fire (entry's discovered_at is ZERO,
     // committed_ts is suddenly ~now, age reports ~57 years).
-    let (mut coord, topology) = fresh_coordinator_with_topology();
-    let local = topology.local_shard();
+    let (mut coord, _topology) = fresh_coordinator_with_topology();
+    let local = ShardGroupId::new(0);
     let remote = ShardGroupId::new(u64::from(local == ShardGroupId::new(0)));
     let header = make_remote_header_targeting(remote, BlockHeight::new(5), local);
-    coord.on_verified_remote_header(&topology, &header);
+    coord.on_verified_remote_header(&header);
 
     // First commit must NOT trigger a fallback fetch storm.
     let actions = coord.on_block_committed(&make_block(BlockHeight::new(1)));

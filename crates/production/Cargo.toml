@@ -85,6 +85,7 @@ tikv-jemallocator = { version = "0.7.0", features = ["background_threads", "unpr
 
 [dev-dependencies]
 hyperscale-dispatch-sync.workspace = true
+hyperscale-types = { workspace = true, features = ["test-utils"] }
 tempfile.workspace = true
 serial_test = "3.4.0"
 tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }

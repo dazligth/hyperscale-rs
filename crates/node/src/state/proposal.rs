@@ -32,10 +32,7 @@ impl NodeStateMachine {
     ) -> ProposalInputs {
         // Request extra transactions from the mempool to compensate for QC-chain
         // duplicates that will be filtered by shard consensus during proposal building.
-        let max_txs = MAX_TXS_PER_BLOCK
-            + self
-                .shard_coordinator
-                .dedup_overhead(self.topology_snapshot.local_shard());
+        let max_txs = MAX_TXS_PER_BLOCK + self.shard_coordinator.dedup_overhead();
         let ready_txs = self.mempool_coordinator.ready_transactions(
             max_txs,
             pending_txs,

@@ -1611,8 +1611,6 @@ fn test_cross_shard_transaction_detection() {
 
     let topology = TopologySnapshot::with_shard_committees(
         NetworkDefinition::simulator(),
-        ValidatorId::new(0),
-        ShardGroupId::new(0),
         2, // num_shards
         &validator_set,
         shard_committees,

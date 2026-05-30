@@ -31,7 +31,7 @@ where
     S: ShardStorage,
     N: Network,
 {
-    let me = ctx.topology_snapshot.local_validator_id();
+    let me = ctx.me;
     let network = ctx.topology_snapshot.network();
     match action {
         Action::SignAndBroadcastPcVote1 {

@@ -7,16 +7,24 @@
 use hyperscale_shard::{ShardConsensusConfig, ShardCoordinator, ShardMemoryStats, ShardStats};
 use hyperscale_storage::RecoveredState;
 use hyperscale_test_helpers::TestCommittee;
-use hyperscale_types::{BlockHeight, LocalTimestamp, Round, TopologySnapshot, VIEW_CHANGE_TIMEOUT};
+use hyperscale_types::{
+    BlockHeight, LocalTimestamp, Round, ShardGroupId, TopologySnapshot, VIEW_CHANGE_TIMEOUT,
+    ValidatorId,
+};
 
 fn fresh_coordinator(config: ShardConsensusConfig) -> ShardCoordinator {
-    ShardCoordinator::new(config, RecoveredState::default())
+    ShardCoordinator::new(
+        ValidatorId::new(0),
+        ShardGroupId::new(0),
+        config,
+        RecoveredState::default(),
+    )
 }
 
 fn fresh_coordinator_with_topology(
     config: ShardConsensusConfig,
 ) -> (ShardCoordinator, TopologySnapshot) {
-    let topology = TestCommittee::new(4, 42).topology_snapshot(0, 1);
+    let topology = TestCommittee::new(4, 42).topology_snapshot(1);
     (fresh_coordinator(config), topology)
 }
 
@@ -100,18 +108,25 @@ fn is_current_proposer_matches_topology() {
 
     // At height 1, round 0 the proposer rotation picks committee[(1+0) % 4] = V1.
     // Each validator's coordinator should answer `is_current_proposer` consistently
-    // with `topology.should_propose(height, round)` for that validator.
+    // with `topology.proposer_for(shard, height, round) == me` for that validator.
     for local_idx in 0_u32..4 {
-        let topology = committee.topology_snapshot(local_idx as usize, 1);
-        let coordinator =
-            ShardCoordinator::new(ShardConsensusConfig::default(), RecoveredState::default());
+        let topology = committee.topology_snapshot(1);
+        let me = ValidatorId::new(u64::from(local_idx));
+        let local_shard = ShardGroupId::new(0);
+        let coordinator = ShardCoordinator::new(
+            me,
+            local_shard,
+            ShardConsensusConfig::default(),
+            RecoveredState::default(),
+        );
         // Fresh coordinator: latest_qc is None → next height = committed_height + 1 = 1.
         // view = Round::INITIAL = Round::new(0).
-        let expected = topology.should_propose(BlockHeight::new(1), Round::INITIAL);
+        let expected =
+            topology.proposer_for(local_shard, BlockHeight::new(1), Round::INITIAL) == me;
         assert_eq!(
             coordinator.is_current_proposer(&topology),
             expected,
-            "V{local_idx}: is_current_proposer must agree with topology.should_propose"
+            "V{local_idx}: is_current_proposer must agree with proposer_for"
         );
     }
 }
@@ -124,9 +139,13 @@ fn will_propose_next_is_true_for_exactly_one_validator_in_fresh_committee() {
     let committee = TestCommittee::new(4, 42);
     let mut proposers = 0usize;
     for local_idx in 0_u32..4 {
-        let topology = committee.topology_snapshot(local_idx as usize, 1);
-        let coordinator =
-            ShardCoordinator::new(ShardConsensusConfig::default(), RecoveredState::default());
+        let topology = committee.topology_snapshot(1);
+        let coordinator = ShardCoordinator::new(
+            ValidatorId::new(u64::from(local_idx)),
+            ShardGroupId::new(0),
+            ShardConsensusConfig::default(),
+            RecoveredState::default(),
+        );
         if coordinator.will_propose_next(&topology) {
             proposers += 1;
         }
@@ -150,10 +169,10 @@ fn proposal_parent_block_hash_falls_back_to_committed_hash_without_qc() {
 
 #[test]
 fn on_block_persisted_returns_no_actions_when_not_syncing() {
-    let (mut coordinator, topology) =
+    let (mut coordinator, _topology) =
         fresh_coordinator_with_topology(ShardConsensusConfig::default());
 
-    let actions = coordinator.on_block_persisted(&topology, BlockHeight::new(1));
+    let actions = coordinator.on_block_persisted(BlockHeight::new(1));
     assert!(actions.is_empty());
     assert!(!coordinator.is_block_syncing());
 }

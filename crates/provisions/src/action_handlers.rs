@@ -122,7 +122,7 @@ where
                 &requests,
                 &shard_recipients,
             );
-            let validator_id = ctx.topology_snapshot.local_validator_id();
+            let validator_id = ctx.me;
             for (provisions, recipients) in batches {
                 // Provisions built from the local JMT view satisfy their
                 // own merkle-proof predicate by construction; wrap as

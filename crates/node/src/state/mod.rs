@@ -39,7 +39,9 @@ use hyperscale_provisions::{
 use hyperscale_remote_headers::RemoteHeaderCoordinator;
 use hyperscale_shard::{ShardConsensusConfig, ShardCoordinator};
 use hyperscale_storage::RecoveredState;
-use hyperscale_types::{Block, LocalTimestamp, ShardGroupId, StateRoot, TopologySnapshot};
+use hyperscale_types::{
+    Block, LocalTimestamp, ShardGroupId, StateRoot, TopologySnapshot, ValidatorId,
+};
 use tracing::instrument;
 
 /// Combined node state machine.
@@ -77,13 +79,19 @@ pub struct NodeStateMachine {
 
     /// Current time.
     now: LocalTimestamp,
+
+    /// This validator's identity.
+    me: ValidatorId,
+
+    /// This validator's home shard.
+    local_shard: ShardGroupId,
 }
 
 impl std::fmt::Debug for NodeStateMachine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NodeStateMachine")
-            .field("validator", &self.topology_snapshot.local_validator_id())
-            .field("shard_id", &self.topology_snapshot.local_shard())
+            .field("validator", &self.me)
+            .field("shard_id", &self.local_shard)
             .field("shard_coordinator", &self.shard_coordinator)
             .field("now", &self.now)
             .finish_non_exhaustive()
@@ -100,6 +108,8 @@ impl NodeStateMachine {
     #[must_use]
     #[allow(clippy::too_many_arguments)] // per-shard-shared stores threaded explicitly
     pub fn new(
+        me: ValidatorId,
+        local_shard: ShardGroupId,
         topology_snapshot: Arc<TopologySnapshot>,
         shard_config: &ShardConsensusConfig,
         recovered: RecoveredState,
@@ -111,20 +121,34 @@ impl NodeStateMachine {
         finalized_wave_store: Arc<FinalizedWaveStore>,
     ) -> Self {
         Self {
-            shard_coordinator: ShardCoordinator::new(shard_config.clone(), recovered),
+            shard_coordinator: ShardCoordinator::new(
+                me,
+                local_shard,
+                shard_config.clone(),
+                recovered,
+            ),
             execution_coordinator: ExecutionCoordinator::with_shared_stores(
+                me,
+                local_shard,
                 exec_cert_store,
                 finalized_wave_store,
             ),
-            mempool_coordinator: MempoolCoordinator::with_tx_store(mempool_config, tx_store),
+            mempool_coordinator: MempoolCoordinator::with_tx_store(
+                local_shard,
+                mempool_config,
+                tx_store,
+            ),
             provisions_coordinator: ProvisionCoordinator::with_config_and_store(
+                local_shard,
                 provision_config,
                 Arc::clone(&provision_store),
             ),
             outbound_provisions: OutboundProvisionTracker::new(provision_store),
-            remote_headers_coordinator: RemoteHeaderCoordinator::new(),
+            remote_headers_coordinator: RemoteHeaderCoordinator::new(local_shard),
             topology_snapshot,
             now: LocalTimestamp::ZERO,
+            me,
+            local_shard,
         }
     }
 
@@ -132,8 +156,14 @@ impl NodeStateMachine {
 
     /// Get this node's shard.
     #[must_use]
-    pub fn shard_id(&self) -> ShardGroupId {
-        self.topology_snapshot.local_shard()
+    pub const fn shard_id(&self) -> ShardGroupId {
+        self.local_shard
+    }
+
+    /// Get this node's validator identity.
+    #[must_use]
+    pub const fn validator_id(&self) -> ValidatorId {
+        self.me
     }
 
     /// Get the current topology snapshot.
@@ -144,9 +174,9 @@ impl NodeStateMachine {
 
     /// Get the current topology snapshot as an `Arc`, for sites that
     /// need to clone it into off-thread closures (delegated action
-    /// dispatch). Carries this vnode's `local_validator_id`, so per-
-    /// vnode signing context stays consistent with the snapshot the
-    /// handler reads.
+    /// dispatch). The snapshot is identity-agnostic and shared across
+    /// every vnode on a host; per-vnode identity travels alongside it
+    /// on [`ActionContext`](hyperscale_core::ActionContext).
     #[must_use]
     pub const fn topology_arc(&self) -> &Arc<TopologySnapshot> {
         &self.topology_snapshot
@@ -198,15 +228,14 @@ impl NodeStateMachine {
     ///
     /// Returns actions to be processed (e.g., initial timers).
     pub fn initialize_genesis(&mut self, genesis: &Block) -> Vec<Action> {
-        self.shard_coordinator
-            .initialize_genesis(&self.topology_snapshot, genesis)
+        self.shard_coordinator.initialize_genesis(genesis)
     }
 }
 
 impl StateMachine for NodeStateMachine {
     #[instrument(skip(self), fields(
-        validator = self.topology_snapshot.local_validator_id().inner(),
-        shard = self.topology_snapshot.local_shard().inner(),
+        validator = self.me.inner(),
+        shard = self.local_shard.inner(),
         event = %event.type_name(),
         height = self.shard_coordinator.committed_height().inner(),
     ))]
@@ -308,7 +337,7 @@ impl StateMachine for NodeStateMachine {
         };
 
         // Drain any state root verifications that became ready during this event.
-        let local_shard = self.topology_snapshot.local_shard();
+        let local_shard = self.local_shard;
         for ready in self
             .shard_coordinator
             .drain_ready_state_root_verifications(local_shard)

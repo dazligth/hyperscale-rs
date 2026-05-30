@@ -224,6 +224,10 @@ pub struct MempoolCoordinator {
 
     /// Configuration for mempool behavior.
     config: MempoolConfig,
+
+    /// This validator's home shard. Filters declared-node iterators to
+    /// local nodes only at lock-tracking time.
+    local_shard: ShardGroupId,
 }
 
 impl std::fmt::Debug for MempoolCoordinator {
@@ -237,28 +241,22 @@ impl std::fmt::Debug for MempoolCoordinator {
     }
 }
 
-impl Default for MempoolCoordinator {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl MempoolCoordinator {
     /// Create a new mempool state machine with default config and a fresh
     /// (private) [`TxStore`]. Most production callers want
     /// [`Self::with_tx_store`] so the body store can be shared with the
     /// network worker thread.
     #[must_use]
-    pub fn new() -> Self {
-        Self::with_config(MempoolConfig::default())
+    pub fn new(local_shard: ShardGroupId) -> Self {
+        Self::with_config(local_shard, MempoolConfig::default())
     }
 
     /// Create a new mempool state machine with custom config and a fresh
     /// (private) [`TxStore`]. See [`Self::with_tx_store`] for the shared
     /// variant.
     #[must_use]
-    pub fn with_config(config: MempoolConfig) -> Self {
-        Self::with_tx_store(config, Arc::new(TxStore::new()))
+    pub fn with_config(local_shard: ShardGroupId, config: MempoolConfig) -> Self {
+        Self::with_tx_store(local_shard, config, Arc::new(TxStore::new()))
     }
 
     /// Create a new mempool state machine that shares its body store with
@@ -266,7 +264,11 @@ impl MempoolCoordinator {
     /// the I/O loop's `caches` so inbound transaction-fetch handlers can
     /// serve bodies without acquiring a mempool lock.
     #[must_use]
-    pub fn with_tx_store(config: MempoolConfig, tx_store: Arc<TxStore>) -> Self {
+    pub fn with_tx_store(
+        local_shard: ShardGroupId,
+        config: MempoolConfig,
+        tx_store: Arc<TxStore>,
+    ) -> Self {
         Self {
             pool: BTreeMap::new(),
             tx_store,
@@ -277,6 +279,7 @@ impl MempoolCoordinator {
             current_ts: WeightedTimestamp::ZERO,
             expected_txs: ExpectedTxs::new(),
             config,
+            local_shard,
         }
     }
 
@@ -730,7 +733,7 @@ impl MempoolCoordinator {
     /// them here would permanently defer future local cross-shard txs that
     /// share those remote nodes, cascading the stall.
     fn add_locked_nodes(&mut self, topology: &TopologySnapshot, tx: &RoutableTransaction) {
-        let local_shard = topology.local_shard();
+        let local_shard = self.local_shard;
         let newly_locked = self.locks.lock_nodes(
             tx.all_declared_nodes()
                 .filter(|node| topology.shard_for_node_id(node) == local_shard)
@@ -747,7 +750,7 @@ impl MempoolCoordinator {
     /// Also promotes any blocked transactions that were waiting on these nodes.
     /// Scoped to local-shard nodes; mirrors [`Self::add_locked_nodes`].
     fn remove_locked_nodes(&mut self, topology: &TopologySnapshot, tx: &RoutableTransaction) {
-        let local_shard = topology.local_shard();
+        let local_shard = self.local_shard;
         let newly_unlocked = self.locks.unlock_nodes(
             tx.all_declared_nodes()
                 .filter(|node| topology.shard_for_node_id(node) == local_shard)
@@ -1086,7 +1089,7 @@ mod tests {
     use super::*;
 
     fn make_test_topology() -> TopologySnapshot {
-        TestCommittee::new(4, 42).topology_snapshot(0, 1)
+        TestCommittee::new(4, 42).topology_snapshot(1)
     }
 
     /// Nominal block spacing used by tests to synthesize `weighted_timestamp_ms`
@@ -1158,7 +1161,7 @@ mod tests {
     #[test]
     fn provisions_record_expected_txs_for_unseen_hashes() {
         let topology = make_test_topology();
-        let mut mempool = MempoolCoordinator::new();
+        let mut mempool = MempoolCoordinator::new(ShardGroupId::new(0));
 
         let already_seen = test_transaction(1);
         let already_seen_hash = already_seen.hash();
@@ -1198,7 +1201,7 @@ mod tests {
     #[test]
     fn first_sighting_wins_across_sources_and_repeats() {
         let topology = make_test_topology();
-        let mut mempool = MempoolCoordinator::new();
+        let mut mempool = MempoolCoordinator::new(ShardGroupId::new(0));
 
         let unseen_hash = test_transaction(1).hash();
 
@@ -1244,7 +1247,7 @@ mod tests {
     #[test]
     fn gossip_arrival_drops_expected_entry() {
         let topology = make_test_topology();
-        let mut mempool = MempoolCoordinator::new();
+        let mut mempool = MempoolCoordinator::new(ShardGroupId::new(0));
 
         let tx = test_transaction(1);
         let tx_hash = tx.hash();
@@ -1269,7 +1272,7 @@ mod tests {
     #[test]
     fn rpc_submit_drops_expected_entry() {
         let topology = make_test_topology();
-        let mut mempool = MempoolCoordinator::new();
+        let mut mempool = MempoolCoordinator::new(ShardGroupId::new(0));
 
         let tx = test_transaction(1);
         let tx_hash = tx.hash();
@@ -1287,7 +1290,7 @@ mod tests {
     #[test]
     fn block_inclusion_drops_expected_entry() {
         let topology = make_test_topology();
-        let mut mempool = MempoolCoordinator::new();
+        let mut mempool = MempoolCoordinator::new(ShardGroupId::new(0));
 
         let tx = test_transaction(1);
         let tx_hash = tx.hash();
@@ -1315,7 +1318,7 @@ mod tests {
         // TEST_BLOCK_INTERVAL_MS = 500; grace = 2_000ms. First sighting at
         // H=1 (ts=500); H=4 (ts=2_000) → elapsed 1_500ms < 2_000ms.
         let topology = make_test_topology();
-        let mut mempool = MempoolCoordinator::new();
+        let mut mempool = MempoolCoordinator::new(ShardGroupId::new(0));
 
         let unseen_hash = test_transaction(1).hash();
 
@@ -1345,7 +1348,7 @@ mod tests {
         // First sighting at H=1 (ts=500); H=5 (ts=2_500) → elapsed 2_000ms.
         let topology = make_test_topology();
         let source = ShardGroupId::new(0);
-        let mut mempool = MempoolCoordinator::new();
+        let mut mempool = MempoolCoordinator::new(ShardGroupId::new(0));
 
         let unseen_hash = test_transaction(1).hash();
 
@@ -1374,7 +1377,7 @@ mod tests {
     #[test]
     fn fetch_uses_first_sighting_source_only() {
         let topology = make_test_topology();
-        let mut mempool = MempoolCoordinator::new();
+        let mut mempool = MempoolCoordinator::new(ShardGroupId::new(0));
 
         let unseen_hash = test_transaction(1).hash();
 
@@ -1421,7 +1424,7 @@ mod tests {
         // RETENTION_HORIZON ≈ 5min + 24s. Sighting at H=1 (ts=500ms); commit
         // far past horizon at H=700 (ts=350_000ms) — well over 324_000ms.
         let topology = make_test_topology();
-        let mut mempool = MempoolCoordinator::new();
+        let mut mempool = MempoolCoordinator::new(ShardGroupId::new(0));
 
         let unseen_hash = test_transaction(1).hash();
 
@@ -1454,7 +1457,7 @@ mod tests {
         // RETENTION_HORIZON (~324_000ms). Entry should still be tracked, and
         // a fetch is emitted but no drop.
         let topology = make_test_topology();
-        let mut mempool = MempoolCoordinator::new();
+        let mut mempool = MempoolCoordinator::new(ShardGroupId::new(0));
 
         let unseen_hash = test_transaction(1).hash();
 
@@ -1479,7 +1482,7 @@ mod tests {
         // but assert the explicit AbandonFetch action so any in-flight fetch
         // is cancelled rather than retried forever.
         let topology = make_test_topology();
-        let mut mempool = MempoolCoordinator::new();
+        let mut mempool = MempoolCoordinator::new(ShardGroupId::new(0));
 
         let unseen_hash = test_transaction(1).hash();
 
@@ -1520,7 +1523,7 @@ mod tests {
         // explicitly because no `TransactionsAdmitted` continuation fires
         // on this path.
         let topology = make_test_topology();
-        let mut mempool = MempoolCoordinator::new();
+        let mut mempool = MempoolCoordinator::new(ShardGroupId::new(0));
 
         let tx = test_transaction(1);
         let tx_hash = tx.hash();
@@ -1559,7 +1562,7 @@ mod tests {
         // whenever execution falls behind enough for tx validity to
         // elapse before delivery.
         let topology = make_test_topology();
-        let mut mempool = MempoolCoordinator::new();
+        let mut mempool = MempoolCoordinator::new(ShardGroupId::new(0));
 
         let tx = test_transaction(1);
         let tx_hash = tx.hash();
@@ -1605,7 +1608,7 @@ mod tests {
     #[test]
     fn fetch_stops_after_admission_clears_expectation() {
         let topology = make_test_topology();
-        let mut mempool = MempoolCoordinator::new();
+        let mut mempool = MempoolCoordinator::new(ShardGroupId::new(0));
 
         let tx = test_transaction(1);
         let tx_hash = tx.hash();
@@ -1636,7 +1639,7 @@ mod tests {
     #[test]
     fn test_abort_updates_status() {
         let topology = make_test_topology();
-        let mut mempool = MempoolCoordinator::new();
+        let mut mempool = MempoolCoordinator::new(ShardGroupId::new(0));
 
         // Submit a TX, then commit a block whose FinalizedWave aborts it.
         let tx = test_transaction(1);
@@ -1677,7 +1680,7 @@ mod tests {
     #[test]
     fn tx_store_bloom_snapshot_covers_pool_and_tombstone_window() {
         let topology = make_test_topology();
-        let mut mempool = MempoolCoordinator::new();
+        let mut mempool = MempoolCoordinator::new(ShardGroupId::new(0));
 
         // A submitted-but-not-yet-committed tx lands in pool.
         let tx_live = test_transaction(1);
@@ -1719,7 +1722,7 @@ mod tests {
     #[test]
     fn test_tombstoned_transaction_rejected_on_gossip() {
         let topology = make_test_topology();
-        let mut mempool = MempoolCoordinator::new();
+        let mut mempool = MempoolCoordinator::new(ShardGroupId::new(0));
 
         let tx = test_transaction(1);
         let tx_hash = tx.hash();
@@ -1756,7 +1759,7 @@ mod tests {
     #[test]
     fn test_tombstoned_transaction_rejected_on_submit() {
         let topology = make_test_topology();
-        let mut mempool = MempoolCoordinator::new();
+        let mut mempool = MempoolCoordinator::new(ShardGroupId::new(0));
 
         let tx = test_transaction(1);
         let tx_hash = tx.hash();
@@ -1832,7 +1835,7 @@ mod tests {
 
     /// Create a topology with 2 shards for cross-shard testing
     fn make_cross_shard_topology() -> TopologySnapshot {
-        TestCommittee::new(8, 42).topology_snapshot(0, 2)
+        TestCommittee::new(8, 42).topology_snapshot(2)
     }
 
     /// Create a cross-shard transaction (writes to nodes in different shards)
@@ -1872,7 +1875,7 @@ mod tests {
     fn test_backpressure_allows_txns_below_limit() {
         // A few txs is far below MAX_TX_IN_FLIGHT, so ready_transactions
         // returns them all once they've dwelled long enough.
-        let mut mempool = MempoolCoordinator::new();
+        let mut mempool = MempoolCoordinator::new(ShardGroupId::new(0));
         let topology = make_cross_shard_topology();
         let submit_at = LocalTimestamp::ZERO;
         let read_at = submit_at.plus(DEFAULT_MIN_DWELL_TIME + Duration::from_millis(1));
@@ -1892,7 +1895,7 @@ mod tests {
 
     #[test]
     fn test_backpressure_rejects_all_at_limit() {
-        let mut mempool = MempoolCoordinator::new();
+        let mut mempool = MempoolCoordinator::new(ShardGroupId::new(0));
         let topology = make_cross_shard_topology();
 
         // Put mempool at the in-flight limit
@@ -1918,7 +1921,7 @@ mod tests {
             min_dwell_time: Duration::ZERO,
             ..MempoolConfig::default()
         };
-        let mut mempool = MempoolCoordinator::with_config(config);
+        let mut mempool = MempoolCoordinator::with_config(ShardGroupId::new(0), config);
 
         // Mempool is not at limit (nothing committed)
         assert!(!mempool.at_in_flight_limit());
@@ -1947,7 +1950,7 @@ mod tests {
     #[test]
     fn test_in_flight_counts_all_txns() {
         let topology = make_cross_shard_topology();
-        let mut mempool = MempoolCoordinator::new();
+        let mut mempool = MempoolCoordinator::new(ShardGroupId::new(0));
 
         assert_eq!(mempool.in_flight(), 0);
 
@@ -2023,7 +2026,7 @@ mod tests {
             min_dwell_time: Duration::ZERO,
             ..MempoolConfig::default()
         };
-        let mut mempool = MempoolCoordinator::with_config(config);
+        let mut mempool = MempoolCoordinator::with_config(ShardGroupId::new(0), config);
         let topology = make_test_topology();
 
         let now = LocalTimestamp::from_millis(10_000);
@@ -2037,7 +2040,7 @@ mod tests {
     #[test]
     fn test_dwell_time_default_150ms() {
         // Default config has 150ms dwell time
-        let mut mempool = MempoolCoordinator::new();
+        let mut mempool = MempoolCoordinator::new(ShardGroupId::new(0));
         let topology = make_test_topology();
 
         let submitted_at = LocalTimestamp::from_millis(10_000);
@@ -2063,7 +2066,7 @@ mod tests {
             min_dwell_time: Duration::from_millis(500),
             ..MempoolConfig::default()
         };
-        let mut mempool = MempoolCoordinator::with_config(config);
+        let mut mempool = MempoolCoordinator::with_config(ShardGroupId::new(0), config);
         let topology = make_test_topology();
 
         // Submit at t=10s
@@ -2094,7 +2097,7 @@ mod tests {
             min_dwell_time: Duration::from_millis(200),
             ..MempoolConfig::default()
         };
-        let mut mempool = MempoolCoordinator::with_config(config);
+        let mut mempool = MempoolCoordinator::with_config(ShardGroupId::new(0), config);
         let topology = make_test_topology();
 
         // Submit tx1 at t=1s
@@ -2146,7 +2149,7 @@ mod tests {
     #[test]
     fn rpc_submit_rejects_expired_transaction() {
         let topology = make_test_topology();
-        let mut mempool = MempoolCoordinator::new();
+        let mut mempool = MempoolCoordinator::new(ShardGroupId::new(0));
         set_current_ts(&mut mempool, WeightedTimestamp::from_millis(2_000));
 
         let tx = tx_with_end(1, 1_000); // expired well before now
@@ -2162,7 +2165,7 @@ mod tests {
     #[test]
     fn gossip_drops_expired_transaction() {
         let topology = make_test_topology();
-        let mut mempool = MempoolCoordinator::new();
+        let mut mempool = MempoolCoordinator::new(ShardGroupId::new(0));
         set_current_ts(&mut mempool, WeightedTimestamp::from_millis(2_000));
 
         let tx = tx_with_end(1, 1_000);
@@ -2175,7 +2178,7 @@ mod tests {
     #[test]
     fn rpc_submit_admits_in_window_transaction() {
         let topology = make_test_topology();
-        let mut mempool = MempoolCoordinator::new();
+        let mut mempool = MempoolCoordinator::new(ShardGroupId::new(0));
         set_current_ts(&mut mempool, WeightedTimestamp::from_millis(500));
 
         let tx = tx_with_end(1, 1_000); // end_exclusive > now
@@ -2189,7 +2192,7 @@ mod tests {
     #[test]
     fn cleanup_expired_pending_drops_only_past_expiry_entries() {
         let topology = make_test_topology();
-        let mut mempool = MempoolCoordinator::new();
+        let mut mempool = MempoolCoordinator::new(ShardGroupId::new(0));
         set_current_ts(&mut mempool, WeightedTimestamp::from_millis(500));
 
         let early = tx_with_end(1, 1_000); // alive
@@ -2212,7 +2215,7 @@ mod tests {
     #[test]
     fn cleanup_expired_pending_does_not_tombstone_dropped_entries() {
         let topology = make_test_topology();
-        let mut mempool = MempoolCoordinator::new();
+        let mut mempool = MempoolCoordinator::new(ShardGroupId::new(0));
         set_current_ts(&mut mempool, WeightedTimestamp::from_millis(500));
 
         let tx = tx_with_end(1, 1_000);

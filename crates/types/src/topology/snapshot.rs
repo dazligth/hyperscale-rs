@@ -47,6 +47,10 @@ struct ValidatorInfoEntry {
 
 /// Immutable topology snapshot — all query methods, no mutation.
 ///
+/// Identity-agnostic: callers carry their own `(validator_id, shard)` and
+/// pass them in at call sites that need self. One snapshot can be shared
+/// across every vnode on a host.
+///
 /// Subsystem crates depend on this (via `hyperscale-types`) instead of the
 /// full `hyperscale-topology` crate.
 ///
@@ -55,15 +59,13 @@ struct ValidatorInfoEntry {
 /// Every validator listed in any committee's `active_validators` is present
 /// in `validator_info` (with the same voting power that contributed to
 /// `total_voting_power`). Constructors enforce this — `with_shard_committees`
-/// panics on a missing entry, `build_modulo` and `with_local_shard` derive
+/// panics on a missing entry, `build_modulo` and `single_shard` derive
 /// committees from the same `ValidatorSet` that seeds `validator_info`.
 /// Downstream code relies on this to call `voting_power(committee_member)`
 /// and `public_key(committee_member)` with `expect` rather than fallback.
 #[derive(Clone)]
 pub struct TopologySnapshot {
     network: NetworkDefinition,
-    local_validator_id: ValidatorId,
-    local_shard: ShardGroupId,
     num_shards: u64,
     shard_committees: HashMap<ShardGroupId, ShardCommittee>,
     validator_info: HashMap<ValidatorId, ValidatorInfoEntry>,
@@ -79,35 +81,39 @@ impl TopologySnapshot {
     ///
     /// Validators are assigned to shards by `id % num_shards`.
     #[must_use]
-    pub fn new(
-        network: NetworkDefinition,
-        local_validator_id: ValidatorId,
-        num_shards: u64,
-        validator_set: ValidatorSet,
-    ) -> Self {
-        let local_shard = ShardGroupId::new(local_validator_id.inner() % num_shards);
-        Self::build_modulo(
+    pub fn new(network: NetworkDefinition, num_shards: u64, validator_set: ValidatorSet) -> Self {
+        let validator_info = build_validator_info(&validator_set);
+
+        let mut shard_committees = empty_committees(num_shards);
+
+        for v in &validator_set.validators {
+            let shard = ShardGroupId::new(v.validator_id.inner() % num_shards);
+            if let Some(committee) = shard_committees.get_mut(&shard) {
+                committee.active_validators.push(v.validator_id);
+                committee.total_voting_power += v.voting_power;
+            }
+        }
+
+        Self {
             network,
-            local_validator_id,
-            local_shard,
             num_shards,
-            validator_set,
-        )
+            shard_committees,
+            validator_info,
+            global_validator_set: Arc::new(validator_set),
+        }
     }
 
-    /// Create a snapshot with an explicit local shard override.
+    /// Create a single-shard snapshot — all validators in `shard`.
     ///
-    /// All validators are placed in `local_shard` regardless of their ID.
     /// Useful for tests where `validator_id % num_shards != desired_shard`.
     ///
     /// # Panics
     ///
-    /// Panics if `local_shard` is not in range `[0, num_shards)`.
+    /// Panics if `shard` is not in range `[0, num_shards)`.
     #[must_use]
-    pub fn with_local_shard(
+    pub fn single_shard(
         network: NetworkDefinition,
-        local_validator_id: ValidatorId,
-        local_shard: ShardGroupId,
+        shard: ShardGroupId,
         num_shards: u64,
         validator_set: ValidatorSet,
     ) -> Self {
@@ -115,10 +121,9 @@ impl TopologySnapshot {
 
         let mut shard_committees = empty_committees(num_shards);
 
-        // Put all validators into the specified local shard.
         let committee = shard_committees
-            .get_mut(&local_shard)
-            .expect("local_shard should be within num_shards");
+            .get_mut(&shard)
+            .expect("shard should be within num_shards");
         for v in &validator_set.validators {
             committee.active_validators.push(v.validator_id);
             committee.total_voting_power += v.voting_power;
@@ -126,8 +131,6 @@ impl TopologySnapshot {
 
         Self {
             network,
-            local_validator_id,
-            local_shard,
             num_shards,
             shard_committees,
             validator_info,
@@ -148,8 +151,6 @@ impl TopologySnapshot {
     #[must_use]
     pub fn with_shard_committees(
         network: NetworkDefinition,
-        local_validator_id: ValidatorId,
-        local_shard: ShardGroupId,
         num_shards: u64,
         global_validator_set: &ValidatorSet,
         shard_committees: HashMap<ShardGroupId, Vec<ValidatorId>>,
@@ -175,43 +176,10 @@ impl TopologySnapshot {
 
         Self {
             network,
-            local_validator_id,
-            local_shard,
             num_shards,
             shard_committees: committees,
             validator_info,
             global_validator_set: Arc::new(global_validator_set.clone()),
-        }
-    }
-
-    /// Internal constructor for modulo-based assignment.
-    fn build_modulo(
-        network: NetworkDefinition,
-        local_validator_id: ValidatorId,
-        local_shard: ShardGroupId,
-        num_shards: u64,
-        validator_set: ValidatorSet,
-    ) -> Self {
-        let validator_info = build_validator_info(&validator_set);
-
-        let mut shard_committees = empty_committees(num_shards);
-
-        for v in &validator_set.validators {
-            let shard = ShardGroupId::new(v.validator_id.inner() % num_shards);
-            if let Some(committee) = shard_committees.get_mut(&shard) {
-                committee.active_validators.push(v.validator_id);
-                committee.total_voting_power += v.voting_power;
-            }
-        }
-
-        Self {
-            network,
-            local_validator_id,
-            local_shard,
-            num_shards,
-            shard_committees,
-            validator_info,
-            global_validator_set: Arc::new(validator_set),
         }
     }
 }
@@ -229,18 +197,6 @@ impl TopologySnapshot {
     #[must_use]
     pub const fn network(&self) -> &NetworkDefinition {
         &self.network
-    }
-
-    /// Get the local validator's ID.
-    #[must_use]
-    pub const fn local_validator_id(&self) -> ValidatorId {
-        self.local_validator_id
-    }
-
-    /// Get the local shard group.
-    #[must_use]
-    pub const fn local_shard(&self) -> ShardGroupId {
-        self.local_shard
     }
 
     /// Get the total number of shards.
@@ -285,12 +241,6 @@ impl TopologySnapshot {
         &self.global_validator_set
     }
 
-    /// Get the validator ID at a specific index in the local committee.
-    #[must_use]
-    pub fn local_validator_at_index(&self, index: usize) -> Option<ValidatorId> {
-        self.local_committee().get(index).copied()
-    }
-
     // ── Derived committee queries ────────────────────────────────────────
 
     /// Get the number of committee members for a shard.
@@ -323,73 +273,27 @@ impl TopologySnapshot {
         VotePower::quorum_threshold(self.voting_power_for_shard(shard))
     }
 
-    // ── Local shard shortcuts ────────────────────────────────────────────
-
-    /// Get the ordered committee members for the local shard.
-    #[must_use]
-    pub fn local_committee(&self) -> &[ValidatorId] {
-        self.committee_for_shard(self.local_shard)
-    }
-
-    /// Get total voting power for the local shard.
-    #[must_use]
-    pub fn local_voting_power(&self) -> VotePower {
-        self.voting_power_for_shard(self.local_shard)
-    }
-
-    /// Get the number of committee members for the local shard.
-    #[must_use]
-    pub fn local_committee_size(&self) -> usize {
-        self.committee_size_for_shard(self.local_shard)
-    }
-
-    /// Get the index of a validator in the local shard's committee.
-    #[must_use]
-    pub fn local_committee_index(&self, validator_id: ValidatorId) -> Option<usize> {
-        self.committee_index_for_shard(self.local_shard, validator_id)
-    }
-
-    /// Check if the given voting power meets quorum for the local shard.
-    #[must_use]
-    pub fn local_has_quorum(&self, voting_power: VotePower) -> bool {
-        self.has_quorum_for_shard(self.local_shard, voting_power)
-    }
-
-    /// Get the minimum voting power required for quorum in the local shard.
-    #[must_use]
-    pub fn local_quorum_threshold(&self) -> VotePower {
-        self.quorum_threshold_for_shard(self.local_shard)
-    }
-
-    /// Check if a validator is a member of the local shard's committee.
-    #[must_use]
-    pub fn is_committee_member(&self, validator_id: ValidatorId) -> bool {
-        self.local_committee_index(validator_id).is_some()
-    }
-
     // ── Proposer selection ───────────────────────────────────────────────
 
-    /// Get the proposer for a given height and round.
+    /// Get the proposer for `shard` at a given height and round.
     ///
     /// # Panics
-    /// Panics if the local committee is empty (invariant violation).
+    /// Panics if the committee for `shard` is empty (invariant violation).
     #[must_use]
-    pub fn proposer_for(&self, height: BlockHeight, round: Round) -> ValidatorId {
-        let committee = self.local_committee();
+    pub fn proposer_for(
+        &self,
+        shard: ShardGroupId,
+        height: BlockHeight,
+        round: Round,
+    ) -> ValidatorId {
+        let committee = self.committee_for_shard(shard);
         debug_assert!(
             !committee.is_empty(),
-            "proposer_for called with empty committee for shard {:?}",
-            self.local_shard
+            "proposer_for called with empty committee for shard {shard:?}",
         );
         let index = usize::try_from((height.inner() + round.inner()) % committee.len() as u64)
             .expect("modulo of usize len fits in usize");
         committee[index]
-    }
-
-    /// Check if the local validator should propose at this height and round.
-    #[must_use]
-    pub fn should_propose(&self, height: BlockHeight, round: Round) -> bool {
-        self.proposer_for(height, round) == self.local_validator_id
     }
 
     // ── Node / transaction routing ───────────────────────────────────────
@@ -424,33 +328,32 @@ impl TopologySnapshot {
         self.all_shards_for_transaction(tx).len() <= 1
     }
 
-    /// Check if a transaction involves the local shard for consensus.
-    pub fn involves_local_shard_for_consensus(&self, tx: &RoutableTransaction) -> bool {
+    /// Check if `shard` is involved in `tx`'s consensus path — i.e. owns at
+    /// least one of `tx`'s declared writes.
+    pub fn involves_shard_for_consensus(
+        &self,
+        shard: ShardGroupId,
+        tx: &RoutableTransaction,
+    ) -> bool {
         tx.declared_writes()
             .iter()
-            .any(|node_id| self.shard_for_node_id(node_id) == self.local_shard)
+            .any(|node_id| self.shard_for_node_id(node_id) == shard)
     }
 
-    /// Check if this shard is involved in a transaction at all.
-    pub fn involves_local_shard(&self, tx: &RoutableTransaction) -> bool {
-        let local = self.local_shard;
+    /// Check if `shard` is involved in `tx` at all (reads or writes).
+    pub fn involves_shard(&self, shard: ShardGroupId, tx: &RoutableTransaction) -> bool {
         tx.declared_writes()
             .iter()
             .chain(tx.declared_reads().iter())
-            .any(|node_id| self.shard_for_node_id(node_id) == local)
+            .any(|node_id| self.shard_for_node_id(node_id) == shard)
     }
 }
 
 impl std::fmt::Debug for TopologySnapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TopologySnapshot")
-            .field("validator", &self.local_validator_id)
-            .field("shard", &self.local_shard)
             .field("num_shards", &self.num_shards)
-            .field(
-                "committee_size",
-                &self.committee_for_shard(self.local_shard).len(),
-            )
+            .field("shard_count_populated", &self.shard_committees.len())
             .finish_non_exhaustive()
     }
 }
@@ -506,13 +409,12 @@ mod tests {
         }
     }
 
-    fn make_snapshot(num_validators: u64, local_id: u64) -> TopologySnapshot {
+    fn make_snapshot(num_validators: u64) -> TopologySnapshot {
         let validators: Vec<_> = (0..num_validators)
             .map(|i| make_test_validator(i, 1))
             .collect();
         TopologySnapshot::new(
             NetworkDefinition::simulator(),
-            ValidatorId::new(local_id),
             1,
             ValidatorSet::new(validators),
         )
@@ -520,60 +422,63 @@ mod tests {
 
     #[test]
     fn test_committee_basics() {
-        let snapshot = make_snapshot(4, 0);
+        let snapshot = make_snapshot(4);
 
-        assert_eq!(snapshot.local_committee_size(), 4);
-        assert_eq!(snapshot.local_validator_id(), ValidatorId::new(0));
-        assert_eq!(snapshot.local_shard(), ShardGroupId::new(0));
+        assert_eq!(snapshot.committee_size_for_shard(ShardGroupId::new(0)), 4);
+        assert_eq!(snapshot.num_shards(), 1);
     }
 
     #[test]
     fn test_quorum() {
-        let snapshot = make_snapshot(4, 0);
+        let snapshot = make_snapshot(4);
+        let shard = ShardGroupId::new(0);
 
-        assert_eq!(snapshot.local_voting_power(), VotePower::new(4));
-        assert_eq!(snapshot.local_quorum_threshold(), VotePower::new(3));
+        assert_eq!(snapshot.voting_power_for_shard(shard), VotePower::new(4));
+        assert_eq!(
+            snapshot.quorum_threshold_for_shard(shard),
+            VotePower::new(3)
+        );
 
-        assert!(!snapshot.local_has_quorum(VotePower::new(2)));
-        assert!(snapshot.local_has_quorum(VotePower::new(3)));
-        assert!(snapshot.local_has_quorum(VotePower::new(4)));
+        assert!(!snapshot.has_quorum_for_shard(shard, VotePower::new(2)));
+        assert!(snapshot.has_quorum_for_shard(shard, VotePower::new(3)));
+        assert!(snapshot.has_quorum_for_shard(shard, VotePower::new(4)));
     }
 
     #[test]
     fn test_proposer_rotation() {
-        let snapshot = make_snapshot(4, 0);
+        let snapshot = make_snapshot(4);
+        let shard = ShardGroupId::new(0);
 
         assert_eq!(
-            snapshot.proposer_for(BlockHeight::new(0), Round::new(0)),
+            snapshot.proposer_for(shard, BlockHeight::new(0), Round::new(0)),
             ValidatorId::new(0)
         );
         assert_eq!(
-            snapshot.proposer_for(BlockHeight::new(1), Round::new(0)),
+            snapshot.proposer_for(shard, BlockHeight::new(1), Round::new(0)),
             ValidatorId::new(1)
         );
         assert_eq!(
-            snapshot.proposer_for(BlockHeight::new(4), Round::new(0)),
+            snapshot.proposer_for(shard, BlockHeight::new(4), Round::new(0)),
             ValidatorId::new(0)
         );
         assert_eq!(
-            snapshot.proposer_for(BlockHeight::new(0), Round::new(1)),
+            snapshot.proposer_for(shard, BlockHeight::new(0), Round::new(1)),
             ValidatorId::new(1)
         );
     }
 
     #[test]
-    fn test_with_local_shard() {
+    fn test_single_shard() {
         let validators: Vec<_> = (0..4).map(|i| make_test_validator(i, 1)).collect();
-        let snapshot = TopologySnapshot::with_local_shard(
+        let shard = ShardGroupId::new(1);
+        let snapshot = TopologySnapshot::single_shard(
             NetworkDefinition::simulator(),
-            ValidatorId::new(0),
-            ShardGroupId::new(1),
+            shard,
             2,
             ValidatorSet::new(validators),
         );
 
-        assert_eq!(snapshot.local_shard(), ShardGroupId::new(1));
-        assert_eq!(snapshot.local_committee_size(), 4);
+        assert_eq!(snapshot.committee_size_for_shard(shard), 4);
         // Other shard should be empty.
         assert_eq!(snapshot.committee_for_shard(ShardGroupId::new(0)).len(), 0);
     }
@@ -594,8 +499,6 @@ mod tests {
 
         let snapshot = TopologySnapshot::with_shard_committees(
             NetworkDefinition::simulator(),
-            ValidatorId::new(0),
-            ShardGroupId::new(0),
             2,
             &vs,
             committees,
@@ -621,8 +524,6 @@ mod tests {
         );
         let _ = TopologySnapshot::with_shard_committees(
             NetworkDefinition::simulator(),
-            ValidatorId::new(0),
-            ShardGroupId::new(0),
             1,
             &vs,
             committees,
@@ -649,8 +550,6 @@ mod tests {
         );
         let snapshot = TopologySnapshot::with_shard_committees(
             NetworkDefinition::simulator(),
-            ValidatorId::new(0),
-            ShardGroupId::new(0),
             1,
             &vs,
             committees,
@@ -666,7 +565,6 @@ mod tests {
         let validators: Vec<_> = (0..8).map(|i| make_test_validator(i, 1)).collect();
         let snapshot = TopologySnapshot::new(
             NetworkDefinition::simulator(),
-            ValidatorId::new(0),
             2,
             ValidatorSet::new(validators),
         );

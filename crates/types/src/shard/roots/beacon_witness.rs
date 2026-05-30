@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use crate::{
     BeaconWitnessLeafCount, BeaconWitnessRoot, BlockHeight, ConsensusReceipt, Hash, ReadySignal,
-    Round, ShardWitnessPayload, StoredReceipt, TopologySnapshot, Verified, Verify,
+    Round, ShardGroupId, ShardWitnessPayload, StoredReceipt, TopologySnapshot, Verified, Verify,
     compute_merkle_root,
 };
 
@@ -26,6 +26,9 @@ pub struct BeaconWitnessRootContext<'a> {
     pub parent_witness_leaves: Vec<Hash>,
     /// Round of the parent block — anchors the missed-proposal walk.
     pub parent_round: Round,
+    /// Shard the block belongs to — anchors the proposer-rotation
+    /// rule for the missed-round walk.
+    pub shard: ShardGroupId,
     /// Height of the block being verified.
     pub height: BlockHeight,
     /// Round at which the block was proposed.
@@ -71,6 +74,7 @@ pub enum BeaconWitnessRootVerifyError {
 /// both sides simultaneously.
 #[must_use]
 pub fn missed_proposals_since_prev_commit(
+    shard: ShardGroupId,
     height: BlockHeight,
     parent_round: Round,
     committed_round: Round,
@@ -79,7 +83,7 @@ pub fn missed_proposals_since_prev_commit(
     let mut missed = Vec::new();
     let mut round = parent_round.next();
     while round < committed_round {
-        let proposer_id = topology.proposer_for(height, round);
+        let proposer_id = topology.proposer_for(shard, height, round);
         missed.push(ShardWitnessPayload::MissedProposal {
             proposer_id,
             height,
@@ -150,6 +154,7 @@ impl Verify<&BeaconWitnessRootContext<'_>> for BeaconWitnessRoot {
     fn verify(&self, ctx: &BeaconWitnessRootContext<'_>) -> Result<Verified<Self>, Self::Error> {
         let expected_root = *self;
         let missed = missed_proposals_since_prev_commit(
+            ctx.shard,
             ctx.height,
             ctx.parent_round,
             ctx.round,

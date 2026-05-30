@@ -48,7 +48,7 @@ impl NodeStateMachine {
         tx: Arc<Verified<RoutableTransaction>>,
         submitted_locally: bool,
     ) -> Vec<Action> {
-        if !self.topology_snapshot.involves_local_shard(&tx) {
+        if !self.topology_snapshot.involves_shard(self.local_shard, &tx) {
             return vec![];
         }
 

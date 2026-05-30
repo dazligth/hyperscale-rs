@@ -63,7 +63,6 @@ mod tests {
             .collect();
         TopologySnapshot::new(
             NetworkDefinition::simulator(),
-            ValidatorId::new(0),
             2,
             ValidatorSet::new(validators),
         )
@@ -135,27 +134,27 @@ mod tests {
     #[test]
     fn test_compute_provision_tx_roots_empty() {
         let topology = two_shard_topology();
-        let map = Verified::<ProvisionTxRootsMap>::compute(&topology, &[]);
+        let map = Verified::<ProvisionTxRootsMap>::compute(ShardGroupId::new(0), &topology, &[]);
         assert!(map.is_empty());
     }
 
     #[test]
     fn test_compute_provision_tx_roots_single_shard_excluded() {
         let topology = two_shard_topology();
-        let local_node = node_on_shard(&topology, topology.local_shard());
+        let local_node = node_on_shard(&topology, ShardGroupId::new(0));
         let tx = Arc::new(Verifiable::from(test_transaction_with_nodes(
             &[1, 2, 3],
             vec![local_node],
             vec![local_node],
         )));
-        let map = Verified::<ProvisionTxRootsMap>::compute(&topology, &[tx]);
+        let map = Verified::<ProvisionTxRootsMap>::compute(ShardGroupId::new(0), &topology, &[tx]);
         assert!(map.is_empty(), "single-shard tx must not produce an entry");
     }
 
     #[test]
     fn test_compute_provision_tx_roots_covers_all_touched_targets() {
         let topology = two_shard_topology();
-        let local_node = node_on_shard(&topology, topology.local_shard());
+        let local_node = node_on_shard(&topology, ShardGroupId::new(0));
         let remote_node = node_on_shard(&topology, ShardGroupId::new(1));
 
         // Cross-shard tx: writes span local shard 0 and remote shard 1.
@@ -170,8 +169,11 @@ mod tests {
             vec![local_node, remote_node],
         )));
 
-        let roots =
-            Verified::<ProvisionTxRootsMap>::compute(&topology, &[tx_a.clone(), tx_b.clone()]);
+        let roots = Verified::<ProvisionTxRootsMap>::compute(
+            ShardGroupId::new(0),
+            &topology,
+            &[tx_a.clone(), tx_b.clone()],
+        );
 
         // Local shard excluded; only shard 1 receives provisions.
         assert_eq!(roots.len(), 1);

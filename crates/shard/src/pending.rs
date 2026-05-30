@@ -11,7 +11,7 @@ use hyperscale_core::{Action, FetchRequest};
 use hyperscale_types::{BeaconWitnessLeafCount, BeaconWitnessRoot};
 use hyperscale_types::{
     Block, BlockHash, BlockHeader, BlockHeight, BlockManifest, FinalizedWave, LocalTimestamp,
-    ProvisionHash, Provisions, ReadySignal, RoutableTransaction, TopologySnapshot, TxHash,
+    ProvisionHash, Provisions, ReadySignal, RoutableTransaction, ShardGroupId, TxHash, ValidatorId,
     Verifiable, WaveId,
 };
 use tracing::{debug, warn};
@@ -264,7 +264,8 @@ impl PendingBlocks {
     /// `force_immediate` bypasses the age check.
     pub fn check_fetches(
         &self,
-        topology: &TopologySnapshot,
+        me: ValidatorId,
+        local_shard: ShardGroupId,
         now: LocalTimestamp,
         timeout: Duration,
         force_immediate: bool,
@@ -283,12 +284,11 @@ impl PendingBlocks {
             }
 
             let proposer = pending.header().proposer();
-            let local_shard = topology.local_shard();
 
             let missing_txs = pending.missing_transactions();
             if !missing_txs.is_empty() {
                 debug!(
-                    validator = ?topology.local_validator_id(),
+                    validator = ?me,
                     block_hash = ?block_hash,
                     missing_tx_count = missing_txs.len(),
                     age_ms = age.as_millis(),
@@ -306,7 +306,7 @@ impl PendingBlocks {
             let missing_provisions = pending.missing_provisions();
             if !missing_provisions.is_empty() {
                 debug!(
-                    validator = ?topology.local_validator_id(),
+                    validator = ?me,
                     block_hash = ?block_hash,
                     missing_provision_count = missing_provisions.len(),
                     age_ms = age.as_millis(),
@@ -323,7 +323,7 @@ impl PendingBlocks {
             let missing_waves = pending.missing_waves();
             if !missing_waves.is_empty() {
                 debug!(
-                    validator = ?topology.local_validator_id(),
+                    validator = ?me,
                     block_hash = ?block_hash,
                     missing_wave_count = missing_waves.len(),
                     age_ms = age.as_millis(),

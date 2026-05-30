@@ -20,18 +20,12 @@ impl NodeStateMachine {
 
         // Pending blocks that need fetch requests. Delayed to give gossip
         // and local certificate creation time to fill in missing data first.
-        actions.extend(
-            self.shard_coordinator
-                .check_pending_block_fetches(&self.topology_snapshot, false),
-        );
+        actions.extend(self.shard_coordinator.check_pending_block_fetches(false));
 
         // Check if we're behind and need to catch up via sync. Handles the
         // case where latest_qc > committed_height — the network progressed
         // but we're stuck.
-        actions.extend(
-            self.shard_coordinator
-                .check_sync_health(&self.topology_snapshot),
-        );
+        actions.extend(self.shard_coordinator.check_sync_health());
 
         // Drop tombstones whose `end_timestamp_exclusive` has passed — past
         // expiry, validator-side validity check rejects re-submission anyway.

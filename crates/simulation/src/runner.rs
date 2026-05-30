@@ -197,6 +197,15 @@ impl SimulationRunner {
             shard_committees.insert(shard, committee);
         }
 
+        // Identity-agnostic snapshot — one allocation shared across every
+        // host and every vnode.
+        let shared_topology = Arc::new(TopologySnapshot::with_shard_committees(
+            NetworkDefinition::simulator(),
+            u64::from(network_config.num_shards),
+            &global_validator_set,
+            shard_committees.clone(),
+        ));
+
         // Build the host→validators layout based on the hosting mode.
         // Each host carries a list of (validator_idx, shard) tuples.
         let vnodes_per_host = network_config.vnodes_per_host;
@@ -235,40 +244,20 @@ impl SimulationRunner {
             }
 
             let mut vnode_inits: Vec<VnodeInit> = Vec::with_capacity(host_vnodes.len());
-            let mut topology_arc_for_host = None;
             for (shard, validator_idxs) in &by_shard {
                 let (provision_store, tx_store, exec_cert_store, fw_store) =
                     shard_stores.get(shard).expect("shard bundle just inserted");
                 for &validator_idx in validator_idxs {
                     let validator_id = ValidatorId::new(u64::from(validator_idx));
-
-                    let topology_state = Arc::new(TopologySnapshot::with_shard_committees(
-                        NetworkDefinition::simulator(),
-                        validator_id,
-                        *shard,
-                        u64::from(network_config.num_shards),
-                        &global_validator_set,
-                        shard_committees.clone(),
-                    ));
-
                     let key_bytes = keys[validator_idx as usize].to_bytes();
                     let signing_key = Arc::new(
                         Bls12381G1PrivateKey::from_bytes(&key_bytes).expect("valid key bytes"),
                     );
 
-                    // First vnode's topology drives the `NodeHost`'s
-                    // shared snapshot. Off-thread handlers only read
-                    // shard-level info from this snapshot, not the
-                    // validator id, so picking the first arbitrarily
-                    // works across both same-shard and cross-shard
-                    // hosting.
-                    if topology_arc_for_host.is_none() {
-                        topology_arc_for_host =
-                            Some(Arc::new(ArcSwap::from(Arc::clone(&topology_state))));
-                    }
-
                     let state = NodeStateMachine::new(
-                        topology_state,
+                        validator_id,
+                        *shard,
+                        Arc::clone(&shared_topology),
                         &ShardConsensusConfig::default(),
                         RecoveredState::default(),
                         MempoolConfig::default(),
@@ -282,6 +271,7 @@ impl SimulationRunner {
                     vnode_inits.push(VnodeInit { state, signing_key });
                 }
             }
+            let topology_arc_for_host = Arc::new(ArcSwap::from(Arc::clone(&shared_topology)));
 
             let (event_tx, event_rx) = unbounded();
 
@@ -308,7 +298,7 @@ impl SimulationRunner {
                 ),
                 SyncDispatch,
                 shard_event_senders,
-                topology_arc_for_host.expect("host carries at least one vnode"),
+                topology_arc_for_host,
                 NodeConfig::default(),
                 tx_validator,
             );
@@ -430,7 +420,7 @@ impl SimulationRunner {
         for shard in host.hosted_shards() {
             for v in 0..host.vnodes_len(shard) {
                 let state = host.vnode_state(shard, v);
-                if state.topology().local_validator_id() == validator_id {
+                if state.validator_id() == validator_id {
                     return Some(state);
                 }
             }

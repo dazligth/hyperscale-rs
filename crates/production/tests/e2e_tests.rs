@@ -229,7 +229,7 @@ async fn test_validator_bind_success() {
         vec![(ValidatorId::new(0), bind_sig0)],
         HashSet::from([ShardGroupId::new(0)]),
         Arc::new(HandlerRegistry::default()),
-        fixtures.validator_key_map(0),
+        fixtures.validator_key_map(),
     )
     .unwrap();
 
@@ -253,7 +253,7 @@ async fn test_validator_bind_success() {
         vec![(ValidatorId::new(1), bind_sig1)],
         HashSet::from([ShardGroupId::new(0)]),
         Arc::new(HandlerRegistry::default()),
-        fixtures.validator_key_map(1),
+        fixtures.validator_key_map(),
     )
     .unwrap();
 
@@ -306,7 +306,7 @@ async fn test_validator_bind_rejects_wrong_key() {
         vec![(ValidatorId::new(0), bind_sig0)],
         HashSet::from([ShardGroupId::new(0)]),
         Arc::new(HandlerRegistry::default()),
-        fixtures.validator_key_map(0),
+        fixtures.validator_key_map(),
     )
     .unwrap();
 
@@ -332,7 +332,7 @@ async fn test_validator_bind_rejects_wrong_key() {
         vec![(ValidatorId::new(1), wrong_signing_key)],
         HashSet::from([ShardGroupId::new(0)]),
         Arc::new(HandlerRegistry::default()),
-        fixtures.validator_key_map(1),
+        fixtures.validator_key_map(),
     )
     .unwrap();
 
@@ -385,7 +385,7 @@ async fn test_validator_bind_evicted_on_disconnect() {
         vec![(ValidatorId::new(0), bind_sig0)],
         HashSet::from([ShardGroupId::new(0)]),
         Arc::new(HandlerRegistry::default()),
-        fixtures.validator_key_map(0),
+        fixtures.validator_key_map(),
     )
     .unwrap();
 
@@ -409,7 +409,7 @@ async fn test_validator_bind_evicted_on_disconnect() {
         vec![(ValidatorId::new(1), bind_sig1)],
         HashSet::from([ShardGroupId::new(0)]),
         Arc::new(HandlerRegistry::default()),
-        fixtures.validator_key_map(1),
+        fixtures.validator_key_map(),
     )
     .unwrap();
 
@@ -474,9 +474,11 @@ async fn test_production_runner_with_network() {
 
     let runner = ProductionRunner::builder(
         vec![VnodeConfig {
-            topology: fixtures.topology(0),
+            validator_id: ValidatorId::new(0),
+            local_shard: ShardGroupId::new(0),
             signing_key: fixtures.signing_key(0),
         }],
+        fixtures.topology(),
         ShardConsensusConfig::default(),
         HashMap::from([(ShardGroupId::new(0), storage)]),
         network_config,
@@ -536,9 +538,11 @@ async fn test_graceful_shutdown() {
 
     let mut runner = ProductionRunner::builder(
         vec![VnodeConfig {
-            topology: fixtures.topology(0),
+            validator_id: ValidatorId::new(0),
+            local_shard: ShardGroupId::new(0),
             signing_key: fixtures.signing_key(0),
         }],
+        fixtures.topology(),
         ShardConsensusConfig::default(),
         HashMap::from([(ShardGroupId::new(0), storage)]),
         network_config,
@@ -602,16 +606,19 @@ async fn test_v2_same_shard_production_runner_binds_all_vnodes() {
 
     let host0_vnodes = vec![
         VnodeConfig {
-            topology: fixtures.topology(0),
+            validator_id: ValidatorId::new(0),
+            local_shard: ShardGroupId::new(0),
             signing_key: fixtures.signing_key(0),
         },
         VnodeConfig {
-            topology: fixtures.topology(1),
+            validator_id: ValidatorId::new(1),
+            local_shard: ShardGroupId::new(0),
             signing_key: fixtures.signing_key(1),
         },
     ];
     let mut runner0 = ProductionRunner::builder(
         host0_vnodes,
+        fixtures.topology(),
         ShardConsensusConfig::default(),
         HashMap::from([(ShardGroupId::new(0), storage0)]),
         network_config0,
@@ -639,16 +646,19 @@ async fn test_v2_same_shard_production_runner_binds_all_vnodes() {
     };
     let host1_vnodes = vec![
         VnodeConfig {
-            topology: fixtures.topology(2),
+            validator_id: ValidatorId::new(2),
+            local_shard: ShardGroupId::new(0),
             signing_key: fixtures.signing_key(2),
         },
         VnodeConfig {
-            topology: fixtures.topology(3),
+            validator_id: ValidatorId::new(3),
+            local_shard: ShardGroupId::new(0),
             signing_key: fixtures.signing_key(3),
         },
     ];
     let mut runner1 = ProductionRunner::builder(
         host1_vnodes,
+        fixtures.topology(),
         ShardConsensusConfig::default(),
         HashMap::from([(ShardGroupId::new(0), storage1)]),
         network_config1,
@@ -748,16 +758,19 @@ async fn test_v2_different_shard_production_runner_binds_all_vnodes() {
     // Host 0: validator 0 (shard 0) + validator 2 (shard 1).
     let host0_vnodes = vec![
         VnodeConfig {
-            topology: fixtures.topology(0),
+            validator_id: ValidatorId::new(0),
+            local_shard: ShardGroupId::new(0),
             signing_key: fixtures.signing_key(0),
         },
         VnodeConfig {
-            topology: fixtures.topology(2),
+            validator_id: ValidatorId::new(2),
+            local_shard: ShardGroupId::new(1),
             signing_key: fixtures.signing_key(2),
         },
     ];
     let mut runner0 = ProductionRunner::builder(
         host0_vnodes,
+        fixtures.topology(),
         ShardConsensusConfig::default(),
         HashMap::from([
             (ShardGroupId::new(0), host0_s0),
@@ -788,16 +801,19 @@ async fn test_v2_different_shard_production_runner_binds_all_vnodes() {
     // Host 1: validator 1 (shard 0) + validator 3 (shard 1).
     let host1_vnodes = vec![
         VnodeConfig {
-            topology: fixtures.topology(1),
+            validator_id: ValidatorId::new(1),
+            local_shard: ShardGroupId::new(0),
             signing_key: fixtures.signing_key(1),
         },
         VnodeConfig {
-            topology: fixtures.topology(3),
+            validator_id: ValidatorId::new(3),
+            local_shard: ShardGroupId::new(1),
             signing_key: fixtures.signing_key(3),
         },
     ];
     let mut runner1 = ProductionRunner::builder(
         host1_vnodes,
+        fixtures.topology(),
         ShardConsensusConfig::default(),
         HashMap::from([
             (ShardGroupId::new(0), host1_s0),

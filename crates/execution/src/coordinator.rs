@@ -210,12 +210,12 @@ pub struct ExecutionCoordinator {
     /// wave is content-addressed by id (one wave per `WaveId`), so a second
     /// fetch arrival for the same wave can short-circuit the BLS pool.
     pending_finalized_wave_verifications: HashSet<WaveId>,
-}
 
-impl Default for ExecutionCoordinator {
-    fn default() -> Self {
-        Self::new()
-    }
+    /// This validator's identity.
+    me: ValidatorId,
+
+    /// This validator's home shard.
+    local_shard: ShardGroupId,
 }
 
 impl ExecutionCoordinator {
@@ -224,8 +224,10 @@ impl ExecutionCoordinator {
     /// [`Self::with_shared_stores`] to share one set of stores across
     /// every coordinator in the shard.
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(me: ValidatorId, local_shard: ShardGroupId) -> Self {
         Self::with_shared_stores(
+            me,
+            local_shard,
             Arc::new(ExecCertStore::new()),
             Arc::new(FinalizedWaveStore::new()),
         )
@@ -238,6 +240,8 @@ impl ExecutionCoordinator {
     /// rather than vnode-0's incidentally-convergent copy.
     #[must_use]
     pub fn with_shared_stores(
+        me: ValidatorId,
+        local_shard: ShardGroupId,
         exec_certs: Arc<ExecCertStore>,
         finalized: Arc<FinalizedWaveStore>,
     ) -> Self {
@@ -253,6 +257,8 @@ impl ExecutionCoordinator {
             exec_certs,
             pending_ec_verifications: HashSet::new(),
             pending_finalized_wave_verifications: HashSet::new(),
+            me,
+            local_shard,
         }
     }
 
@@ -300,9 +306,9 @@ impl ExecutionCoordinator {
         block_ts: WeightedTimestamp,
         transactions: &[Arc<Verifiable<RoutableTransaction>>],
     ) -> (Vec<Action>, Vec<Verifiable<ExecutionVote>>) {
-        let waves = assign_waves(topology, block_height, transactions);
-        let quorum = topology.local_quorum_threshold();
-        let local_shard = topology.local_shard();
+        let waves = assign_waves(topology, self.local_shard, block_height, transactions);
+        let quorum = topology.quorum_threshold_for_shard(self.local_shard);
+        let local_shard = self.local_shard;
         let mut dispatch_actions: Vec<Action> = Vec::new();
         let mut votes_to_replay: Vec<Verifiable<ExecutionVote>> = Vec::new();
 
@@ -336,6 +342,7 @@ impl ExecutionCoordinator {
 
                     let conflicts = self.provisioning.register_tx(
                         tx_hash,
+                        self.local_shard,
                         topology,
                         tx.declared_reads(),
                         tx.declared_writes(),
@@ -372,8 +379,8 @@ impl ExecutionCoordinator {
             self.waves.insert_wave(wave_id.clone(), wave_state);
 
             // Only the wave leader creates a VoteTracker for aggregation.
-            let leader = wave_leader(&wave_id, topology.local_committee());
-            if topology.local_validator_id() == leader {
+            let leader = wave_leader(&wave_id, topology.committee_for_shard(self.local_shard));
+            if self.me == leader {
                 let tracker = VoteTracker::new(wave_id.clone(), block_hash, quorum);
                 self.waves.insert_tracker(wave_id.clone(), tracker);
 
@@ -511,8 +518,8 @@ impl ExecutionCoordinator {
     /// (either `all_provisioned_at`, or `wave_start_ts + WAVE_TIMEOUT`
     /// for timeout-abort).
     pub fn emit_vote_actions(&mut self, topology: &TopologySnapshot) -> Vec<Action> {
-        let committee = topology.local_committee().to_vec();
-        let local_vid = topology.local_validator_id();
+        let committee = topology.committee_for_shard(self.local_shard).to_vec();
+        let local_vid = self.me;
         let completions = self.scan_complete_waves();
         let mut actions = Vec::with_capacity(completions.len());
         for completion in completions {
@@ -719,7 +726,10 @@ impl ExecutionCoordinator {
         // signatures the verifier's bitfield-derived pubkey pool excludes
         // — guaranteed to fail verification and waste a leader rotation.
         // Mirrors `vote_keeper::record_received_vote`.
-        if topology.local_committee_index(validator_id).is_none() {
+        if topology
+            .committee_index_for_shard(self.local_shard, validator_id)
+            .is_none()
+        {
             tracing::warn!(
                 validator = validator_id.inner(),
                 "Execution vote from validator not in local committee"
@@ -739,7 +749,7 @@ impl ExecutionCoordinator {
             }
             // Wave exists but no VoteTracker and no EC yet. This validator
             // was targeted as a fallback leader (rotated attempt). Create tracker.
-            let quorum = topology.local_quorum_threshold();
+            let quorum = topology.quorum_threshold_for_shard(self.local_shard);
             let block_hash = self
                 .waves
                 .get_wave(&wave_id)
@@ -881,7 +891,8 @@ impl ExecutionCoordinator {
         // across multiple global receipt roots — this means validators disagree
         // on execution results.
         if tracker.check_quorum().is_none()
-            && tracker.total_verified_power() >= topology.local_quorum_threshold()
+            && tracker.total_verified_power()
+                >= topology.quorum_threshold_for_shard(self.local_shard)
             && tracker.distinct_global_receipt_root_count() > 1
         {
             let summary = tracker.global_receipt_root_power_summary();
@@ -889,7 +900,7 @@ impl ExecutionCoordinator {
                 block_hash = ?block_hash,
                 wave = %wave_id,
                 global_receipt_root_split = ?summary,
-                quorum = topology.local_quorum_threshold().inner(),
+                quorum = topology.quorum_threshold_for_shard(self.local_shard).inner(),
                 "Execution vote quorum blocked: global receipt roots are split across validators"
             );
         }
@@ -920,7 +931,7 @@ impl ExecutionCoordinator {
         );
 
         let votes = tracker.take_votes(global_receipt_root, vote_anchor_ts);
-        let committee = topology.local_committee().to_vec();
+        let committee = topology.committee_for_shard(self.local_shard).to_vec();
 
         // Remove the vote tracker — this EC is the shard's final answer.
         // Mark wave as having an EC to skip it in scan_complete_waves.
@@ -982,10 +993,10 @@ impl ExecutionCoordinator {
         self.exec_certs.insert(Arc::clone(certificate));
 
         // Broadcast EC to all local peers (they don't aggregate — they need it).
-        let local_peers = peers_excluding_self(topology, topology.local_shard());
+        let local_peers = peers_excluding_self(topology, self.me, self.local_shard);
         if !local_peers.is_empty() {
             actions.push(Action::BroadcastExecutionCertificate {
-                shard: topology.local_shard(),
+                shard: self.local_shard,
                 certificate: Arc::clone(certificate),
                 recipients: local_peers,
             });
@@ -1172,7 +1183,7 @@ impl ExecutionCoordinator {
         // If this is a local shard EC, mark the wave as having an EC to skip
         // it in scan_complete_waves, and persist it for fallback serving to
         // remote shards.
-        if shard == topology.local_shard() {
+        if shard == self.local_shard {
             self.waves.mark_ec_dispatched(ec_arc.wave_id().clone());
             // EC received from wave leader — cancel any pending vote retry.
             self.waves.clear_vote_retry(ec_arc.wave_id());
@@ -1196,12 +1207,11 @@ impl ExecutionCoordinator {
     /// If the cert doesn't arrive within the timeout, we request it via fallback.
     pub fn on_verified_remote_header(
         &mut self,
-        topology: &TopologySnapshot,
         source_shard: ShardGroupId,
         block_height: BlockHeight,
         waves: &[WaveId],
     ) {
-        let local_shard = topology.local_shard();
+        let local_shard = self.local_shard;
 
         for wave in waves {
             if wave.remote_shards().contains(&local_shard) {
@@ -1219,7 +1229,7 @@ impl ExecutionCoordinator {
     ///
     /// Called during block commit processing. Returns actions for any certs
     /// that have exceeded the timeout.
-    fn check_exec_cert_timeouts(&mut self, topology: &TopologySnapshot) -> Vec<Action> {
+    fn check_exec_cert_timeouts(&mut self) -> Vec<Action> {
         let now_ts = self.committed_ts;
         let fetches = self.expected_certs.check_timeouts(now_ts);
 
@@ -1245,7 +1255,7 @@ impl ExecutionCoordinator {
         // once a wave is complete. Keyed by source shard (not wave_id)
         // because expected entries carry the remote shard's wave
         // decomposition, which cannot be matched against local wave ids.
-        let local_shard = topology.local_shard();
+        let local_shard = self.local_shard;
         let shards_needed: HashSet<ShardGroupId> = self
             .waves
             .waves_iter()
@@ -1272,7 +1282,7 @@ impl ExecutionCoordinator {
             return Vec::new();
         }
 
-        let committee = topology.local_committee().to_vec();
+        let committee = topology.committee_for_shard(self.local_shard).to_vec();
         let mut actions = Vec::with_capacity(effects.len());
         for RetryEffect {
             wave_id,
@@ -1372,7 +1382,7 @@ impl ExecutionCoordinator {
 
         // Timeout checks + pruning run every block, not just commits that
         // carry txs.
-        actions.extend(self.check_exec_cert_timeouts(topology));
+        actions.extend(self.check_exec_cert_timeouts());
         actions.extend(self.check_vote_retry_timeouts(topology));
         self.prune_execution_state();
         self.early.gc_stale_ecs(self.committed_ts);
@@ -1459,10 +1469,10 @@ impl ExecutionCoordinator {
         let mut actions = Vec::new();
 
         // ── Provision broadcasting (proposer only) ─────────────────────
-        if topology.local_validator_id() == header.proposer() {
-            let local_shard = topology.local_shard();
+        if self.me == header.proposer() {
+            let local_shard = self.local_shard;
             if let Some((requests, shard_recipients)) =
-                build_provision_requests(topology, transactions, local_shard)
+                build_provision_requests(topology, transactions, self.me, local_shard)
             {
                 actions.push(Action::FetchAndBroadcastProvisions {
                     block_hash,
@@ -1560,7 +1570,7 @@ impl ExecutionCoordinator {
         block_height: BlockHeight,
         transactions: &[Arc<Verifiable<RoutableTransaction>>],
     ) {
-        let waves = assign_waves(topology, block_height, transactions);
+        let waves = assign_waves(topology, self.local_shard, block_height, transactions);
         for (wave_id, txs) in waves {
             for (tx, _) in &txs {
                 self.waves.assign_tx(tx.hash(), wave_id.clone());
@@ -2014,27 +2024,26 @@ mod tests {
             .collect();
         let validator_set = ValidatorSet::new(validators);
 
-        TopologySnapshot::new(
-            NetworkDefinition::simulator(),
-            ValidatorId::new(0),
-            1,
-            validator_set,
-        )
+        TopologySnapshot::new(NetworkDefinition::simulator(), 1, validator_set)
     }
 
     fn make_test_state() -> ExecutionCoordinator {
-        ExecutionCoordinator::new()
+        make_test_state_for(ValidatorId::new(0))
+    }
+
+    fn make_test_state_for(me: ValidatorId) -> ExecutionCoordinator {
+        ExecutionCoordinator::new(me, ShardGroupId::new(0))
     }
 
     fn make_live_block(
-        topology: &TopologySnapshot,
+        _topology: &TopologySnapshot,
         height: BlockHeight,
         timestamp_ms: u64,
         proposer: ValidatorId,
         transactions: Vec<Arc<RoutableTransaction>>,
     ) -> Block {
         helpers_make_live_block(
-            topology.local_shard(),
+            ShardGroupId::new(0),
             height,
             timestamp_ms,
             proposer,
@@ -2080,8 +2089,7 @@ mod tests {
         assert!(state.waves.contains_wave(&wave_id.unwrap()));
     }
 
-    /// Build a topology where the given `validator_id` is the local validator.
-    fn make_topology_for(local_vid: u64) -> TopologySnapshot {
+    fn make_topology() -> TopologySnapshot {
         let keys: Vec<Bls12381G1PrivateKey> = (0..4).map(|_| generate_bls_keypair()).collect();
         let validators: Vec<ValidatorInfo> = keys
             .iter()
@@ -2093,12 +2101,7 @@ mod tests {
             })
             .collect();
         let validator_set = ValidatorSet::new(validators);
-        TopologySnapshot::new(
-            NetworkDefinition::simulator(),
-            ValidatorId::new(local_vid),
-            1,
-            validator_set,
-        )
+        TopologySnapshot::new(NetworkDefinition::simulator(), 1, validator_set)
     }
 
     #[test]
@@ -2106,8 +2109,8 @@ mod tests {
         let tx = test_transaction(1);
 
         // Determine who the wave leader will be for this block's wave.
-        let topo0 = make_topology_for(0);
-        let committee = topo0.local_committee().to_vec();
+        let topo0 = make_topology();
+        let committee = topo0.committee_for_shard(ShardGroupId::new(0)).to_vec();
         let block = make_live_block(
             &topo0,
             BlockHeight::new(1),
@@ -2129,7 +2132,7 @@ mod tests {
         let leader = wave_leader(&wave_id, &committee);
 
         // Leader should have a VoteTracker.
-        let topo_leader = make_topology_for(leader.inner());
+        let topo_leader = make_topology();
         let block_leader = make_live_block(
             &topo_leader,
             BlockHeight::new(1),
@@ -2137,7 +2140,7 @@ mod tests {
             ValidatorId::new(0),
             vec![Arc::new(tx.clone())],
         );
-        let mut state_leader = make_test_state();
+        let mut state_leader = make_test_state_for(leader);
         state_leader.on_block_committed(&topo_leader, &certify(block_leader));
         assert!(
             state_leader.waves.contains_tracker(&wave_id),
@@ -2145,8 +2148,8 @@ mod tests {
         );
 
         // A non-leader should NOT have a VoteTracker.
-        let non_leader_id = committee.iter().find(|&&v| v != leader).unwrap();
-        let topo_non = make_topology_for(non_leader_id.inner());
+        let non_leader_id = *committee.iter().find(|&&v| v != leader).unwrap();
+        let topo_non = make_topology();
         let block_non = make_live_block(
             &topo_non,
             BlockHeight::new(1),
@@ -2154,7 +2157,7 @@ mod tests {
             ValidatorId::new(0),
             vec![Arc::new(tx)],
         );
-        let mut state_non = make_test_state();
+        let mut state_non = make_test_state_for(non_leader_id);
         state_non.on_block_committed(&topo_non, &certify(block_non));
         assert!(
             !state_non.waves.contains_tracker(&wave_id),
@@ -2165,8 +2168,8 @@ mod tests {
     #[test]
     fn test_fallback_tracker_created_on_vote() {
         let tx = test_transaction(1);
-        let topo = make_topology_for(0);
-        let committee = topo.local_committee().to_vec();
+        let topo = make_topology();
+        let committee = topo.committee_for_shard(ShardGroupId::new(0)).to_vec();
         let block = make_live_block(
             &topo,
             BlockHeight::new(1),
@@ -2189,7 +2192,7 @@ mod tests {
 
         // If we're the leader, this test doesn't apply — find a non-leader topology.
         let non_leader_id = committee.iter().find(|&&v| v != leader).unwrap();
-        let topo_non = make_topology_for(non_leader_id.inner());
+        let topo_non = make_topology();
         let block_non = make_live_block(
             &topo_non,
             BlockHeight::new(1),
@@ -2197,7 +2200,7 @@ mod tests {
             ValidatorId::new(0),
             vec![Arc::new(tx)],
         );
-        let mut state_non = make_test_state();
+        let mut state_non = make_test_state_for(*non_leader_id);
         state_non.on_block_committed(&topo_non, &certify(block_non));
 
         assert!(!state_non.waves.contains_tracker(&wave_id));
@@ -2234,7 +2237,7 @@ mod tests {
         // pool its cross-shard power into the tracker and trigger premature
         // aggregation that produces an EC the BLS verifier will reject.
         let topo = make_two_shard_topology();
-        let local = topo.local_committee();
+        let local = topo.committee_for_shard(ShardGroupId::new(0));
         let outsider = (0u64..4)
             .map(ValidatorId::new)
             .find(|v| !local.contains(v))
@@ -2273,7 +2276,7 @@ mod tests {
         use crate::waves::VOTE_RETRY_TIMEOUT;
         let wave_id = WaveId::new(ShardGroupId::new(0), BlockHeight::new(1), BTreeSet::new());
         let topo = make_test_topology();
-        let committee = topo.local_committee().to_vec();
+        let committee = topo.committee_for_shard(ShardGroupId::new(0)).to_vec();
 
         let mut state = make_test_state();
         state.committed_height = BlockHeight::new(20);
@@ -3025,7 +3028,6 @@ mod tests {
             std::iter::once(ShardGroupId::new(0)).collect(),
         );
         state.on_verified_remote_header(
-            &topo,
             remote_shard,
             BlockHeight::new(5),
             std::slice::from_ref(&wave_id),
@@ -3126,7 +3128,6 @@ mod tests {
             .collect();
         TopologySnapshot::new(
             NetworkDefinition::simulator(),
-            ValidatorId::new(0),
             2,
             ValidatorSet::new(validators),
         )
@@ -3143,7 +3144,7 @@ mod tests {
 
         use hyperscale_types::test_utils::test_transaction;
 
-        let topo = make_two_shard_topology();
+        let _topo = make_two_shard_topology();
         let mut state = make_test_state();
 
         let remote_shard = ShardGroupId::new(1);
@@ -3153,7 +3154,6 @@ mod tests {
             std::iter::once(ShardGroupId::new(0)).collect(),
         );
         state.on_verified_remote_header(
-            &topo,
             remote_shard,
             BlockHeight::new(5),
             std::slice::from_ref(&remote_wave),
@@ -3192,7 +3192,7 @@ mod tests {
         // because a local wave still needs shard 1's EC.
         state.committed_height = BlockHeight::new(500);
         state.committed_ts = WeightedTimestamp::from_millis(60_000);
-        let actions = state.check_exec_cert_timeouts(&topo);
+        let actions = state.check_exec_cert_timeouts();
 
         assert_eq!(
             state.expected_certs.expected_len(),
@@ -3212,7 +3212,7 @@ mod tests {
         state.waves.remove_assignment(tx_hash);
         state.committed_height = BlockHeight::new(600);
         state.committed_ts = WeightedTimestamp::from_millis(120_000);
-        let _ = state.check_exec_cert_timeouts(&topo);
+        let _ = state.check_exec_cert_timeouts();
         assert_eq!(
             state.expected_certs.expected_len(),
             0,
@@ -3402,7 +3402,6 @@ mod tests {
             std::iter::once(ShardGroupId::new(0)).collect(),
         );
         state.on_verified_remote_header(
-            &topo,
             remote_shard,
             BlockHeight::new(5),
             std::slice::from_ref(&remote_wave),

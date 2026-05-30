@@ -7,14 +7,16 @@
 
 use hyperscale_execution::{ExecutionCoordinator, ExecutionMemoryStats};
 use hyperscale_test_helpers::TestCommittee;
-use hyperscale_types::{BlockHeight, Hash, ShardGroupId, TopologySnapshot, TxHash, WaveId};
+use hyperscale_types::{
+    BlockHeight, Hash, ShardGroupId, TopologySnapshot, TxHash, ValidatorId, WaveId,
+};
 
 fn fresh_coordinator() -> ExecutionCoordinator {
-    ExecutionCoordinator::new()
+    ExecutionCoordinator::new(ValidatorId::new(0), ShardGroupId::new(0))
 }
 
 fn fresh_coordinator_with_topology() -> (ExecutionCoordinator, TopologySnapshot) {
-    let topology = TestCommittee::new(4, 42).topology_snapshot(0, 1);
+    let topology = TestCommittee::new(4, 42).topology_snapshot(1);
     (fresh_coordinator(), topology)
 }
 
@@ -144,7 +146,8 @@ fn certificate_tracking_debug_reports_no_assignment_for_unknown_tx() {
 #[test]
 fn on_verified_remote_header_registers_expectation_for_wave_targeting_local_shard() {
     let (mut coord, topology) = fresh_coordinator_with_topology();
-    let local_shard = topology.local_shard();
+    let local_shard = ShardGroupId::new(0);
+    let _ = &topology;
     // A remote shard's wave that targets our local shard must register an
     // expectation. With committed_ts still ZERO the initial-deadline
     // gate is silenced, but the expectation count must reflect the header.
@@ -154,7 +157,7 @@ fn on_verified_remote_header_registers_expectation_for_wave_targeting_local_shar
         BlockHeight::new(5),
         std::iter::once(local_shard).collect(),
     );
-    coord.on_verified_remote_header(&topology, remote_shard, BlockHeight::new(5), &[wave]);
+    coord.on_verified_remote_header(remote_shard, BlockHeight::new(5), &[wave]);
 
     assert_eq!(
         coord.memory_stats().expected_exec_certs,
@@ -165,7 +168,7 @@ fn on_verified_remote_header_registers_expectation_for_wave_targeting_local_shar
 
 #[test]
 fn on_verified_remote_header_ignores_waves_not_targeting_local_shard() {
-    let (mut coord, topology) = fresh_coordinator_with_topology();
+    let (mut coord, _topology) = fresh_coordinator_with_topology();
     // Wave targets ShardGroupId::new(7) only; local is ShardGroupId::new(0). No
     // expectation should land.
     let wave = WaveId::new(
@@ -173,12 +176,7 @@ fn on_verified_remote_header_ignores_waves_not_targeting_local_shard() {
         BlockHeight::new(5),
         std::iter::once(ShardGroupId::new(7)).collect(),
     );
-    coord.on_verified_remote_header(
-        &topology,
-        ShardGroupId::new(99),
-        BlockHeight::new(5),
-        &[wave],
-    );
+    coord.on_verified_remote_header(ShardGroupId::new(99), BlockHeight::new(5), &[wave]);
 
     assert_eq!(
         coord.memory_stats().expected_exec_certs,

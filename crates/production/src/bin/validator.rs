@@ -45,6 +45,7 @@
 //! gossipsub subscriptions; different-shard vnodes share only the libp2p
 //! peer and dispatch pools.
 
+use std::collections::HashMap;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -655,24 +656,37 @@ fn load_or_generate_keypair(key_path: Option<&PathBuf>) -> Result<Bls12381G1Priv
     }
 }
 
-/// Build the topology from genesis configuration.
+/// Build the identity-agnostic topology snapshot once for the host.
+///
+/// `local_keypairs` carries every hosted vnode's (`validator_id`, private key)
+/// in `config.vnodes` order. For each genesis validator whose id matches a
+/// hosted vnode, the public key is taken from the local keypair rather than
+/// parsed from the genesis hex — keeping the snapshot's view consistent with
+/// what this process actually signs with.
+///
+/// `fallback_shard` is only consulted when no `[[genesis.validators]]` entry
+/// sets `shard` — covering both empty-genesis development mode and the legacy
+/// single-shard no-assignments path. Production multi-shard deployments must
+/// populate `shard` in `[[genesis.validators]]`.
 fn build_topology(
     network: NetworkDefinition,
-    local_validator_id: ValidatorId,
-    local_shard: ShardGroupId,
     num_shards: u64,
     genesis: &GenesisConfig,
-    local_keypair: &Bls12381G1PrivateKey,
+    local_keypairs: &[(ValidatorId, Arc<Bls12381G1PrivateKey>)],
+    fallback_shard: ShardGroupId,
 ) -> Result<Arc<TopologySnapshot>> {
-    use std::collections::HashMap;
+    let lookup_local = |id: ValidatorId| -> Option<&Arc<Bls12381G1PrivateKey>> {
+        local_keypairs
+            .iter()
+            .find_map(|(vid, k)| (*vid == id).then_some(k))
+    };
 
-    // Build validator set from genesis config
     let validators: Vec<ValidatorInfo> = if genesis.validators.is_empty() {
-        // Single validator mode (development/testing)
         warn!("No validators in genesis config, running in single-validator mode");
+        let (validator_id, keypair) = local_keypairs.first().expect("at least one hosted vnode");
         vec![ValidatorInfo {
-            validator_id: local_validator_id,
-            public_key: local_keypair.public_key(),
+            validator_id: *validator_id,
+            public_key: keypair.public_key(),
             voting_power: VotePower::new(1),
         }]
     } else {
@@ -680,16 +694,13 @@ fn build_topology(
             .validators
             .iter()
             .map(|v| {
-                let public_key = if ValidatorId::new(v.id) == local_validator_id {
-                    // Use our own key for our validator ID
-                    local_keypair.public_key()
+                let validator_id = ValidatorId::new(v.id);
+                let public_key = if let Some(keypair) = lookup_local(validator_id) {
+                    keypair.public_key()
                 } else {
-                    // Parse hex-encoded public key (BLS12-381 only)
                     let key_bytes = hex_decode(&v.public_key).with_context(|| {
                         format!("Invalid hex public key for validator {}", v.id)
                     })?;
-
-                    // BLS12-381 public key (compressed, 48 bytes)
                     if key_bytes.len() != 48 {
                         bail!(
                             "Invalid public key length for validator {}: expected 48 (BLS), got {}",
@@ -701,9 +712,8 @@ fn build_topology(
                         anyhow::anyhow!("Invalid BLS public key for validator {}", v.id)
                     })?
                 };
-
                 Ok(ValidatorInfo {
-                    validator_id: ValidatorId::new(v.id),
+                    validator_id,
                     public_key,
                     voting_power: VotePower::new(v.voting_power),
                 })
@@ -713,46 +723,33 @@ fn build_topology(
 
     let validator_set = ValidatorSet::new(validators);
 
-    // Check if validators have explicit shard assignments
     let has_shard_assignments = genesis.validators.iter().any(|v| v.shard.is_some());
 
     if has_shard_assignments {
-        // Build shard committees from explicit shard assignments in config
-        // This is required for multi-shard setups where each validator needs to know
-        // about ALL validators across ALL shards for cross-shard message verification
         let mut shard_committees: HashMap<ShardGroupId, Vec<ValidatorId>> = HashMap::new();
-
         for v in &genesis.validators {
-            // Use explicit shard if provided, otherwise fall back to validator_id % num_shards
             let shard = ShardGroupId::new(v.shard.unwrap_or(v.id % num_shards));
             shard_committees
                 .entry(shard)
                 .or_default()
                 .push(ValidatorId::new(v.id));
         }
-
         Ok(Arc::new(TopologySnapshot::with_shard_committees(
             network,
-            local_validator_id,
-            local_shard,
             num_shards,
             &validator_set,
             shard_committees,
         )))
     } else {
-        // No explicit shard assignments: all genesis validators belong to the
-        // local shard, which only works for single-shard deployments.
         if num_shards > 1 {
             warn!(
                 "Multi-shard deployment without explicit shard assignments in genesis config. \
                  Cross-shard messages may fail. Add 'shard = N' to each [[genesis.validators]] entry."
             );
         }
-
-        Ok(Arc::new(TopologySnapshot::with_local_shard(
+        Ok(Arc::new(TopologySnapshot::single_shard(
             network,
-            local_validator_id,
-            local_shard,
+            fallback_shard,
             num_shards,
             validator_set,
         )))
@@ -1170,8 +1167,7 @@ async fn async_main(cli: Cli, config: ValidatorConfig) -> Result<()> {
     // the storage Arc; different-shard vnodes each provision their own.
     let hosted_shards: std::collections::BTreeSet<u64> =
         config.vnodes.iter().map(|v| v.shard).collect();
-    let mut storages: std::collections::HashMap<ShardGroupId, Arc<RocksDbShardStorage>> =
-        std::collections::HashMap::new();
+    let mut storages: HashMap<ShardGroupId, Arc<RocksDbShardStorage>> = HashMap::new();
     for shard in &hosted_shards {
         let db_path = config
             .node
@@ -1184,8 +1180,12 @@ async fn async_main(cli: Cli, config: ValidatorConfig) -> Result<()> {
         storages.insert(ShardGroupId::new(*shard), Arc::new(storage));
     }
 
-    // Build one VnodeConfig per [[vnode]] entry.
-    let mut vnode_configs: Vec<VnodeConfig> = Vec::with_capacity(config.vnodes.len());
+    // Pass 1: load every hosted vnode's signing keypair so the topology builder
+    // can substitute trusted local public keys for genesis-hex pubkeys.
+    // Ordered Vec — single-validator mode picks the first entry, so source
+    // order must be the same as config.vnodes.
+    let mut hosted_keypairs: Vec<(ValidatorId, Arc<Bls12381G1PrivateKey>)> =
+        Vec::with_capacity(config.vnodes.len());
     for entry in &config.vnodes {
         let keypair = load_or_generate_keypair(Some(&entry.key_path))?;
         info!(
@@ -1194,26 +1194,39 @@ async fn async_main(cli: Cli, config: ValidatorConfig) -> Result<()> {
             public_key = %format_public_key(&keypair.public_key()),
             "Loaded vnode signing keypair"
         );
+        hosted_keypairs.push((ValidatorId::new(entry.validator_id), Arc::new(keypair)));
+    }
 
-        let topology = build_topology(
-            config.node.network.clone(),
-            ValidatorId::new(entry.validator_id),
-            ShardGroupId::new(entry.shard),
-            config.node.num_shards,
-            &config.genesis,
-            &keypair,
-        )?;
+    // Build the host's single identity-agnostic topology snapshot.
+    let fallback_shard = ShardGroupId::new(config.vnodes[0].shard);
+    let topology = build_topology(
+        config.node.network.clone(),
+        config.node.num_shards,
+        &config.genesis,
+        &hosted_keypairs,
+        fallback_shard,
+    )?;
+
+    // Pass 2: assemble per-vnode configs from the loaded keypairs.
+    let mut vnode_configs: Vec<VnodeConfig> = Vec::with_capacity(config.vnodes.len());
+    for entry in &config.vnodes {
+        let validator_id = ValidatorId::new(entry.validator_id);
+        let local_shard = ShardGroupId::new(entry.shard);
+        let signing_key = hosted_keypairs
+            .iter()
+            .find_map(|(vid, k)| (*vid == validator_id).then(|| Arc::clone(k)))
+            .expect("keypair populated in pass 1");
         info!(
             validator_id = entry.validator_id,
             shard = entry.shard,
-            committee_size = topology.local_committee_size(),
-            quorum_threshold = topology.local_quorum_threshold().inner(),
+            committee_size = topology.committee_for_shard(local_shard).len(),
+            quorum_threshold = topology.quorum_threshold_for_shard(local_shard).inner(),
             "Topology initialized for vnode"
         );
-
         vnode_configs.push(VnodeConfig {
-            topology,
-            signing_key: Arc::new(keypair),
+            validator_id,
+            local_shard,
+            signing_key,
         });
     }
 
@@ -1230,14 +1243,19 @@ async fn async_main(cli: Cli, config: ValidatorConfig) -> Result<()> {
 
     // The runner is built before the RPC server because it owns the crossbeam
     // event channel the RPC server submits transactions through.
-    let mut runner_builder =
-        ProductionRunner::builder(vnode_configs, shard_config, storages, network_config)
-            .dispatch(dispatch)
-            .rpc_status(rpc_node_status.clone())
-            .mempool_snapshot(rpc_mempool_snapshot.clone())
-            .sync_status(rpc_sync_status.clone())
-            .mempool_config(config.mempool.clone())
-            .provision_config(config.provisions);
+    let mut runner_builder = ProductionRunner::builder(
+        vnode_configs,
+        topology,
+        shard_config,
+        storages,
+        network_config,
+    )
+    .dispatch(dispatch)
+    .rpc_status(rpc_node_status.clone())
+    .mempool_snapshot(rpc_mempool_snapshot.clone())
+    .sync_status(rpc_sync_status.clone())
+    .mempool_config(config.mempool.clone())
+    .provision_config(config.provisions);
 
     if !config.genesis.xrd_balances.is_empty() {
         let engine_genesis = build_engine_genesis_config(&config.genesis)

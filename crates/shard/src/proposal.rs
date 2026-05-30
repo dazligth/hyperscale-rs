@@ -21,7 +21,8 @@ use hyperscale_core::Action;
 use hyperscale_types::{
     BeaconWitnessLeafCount, BeaconWitnessRoot, BlockHash, BlockHeight, FinalizedWave,
     LocalTimestamp, ProposerTimestamp, ProvisionHash, Provisions, ReadySignal, Round,
-    RoutableTransaction, TopologySnapshot, TxHash, Verifiable, Verified, WaveId, WeightedTimestamp,
+    RoutableTransaction, ShardGroupId, TxHash, ValidatorId, Verifiable, Verified, WaveId,
+    WeightedTimestamp,
 };
 use tracing::debug;
 
@@ -303,7 +304,8 @@ pub struct BuildActionPlan {
 /// accumulator type.
 #[allow(clippy::too_many_arguments)] // assemble fans a coordinator-side bundle into the action
 pub fn assemble_build_action(
-    topology: &TopologySnapshot,
+    me: ValidatorId,
+    local_shard: ShardGroupId,
     chain: &ChainView,
     height: BlockHeight,
     round: Round,
@@ -370,8 +372,8 @@ pub fn assemble_build_action(
     // verified shapes, but the field type is raw.
     let parent_qc_raw = parent_qc.into_inner();
     let action = Action::BuildProposal {
-        shard_group_id: topology.local_shard(),
-        proposer: topology.local_validator_id(),
+        shard_group_id: local_shard,
+        proposer: me,
         height,
         round,
         parent_block_hash,

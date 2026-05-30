@@ -20,8 +20,8 @@ use std::sync::Arc;
 use hyperscale_types::{BeaconWitnessLeafCount, BeaconWitnessRoot};
 use hyperscale_types::{
     Block, BlockHeader, BlockHeight, LocalTimestamp, MAX_TIMESTAMP_DELAY, MAX_TIMESTAMP_RUSH,
-    ProvisionHash, QuorumCertificate, RoutableTransaction, TopologySnapshot, TxHash, Verifiable,
-    VotePower, WaveId, compute_waves,
+    ProvisionHash, QuorumCertificate, RoutableTransaction, ShardGroupId, TopologySnapshot, TxHash,
+    Verifiable, VotePower, WaveId, compute_waves,
 };
 
 use crate::commit_dedup::CommitDedupIndex;
@@ -31,8 +31,12 @@ use crate::commit_dedup::CommitDedupIndex;
 /// both call this — without it, a single Byzantine signer suffices to pass
 /// the BLS-only `VerifyQcSignature` check that follows.
 #[must_use]
-pub fn qc_has_local_quorum_power(topology: &TopologySnapshot, qc: &QuorumCertificate) -> bool {
-    let committee = topology.local_committee();
+pub fn qc_has_local_quorum_power(
+    topology: &TopologySnapshot,
+    local_shard: ShardGroupId,
+    qc: &QuorumCertificate,
+) -> bool {
+    let committee = topology.committee_for_shard(local_shard);
     let qc_power: VotePower = qc
         .signers()
         .set_indices()
@@ -43,13 +47,14 @@ pub fn qc_has_local_quorum_power(topology: &TopologySnapshot, qc: &QuorumCertifi
                 .expect("committee member has voting power (TopologySnapshot invariant)")
         })
         .sum();
-    VotePower::has_quorum(qc_power, topology.local_voting_power())
+    VotePower::has_quorum(qc_power, topology.voting_power_for_shard(local_shard))
 }
 
 /// Validate block header structure, proposer, and parent QC quorum. Returns
 /// `Err(..)` with a human-readable reason on any check failure.
 pub fn validate_header(
     topology: &TopologySnapshot,
+    local_shard: ShardGroupId,
     header: &BlockHeader,
     committed_height: BlockHeight,
     now: LocalTimestamp,
@@ -65,7 +70,7 @@ pub fn validate_header(
         ));
     }
 
-    let expected_proposer = topology.proposer_for(height, round);
+    let expected_proposer = topology.proposer_for(local_shard, height, round);
     if header.proposer() != expected_proposer {
         return Err(format!(
             "wrong proposer: expected {:?}, got {:?}",
@@ -75,7 +80,7 @@ pub fn validate_header(
     }
 
     if !header.parent_qc().is_genesis() {
-        if !qc_has_local_quorum_power(topology, header.parent_qc()) {
+        if !qc_has_local_quorum_power(topology, local_shard, header.parent_qc()) {
             return Err("parent QC does not have quorum".to_string());
         }
 
@@ -154,8 +159,12 @@ pub fn validate_transaction_ordering(block: &Block) -> Result<(), String> {
 /// Validate that a block's `waves` field matches the value recomputed from
 /// its transactions. Prevents a Byzantine proposer from lying about which
 /// waves exist.
-pub fn validate_waves(topology: &TopologySnapshot, block: &Block) -> Result<(), String> {
-    let expected = compute_waves(topology, block.height(), block.transactions());
+pub fn validate_waves(
+    topology: &TopologySnapshot,
+    local_shard: ShardGroupId,
+    block: &Block,
+) -> Result<(), String> {
+    let expected = compute_waves(local_shard, topology, block.height(), block.transactions());
 
     if block.header().waves().0 != expected {
         return Err(format!(
@@ -273,6 +282,7 @@ pub fn validate_no_duplicate_provisions(
 /// caller can log once.
 pub fn validate_block_for_vote(
     topology: &TopologySnapshot,
+    local_shard: ShardGroupId,
     block: &Block,
     qc_chain_tx_hashes: &HashSet<TxHash>,
     qc_chain_cert_ids: &HashSet<WaveId>,
@@ -281,7 +291,7 @@ pub fn validate_block_for_vote(
 ) -> Result<(), String> {
     validate_transactions_verified(block)?;
     validate_transaction_ordering(block)?;
-    validate_waves(topology, block)?;
+    validate_waves(topology, local_shard, block)?;
     validate_no_duplicate_transactions(block, qc_chain_tx_hashes, dedup_index)?;
     validate_no_duplicate_certificates(block, qc_chain_cert_ids, dedup_index)?;
     validate_no_duplicate_provisions(block, qc_chain_provision_hashes, dedup_index)?;
@@ -351,10 +361,13 @@ mod tests {
             .collect();
         TopologySnapshot::new(
             NetworkDefinition::simulator(),
-            ValidatorId::new(0),
             1,
             ValidatorSet::new(validators),
         )
+    }
+
+    fn local_shard() -> ShardGroupId {
+        ShardGroupId::new(0)
     }
 
     fn header_at_height(height: BlockHeight, timestamp_ms: u64) -> BlockHeader {
@@ -442,9 +455,9 @@ mod tests {
     fn validate_waves_accepts_recomputed_waves() {
         let topo = topology();
         let height = BlockHeight::new(1);
-        let expected = compute_waves(&topo, height, &[]);
+        let expected = compute_waves(local_shard(), &topo, height, &[]);
         let block = block_with_waves(height, expected);
-        assert!(validate_waves(&topo, &block).is_ok());
+        assert!(validate_waves(&topo, local_shard(), &block).is_ok());
     }
 
     #[test]
@@ -458,7 +471,7 @@ mod tests {
                 BTreeSet::new(),
             )],
         );
-        assert!(validate_waves(&topo, &block).is_err());
+        assert!(validate_waves(&topo, local_shard(), &block).is_err());
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -820,6 +833,7 @@ mod tests {
         let block = block_with_transactions(BlockHeight::new(1), txs);
         let err = validate_block_for_vote(
             &topo,
+            local_shard(),
             &block,
             &HashSet::new(),
             &HashSet::new(),

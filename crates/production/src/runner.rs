@@ -122,14 +122,16 @@ impl Drop for ShutdownHandle {
 
 /// One hosted validator's identity + per-validator state inputs.
 ///
-/// A [`ProductionRunner`] hosts a `Vec<VnodeConfig>`. Same-shard hosting
-/// (V > 1 with every entry mapped to the same `local_shard()`) collapses
-/// onto one `NodeHost`, one libp2p peer, and one `ShardIo`, with per-vnode
-/// signing keys and per-vnode `NodeStateMachine`s.
+/// A [`ProductionRunner`] hosts a `Vec<VnodeConfig>` alongside a single
+/// `Arc<TopologySnapshot>` shared across every vnode. Same-shard hosting
+/// (V > 1 with every entry mapped to the same `local_shard`) collapses onto
+/// one `NodeHost`, one libp2p peer, and one `ShardIo`, with per-vnode signing
+/// keys and per-vnode `NodeStateMachine`s.
 pub struct VnodeConfig {
-    /// Per-validator topology view. Provides this vnode's `validator_id`,
-    /// `local_shard`, and the shard committee membership it participates in.
-    pub topology: Arc<TopologySnapshot>,
+    /// This vnode's validator identity.
+    pub validator_id: ValidatorId,
+    /// This vnode's home shard.
+    pub local_shard: ShardGroupId,
     /// BLS signing key for this validator's votes, proposals, and the
     /// per-session validator-bind attestation. Held by `Arc` so the same
     /// allocation is shared between the bind service, the state machine,
@@ -152,6 +154,8 @@ pub struct VnodeConfig {
 /// - `vnodes` - One [`VnodeConfig`] per hosted validator. Vnodes may
 ///   target different shards; the host derives its `local_shards` set
 ///   from the supplied vnodes.
+/// - `topology` - Identity-agnostic [`TopologySnapshot`] shared across every
+///   hosted vnode and seeded into the `ProcessIo`'s `ArcSwap`.
 /// - `shard_config` - Consensus configuration parameters
 /// - `storages` - One `RocksDB` storage per hosted shard. Every shard
 ///   referenced by a vnode must have a matching entry.
@@ -162,6 +166,7 @@ pub struct VnodeConfig {
 /// - `channel_capacity` - Event channel capacity (defaults to 10,000)
 pub struct ProductionRunnerBuilder {
     vnodes: Vec<VnodeConfig>,
+    topology: Arc<TopologySnapshot>,
     shard_config: ShardConsensusConfig,
     storages: HashMap<ShardGroupId, Arc<RocksDbShardStorage>>,
     network_config: Libp2pConfig,
@@ -191,6 +196,7 @@ impl ProductionRunnerBuilder {
     #[must_use]
     pub fn new(
         vnodes: Vec<VnodeConfig>,
+        topology: Arc<TopologySnapshot>,
         shard_config: ShardConsensusConfig,
         storages: HashMap<ShardGroupId, Arc<RocksDbShardStorage>>,
         network_config: Libp2pConfig,
@@ -201,6 +207,7 @@ impl ProductionRunnerBuilder {
         );
         Self {
             vnodes,
+            topology,
             shard_config,
             storages,
             network_config,
@@ -298,6 +305,7 @@ impl ProductionRunnerBuilder {
         install();
 
         let vnode_configs = self.vnodes;
+        let shared_topology = self.topology;
         let shard_config = self.shard_config;
         let storages = self.storages;
         let network_config = self.network_config;
@@ -313,10 +321,8 @@ impl ProductionRunnerBuilder {
 
         // Derive the hosted shard set from the vnodes; every shard
         // referenced by a vnode must have a matching storage entry.
-        let local_shards: HashSet<ShardGroupId> = vnode_configs
-            .iter()
-            .map(|cfg| cfg.topology.local_shard())
-            .collect();
+        let local_shards: HashSet<ShardGroupId> =
+            vnode_configs.iter().map(|cfg| cfg.local_shard).collect();
         for shard in &local_shards {
             assert!(
                 storages.contains_key(shard),
@@ -326,23 +332,19 @@ impl ProductionRunnerBuilder {
         // Recovery reads from a single shard's storage. Pick the first
         // hosted shard arbitrarily — every hosted storage exposes the
         // same `RecoveredState` shape.
-        let recovery_shard = vnode_configs[0].topology.local_shard();
+        let recovery_shard = vnode_configs[0].local_shard;
         let recovery_storage = Arc::clone(
             storages
                 .get(&recovery_shard)
                 .expect("hosted shard derived from vnodes"),
         );
 
-        // The shared snapshot drives off-thread handlers that read
-        // shard-level info only. We seed it with the first vnode's
-        // snapshot; per-vnode snapshots are taken inside dispatch.
         let topology: SharedTopologySnapshot =
-            Arc::new(ArcSwap::from(Arc::clone(&vnode_configs[0].topology)));
+            Arc::new(ArcSwap::from(Arc::clone(&shared_topology)));
 
         // Extract initial validator keys for network-layer bind verification.
         let initial_validator_keys: Arc<ValidatorKeyMap> = Arc::new(
-            vnode_configs[0]
-                .topology
+            shared_topology
                 .global_validator_set()
                 .validators
                 .iter()
@@ -354,10 +356,7 @@ impl ProductionRunnerBuilder {
         // single key allocation each `VnodeConfig` carries.
         let bind_vnodes: Vec<(ValidatorId, Arc<Bls12381G1PrivateKey>)> = vnode_configs
             .iter()
-            .map(|cfg| {
-                let vid = cfg.topology.local_validator_id();
-                (vid, Arc::clone(&cfg.signing_key))
-            })
+            .map(|cfg| (cfg.validator_id, Arc::clone(&cfg.signing_key)))
             .collect();
 
         // Build one (timer / callback / shutdown) channel triple per
@@ -419,7 +418,7 @@ impl ProductionRunnerBuilder {
         let vnode_inits: Vec<VnodeInit> = vnode_configs
             .into_iter()
             .map(|cfg| {
-                let shard = cfg.topology.local_shard();
+                let shard = cfg.local_shard;
                 let provision_store = Arc::clone(
                     provision_stores
                         .get(&shard)
@@ -441,7 +440,9 @@ impl ProductionRunnerBuilder {
                         .expect("hosted shard derived from vnodes"),
                 );
                 let state = NodeStateMachine::new(
-                    cfg.topology,
+                    cfg.validator_id,
+                    cfg.local_shard,
+                    Arc::clone(&shared_topology),
                     &shard_config,
                     recovered.clone(),
                     self.mempool_config.clone(),
@@ -615,11 +616,12 @@ impl ProductionRunner {
     #[must_use]
     pub fn builder(
         vnodes: Vec<VnodeConfig>,
+        topology: Arc<TopologySnapshot>,
         shard_config: ShardConsensusConfig,
         storages: HashMap<ShardGroupId, Arc<RocksDbShardStorage>>,
         network_config: Libp2pConfig,
     ) -> ProductionRunnerBuilder {
-        ProductionRunnerBuilder::new(vnodes, shard_config, storages, network_config)
+        ProductionRunnerBuilder::new(vnodes, topology, shard_config, storages, network_config)
     }
 
     /// Get a reference to the dispatch implementation.

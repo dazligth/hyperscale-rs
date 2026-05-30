@@ -146,8 +146,7 @@ impl BeaconCoordinator {
             );
         }
         let next_epoch = latest_state.current_epoch.next();
-        let topology_snapshot =
-            Arc::new(derive_topology_snapshot(&latest_state, network.clone(), me));
+        let topology_snapshot = Arc::new(derive_topology_snapshot(&latest_state, network.clone()));
         Self {
             state: latest_state,
             latest_block,
@@ -1325,11 +1324,8 @@ impl BeaconCoordinator {
         self.state = new_state;
         self.latest_block = Arc::clone(&block);
         self.spc = None;
-        self.topology_snapshot = Arc::new(derive_topology_snapshot(
-            &self.state,
-            self.network.clone(),
-            self.me,
-        ));
+        self.topology_snapshot =
+            Arc::new(derive_topology_snapshot(&self.state, self.network.clone()));
 
         // Witness fetcher uses mark-not-remove on drain; physical
         // eviction is driven by the chain's `consumed_through`
@@ -2764,18 +2760,7 @@ mod tests {
         let snap = coord.current_topology_snapshot();
         // 4 validators all on shard 0.
         assert_eq!(snap.num_shards(), 1);
-        assert_eq!(snap.local_validator_id(), ValidatorId::new(0));
-        assert_eq!(snap.local_shard(), ShardGroupId::new(0));
-    }
-
-    #[test]
-    fn off_committee_observer_topology_snapshot_falls_back_to_shard_zero() {
-        let observer = new_coord(ValidatorId::new(99));
-        let snap = observer.current_topology_snapshot();
-        // Validator 99 isn't in `state.validators`, so the shard
-        // resolver falls through to `ShardGroupId::new(0)`.
-        assert_eq!(snap.local_validator_id(), ValidatorId::new(99));
-        assert_eq!(snap.local_shard(), ShardGroupId::new(0));
+        assert_eq!(snap.committee_for_shard(ShardGroupId::new(0)).len(), 4);
     }
 
     #[test]

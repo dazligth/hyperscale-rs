@@ -601,8 +601,7 @@ where
         let shard = self.shard;
         let handles = Arc::clone(&self.process.dispatch_handles);
         let vnode = self.vnode(vnode_idx);
-        // Per-vnode snapshot so the handler's `local_validator_id`
-        // matches the signing key used.
+        let me = vnode.validator_id;
         let topology_snapshot = Arc::clone(vnode.state.topology_arc());
         let event_tx = self.event_sender().clone();
         let signing_key = Arc::clone(&vnode.signing_key);
@@ -626,6 +625,8 @@ where
             let ctx = ActionContext {
                 executor: &handles.executor,
                 topology_snapshot: &topology_snapshot,
+                me,
+                shard,
                 pending_chain: &shard_handles.pending_chain,
                 execution_cache: &handles.execution_cache,
                 network: &handles.network,
@@ -661,8 +662,8 @@ where
         self.process.network.update_topology(Arc::clone(topology));
 
         tracing::info!(
-            local_shard = topology.local_shard().inner(),
-            committee_size = topology.committee_for_shard(topology.local_shard()).len(),
+            local_shard = self.shard.inner(),
+            committee_size = topology.committee_for_shard(self.shard).len(),
             "Network topology updated"
         );
     }

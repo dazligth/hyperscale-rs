@@ -154,7 +154,6 @@ pub fn derive_beacon_committee(state: &BeaconState) -> Vec<(ValidatorId, Bls1238
 pub fn derive_topology_snapshot(
     state: &BeaconState,
     network: NetworkDefinition,
-    local_validator_id: ValidatorId,
 ) -> TopologySnapshot {
     let validators: Vec<ValidatorInfo> = state
         .validators
@@ -173,25 +172,9 @@ pub fn derive_topology_snapshot(
         .map(|(sid, sc)| (*sid, sc.members.clone()))
         .collect();
 
-    let local_shard = state
-        .validators
-        .get(&local_validator_id)
-        .and_then(|r| match r.status {
-            ValidatorStatus::OnShard { shard, .. } => Some(shard),
-            _ => None,
-        })
-        .unwrap_or_else(|| ShardGroupId::new(0));
-
     let num_shards = u64::try_from(state.shard_committees.len()).unwrap_or(u64::MAX);
 
-    TopologySnapshot::with_shard_committees(
-        network,
-        local_validator_id,
-        local_shard,
-        num_shards,
-        &validator_set,
-        shard_committees,
-    )
+    TopologySnapshot::with_shard_committees(network, num_shards, &validator_set, shard_committees)
 }
 
 /// Active-duty validator pool: every validator `OnShard { ready: true }`

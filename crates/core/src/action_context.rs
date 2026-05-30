@@ -12,8 +12,8 @@ use hyperscale_engine::{ProcessExecutionCache, RadixExecutor};
 use hyperscale_network::Network;
 use hyperscale_storage::{JmtSnapshot, PendingChain, ShardStorage};
 use hyperscale_types::{
-    BlockHash, BlockHeight, Bls12381G1PrivateKey, ConsensusReceipt, PreparedCommit,
-    TopologySnapshot,
+    BlockHash, BlockHeight, Bls12381G1PrivateKey, ConsensusReceipt, PreparedCommit, ShardGroupId,
+    TopologySnapshot, ValidatorId,
 };
 
 use crate::ProtocolEvent;
@@ -28,6 +28,14 @@ use crate::ProtocolEvent;
 pub struct ActionContext<'a, S: ShardStorage, N: Network> {
     pub executor: &'a RadixExecutor,
     pub topology_snapshot: &'a TopologySnapshot,
+    /// Dispatching vnode's validator identity. The shard dispatch site
+    /// reads this off the `Vnode` that emitted the action; handlers use
+    /// it for signing, vote attribution, and self-filtering recipient
+    /// lists.
+    pub me: ValidatorId,
+    /// Dispatching vnode's shard. Equal to the vnode's `local_shard`
+    /// for shard-rooted handlers; beacon handlers ignore it.
+    pub shard: ShardGroupId,
     /// Chain-state lookup. Handlers that read state call
     /// `pending_chain.view_at(block_hash)` to build an anchored view.
     pub pending_chain: &'a Arc<PendingChain<S>>,
@@ -36,9 +44,7 @@ pub struct ActionContext<'a, S: ShardStorage, N: Network> {
     /// hits skip the Radix VM call and only run the per-shard
     /// projection step.
     pub execution_cache: &'a Arc<ProcessExecutionCache>,
-    /// Network handle for broadcast/notify/request actions. The local
-    /// validator's identity and shard are read from `topology` (see
-    /// [`TopologySnapshot::local_validator_id`] / [`TopologySnapshot::local_shard`]).
+    /// Network handle for broadcast/notify/request actions.
     pub network: &'a Arc<N>,
     /// Local validator's BLS signing key. Used by handlers that sign
     /// votes/headers before broadcast.

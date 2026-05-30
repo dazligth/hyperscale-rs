@@ -113,10 +113,8 @@ where
 
         // Distinct shards this host carries, derived from the supplied
         // vnodes. Used to allocate one `ShardIo` per shard.
-        let hosted_shards: HashSet<ShardGroupId> = vnodes
-            .iter()
-            .map(|v| v.state.topology().local_shard())
-            .collect();
+        let hosted_shards: HashSet<ShardGroupId> =
+            vnodes.iter().map(|v| v.state.shard_id()).collect();
 
         let b = &config.batch;
         let network = Arc::new(network);
@@ -130,7 +128,7 @@ where
 
         let mut by_shard: HashMap<ShardGroupId, Vec<VnodeInit>> = HashMap::new();
         for init in vnodes {
-            let shard = init.state.topology().local_shard();
+            let shard = init.state.shard_id();
             by_shard.entry(shard).or_default().push(init);
         }
 
@@ -163,7 +161,7 @@ where
             let vnodes: Vec<Vnode> = inits
                 .into_iter()
                 .map(|init| Vnode {
-                    validator_id: init.state.topology().local_validator_id(),
+                    validator_id: init.state.validator_id(),
                     state: init.state,
                     signing_key: init.signing_key,
                 })

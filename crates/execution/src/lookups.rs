@@ -30,13 +30,16 @@ pub type WaveAssignments = BTreeMap<WaveId, Vec<WaveTxEntry>>;
 /// provision fetch) that fan out to every other member of a committee. Works
 /// for both the local shard (self is always a member, filter removes exactly
 /// one entry) and remote shards (filter is a no-op when self isn't a member).
-pub fn peers_excluding_self(topology: &TopologySnapshot, shard: ShardGroupId) -> Vec<ValidatorId> {
-    let self_id = topology.local_validator_id();
+pub fn peers_excluding_self(
+    topology: &TopologySnapshot,
+    me: ValidatorId,
+    shard: ShardGroupId,
+) -> Vec<ValidatorId> {
     topology
         .committee_for_shard(shard)
         .iter()
         .copied()
-        .filter(|&v| v != self_id)
+        .filter(|&v| v != me)
         .collect()
 }
 
@@ -87,10 +90,10 @@ pub fn committee_public_keys_for_shard(
 /// block order within each wave.
 pub fn assign_waves(
     topology: &TopologySnapshot,
+    local_shard: ShardGroupId,
     block_height: BlockHeight,
     transactions: &[Arc<Verifiable<RoutableTransaction>>],
 ) -> WaveAssignments {
-    let local_shard = topology.local_shard();
     let mut waves: WaveAssignments = BTreeMap::new();
 
     for tx in transactions {
@@ -123,9 +126,10 @@ pub fn assign_waves(
 pub fn build_provision_requests(
     topology: &TopologySnapshot,
     transactions: &[Arc<Verifiable<RoutableTransaction>>],
+    me: ValidatorId,
     local_shard: ShardGroupId,
 ) -> Option<(Vec<ProvisionsRequest>, ShardRecipients)> {
-    let local_vid = topology.local_validator_id();
+    let local_vid = me;
 
     let mut provision_requests = Vec::new();
     for tx in transactions {
@@ -207,7 +211,7 @@ mod tests {
 
     use super::*;
 
-    fn single_shard_topology(local_idx: usize, committee: &TestCommittee) -> TopologySnapshot {
+    fn single_shard_topology(committee: &TestCommittee) -> TopologySnapshot {
         let validators: Vec<ValidatorInfo> = (0..committee.size())
             .map(|i| ValidatorInfo {
                 validator_id: committee.validator_id(i),
@@ -216,12 +220,7 @@ mod tests {
             })
             .collect();
         let validator_set = ValidatorSet::new(validators);
-        TopologySnapshot::new(
-            NetworkDefinition::simulator(),
-            committee.validator_id(local_idx),
-            1,
-            validator_set,
-        )
+        TopologySnapshot::new(NetworkDefinition::simulator(), 1, validator_set)
     }
 
     // ─── peers_excluding_self ───────────────────────────────────────────
@@ -229,9 +228,9 @@ mod tests {
     #[test]
     fn peers_excluding_self_drops_local_validator() {
         let committee = TestCommittee::new(4, 42);
-        let topology = single_shard_topology(0, &committee);
+        let topology = single_shard_topology(&committee);
 
-        let peers = peers_excluding_self(&topology, topology.local_shard());
+        let peers = peers_excluding_self(&topology, ValidatorId::new(0), ShardGroupId::new(0));
         assert_eq!(peers.len(), 3);
         assert!(!peers.contains(&ValidatorId::new(0)));
         assert!(peers.contains(&ValidatorId::new(1)));
@@ -242,20 +241,20 @@ mod tests {
     #[test]
     fn peers_excluding_self_empty_for_unknown_shard() {
         let committee = TestCommittee::new(4, 42);
-        let topology = single_shard_topology(0, &committee);
+        let topology = single_shard_topology(&committee);
 
         // Shard 99 has no committee — filter returns an empty vec regardless
         // of who the local validator is.
-        let peers = peers_excluding_self(&topology, ShardGroupId::new(99));
+        let peers = peers_excluding_self(&topology, ValidatorId::new(0), ShardGroupId::new(99));
         assert!(peers.is_empty());
     }
 
     #[test]
     fn peers_excluding_self_empty_when_solo_validator() {
         let committee = TestCommittee::new(1, 42);
-        let topology = single_shard_topology(0, &committee);
+        let topology = single_shard_topology(&committee);
 
-        let peers = peers_excluding_self(&topology, topology.local_shard());
+        let peers = peers_excluding_self(&topology, ValidatorId::new(0), ShardGroupId::new(0));
         assert!(peers.is_empty());
     }
 
@@ -264,9 +263,9 @@ mod tests {
     #[test]
     fn committee_public_keys_for_shard_returns_keys_in_order() {
         let committee = TestCommittee::new(4, 42);
-        let topology = single_shard_topology(0, &committee);
+        let topology = single_shard_topology(&committee);
 
-        let keys = committee_public_keys_for_shard(&topology, topology.local_shard())
+        let keys = committee_public_keys_for_shard(&topology, ShardGroupId::new(0))
             .expect("well-formed topology resolves every key");
         assert_eq!(keys.len(), 4);
 
@@ -278,7 +277,7 @@ mod tests {
     #[test]
     fn committee_public_keys_for_shard_empty_for_unknown_shard() {
         let committee = TestCommittee::new(4, 42);
-        let topology = single_shard_topology(0, &committee);
+        let topology = single_shard_topology(&committee);
 
         // An unknown shard has an empty committee, so the result is
         // `Some(vec![])` — not `None` (which is reserved for corruption).

@@ -87,7 +87,7 @@ impl NodeStateMachine {
                 .execution_coordinator
                 .on_certificate_verified(&self.topology_snapshot, result),
             ProtocolEvent::ExecutionCertificateAdmitted { certificate } => {
-                let local_shard = self.topology_snapshot.local_shard();
+                let local_shard = self.local_shard;
                 let mut actions = Vec::new();
                 // If the EC is for a remote wave where we were a source, the
                 // target shard's tx_outcomes acknowledge outbound batches we

@@ -25,7 +25,7 @@ impl NodeStateMachine {
             // pass.
             ProtocolEvent::BlockSyncComplete { .. } => {
                 let topo = &self.topology_snapshot;
-                let mut actions = self.shard_coordinator.on_block_sync_complete(topo);
+                let mut actions = self.shard_coordinator.on_block_sync_complete();
                 actions.extend(self.remote_headers_coordinator.flush_expected_headers(topo));
                 actions.extend(self.provisions_coordinator.flush_expected_provisions());
                 actions

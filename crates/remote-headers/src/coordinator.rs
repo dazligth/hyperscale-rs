@@ -128,18 +128,16 @@ pub struct RemoteHeaderCoordinator {
     /// independent of local block production rate and deterministic across
     /// validators.
     local_committed_ts: WeightedTimestamp,
-}
 
-impl Default for RemoteHeaderCoordinator {
-    fn default() -> Self {
-        Self::new()
-    }
+    /// This validator's home shard. Headers tagged with `local_shard` are
+    /// ignored (we cert-verify our own headers through the shard pipeline).
+    local_shard: ShardGroupId,
 }
 
 impl RemoteHeaderCoordinator {
     /// Create a new remote header coordinator.
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(local_shard: ShardGroupId) -> Self {
         Self {
             pending: HashMap::new(),
             verified: HashMap::new(),
@@ -147,6 +145,7 @@ impl RemoteHeaderCoordinator {
             expected: HashMap::new(),
             local_committed_height: BlockHeight::new(0),
             local_committed_ts: WeightedTimestamp::ZERO,
+            local_shard,
         }
     }
 
@@ -163,14 +162,13 @@ impl RemoteHeaderCoordinator {
     /// already expect.
     pub fn on_verified_remote_header_received(
         &mut self,
-        topology: &TopologySnapshot,
         certified_header: Arc<Verified<CertifiedBlockHeader>>,
         sender: ValidatorId,
     ) -> Vec<Action> {
         let shard = certified_header.shard_group_id();
         let height = certified_header.height();
 
-        if shard == topology.local_shard() {
+        if shard == self.local_shard {
             return vec![];
         }
 
@@ -219,7 +217,7 @@ impl RemoteHeaderCoordinator {
         let height = certified_header.height();
 
         // Ignore headers from our own shard.
-        if shard == topology.local_shard() {
+        if shard == self.local_shard {
             return vec![];
         }
 
@@ -405,10 +403,9 @@ impl RemoteHeaderCoordinator {
         }
 
         // Seed expected headers for remote shards we haven't seen yet.
-        let local_shard = topology.local_shard();
         for shard_id in 0..topology.num_shards() {
             let shard = ShardGroupId::new(shard_id);
-            if shard == local_shard {
+            if shard == self.local_shard {
                 continue;
             }
             self.expected
@@ -658,7 +655,7 @@ mod tests {
 
     #[test]
     fn test_new_coordinator_is_empty() {
-        let coord = RemoteHeaderCoordinator::new();
+        let coord = RemoteHeaderCoordinator::new(ShardGroupId::new(0));
         let stats = coord.memory_stats();
         assert_eq!(stats.pending_headers, 0);
         assert_eq!(stats.verified_headers, 0);
@@ -701,7 +698,7 @@ mod tests {
         );
 
         let committed = CertifiedBlockHeader::new(header, qc);
-        let _coord = RemoteHeaderCoordinator::new();
+        let _coord = RemoteHeaderCoordinator::new(ShardGroupId::new(0));
 
         // The structural check happens inside on_remote_header_received which
         // needs a topology. We test the logic directly here by checking the
@@ -711,7 +708,7 @@ mod tests {
 
     #[test]
     fn test_get_verified_returns_none_when_empty() {
-        let coord = RemoteHeaderCoordinator::new();
+        let coord = RemoteHeaderCoordinator::new(ShardGroupId::new(0));
         assert!(
             coord
                 .get_verified(ShardGroupId::new(1), BlockHeight::new(5))

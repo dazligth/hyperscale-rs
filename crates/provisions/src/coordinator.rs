@@ -18,8 +18,7 @@ use hyperscale_core::{Action, FetchAbandon, ProtocolEvent};
 use hyperscale_types::{BeaconWitnessLeafCount, BeaconWitnessRoot};
 use hyperscale_types::{
     BlockHeight, BlockManifest, CertifiedBlock, CertifiedBlockHeader, LocalTimestamp,
-    ProvisionHash, Provisions, ProvisionsVerifyError, RETENTION_HORIZON, ShardGroupId,
-    TopologySnapshot, Verified,
+    ProvisionHash, Provisions, ProvisionsVerifyError, RETENTION_HORIZON, ShardGroupId, Verified,
 };
 use serde::Deserialize;
 use tracing::{debug, info, warn};
@@ -128,6 +127,10 @@ pub struct ProvisionCoordinator {
     /// re-enter the proposer queue (which would then propose a batch
     /// the validator side rejects, causing view changes).
     committed_tombstones: CommittedProvisionTombstones,
+
+    /// This validator's home shard. Used to gate inbound provisions:
+    /// only batches whose target shard matches ours are admitted.
+    local_shard: ShardGroupId,
 }
 
 impl std::fmt::Debug for ProvisionCoordinator {
@@ -139,25 +142,23 @@ impl std::fmt::Debug for ProvisionCoordinator {
     }
 }
 
-impl Default for ProvisionCoordinator {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl ProvisionCoordinator {
     /// Create a new `ProvisionCoordinator` with default config and a fresh
     /// local [`ProvisionStore`].
     #[must_use]
-    pub fn new() -> Self {
-        Self::with_config_and_store(ProvisionConfig::default(), Arc::new(ProvisionStore::new()))
+    pub fn new(local_shard: ShardGroupId) -> Self {
+        Self::with_config_and_store(
+            local_shard,
+            ProvisionConfig::default(),
+            Arc::new(ProvisionStore::new()),
+        )
     }
 
     /// Create a new `ProvisionCoordinator` with the given config and a fresh
     /// local [`ProvisionStore`].
     #[must_use]
-    pub fn with_config(config: ProvisionConfig) -> Self {
-        Self::with_config_and_store(config, Arc::new(ProvisionStore::new()))
+    pub fn with_config(local_shard: ShardGroupId, config: ProvisionConfig) -> Self {
+        Self::with_config_and_store(local_shard, config, Arc::new(ProvisionStore::new()))
     }
 
     /// Create a new `ProvisionCoordinator` wired to an externally-owned
@@ -165,7 +166,11 @@ impl ProvisionCoordinator {
     /// io-loop so `local_provision.request` handlers read from the same
     /// source of truth this coordinator writes to.
     #[must_use]
-    pub fn with_config_and_store(config: ProvisionConfig, store: Arc<ProvisionStore>) -> Self {
+    pub fn with_config_and_store(
+        local_shard: ShardGroupId,
+        config: ProvisionConfig,
+        store: Arc<ProvisionStore>,
+    ) -> Self {
         let queue = QueuedProvisionBuffer::new(config.min_dwell_time);
         Self {
             headers: Arc::new(VerifiedHeaderBuffer::new()),
@@ -173,6 +178,7 @@ impl ProvisionCoordinator {
             expected: ExpectedProvisionTracker::new(),
             queue,
             committed_tombstones: CommittedProvisionTombstones::new(),
+            local_shard,
         }
     }
 
@@ -346,7 +352,6 @@ impl ProvisionCoordinator {
     /// 2. Join with any buffered provisions waiting for this header
     pub fn on_verified_remote_header(
         &mut self,
-        topology: &TopologySnapshot,
         certified_header: &Arc<Verified<CertifiedBlockHeader>>,
     ) -> Vec<Action> {
         let shard = certified_header.shard_group_id();
@@ -354,12 +359,12 @@ impl ProvisionCoordinator {
         let key = (shard, height);
 
         // Ignore headers from our own shard.
-        if shard == topology.local_shard() {
+        if shard == self.local_shard {
             return vec![];
         }
 
         // Only store headers that target our shard (i.e., we expect provisions).
-        let local_shard = topology.local_shard();
+        let local_shard = self.local_shard;
         let targets_us = certified_header
             .header()
             .waves()
@@ -420,7 +425,7 @@ impl ProvisionCoordinator {
                     continue;
                 }
                 actions.extend(build_verify_action(
-                    topology.local_shard(),
+                    self.local_shard,
                     provisions,
                     Arc::clone(certified_header),
                 ));
@@ -449,7 +454,6 @@ impl ProvisionCoordinator {
     /// preservation lands.
     pub fn on_verified_state_provisions_received(
         &mut self,
-        topology: &TopologySnapshot,
         provisions: Arc<Verified<Provisions>>,
         now: LocalTimestamp,
     ) -> Vec<Action> {
@@ -460,15 +464,15 @@ impl ProvisionCoordinator {
         let source_shard = provisions.source_shard();
         let block_height = provisions.block_height();
 
-        if source_shard == topology.local_shard() {
+        if source_shard == self.local_shard {
             return vec![];
         }
 
-        if provisions.target_shard() != topology.local_shard() {
+        if provisions.target_shard() != self.local_shard {
             warn!(
                 source_shard = source_shard.inner(),
                 target_shard = provisions.target_shard().inner(),
-                local_shard = topology.local_shard().inner(),
+                local_shard = self.local_shard.inner(),
                 block_height = block_height.inner(),
                 "Dropping verified provisions: target_shard does not match local shard"
             );
@@ -526,11 +530,7 @@ impl ProvisionCoordinator {
     /// - If a verified header exists: emit verification with single candidate
     /// - If no header yet: buffer the provisions until
     ///   `on_verified_remote_header` delivers it
-    pub fn on_state_provisions_received(
-        &mut self,
-        topology: &TopologySnapshot,
-        provisions: Provisions,
-    ) -> Vec<Action> {
+    pub fn on_state_provisions_received(&mut self, provisions: Provisions) -> Vec<Action> {
         if provisions.transactions().is_empty() {
             return vec![];
         }
@@ -546,18 +546,18 @@ impl ProvisionCoordinator {
         );
 
         // Ignore provisions from our own shard
-        if source_shard == topology.local_shard() {
+        if source_shard == self.local_shard {
             return vec![];
         }
 
         // Reject provisions not destined for our shard. Indicates a proposer
         // bug, a network misroute, or an adversarial attempt — log loudly so
         // it's visible but don't propagate.
-        if provisions.target_shard() != topology.local_shard() {
+        if provisions.target_shard() != self.local_shard {
             warn!(
                 source_shard = source_shard.inner(),
                 target_shard = provisions.target_shard().inner(),
-                local_shard = topology.local_shard().inner(),
+                local_shard = self.local_shard.inner(),
                 block_height = block_height.inner(),
                 "Dropping provisions: target_shard does not match local shard"
             );
@@ -599,7 +599,7 @@ impl ProvisionCoordinator {
                 );
                 return vec![];
             }
-            return build_verify_action(topology.local_shard(), provisions, verified_header)
+            return build_verify_action(self.local_shard, provisions, verified_header)
                 .into_iter()
                 .collect();
         }
@@ -758,47 +758,16 @@ impl ProvisionCoordinator {
 mod tests {
     use hyperscale_core::FetchRequest;
     use hyperscale_types::{
-        Block, BlockHash, BlockHeader, Bls12381G1PrivateKey, BoundedVec, CertificateRoot, Hash,
-        InFlightCount, LocalReceiptRoot, MerkleInclusionProof, NetworkDefinition,
-        ProposerTimestamp, ProvisionEntry, ProvisionTxRoot, ProvisionsRoot, QuorumCertificate,
-        Round, ShardGroupId, SignerBitfield, StateRoot, TopologySnapshot, TransactionRoot, TxHash,
-        ValidatorId, ValidatorInfo, ValidatorSet, Verifiable, VotePower, WaveId, WeightedTimestamp,
-        bls_keypair_from_seed, compute_merkle_root, zero_bls_signature,
+        Block, BlockHash, BlockHeader, BoundedVec, CertificateRoot, Hash, InFlightCount,
+        LocalReceiptRoot, MerkleInclusionProof, ProposerTimestamp, ProvisionEntry, ProvisionTxRoot,
+        ProvisionsRoot, QuorumCertificate, Round, ShardGroupId, SignerBitfield, StateRoot,
+        TransactionRoot, TxHash, ValidatorId, Verifiable, WaveId, WeightedTimestamp,
+        compute_merkle_root, zero_bls_signature,
     };
     use proptest::bool::ANY as ANY_BOOL;
     use proptest::collection::vec as prop_vec;
 
     use super::*;
-
-    fn make_test_topology(local_shard: ShardGroupId) -> TopologySnapshot {
-        // Create deterministic BLS keypairs for 6 validators (2 shards × 3 validators)
-        let keypairs: Vec<Bls12381G1PrivateKey> = (0u8..6)
-            .map(|i| {
-                let mut seed = [0u8; 32];
-                seed[0] = i;
-                seed[1] = 42; // Fixed seed for determinism
-                bls_keypair_from_seed(&seed)
-            })
-            .collect();
-
-        let validators: Vec<_> = keypairs
-            .iter()
-            .enumerate()
-            .map(|(i, kp)| ValidatorInfo {
-                validator_id: ValidatorId::new(i as u64),
-                public_key: kp.public_key(),
-                voting_power: VotePower::new(1),
-            })
-            .collect();
-
-        TopologySnapshot::with_local_shard(
-            NetworkDefinition::simulator(),
-            ValidatorId::new(local_shard.inner() * 3), // First validator in shard
-            local_shard,
-            2,
-            ValidatorSet::new(validators),
-        )
-    }
 
     // ═══════════════════════════════════════════════════════════════════════
     // Remote Block Header Tracking Tests (Unverified Buffer)
@@ -855,11 +824,10 @@ mod tests {
 
     #[test]
     fn test_remote_header_stored_in_verified_buffer() {
-        let topology = make_test_topology(ShardGroupId::new(0));
-        let mut coordinator = ProvisionCoordinator::new();
+        let mut coordinator = ProvisionCoordinator::new(ShardGroupId::new(0));
 
         let header = make_certified_header(ShardGroupId::new(1), BlockHeight::new(10));
-        let actions = coordinator.on_verified_remote_header(&topology, &header);
+        let actions = coordinator.on_verified_remote_header(&header);
         assert!(actions.is_empty());
 
         // Should be in verified buffer (pre-verified by RemoteHeaderCoordinator)
@@ -873,48 +841,45 @@ mod tests {
 
     #[test]
     fn test_remote_header_from_own_shard_ignored() {
-        let topology = make_test_topology(ShardGroupId::new(0));
-        let mut coordinator = ProvisionCoordinator::new();
+        let mut coordinator = ProvisionCoordinator::new(ShardGroupId::new(0));
 
         let header = make_certified_header(ShardGroupId::new(0), BlockHeight::new(10));
-        coordinator.on_verified_remote_header(&topology, &header);
+        coordinator.on_verified_remote_header(&header);
 
         assert_eq!(coordinator.verified_remote_header_count(), 0);
     }
 
     #[test]
     fn test_remote_header_multiple_shards_and_heights() {
-        let topology = make_test_topology(ShardGroupId::new(0));
-        let mut coordinator = ProvisionCoordinator::new();
+        let mut coordinator = ProvisionCoordinator::new(ShardGroupId::new(0));
 
-        coordinator.on_verified_remote_header(
-            &topology,
-            &make_certified_header(ShardGroupId::new(1), BlockHeight::new(10)),
-        );
-        coordinator.on_verified_remote_header(
-            &topology,
-            &make_certified_header(ShardGroupId::new(1), BlockHeight::new(11)),
-        );
+        coordinator.on_verified_remote_header(&make_certified_header(
+            ShardGroupId::new(1),
+            BlockHeight::new(10),
+        ));
+        coordinator.on_verified_remote_header(&make_certified_header(
+            ShardGroupId::new(1),
+            BlockHeight::new(11),
+        ));
         // Use a different sender for shard 2 (since our topology has different validators per shard)
-        coordinator.on_verified_remote_header(
-            &topology,
-            &make_certified_header(ShardGroupId::new(2), BlockHeight::new(10)),
-        );
+        coordinator.on_verified_remote_header(&make_certified_header(
+            ShardGroupId::new(2),
+            BlockHeight::new(10),
+        ));
 
         assert_eq!(coordinator.verified_remote_header_count(), 3);
     }
 
     #[test]
     fn test_remote_header_same_shard_height_overwrites() {
-        let topology = make_test_topology(ShardGroupId::new(0));
-        let mut coordinator = ProvisionCoordinator::new();
+        let mut coordinator = ProvisionCoordinator::new(ShardGroupId::new(0));
 
         let header1 = make_certified_header(ShardGroupId::new(1), BlockHeight::new(10));
         let header2 = make_certified_header(ShardGroupId::new(1), BlockHeight::new(10));
 
         // Two verified headers for same (shard, height) — last wins
-        coordinator.on_verified_remote_header(&topology, &header1);
-        coordinator.on_verified_remote_header(&topology, &header2);
+        coordinator.on_verified_remote_header(&header1);
+        coordinator.on_verified_remote_header(&header2);
 
         // Only one entry per (shard, height) in verified map
         assert_eq!(coordinator.verified_remote_header_count(), 1);
@@ -922,17 +887,16 @@ mod tests {
 
     #[test]
     fn test_remote_header_same_shard_height_same_validator_overwrites() {
-        let topology = make_test_topology(ShardGroupId::new(0));
-        let mut coordinator = ProvisionCoordinator::new();
+        let mut coordinator = ProvisionCoordinator::new(ShardGroupId::new(0));
 
-        coordinator.on_verified_remote_header(
-            &topology,
-            &make_certified_header(ShardGroupId::new(1), BlockHeight::new(10)),
-        );
-        coordinator.on_verified_remote_header(
-            &topology,
-            &make_certified_header(ShardGroupId::new(1), BlockHeight::new(10)),
-        );
+        coordinator.on_verified_remote_header(&make_certified_header(
+            ShardGroupId::new(1),
+            BlockHeight::new(10),
+        ));
+        coordinator.on_verified_remote_header(&make_certified_header(
+            ShardGroupId::new(1),
+            BlockHeight::new(10),
+        ));
 
         // Same (shard, height, sender) — should overwrite, not duplicate
         assert_eq!(coordinator.verified_remote_header_count(), 1);
@@ -974,8 +938,7 @@ mod tests {
 
     #[test]
     fn test_provision_received_with_header_emits_verification() {
-        let topology = make_test_topology(ShardGroupId::new(0));
-        let mut coordinator = ProvisionCoordinator::new();
+        let mut coordinator = ProvisionCoordinator::new(ShardGroupId::new(0));
 
         let tx_hash = TxHash::from_raw(Hash::from_bytes(b"tx1"));
         let source_shard = ShardGroupId::new(1);
@@ -987,7 +950,7 @@ mod tests {
             ShardGroupId::new(0),
             &[tx_hash],
         );
-        coordinator.on_verified_remote_header(&topology, &header);
+        coordinator.on_verified_remote_header(&header);
 
         // Then: provisions arrives — should emit VerifyProvisions
         let provisions = make_provisions(
@@ -996,7 +959,7 @@ mod tests {
             ShardGroupId::new(0),
             BlockHeight::new(10),
         );
-        let actions = coordinator.on_state_provisions_received(&topology, provisions);
+        let actions = coordinator.on_state_provisions_received(provisions);
 
         assert_eq!(actions.len(), 1);
         assert!(matches!(
@@ -1007,8 +970,7 @@ mod tests {
 
     #[test]
     fn test_provision_received_without_header_buffers() {
-        let topology = make_test_topology(ShardGroupId::new(0));
-        let mut coordinator = ProvisionCoordinator::new();
+        let mut coordinator = ProvisionCoordinator::new(ShardGroupId::new(0));
 
         let tx_hash = TxHash::from_raw(Hash::from_bytes(b"tx1"));
         let source_shard = ShardGroupId::new(1);
@@ -1020,15 +982,14 @@ mod tests {
             ShardGroupId::new(0),
             BlockHeight::new(10),
         );
-        let actions = coordinator.on_state_provisions_received(&topology, provisions);
+        let actions = coordinator.on_state_provisions_received(provisions);
 
         assert!(actions.is_empty());
     }
 
     #[test]
     fn test_header_arrival_triggers_buffered_provision_verification() {
-        let topology = make_test_topology(ShardGroupId::new(0));
-        let mut coordinator = ProvisionCoordinator::new();
+        let mut coordinator = ProvisionCoordinator::new(ShardGroupId::new(0));
 
         let tx_hash = TxHash::from_raw(Hash::from_bytes(b"tx1"));
         let source_shard = ShardGroupId::new(1);
@@ -1040,7 +1001,7 @@ mod tests {
             ShardGroupId::new(0),
             BlockHeight::new(10),
         );
-        coordinator.on_state_provisions_received(&topology, provisions);
+        coordinator.on_state_provisions_received(provisions);
 
         // Then header arrives (commits to the buffered tx) — should trigger verification
         let header = make_certified_header_committing(
@@ -1049,7 +1010,7 @@ mod tests {
             ShardGroupId::new(0),
             &[tx_hash],
         );
-        let actions = coordinator.on_verified_remote_header(&topology, &header);
+        let actions = coordinator.on_verified_remote_header(&header);
 
         assert_eq!(actions.len(), 1);
         assert!(matches!(
@@ -1060,8 +1021,7 @@ mod tests {
 
     #[test]
     fn test_provision_from_own_shard_ignored() {
-        let topology = make_test_topology(ShardGroupId::new(0));
-        let mut coordinator = ProvisionCoordinator::new();
+        let mut coordinator = ProvisionCoordinator::new(ShardGroupId::new(0));
 
         let provisions = make_provisions(
             TxHash::from_raw(Hash::from_bytes(b"tx1")),
@@ -1069,15 +1029,14 @@ mod tests {
             ShardGroupId::new(1),
             BlockHeight::new(10),
         );
-        let actions = coordinator.on_state_provisions_received(&topology, provisions);
+        let actions = coordinator.on_state_provisions_received(provisions);
 
         assert!(actions.is_empty());
     }
 
     #[test]
     fn test_duplicate_provision_ignored_after_verification() {
-        let topology = make_test_topology(ShardGroupId::new(0));
-        let mut coordinator = ProvisionCoordinator::new();
+        let mut coordinator = ProvisionCoordinator::new(ShardGroupId::new(0));
 
         let tx_hash = TxHash::from_raw(Hash::from_bytes(b"tx1"));
         let source_shard = ShardGroupId::new(1);
@@ -1089,14 +1048,14 @@ mod tests {
             ShardGroupId::new(0),
             &[tx_hash],
         );
-        coordinator.on_verified_remote_header(&topology, &header);
+        coordinator.on_verified_remote_header(&header);
         let provisions = make_provisions(
             tx_hash,
             source_shard,
             ShardGroupId::new(0),
             BlockHeight::new(10),
         );
-        coordinator.on_state_provisions_received(&topology, provisions.clone());
+        coordinator.on_state_provisions_received(provisions.clone());
         coordinator.on_state_provisions_verified(
             Ok(Arc::new(Verified::<Provisions>::new_unchecked_for_test(
                 provisions,
@@ -1113,29 +1072,28 @@ mod tests {
             ShardGroupId::new(0),
             BlockHeight::new(10),
         );
-        let actions = coordinator.on_state_provisions_received(&topology, batch2);
+        let actions = coordinator.on_state_provisions_received(batch2);
         assert!(actions.is_empty());
         assert_eq!(coordinator.pipeline.pending_len(), 0);
     }
 
     #[test]
     fn test_provision_verified_emits_provisions_verified() {
-        let topology = make_test_topology(ShardGroupId::new(0));
-        let mut coordinator = ProvisionCoordinator::new();
+        let mut coordinator = ProvisionCoordinator::new(ShardGroupId::new(0));
 
         let tx_hash = TxHash::from_raw(Hash::from_bytes(b"tx1"));
         let source_shard = ShardGroupId::new(1);
 
         // Setup
         let header = make_certified_header(source_shard, BlockHeight::new(10));
-        coordinator.on_verified_remote_header(&topology, &header);
+        coordinator.on_verified_remote_header(&header);
         let provisions = make_provisions(
             tx_hash,
             source_shard,
             ShardGroupId::new(0),
             BlockHeight::new(10),
         );
-        coordinator.on_state_provisions_received(&topology, provisions.clone());
+        coordinator.on_state_provisions_received(provisions.clone());
 
         // Verify
         let actions = coordinator.on_state_provisions_verified(
@@ -1156,21 +1114,20 @@ mod tests {
 
     #[test]
     fn test_provision_verified_invalid_does_not_emit() {
-        let topology = make_test_topology(ShardGroupId::new(0));
-        let mut coordinator = ProvisionCoordinator::new();
+        let mut coordinator = ProvisionCoordinator::new(ShardGroupId::new(0));
 
         let tx_hash = TxHash::from_raw(Hash::from_bytes(b"tx1"));
         let source_shard = ShardGroupId::new(1);
 
         let header = make_certified_header(source_shard, BlockHeight::new(10));
-        coordinator.on_verified_remote_header(&topology, &header);
+        coordinator.on_verified_remote_header(&header);
         let provisions = make_provisions(
             tx_hash,
             source_shard,
             ShardGroupId::new(0),
             BlockHeight::new(10),
         );
-        coordinator.on_state_provisions_received(&topology, provisions.clone());
+        coordinator.on_state_provisions_received(provisions.clone());
 
         // Verification fails — no certified_header returned
         let actions = coordinator.on_state_provisions_verified(
@@ -1192,8 +1149,7 @@ mod tests {
 
     #[test]
     fn test_provision_batch_emits_single_verification() {
-        let topology = make_test_topology(ShardGroupId::new(0));
-        let mut coordinator = ProvisionCoordinator::new();
+        let mut coordinator = ProvisionCoordinator::new(ShardGroupId::new(0));
 
         let source_shard = ShardGroupId::new(1);
 
@@ -1207,7 +1163,7 @@ mod tests {
             ShardGroupId::new(0),
             &tx_hashes,
         );
-        coordinator.on_verified_remote_header(&topology, &header);
+        coordinator.on_verified_remote_header(&header);
 
         let provisions = make_provisions_multi(
             tx_hashes,
@@ -1216,7 +1172,7 @@ mod tests {
             BlockHeight::new(10),
         );
 
-        let actions = coordinator.on_state_provisions_received(&topology, provisions);
+        let actions = coordinator.on_state_provisions_received(provisions);
 
         // Should emit exactly ONE VerifyProvisions action with all 3 transactions
         assert_eq!(actions.len(), 1);
@@ -1230,8 +1186,7 @@ mod tests {
 
     #[test]
     fn test_provision_uses_single_verified_candidate() {
-        let topology = make_test_topology(ShardGroupId::new(0));
-        let mut coordinator = ProvisionCoordinator::new();
+        let mut coordinator = ProvisionCoordinator::new(ShardGroupId::new(0));
 
         let source_shard = ShardGroupId::new(1);
         let tx_hash = TxHash::from_raw(Hash::from_bytes(b"tx1"));
@@ -1243,7 +1198,7 @@ mod tests {
             ShardGroupId::new(0),
             &[tx_hash],
         );
-        coordinator.on_verified_remote_header(&topology, &header);
+        coordinator.on_verified_remote_header(&header);
         assert_eq!(coordinator.verified_remote_header_count(), 1);
 
         // Batch arrives — should send single verified candidate
@@ -1253,7 +1208,7 @@ mod tests {
             ShardGroupId::new(0),
             BlockHeight::new(10),
         );
-        let actions = coordinator.on_state_provisions_received(&topology, provisions);
+        let actions = coordinator.on_state_provisions_received(provisions);
 
         assert_eq!(actions.len(), 1);
         assert!(matches!(
@@ -1265,8 +1220,7 @@ mod tests {
 
     #[test]
     fn test_provision_header_usable_while_batch_outstanding() {
-        let topology = make_test_topology(ShardGroupId::new(0));
-        let mut coordinator = ProvisionCoordinator::new();
+        let mut coordinator = ProvisionCoordinator::new(ShardGroupId::new(0));
 
         let source_shard = ShardGroupId::new(1);
         let tx_hash = TxHash::from_raw(Hash::from_bytes(b"tx1"));
@@ -1277,7 +1231,7 @@ mod tests {
             ShardGroupId::new(0),
             &[tx_hash],
         );
-        coordinator.on_verified_remote_header(&topology, &header);
+        coordinator.on_verified_remote_header(&header);
 
         // Batch arrives while the header is live — verification dispatches.
         let provisions = make_provisions(
@@ -1286,7 +1240,7 @@ mod tests {
             ShardGroupId::new(0),
             BlockHeight::new(10),
         );
-        let actions = coordinator.on_state_provisions_received(&topology, provisions);
+        let actions = coordinator.on_state_provisions_received(provisions);
 
         assert_eq!(actions.len(), 1);
         assert!(matches!(
@@ -1302,8 +1256,7 @@ mod tests {
         // header commits to the full tx set; the arriving provisions contains only
         // a subset. Completeness check must reject so the fallback fetch
         // refetches a complete provisions from a peer.
-        let topology = make_test_topology(ShardGroupId::new(0));
-        let mut coordinator = ProvisionCoordinator::new();
+        let mut coordinator = ProvisionCoordinator::new(ShardGroupId::new(0));
 
         let source_shard = ShardGroupId::new(1);
         let tx_full = vec![
@@ -1317,7 +1270,7 @@ mod tests {
             ShardGroupId::new(0),
             &tx_full,
         );
-        coordinator.on_verified_remote_header(&topology, &header);
+        coordinator.on_verified_remote_header(&header);
 
         // Arriving provisions is missing tx_c.
         let partial = make_provisions_multi(
@@ -1326,7 +1279,7 @@ mod tests {
             ShardGroupId::new(0),
             BlockHeight::new(10),
         );
-        let actions = coordinator.on_state_provisions_received(&topology, partial);
+        let actions = coordinator.on_state_provisions_received(partial);
 
         assert!(
             actions.is_empty(),
@@ -1338,14 +1291,13 @@ mod tests {
     fn test_batch_with_missing_header_entry_rejected() {
         // Source block has no provision_tx_roots entry for our shard, yet a
         // provisions arrived claiming to target us — reject.
-        let topology = make_test_topology(ShardGroupId::new(0));
-        let mut coordinator = ProvisionCoordinator::new();
+        let mut coordinator = ProvisionCoordinator::new(ShardGroupId::new(0));
 
         let source_shard = ShardGroupId::new(1);
         // Header targets our shard via waves but has no provision_tx_roots
         // entry for us — mismatched commitment shape.
         let header = make_certified_header(source_shard, BlockHeight::new(10));
-        coordinator.on_verified_remote_header(&topology, &header);
+        coordinator.on_verified_remote_header(&header);
 
         let provisions = make_provisions(
             TxHash::from_raw(Hash::from_bytes(b"tx1")),
@@ -1353,15 +1305,14 @@ mod tests {
             ShardGroupId::new(0),
             BlockHeight::new(10),
         );
-        let actions = coordinator.on_state_provisions_received(&topology, provisions);
+        let actions = coordinator.on_state_provisions_received(provisions);
 
         assert!(actions.is_empty());
     }
 
     #[test]
     fn test_batch_invalid_does_not_emit() {
-        let topology = make_test_topology(ShardGroupId::new(0));
-        let mut coordinator = ProvisionCoordinator::new();
+        let mut coordinator = ProvisionCoordinator::new(ShardGroupId::new(0));
 
         let source_shard = ShardGroupId::new(1);
         let tx_hashes = vec![
@@ -1374,7 +1325,7 @@ mod tests {
             ShardGroupId::new(0),
             &tx_hashes,
         );
-        coordinator.on_verified_remote_header(&topology, &header);
+        coordinator.on_verified_remote_header(&header);
 
         let provisions = make_provisions_multi(
             tx_hashes,
@@ -1383,7 +1334,7 @@ mod tests {
             BlockHeight::new(10),
         );
 
-        coordinator.on_state_provisions_received(&topology, provisions.clone());
+        coordinator.on_state_provisions_received(provisions.clone());
 
         // Entire provisions fails verification
         let actions = coordinator.on_state_provisions_verified(
@@ -1505,8 +1456,7 @@ mod tests {
 
     #[test]
     fn test_expected_provision_tracked_when_header_targets_local_shard() {
-        let topology = make_test_topology(ShardGroupId::new(0));
-        let mut coordinator = ProvisionCoordinator::new();
+        let mut coordinator = ProvisionCoordinator::new(ShardGroupId::new(0));
 
         // Remote shard 1 block targets shard 0 (our shard)
         let header = make_certified_header_with_targets(
@@ -1514,7 +1464,7 @@ mod tests {
             BlockHeight::new(10),
             vec![ShardGroupId::new(0)],
         );
-        coordinator.on_verified_remote_header(&topology, &header);
+        coordinator.on_verified_remote_header(&header);
 
         // Should have one expected provision
         assert_eq!(coordinator.expected.len(), 1);
@@ -1522,8 +1472,7 @@ mod tests {
 
     #[test]
     fn test_expected_provision_not_tracked_when_header_does_not_target_local_shard() {
-        let topology = make_test_topology(ShardGroupId::new(0));
-        let mut coordinator = ProvisionCoordinator::new();
+        let mut coordinator = ProvisionCoordinator::new(ShardGroupId::new(0));
 
         // Remote shard 1 block targets shard 2 (NOT our shard)
         let header = make_certified_header_with_targets(
@@ -1531,7 +1480,7 @@ mod tests {
             BlockHeight::new(10),
             vec![ShardGroupId::new(2)],
         );
-        coordinator.on_verified_remote_header(&topology, &header);
+        coordinator.on_verified_remote_header(&header);
 
         // Header should NOT be stored (not expecting provisions from it)
         assert_eq!(coordinator.verified_remote_header_count(), 0);
@@ -1540,8 +1489,7 @@ mod tests {
 
     #[test]
     fn test_expected_provision_cleared_on_verification() {
-        let topology = make_test_topology(ShardGroupId::new(0));
-        let mut coordinator = ProvisionCoordinator::new();
+        let mut coordinator = ProvisionCoordinator::new(ShardGroupId::new(0));
 
         let source_shard = ShardGroupId::new(1);
         let header = make_certified_header_with_targets(
@@ -1549,7 +1497,7 @@ mod tests {
             BlockHeight::new(10),
             vec![ShardGroupId::new(0)],
         );
-        coordinator.on_verified_remote_header(&topology, &header);
+        coordinator.on_verified_remote_header(&header);
         assert_eq!(coordinator.expected.len(), 1);
 
         // Batch arrives and is verified
@@ -1559,7 +1507,7 @@ mod tests {
             ShardGroupId::new(0),
             BlockHeight::new(10),
         );
-        coordinator.on_state_provisions_received(&topology, provisions.clone());
+        coordinator.on_state_provisions_received(provisions.clone());
         coordinator.on_state_provisions_verified(
             Ok(Arc::new(Verified::<Provisions>::new_unchecked_for_test(
                 provisions,
@@ -1574,8 +1522,7 @@ mod tests {
 
     #[test]
     fn test_timeout_emits_request_missing_provisions() {
-        let topology = make_test_topology(ShardGroupId::new(0));
-        let mut coordinator = ProvisionCoordinator::new();
+        let mut coordinator = ProvisionCoordinator::new(ShardGroupId::new(0));
 
         // Prime local clock with a first commit so the expected-provision
         // entry stamped below gets a real baseline (not the zero sentinel).
@@ -1587,7 +1534,7 @@ mod tests {
             BlockHeight::new(10),
             vec![ShardGroupId::new(0)],
         );
-        coordinator.on_verified_remote_header(&topology, &header);
+        coordinator.on_verified_remote_header(&header);
 
         // Advance blocks — should not emit before the timeout threshold.
         // discovered_at = 500ms; fires when now_ms - 500 >= 5000 → h = 11.
@@ -1620,8 +1567,7 @@ mod tests {
         // recorded while `local_committed_ts == 0` would report a ~epoch-ms
         // age on the very next commit and trigger an immediate fallback,
         // bypassing PROVISION_FALLBACK_TIMEOUT entirely.
-        let topology = make_test_topology(ShardGroupId::new(0));
-        let mut coordinator = ProvisionCoordinator::new();
+        let mut coordinator = ProvisionCoordinator::new(ShardGroupId::new(0));
 
         // Remote header arrives BEFORE any local block commits.
         let header = make_certified_header_with_targets(
@@ -1629,7 +1575,7 @@ mod tests {
             BlockHeight::new(10),
             vec![ShardGroupId::new(0)],
         );
-        coordinator.on_verified_remote_header(&topology, &header);
+        coordinator.on_verified_remote_header(&header);
         assert_eq!(coordinator.expected.len(), 1);
 
         // First local commit at ts=500ms. Should NOT fire — the pre-genesis
@@ -1651,15 +1597,14 @@ mod tests {
 
     #[test]
     fn test_no_re_emission_after_initial_request() {
-        let topology = make_test_topology(ShardGroupId::new(0));
-        let mut coordinator = ProvisionCoordinator::new();
+        let mut coordinator = ProvisionCoordinator::new(ShardGroupId::new(0));
 
         let header = make_certified_header_with_targets(
             ShardGroupId::new(1),
             BlockHeight::new(10),
             vec![ShardGroupId::new(0)],
         );
-        coordinator.on_verified_remote_header(&topology, &header);
+        coordinator.on_verified_remote_header(&header);
 
         // Advance past timeout to trigger the one-time request at height 30
         for h in 1..=30 {
@@ -1678,8 +1623,7 @@ mod tests {
 
     #[test]
     fn test_no_timeout_when_provision_verified_in_time() {
-        let topology = make_test_topology(ShardGroupId::new(0));
-        let mut coordinator = ProvisionCoordinator::new();
+        let mut coordinator = ProvisionCoordinator::new(ShardGroupId::new(0));
 
         let source_shard = ShardGroupId::new(1);
         let header = make_certified_header_with_targets(
@@ -1687,7 +1631,7 @@ mod tests {
             BlockHeight::new(10),
             vec![ShardGroupId::new(0)],
         );
-        coordinator.on_verified_remote_header(&topology, &header);
+        coordinator.on_verified_remote_header(&header);
 
         // Advance a few blocks
         for h in 1..=5 {
@@ -1701,7 +1645,7 @@ mod tests {
             ShardGroupId::new(0),
             BlockHeight::new(10),
         );
-        coordinator.on_state_provisions_received(&topology, provisions.clone());
+        coordinator.on_state_provisions_received(provisions.clone());
         coordinator.on_state_provisions_verified(
             Ok(Arc::new(Verified::<Provisions>::new_unchecked_for_test(
                 provisions,
@@ -1726,8 +1670,7 @@ mod tests {
 
     #[test]
     fn test_verified_provisions_clear_expected_tracking() {
-        let topology = make_test_topology(ShardGroupId::new(0));
-        let mut coordinator = ProvisionCoordinator::new();
+        let mut coordinator = ProvisionCoordinator::new(ShardGroupId::new(0));
 
         let source_shard = ShardGroupId::new(1);
 
@@ -1736,7 +1679,7 @@ mod tests {
             BlockHeight::new(10),
             vec![ShardGroupId::new(0)],
         );
-        coordinator.on_verified_remote_header(&topology, &header);
+        coordinator.on_verified_remote_header(&header);
         assert_eq!(coordinator.expected.len(), 1);
 
         let provisions = make_provisions(
@@ -1745,7 +1688,7 @@ mod tests {
             ShardGroupId::new(0),
             BlockHeight::new(10),
         );
-        coordinator.on_state_provisions_received(&topology, provisions.clone());
+        coordinator.on_state_provisions_received(provisions.clone());
         coordinator.on_state_provisions_verified(
             Ok(Arc::new(Verified::<Provisions>::new_unchecked_for_test(
                 provisions,
@@ -1824,8 +1767,7 @@ mod tests {
     /// triggering a view-change loop.
     #[test]
     fn test_committed_tombstone_drops_re_arrival_after_pipeline_eviction() {
-        let topology = make_test_topology(ShardGroupId::new(0));
-        let mut coordinator = ProvisionCoordinator::new();
+        let mut coordinator = ProvisionCoordinator::new(ShardGroupId::new(0));
 
         // Prime the local clock so the expected-provision entry stamps a
         // real baseline rather than the zero sentinel.
@@ -1847,10 +1789,10 @@ mod tests {
             ShardGroupId::new(0),
             &[tx_hash],
         );
-        coordinator.on_verified_remote_header(&topology, &header);
+        coordinator.on_verified_remote_header(&header);
 
         // First arrival → queued.
-        coordinator.on_state_provisions_received(&topology, provisions.clone());
+        coordinator.on_state_provisions_received(provisions.clone());
         coordinator.on_state_provisions_verified(
             Ok(Arc::new(Verified::<Provisions>::new_unchecked_for_test(
                 provisions.clone(),
@@ -1902,7 +1844,7 @@ mod tests {
         // Late re-arrival (e.g. fetch fall-through, gossip retransmit).
         // The tombstone must drop it before it reaches the verify path
         // and re-enters the queue.
-        let actions = coordinator.on_state_provisions_received(&topology, provisions);
+        let actions = coordinator.on_state_provisions_received(provisions);
         assert!(actions.is_empty(), "re-arrival should be dropped silently");
         assert_eq!(
             coordinator.queue.queue_len(),
@@ -1917,8 +1859,7 @@ mod tests {
         // (buffered as pending). After the first pair commits, a later
         // header re-arrival drains pending — the drain path must check
         // the tombstone too.
-        let topology = make_test_topology(ShardGroupId::new(0));
-        let mut coordinator = ProvisionCoordinator::new();
+        let mut coordinator = ProvisionCoordinator::new(ShardGroupId::new(0));
 
         coordinator.on_block_committed(&make_block(BlockHeight::new(1)));
 
@@ -1937,8 +1878,8 @@ mod tests {
         );
 
         // First lifecycle: header, receive, verify, commit.
-        coordinator.on_verified_remote_header(&topology, &header);
-        coordinator.on_state_provisions_received(&topology, provisions.clone());
+        coordinator.on_verified_remote_header(&header);
+        coordinator.on_state_provisions_received(provisions.clone());
         coordinator.on_state_provisions_verified(
             Ok(Arc::new(Verified::<Provisions>::new_unchecked_for_test(
                 provisions.clone(),
@@ -1954,8 +1895,8 @@ mod tests {
         // Second lifecycle: provisions re-arrive before any header. The
         // receipt-time tombstone guard short-circuits at receipt — no
         // pending buffering, no drain work, no re-enqueue.
-        coordinator.on_state_provisions_received(&topology, provisions);
-        let actions = coordinator.on_verified_remote_header(&topology, &header);
+        coordinator.on_state_provisions_received(provisions);
+        let actions = coordinator.on_verified_remote_header(&header);
         assert!(
             actions.is_empty(),
             "tombstoned re-arrival should be dropped at receipt — no drain work"
@@ -1966,8 +1907,7 @@ mod tests {
 
     #[test]
     fn test_orphan_cleanup_emits_abandon_fetch() {
-        let topology = make_test_topology(ShardGroupId::new(0));
-        let mut coordinator = ProvisionCoordinator::new();
+        let mut coordinator = ProvisionCoordinator::new(ShardGroupId::new(0));
 
         // Prime local clock so the expected-provision entry gets a real
         // baseline rather than the zero sentinel retro-stamped on first commit.
@@ -1981,7 +1921,7 @@ mod tests {
             block_height,
             vec![ShardGroupId::new(0)],
         );
-        coordinator.on_verified_remote_header(&topology, &header);
+        coordinator.on_verified_remote_header(&header);
 
         let orphan_cutoff_blocks = u64::try_from(RETENTION_HORIZON.as_millis()).unwrap_or(u64::MAX)
             / TEST_BLOCK_INTERVAL_MS;
@@ -2017,15 +1957,14 @@ mod tests {
 
     #[test]
     fn test_header_retained_while_batch_outstanding() {
-        let topology = make_test_topology(ShardGroupId::new(0));
-        let mut coordinator = ProvisionCoordinator::new();
+        let mut coordinator = ProvisionCoordinator::new(ShardGroupId::new(0));
 
         let header = make_certified_header_with_targets(
             ShardGroupId::new(1),
             BlockHeight::new(10),
             vec![ShardGroupId::new(0)],
         );
-        coordinator.on_verified_remote_header(&topology, &header);
+        coordinator.on_verified_remote_header(&header);
         assert_eq!(coordinator.verified_remote_header_count(), 1);
 
         // Advance local well past any old time-based cutoff but short of the
@@ -2051,8 +1990,7 @@ mod tests {
         // Each verifies against the same remote header, and any of them may
         // be the one a remote proposer later commits. The header must stay
         // available so a second-arriving batch can verify against it.
-        let topology = make_test_topology(ShardGroupId::new(0));
-        let mut coordinator = ProvisionCoordinator::new();
+        let mut coordinator = ProvisionCoordinator::new(ShardGroupId::new(0));
 
         let source_shard = ShardGroupId::new(1);
         let tx_hash = TxHash::from_raw(Hash::from_bytes(b"tx1"));
@@ -2063,7 +2001,7 @@ mod tests {
             ShardGroupId::new(0),
             &[tx_hash],
         );
-        coordinator.on_verified_remote_header(&topology, &header);
+        coordinator.on_verified_remote_header(&header);
         assert_eq!(coordinator.verified_remote_header_count(), 1);
 
         let provisions = make_provisions(
@@ -2072,7 +2010,7 @@ mod tests {
             ShardGroupId::new(0),
             BlockHeight::new(10),
         );
-        coordinator.on_state_provisions_received(&topology, provisions.clone());
+        coordinator.on_state_provisions_received(provisions.clone());
         coordinator.on_state_provisions_verified(
             Ok(Arc::new(Verified::<Provisions>::new_unchecked_for_test(
                 provisions,
@@ -2091,8 +2029,7 @@ mod tests {
 
     #[test]
     fn test_orphan_header_dropped_after_cutoff() {
-        let topology = make_test_topology(ShardGroupId::new(0));
-        let mut coordinator = ProvisionCoordinator::new();
+        let mut coordinator = ProvisionCoordinator::new(ShardGroupId::new(0));
 
         // Prime local clock so the expected-provision entry gets a real
         // baseline rather than the zero sentinel retro-stamped on first commit.
@@ -2105,7 +2042,7 @@ mod tests {
             BlockHeight::new(10),
             vec![ShardGroupId::new(0)],
         );
-        coordinator.on_verified_remote_header(&topology, &header);
+        coordinator.on_verified_remote_header(&header);
         assert_eq!(coordinator.expected.len(), 1);
 
         // Not yet past the orphan cutoff — still retained.
@@ -2130,8 +2067,7 @@ mod tests {
         // source data has aged past `RETENTION_HORIZON` must be evicted from
         // the proposer queue, otherwise it gets re-proposed forever and
         // peers without the matching remote header view-change endlessly.
-        let topology = make_test_topology(ShardGroupId::new(0));
-        let mut coordinator = ProvisionCoordinator::new();
+        let mut coordinator = ProvisionCoordinator::new(ShardGroupId::new(0));
 
         // Verify a provisions sourced from shard 1 at height 10
         // (weighted_ts = 5_000ms in the test clock).
@@ -2142,14 +2078,14 @@ mod tests {
             ShardGroupId::new(0),
             &[tx_hash],
         );
-        coordinator.on_verified_remote_header(&topology, &header);
+        coordinator.on_verified_remote_header(&header);
         let provisions = make_provisions(
             tx_hash,
             ShardGroupId::new(1),
             ShardGroupId::new(0),
             BlockHeight::new(10),
         );
-        coordinator.on_state_provisions_received(&topology, provisions.clone());
+        coordinator.on_state_provisions_received(provisions.clone());
         coordinator.on_state_provisions_verified(
             Ok(Arc::new(Verified::<Provisions>::new_unchecked_for_test(
                 provisions,
@@ -2186,8 +2122,7 @@ mod tests {
         // Header arrived long ago; receiving a fresh provisions for that
         // already-aged source must short-circuit instead of dispatching a
         // verification that no peer can use.
-        let topology = make_test_topology(ShardGroupId::new(0));
-        let mut coordinator = ProvisionCoordinator::new();
+        let mut coordinator = ProvisionCoordinator::new(ShardGroupId::new(0));
 
         let tx_hash = TxHash::from_raw(Hash::from_bytes(b"tx-old"));
         let header = make_certified_header_committing(
@@ -2196,7 +2131,7 @@ mod tests {
             ShardGroupId::new(0),
             &[tx_hash],
         );
-        coordinator.on_verified_remote_header(&topology, &header);
+        coordinator.on_verified_remote_header(&header);
 
         // Advance local commits well past the source's deadline.
         let deadline_height = (u64::try_from(RETENTION_HORIZON.as_millis()).unwrap_or(u64::MAX)
@@ -2224,7 +2159,7 @@ mod tests {
             ShardGroupId::new(0),
             BlockHeight::new(10),
         );
-        let actions = coordinator.on_state_provisions_received(&topology, provisions);
+        let actions = coordinator.on_state_provisions_received(provisions);
         assert!(
             actions.is_empty(),
             "past-deadline provisions must be dropped without dispatching verification"
@@ -2238,8 +2173,7 @@ mod tests {
         // the entry must be evicted by the deadline sweep — and its hash
         // surfaced as an `AbandonFetch::LocalProvisions` so any pinned
         // local-DA fetch on that hash releases its slot.
-        let topology = make_test_topology(ShardGroupId::new(0));
-        let mut coordinator = ProvisionCoordinator::new();
+        let mut coordinator = ProvisionCoordinator::new(ShardGroupId::new(0));
 
         // Prime local clock so received_at is non-zero.
         coordinator.on_block_committed(&make_block(BlockHeight::new(1)));
@@ -2252,7 +2186,7 @@ mod tests {
             BlockHeight::new(10),
         );
         let provisions_hash = provisions.hash();
-        coordinator.on_state_provisions_received(&topology, provisions);
+        coordinator.on_state_provisions_received(provisions);
         assert_eq!(coordinator.pipeline.pending_len(), 1);
 
         // Advance past the deadline horizon measured from received_at,
@@ -2289,7 +2223,6 @@ mod tests {
     /// at `now`.
     fn verify_batch_into_queue(
         coordinator: &mut ProvisionCoordinator,
-        topology: &TopologySnapshot,
         source_shard: ShardGroupId,
         height: BlockHeight,
         tx_hash: TxHash,
@@ -2301,9 +2234,9 @@ mod tests {
             ShardGroupId::new(0),
             &[tx_hash],
         );
-        coordinator.on_verified_remote_header(topology, &header);
+        coordinator.on_verified_remote_header(&header);
         let provisions = make_provisions(tx_hash, source_shard, ShardGroupId::new(0), height);
-        coordinator.on_state_provisions_received(topology, provisions.clone());
+        coordinator.on_state_provisions_received(provisions.clone());
         coordinator.on_state_provisions_verified(
             Ok(Arc::new(Verified::<Provisions>::new_unchecked_for_test(
                 provisions,
@@ -2315,14 +2248,15 @@ mod tests {
 
     #[test]
     fn test_dwell_time_zero_yields_immediately() {
-        let topology = make_test_topology(ShardGroupId::new(0));
-        let mut coordinator = ProvisionCoordinator::with_config(ProvisionConfig {
-            min_dwell_time: Duration::ZERO,
-        });
+        let mut coordinator = ProvisionCoordinator::with_config(
+            ShardGroupId::new(0),
+            ProvisionConfig {
+                min_dwell_time: Duration::ZERO,
+            },
+        );
         let now = LocalTimestamp::from_millis(1_000);
         verify_batch_into_queue(
             &mut coordinator,
-            &topology,
             ShardGroupId::new(1),
             BlockHeight::new(10),
             TxHash::from_raw(Hash::from_bytes(b"tx1")),
@@ -2338,15 +2272,16 @@ mod tests {
 
     #[test]
     fn test_dwell_time_filters_young_batch() {
-        let topology = make_test_topology(ShardGroupId::new(0));
-        let mut coordinator = ProvisionCoordinator::with_config(ProvisionConfig {
-            min_dwell_time: Duration::from_millis(500),
-        });
+        let mut coordinator = ProvisionCoordinator::with_config(
+            ShardGroupId::new(0),
+            ProvisionConfig {
+                min_dwell_time: Duration::from_millis(500),
+            },
+        );
 
         // Verify at t=1.0s
         verify_batch_into_queue(
             &mut coordinator,
-            &topology,
             ShardGroupId::new(1),
             BlockHeight::new(10),
             TxHash::from_raw(Hash::from_bytes(b"tx1")),
@@ -2374,15 +2309,16 @@ mod tests {
 
     #[test]
     fn test_dwell_time_mixed_eligibility() {
-        let topology = make_test_topology(ShardGroupId::new(0));
-        let mut coordinator = ProvisionCoordinator::with_config(ProvisionConfig {
-            min_dwell_time: Duration::from_millis(200),
-        });
+        let mut coordinator = ProvisionCoordinator::with_config(
+            ShardGroupId::new(0),
+            ProvisionConfig {
+                min_dwell_time: Duration::from_millis(200),
+            },
+        );
 
         // t=1.0s: verify old provisions
         verify_batch_into_queue(
             &mut coordinator,
-            &topology,
             ShardGroupId::new(1),
             BlockHeight::new(10),
             TxHash::from_raw(Hash::from_bytes(b"tx_old")),
@@ -2392,7 +2328,6 @@ mod tests {
         // t=1.3s: verify young provisions
         verify_batch_into_queue(
             &mut coordinator,
-            &topology,
             ShardGroupId::new(1),
             BlockHeight::new(11),
             TxHash::from_raw(Hash::from_bytes(b"tx_young")),
@@ -2424,8 +2359,7 @@ mod tests {
             // will be verified. A bool per provisions picks the path.
             verify_path in prop_vec(ANY_BOOL, 0..=16),
         ) {
-            let topology = make_test_topology(ShardGroupId::new(0));
-            let mut coordinator = ProvisionCoordinator::new();
+            let mut coordinator = ProvisionCoordinator::new(ShardGroupId::new(0));
             // Prime so received_at is non-zero on pending entries.
             coordinator.on_block_committed(&make_block(BlockHeight::new(1)));
 
@@ -2449,8 +2383,8 @@ mod tests {
                         ShardGroupId::new(0),
                         &[tx_hash],
                     );
-                    coordinator.on_verified_remote_header(&topology, &header);
-                    coordinator.on_state_provisions_received(&topology, provisions.clone());
+                    coordinator.on_verified_remote_header(&header);
+                    coordinator.on_state_provisions_received(provisions.clone());
                     coordinator.on_state_provisions_verified(
                         Ok(Arc::new(Verified::<Provisions>::new_unchecked_for_test(
                             provisions,
@@ -2460,7 +2394,7 @@ mod tests {
                     );
                 } else {
                     // Pending path: provisions arrives without header.
-                    coordinator.on_state_provisions_received(&topology, provisions);
+                    coordinator.on_state_provisions_received(provisions);
                 }
             }
 
