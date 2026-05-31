@@ -624,6 +624,9 @@ where
             FetchAbandon::ExecutionCerts { ids } => {
                 self.drive_fetch::<ExecCertBinding>(FetchInput::Abandoned { ids });
             }
+            FetchAbandon::BeaconProposal { ids } => {
+                self.drive_fetch::<BeaconProposalBinding>(FetchInput::Abandoned { ids });
+            }
         }
     }
 

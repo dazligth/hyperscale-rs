@@ -10,7 +10,9 @@
 //! `io_loop`'s dispatcher matches the inner enum and feeds the ids through
 //! `FetchInput::Abandoned` on the corresponding binding.
 
-use hyperscale_types::{BlockHeight, ProvisionHash, ShardGroupId, TxHash, WaveId};
+use hyperscale_types::{
+    BlockHeight, Epoch, ProvisionHash, ShardGroupId, TxHash, ValidatorId, WaveId,
+};
 
 /// Fetch-cancel family — one variant per payload type. Variants are added
 /// when each binding migrates to push-cancel.
@@ -63,5 +65,16 @@ pub enum FetchAbandon {
     ExecutionCerts {
         /// Wave ids whose in-flight EC fetch should be cancelled.
         ids: Vec<WaveId>,
+    },
+    /// Missing-proposal fetch keyed by `(epoch, validator)`. Emitted by
+    /// the beacon coordinator when a pending commit-assembly stash is
+    /// evicted before its awaited fetches resolve — typically because a
+    /// peer's beacon-block gossip committed the same epoch first and
+    /// `adopt_block` advanced `current_epoch` past the stash, leaving
+    /// the in-flight `(epoch, validator)` slots pinned on data we no
+    /// longer need.
+    BeaconProposal {
+        /// `(epoch, validator)` pairs whose in-flight fetch should be cancelled.
+        ids: Vec<(Epoch, ValidatorId)>,
     },
 }

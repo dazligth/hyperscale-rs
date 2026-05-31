@@ -17,11 +17,11 @@
 //! matches `expected_config_hash` — a tripwire against booting a
 //! validator off a chain initialised by a different operator TOML.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use hyperscale_core::{Action, FetchRequest, TimerId};
+use hyperscale_core::{Action, FetchAbandon, FetchRequest, TimerId};
 use hyperscale_types::{
     BeaconBlock, BeaconCert, BeaconProposal, BeaconProposalVerifyContext, BeaconState,
     Bls12381G1PublicKey, CertifiedBeaconBlock, CertifiedBeaconBlockVerifyError, Epoch,
@@ -100,14 +100,15 @@ pub struct BeaconCoordinator {
     /// `BeaconCoordinator` — single `Arc` per host.
     proposal_pool: Arc<BeaconProposalPool>,
 
-    /// Stashed SPC-decided epoch whose committed proposals reference
+    /// Stashed SPC-decided epochs whose committed proposals reference
     /// at least one `BeaconProposal` the local pool never observed.
-    /// Holds the SPC cert + output vector + the set of validators
-    /// whose proposals are still being fetched. Cleared once every
-    /// awaiting fetch resolves and the block adopts (or once the
-    /// stash is abandoned because a later peer's beacon-block gossip
-    /// committed the same epoch first).
-    pending_assembly: Option<PendingCommitAssembly>,
+    /// Each entry holds its SPC cert + output vector + the set of
+    /// validators whose proposals are still being fetched. Entries
+    /// clear once every awaiting fetch resolves and the block adopts,
+    /// or — once `adopt_block` advances `current_epoch` past them —
+    /// get evicted in `prune_stale_assemblies`, which emits
+    /// [`FetchAbandon::BeaconProposal`] for their in-flight ids.
+    pending_assemblies: BTreeMap<Epoch, PendingCommitAssembly>,
 
     /// Read-only topology view derived from the current `BeaconState`.
     /// Refreshed on every `adopt_block` so consumers (shard
@@ -194,7 +195,7 @@ impl BeaconCoordinator {
             equivocations: EquivocationObservations::new(),
             sync: BeaconBlockSyncManager::new(),
             proposal_pool,
-            pending_assembly: None,
+            pending_assemblies: BTreeMap::new(),
             local_shard,
             topology_snapshot,
             me,
@@ -1468,6 +1469,10 @@ impl BeaconCoordinator {
             },
         ];
 
+        if let Some(abandon) = self.prune_stale_assemblies() {
+            actions.push(abandon);
+        }
+
         if self.is_on_committee() {
             self.bootstrap_spc_for_next_epoch();
             actions.extend(self.try_propose());
@@ -1478,14 +1483,17 @@ impl BeaconCoordinator {
 
     /// SPC has decided this epoch. When every committed-vector
     /// element resolves to a pooled proposal, assemble the block
-    /// directly. Otherwise stash the cert + output and emit one
-    /// `Action::Fetch(FetchRequest::BeaconProposal { … })` per
-    /// missing element; assembly resumes from
+    /// directly. Otherwise stash the cert + output keyed by `epoch`
+    /// and emit one `Action::Fetch(FetchRequest::BeaconProposal { … })`
+    /// per missing element; assembly resumes from
     /// [`Self::on_beacon_proposal_fetched`] once every awaited fetch
-    /// lands. The fetch's routing `shard` is the dispatching vnode's
-    /// `local_shard` (peer selection rides the local committee);
-    /// `preferred` rotates through the beacon committee so multiple
-    /// missing proposals don't all target the same peer.
+    /// lands. Concurrent stashes for different epochs are allowed —
+    /// stale entries get evicted from `adopt_block` once
+    /// `current_epoch` advances past them. The fetch's routing
+    /// `shard` is the dispatching vnode's `local_shard` (peer
+    /// selection rides the local committee); `preferred` rotates
+    /// through the beacon committee so multiple missing proposals
+    /// don't all target the same peer.
     fn on_spc_output_high(
         &mut self,
         epoch: Epoch,
@@ -1496,14 +1504,6 @@ impl BeaconCoordinator {
         match self.decode_committed_proposals(epoch, output) {
             DecodeOutcome::Complete(committed) => self.assemble_and_adopt(epoch, committed, cert),
             DecodeOutcome::Pending { missing } => {
-                if let Some(prior) = self.pending_assembly.as_ref() {
-                    warn!(
-                        epoch = epoch.inner(),
-                        prior_epoch = prior.epoch.inner(),
-                        "OutputHigh arrived while an earlier assembly is still awaiting fetches — dropping",
-                    );
-                    return Vec::new();
-                }
                 let peers = self.spc_recipients();
                 let local_shard = self.local_shard;
                 let actions: Vec<Action> = missing
@@ -1520,12 +1520,21 @@ impl BeaconCoordinator {
                         })
                     })
                     .collect();
-                self.pending_assembly = Some(PendingCommitAssembly {
+                if let Some(prior) = self.pending_assemblies.insert(
                     epoch,
-                    output: output.clone(),
-                    cert,
-                    awaiting: missing.into_iter().collect(),
-                });
+                    PendingCommitAssembly {
+                        epoch,
+                        output: output.clone(),
+                        cert,
+                        awaiting: missing.into_iter().collect(),
+                    },
+                ) {
+                    warn!(
+                        epoch = epoch.inner(),
+                        prior_awaiting = prior.awaiting.len(),
+                        "OutputHigh re-fired for an epoch with an existing stash — overwriting",
+                    );
+                }
                 actions
             }
         }
@@ -1604,10 +1613,10 @@ impl BeaconCoordinator {
     /// Handle a [`ProtocolEvent::BeaconProposalFetched`] dispatch:
     /// verify the returned proposal under the named validator's
     /// pubkey, admit it to the pool, and resume the stashed assembly
-    /// once every awaited fetch has resolved.
+    /// for `epoch` once every awaited fetch has resolved.
     ///
-    /// Out-of-band responses — stash already cleared, mismatched
-    /// epoch, or validator not in the awaiting set — drop silently.
+    /// Out-of-band responses — no stash for the named epoch, or
+    /// validator not in the awaiting set — drop silently.
     ///
     /// [`ProtocolEvent::BeaconProposalFetched`]: hyperscale_core::ProtocolEvent::BeaconProposalFetched
     pub fn on_beacon_proposal_fetched(
@@ -1616,10 +1625,10 @@ impl BeaconCoordinator {
         validator: ValidatorId,
         proposal: Option<Arc<Verifiable<BeaconProposal>>>,
     ) -> Vec<Action> {
-        let Some(pending) = self.pending_assembly.as_mut() else {
+        let Some(pending) = self.pending_assemblies.get_mut(&epoch) else {
             return Vec::new();
         };
-        if pending.epoch != epoch || !pending.awaiting.remove(&validator) {
+        if !pending.awaiting.remove(&validator) {
             return Vec::new();
         }
         if let Some(proposal) = proposal {
@@ -1651,24 +1660,24 @@ impl BeaconCoordinator {
                 );
             }
         }
-        self.maybe_resume_assembly()
+        self.maybe_resume_assembly(epoch)
     }
 
-    /// Drive the stashed assembly forward if every awaited fetch has
+    /// Drive the stash for `epoch` forward if every awaited fetch has
     /// resolved. Re-runs the decode against the now-extended pool;
     /// `Complete` adopts and broadcasts, `Pending` (a fetch returned
     /// no proposal or one whose hash still mismatched) drops the
     /// stash — the local node will catch up via beacon-block gossip
     /// from a peer that assembled cleanly.
-    fn maybe_resume_assembly(&mut self) -> Vec<Action> {
+    fn maybe_resume_assembly(&mut self, epoch: Epoch) -> Vec<Action> {
         let still_awaiting = self
-            .pending_assembly
-            .as_ref()
+            .pending_assemblies
+            .get(&epoch)
             .is_some_and(|p| !p.awaiting.is_empty());
         if still_awaiting {
             return Vec::new();
         }
-        let Some(pending) = self.pending_assembly.take() else {
+        let Some(pending) = self.pending_assemblies.remove(&epoch) else {
             return Vec::new();
         };
         match self.decode_committed_proposals(pending.epoch, &pending.output) {
@@ -1684,6 +1693,34 @@ impl BeaconCoordinator {
                 Vec::new()
             }
         }
+    }
+
+    /// Evict pending commit-assembly stashes whose epoch is at or
+    /// before `self.state.current_epoch`. Called from `adopt_block`
+    /// after the epoch advances — entries for committed or earlier
+    /// epochs can no longer adopt (the block already sits in the
+    /// chain). Each evicted entry's outstanding fetches turn into a
+    /// single [`FetchAbandon::BeaconProposal`] so the binding's FSM
+    /// releases its in-flight slots.
+    fn prune_stale_assemblies(&mut self) -> Option<Action> {
+        let stale_epochs: Vec<Epoch> = self
+            .pending_assemblies
+            .range(..=self.state.current_epoch)
+            .map(|(e, _)| *e)
+            .collect();
+        if stale_epochs.is_empty() {
+            return None;
+        }
+        let mut ids: Vec<(Epoch, ValidatorId)> = Vec::new();
+        for epoch in stale_epochs {
+            if let Some(pending) = self.pending_assemblies.remove(&epoch) {
+                ids.extend(pending.awaiting.into_iter().map(|v| (epoch, v)));
+            }
+        }
+        if ids.is_empty() {
+            return None;
+        }
+        Some(Action::AbandonFetch(FetchAbandon::BeaconProposal { ids }))
     }
 
     /// Shared handle to this coordinator's proposal pool. Lets the
