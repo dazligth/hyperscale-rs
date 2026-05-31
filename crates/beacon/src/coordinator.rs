@@ -1736,6 +1736,11 @@ impl BeaconCoordinator {
     }
 
     #[must_use]
+    pub const fn network_definition(&self) -> &NetworkDefinition {
+        &self.network
+    }
+
+    #[must_use]
     pub const fn me(&self) -> ValidatorId {
         self.me
     }

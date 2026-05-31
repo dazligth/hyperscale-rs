@@ -11,15 +11,22 @@
 //! No mocks, no dispatch-table tracing — assertions ride on the same
 //! contract `NodeHost` consumes in production.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use hyperscale_beacon::coordinator::BeaconCoordinator;
+use hyperscale_beacon::genesis::build_genesis_beacon_state;
 use hyperscale_execution::{ExecCertStore, FinalizedWaveStore};
 use hyperscale_mempool::{MempoolConfig, TxStore};
 use hyperscale_provisions::{ProvisionConfig, ProvisionStore};
 use hyperscale_shard::ShardConsensusConfig;
 use hyperscale_storage::RecoveredState;
 use hyperscale_test_helpers::TestCommittee;
-use hyperscale_types::ShardGroupId;
+use hyperscale_types::{
+    BEACON_SIGNER_COUNT, BeaconGenesisConfig, CertifiedBeaconBlock, GenesisPool, GenesisValidator,
+    MIN_STAKE_FLOOR, NetworkDefinition, Randomness, ShardGroupId, Stake, StakePoolId, ValidatorId,
+    Verified, genesis_config_hash,
+};
 
 use super::NodeStateMachine;
 
@@ -75,6 +82,7 @@ impl TestNodeBuilder {
         let me = committee.validator_id(self.local_idx);
         let local_shard = ShardGroupId::new(me.inner() % self.num_shards);
         let provision_store = Arc::new(ProvisionStore::new());
+        let beacon_coordinator = test_beacon_coordinator(&committee, me, self.num_shards);
 
         let node = NodeStateMachine::new(
             me,
@@ -82,6 +90,7 @@ impl TestNodeBuilder {
             topology,
             &ShardConsensusConfig::default(),
             RecoveredState::default(),
+            beacon_coordinator,
             MempoolConfig::default(),
             ProvisionConfig::default(),
             provision_store,
@@ -92,6 +101,55 @@ impl TestNodeBuilder {
 
         TestNode { node, committee }
     }
+}
+
+/// Build a `BeaconCoordinator` for tests over the `TestCommittee` —
+/// every validator on a single pool, the first `BEACON_SIGNER_COUNT`
+/// on the beacon committee, every validator placed on shard 0.
+fn test_beacon_coordinator(
+    committee: &TestCommittee,
+    me: ValidatorId,
+    _num_shards: u64,
+) -> BeaconCoordinator {
+    let network = NetworkDefinition::simulator();
+    let pool_id = StakePoolId::new(0);
+    let n = committee.size();
+    let initial_validators: Vec<GenesisValidator> = (0..n)
+        .map(|i| GenesisValidator {
+            id: committee.validator_id(i),
+            pool: pool_id,
+            pubkey: *committee.public_key(i),
+        })
+        .collect();
+    let initial_pools = vec![GenesisPool {
+        id: pool_id,
+        total_stake: Stake::from_attos(n as u128 * MIN_STAKE_FLOOR.attos()),
+    }];
+    let beacon_count = n.min(BEACON_SIGNER_COUNT);
+    let initial_beacon_committee: Vec<_> = (0..beacon_count)
+        .map(|i| committee.validator_id(i))
+        .collect();
+    // Beacon-state shard committees populate shard 0 with every
+    // validator. `_num_shards` is reserved for callers that want
+    // more shards declared in the topology snapshot for tx routing;
+    // the beacon-state placement stays consolidated for test
+    // determinism.
+    let mut initial_shard_committees: BTreeMap<ShardGroupId, Vec<_>> = BTreeMap::new();
+    initial_shard_committees.insert(
+        ShardGroupId::new(0),
+        (0..n).map(|i| committee.validator_id(i)).collect(),
+    );
+    let config = BeaconGenesisConfig {
+        initial_validators,
+        initial_pools,
+        initial_beacon_committee,
+        initial_shard_committees,
+        initial_randomness: Randomness::new([0x42; 32]),
+    };
+    let state = build_genesis_beacon_state(&config);
+    let config_hash = genesis_config_hash(&config, &network);
+    let block = Arc::new(Verified::<CertifiedBeaconBlock>::genesis(config_hash));
+    BeaconCoordinator::new(block, state, me, network, config_hash)
 }
 
 // ─── Action-stream assertions ─────────────────────────────────────────

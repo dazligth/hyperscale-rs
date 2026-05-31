@@ -26,6 +26,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use arc_swap::ArcSwap;
 use crossbeam::channel::{Receiver, Sender, unbounded};
 use hex::encode as hex_encode;
+use hyperscale_beacon::coordinator::BeaconCoordinator;
+use hyperscale_beacon::genesis::build_genesis_beacon_state;
 use hyperscale_core::{ProtocolEvent, TimerId};
 use hyperscale_dispatch::{Dispatch, DispatchPool};
 use hyperscale_dispatch_pooled::{PooledDispatch, ThreadPoolConfig};
@@ -43,12 +45,14 @@ use hyperscale_node::shard_loop::{ShardEvent, ShardLoop, TimerOp, timer_event};
 use hyperscale_node::{NodeConfig, NodeHost, NodeStateMachine, SharedTopologySnapshot, VnodeInit};
 use hyperscale_provisions::{ProvisionConfig, ProvisionStore};
 use hyperscale_shard::ShardConsensusConfig;
-use hyperscale_storage::ShardChainReader;
+use hyperscale_storage::{BeaconStorage, ShardChainReader};
 use hyperscale_storage_rocksdb::{RocksDbShardStorage, SharedStorage};
 use hyperscale_types::{
-    Block, BlockHeight, Bls12381G1PrivateKey, CertifiedBlock, InFlightCount, LocalTimestamp,
-    MAX_TX_IN_FLIGHT, NodeId, RoutableTransaction, ShardGroupId, TopologySnapshot,
-    TransactionStatus, TxHash, ValidatorId, Verified, shard_for_node,
+    BEACON_SIGNER_COUNT, BeaconGenesisConfig, Block, BlockHeight, Bls12381G1PrivateKey,
+    CertifiedBeaconBlock, CertifiedBlock, GenesisPool, GenesisValidator, InFlightCount,
+    LocalTimestamp, MAX_TX_IN_FLIGHT, MIN_STAKE_FLOOR, NodeId, Randomness, RoutableTransaction,
+    ShardGroupId, Stake, StakePoolId, TopologySnapshot, TransactionStatus, TxHash, ValidatorId,
+    Verified, genesis_config_hash, shard_for_node,
 };
 use libp2p::identity::Keypair;
 use quick_cache::sync::Cache as QuickCache;
@@ -169,6 +173,7 @@ pub struct ProductionRunnerBuilder {
     topology: Arc<TopologySnapshot>,
     shard_config: ShardConsensusConfig,
     storages: HashMap<ShardGroupId, Arc<RocksDbShardStorage>>,
+    beacon_storage: Arc<dyn BeaconStorage>,
     network_config: Libp2pConfig,
     dispatch: Option<Arc<PooledDispatch>>,
     channel_capacity: usize,
@@ -194,11 +199,13 @@ impl ProductionRunnerBuilder {
     ///
     /// Panics if `vnodes` is empty.
     #[must_use]
+    #[allow(clippy::too_many_arguments)] // storage + identity threading
     pub fn new(
         vnodes: Vec<VnodeConfig>,
         topology: Arc<TopologySnapshot>,
         shard_config: ShardConsensusConfig,
         storages: HashMap<ShardGroupId, Arc<RocksDbShardStorage>>,
+        beacon_storage: Arc<dyn BeaconStorage>,
         network_config: Libp2pConfig,
     ) -> Self {
         assert!(
@@ -210,6 +217,7 @@ impl ProductionRunnerBuilder {
             topology,
             shard_config,
             storages,
+            beacon_storage,
             network_config,
             dispatch: None,
             channel_capacity: 10_000,
@@ -387,6 +395,56 @@ impl ProductionRunnerBuilder {
 
         let recovered = recovery_storage.load_recovered_state();
 
+        // Beacon genesis: one config + derived (block, state) reused
+        // across every per-vnode `BeaconCoordinator`. All validators
+        // land in a single pool; the first `BEACON_SIGNER_COUNT` form
+        // the beacon committee. Shard committees mirror the topology
+        // snapshot's view so the beacon-state placement agrees with
+        // tx-routing. Storage-loading on restart is a follow-up.
+        let (beacon_genesis_block, beacon_genesis_state, beacon_config_hash, beacon_network) = {
+            let network = NetworkDefinition::simulator();
+            let pool_id = StakePoolId::new(0);
+            let validators_set = shared_topology.global_validator_set();
+            let initial_validators: Vec<GenesisValidator> = validators_set
+                .validators
+                .iter()
+                .map(|v| GenesisValidator {
+                    id: v.validator_id,
+                    pool: pool_id,
+                    pubkey: v.public_key,
+                })
+                .collect();
+            let n = u128::from(initial_validators.len() as u64);
+            let initial_pools = vec![GenesisPool {
+                id: pool_id,
+                total_stake: Stake::from_attos(n * MIN_STAKE_FLOOR.attos()),
+            }];
+            let beacon_committee_size = initial_validators.len().min(BEACON_SIGNER_COUNT);
+            let initial_beacon_committee: Vec<ValidatorId> = initial_validators
+                .iter()
+                .take(beacon_committee_size)
+                .map(|v| v.id)
+                .collect();
+            let initial_shard_committees: std::collections::BTreeMap<
+                ShardGroupId,
+                Vec<ValidatorId>,
+            > = (0..shared_topology.num_shards())
+                .map(ShardGroupId::new)
+                .map(|s| (s, shared_topology.committee_for_shard(s).to_vec()))
+                .collect();
+            let config = BeaconGenesisConfig {
+                initial_validators,
+                initial_pools,
+                initial_beacon_committee,
+                initial_shard_committees,
+                initial_randomness: Randomness::new([0x42; 32]),
+            };
+            let state = Arc::new(build_genesis_beacon_state(&config));
+            let config_hash = genesis_config_hash(&config, &network);
+            let block = Arc::new(Verified::<CertifiedBeaconBlock>::genesis(config_hash));
+            (block, state, config_hash, network)
+        };
+
         // One `ProvisionStore` + `TxStore` + `ExecCertStore` +
         // `FinalizedWaveStore` per hosted shard, shared across every same-
         // shard vnode and into the `NodeHost`'s `SharedCaches`. Determinism
@@ -439,12 +497,20 @@ impl ProductionRunnerBuilder {
                         .get(&shard)
                         .expect("hosted shard derived from vnodes"),
                 );
+                let beacon_coordinator = BeaconCoordinator::new(
+                    Arc::clone(&beacon_genesis_block),
+                    (*beacon_genesis_state).clone(),
+                    cfg.validator_id,
+                    beacon_network.clone(),
+                    beacon_config_hash,
+                );
                 let state = NodeStateMachine::new(
                     cfg.validator_id,
                     cfg.local_shard,
                     Arc::clone(&shared_topology),
                     &shard_config,
                     recovered.clone(),
+                    beacon_coordinator,
                     self.mempool_config.clone(),
                     self.provision_config,
                     provision_store,
@@ -498,6 +564,7 @@ impl ProductionRunnerBuilder {
         let host = NodeHost::new(
             vnode_inits,
             shared_storages,
+            self.beacon_storage,
             executor,
             libp2p_network,
             (*dispatch).clone(),
@@ -614,14 +681,23 @@ impl ProductionRunner {
     /// set via the builder's setters before calling
     /// [`ProductionRunnerBuilder::build`].
     #[must_use]
+    #[allow(clippy::too_many_arguments)] // storage handles threaded explicitly
     pub fn builder(
         vnodes: Vec<VnodeConfig>,
         topology: Arc<TopologySnapshot>,
         shard_config: ShardConsensusConfig,
         storages: HashMap<ShardGroupId, Arc<RocksDbShardStorage>>,
+        beacon_storage: Arc<dyn BeaconStorage>,
         network_config: Libp2pConfig,
     ) -> ProductionRunnerBuilder {
-        ProductionRunnerBuilder::new(vnodes, topology, shard_config, storages, network_config)
+        ProductionRunnerBuilder::new(
+            vnodes,
+            topology,
+            shard_config,
+            storages,
+            beacon_storage,
+            network_config,
+        )
     }
 
     /// Get a reference to the dispatch implementation.

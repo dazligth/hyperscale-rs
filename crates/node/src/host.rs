@@ -17,7 +17,7 @@ use crossbeam::channel::Sender;
 use hyperscale_dispatch::Dispatch;
 use hyperscale_engine::{ProcessExecutionCache, RadixExecutor, TransactionValidation};
 use hyperscale_network::Network;
-use hyperscale_storage::{PendingChain, ShardStorage};
+use hyperscale_storage::{BeaconStorage, PendingChain, ShardStorage};
 use hyperscale_types::{LocalTimestamp, ShardGroupId, TransactionStatus, TxHash};
 use quick_cache::sync::Cache as QuickCache;
 
@@ -101,6 +101,7 @@ where
     pub fn new(
         vnodes: Vec<VnodeInit>,
         mut storages: HashMap<ShardGroupId, S>,
+        beacon_storage: Arc<dyn BeaconStorage>,
         executor: RadixExecutor,
         network: N,
         dispatch: D,
@@ -214,6 +215,7 @@ where
             topology_snapshot,
             dispatch_handles,
             tx_validator,
+            beacon_storage,
         ));
 
         // Second pass: assemble ShardLoops with cloned Arc<ProcessIo>.

@@ -5,6 +5,7 @@ edition.workspace = true
 description = "Simulation runner"
 
 [dependencies]
+hyperscale-beacon.workspace = true
 hyperscale-core.workspace = true
 hyperscale-shard.workspace = true
 hyperscale-engine.workspace = true

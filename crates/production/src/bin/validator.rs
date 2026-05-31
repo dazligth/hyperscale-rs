@@ -67,8 +67,10 @@ use hyperscale_production::{
 };
 use hyperscale_provisions::ProvisionConfig;
 use hyperscale_shard::ShardConsensusConfig;
+use hyperscale_storage::BeaconStorage;
 use hyperscale_storage_rocksdb::{
-    CompressionType as RocksCompressionType, RocksDbConfig, RocksDbShardStorage,
+    CompressionType as RocksCompressionType, RocksDbBeaconStorage, RocksDbConfig,
+    RocksDbShardStorage,
 };
 use hyperscale_types::{
     Bls12381G1PrivateKey, Bls12381G1PublicKey, ShardGroupId, TopologySnapshot, ValidatorId,
@@ -1180,6 +1182,15 @@ async fn async_main(cli: Cli, config: ValidatorConfig) -> Result<()> {
         storages.insert(ShardGroupId::new(*shard), Arc::new(storage));
     }
 
+    // Process-level beacon storage, shared across every hosted vnode's
+    // `BeaconCoordinator`. One DB under `{data_dir}/beacon/db`.
+    let beacon_db_path = config.node.data_dir.join("beacon").join("db");
+    let beacon_storage: Arc<dyn BeaconStorage> = Arc::new(
+        RocksDbBeaconStorage::open_with_config(&beacon_db_path, &rocksdb_config)
+            .with_context(|| format!("Failed to open beacon DB at {}", beacon_db_path.display()))?,
+    );
+    info!(path = %beacon_db_path.display(), "Beacon storage opened");
+
     // Pass 1: load every hosted vnode's signing keypair so the topology builder
     // can substitute trusted local public keys for genesis-hex pubkeys.
     // Ordered Vec — single-validator mode picks the first entry, so source
@@ -1248,6 +1259,7 @@ async fn async_main(cli: Cli, config: ValidatorConfig) -> Result<()> {
         topology,
         shard_config,
         storages,
+        beacon_storage,
         network_config,
     )
     .dispatch(dispatch)

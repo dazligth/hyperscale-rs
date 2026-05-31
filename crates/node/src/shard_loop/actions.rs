@@ -128,10 +128,19 @@ where
             }
 
             // ─── Beacon-local effects ──────────────────────────────────────
-            Action::CommitBeaconBlock { block, .. } => {
-                warn!(
-                    epoch = block.epoch().inner(),
-                    "Action::CommitBeaconBlock ignored at runner",
+            Action::CommitBeaconBlock { block, state } => {
+                let epoch = block.epoch();
+                // Storage strips the `Verified` marker; the next
+                // load-from-storage path will need to re-wrap. Same
+                // shape as shard storage's `commit_block` API.
+                let block_for_storage = Arc::new((**block).clone());
+                self.process
+                    .beacon_storage
+                    .commit_beacon_block(&block_for_storage, &state);
+                push_protocol_event(
+                    self.process.shard_sender(self.shard),
+                    self.shard,
+                    ProtocolEvent::BeaconBlockPersisted { epoch },
                 );
             }
             Action::Continuation(pe) => self.handle_continuation(pe),

@@ -18,7 +18,8 @@ use hyperscale_network::{HandlerRegistry, ValidatorKeyMap};
 use hyperscale_network_libp2p::{Libp2pAdapter, Libp2pConfig};
 use hyperscale_production::{ProductionRunner, VnodeConfig};
 use hyperscale_shard::ShardConsensusConfig;
-use hyperscale_storage_rocksdb::RocksDbShardStorage;
+use hyperscale_storage::BeaconStorage;
+use hyperscale_storage_rocksdb::{RocksDbBeaconStorage, RocksDbShardStorage};
 use hyperscale_types::{
     Bls12381G1PrivateKey, NetworkDefinition, ShardGroupId, ValidatorId, generate_bls_keypair,
 };
@@ -472,6 +473,8 @@ async fn test_production_runner_with_network() {
         ..Default::default()
     };
 
+    let beacon_storage: Arc<dyn BeaconStorage> =
+        Arc::new(RocksDbBeaconStorage::open(temp_dir.path().join("beacon_db")).unwrap());
     let runner = ProductionRunner::builder(
         vec![VnodeConfig {
             validator_id: ValidatorId::new(0),
@@ -481,6 +484,7 @@ async fn test_production_runner_with_network() {
         fixtures.topology(),
         ShardConsensusConfig::default(),
         HashMap::from([(ShardGroupId::new(0), storage)]),
+        beacon_storage,
         network_config,
     )
     .build();
@@ -536,6 +540,8 @@ async fn test_graceful_shutdown() {
         ..Default::default()
     };
 
+    let beacon_storage: Arc<dyn BeaconStorage> =
+        Arc::new(RocksDbBeaconStorage::open(temp_dir.path().join("beacon_db")).unwrap());
     let mut runner = ProductionRunner::builder(
         vec![VnodeConfig {
             validator_id: ValidatorId::new(0),
@@ -545,6 +551,7 @@ async fn test_graceful_shutdown() {
         fixtures.topology(),
         ShardConsensusConfig::default(),
         HashMap::from([(ShardGroupId::new(0), storage)]),
+        beacon_storage,
         network_config,
     )
     .build()
@@ -616,11 +623,14 @@ async fn test_v2_same_shard_production_runner_binds_all_vnodes() {
             signing_key: fixtures.signing_key(1),
         },
     ];
+    let beacon_storage0: Arc<dyn BeaconStorage> =
+        Arc::new(RocksDbBeaconStorage::open(temp_dir0.path().join("beacon_db")).unwrap());
     let mut runner0 = ProductionRunner::builder(
         host0_vnodes,
         fixtures.topology(),
         ShardConsensusConfig::default(),
         HashMap::from([(ShardGroupId::new(0), storage0)]),
+        beacon_storage0,
         network_config0,
     )
     .build()
@@ -656,11 +666,14 @@ async fn test_v2_same_shard_production_runner_binds_all_vnodes() {
             signing_key: fixtures.signing_key(3),
         },
     ];
+    let beacon_storage1: Arc<dyn BeaconStorage> =
+        Arc::new(RocksDbBeaconStorage::open(temp_dir1.path().join("beacon_db")).unwrap());
     let mut runner1 = ProductionRunner::builder(
         host1_vnodes,
         fixtures.topology(),
         ShardConsensusConfig::default(),
         HashMap::from([(ShardGroupId::new(0), storage1)]),
+        beacon_storage1,
         network_config1,
     )
     .build()
@@ -768,6 +781,8 @@ async fn test_v2_different_shard_production_runner_binds_all_vnodes() {
             signing_key: fixtures.signing_key(2),
         },
     ];
+    let beacon_storage0: Arc<dyn BeaconStorage> =
+        Arc::new(RocksDbBeaconStorage::open(temp_dir0.path().join("beacon_db")).unwrap());
     let mut runner0 = ProductionRunner::builder(
         host0_vnodes,
         fixtures.topology(),
@@ -776,6 +791,7 @@ async fn test_v2_different_shard_production_runner_binds_all_vnodes() {
             (ShardGroupId::new(0), host0_s0),
             (ShardGroupId::new(1), host0_s1),
         ]),
+        beacon_storage0,
         network_config0,
     )
     .build()
@@ -811,6 +827,8 @@ async fn test_v2_different_shard_production_runner_binds_all_vnodes() {
             signing_key: fixtures.signing_key(3),
         },
     ];
+    let beacon_storage1: Arc<dyn BeaconStorage> =
+        Arc::new(RocksDbBeaconStorage::open(temp_dir1.path().join("beacon_db")).unwrap());
     let mut runner1 = ProductionRunner::builder(
         host1_vnodes,
         fixtures.topology(),
@@ -819,6 +837,7 @@ async fn test_v2_different_shard_production_runner_binds_all_vnodes() {
             (ShardGroupId::new(0), host1_s0),
             (ShardGroupId::new(1), host1_s1),
         ]),
+        beacon_storage1,
         network_config1,
     )
     .build()

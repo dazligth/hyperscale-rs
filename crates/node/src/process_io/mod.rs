@@ -16,7 +16,7 @@ use std::sync::Arc;
 use crossbeam::channel::Sender;
 use hyperscale_dispatch::Dispatch;
 use hyperscale_engine::TransactionValidation;
-use hyperscale_storage::ShardStorage;
+use hyperscale_storage::{BeaconStorage, ShardStorage};
 use hyperscale_types::{RoutableTransaction, ShardGroupId, shard_for_node};
 
 use crate::event::{ShardEvent, ShardScopedInput};
@@ -67,6 +67,12 @@ where
     /// `Arc` so it can be cloned into the `tx_validation` pool closure
     /// on each batch flush.
     pub(crate) tx_validator: Arc<TransactionValidation>,
+
+    /// Process-level beacon chain storage. One handle per host,
+    /// shared across every vnode's `Action::CommitBeaconBlock`
+    /// handler. The implementation serializes writes internally
+    /// (`RocksDbBeaconStorage::commit_lock`); reads remain lock-free.
+    pub(crate) beacon_storage: Arc<dyn BeaconStorage>,
 }
 
 impl<S, N, D> ProcessIo<S, N, D>
@@ -77,6 +83,7 @@ where
     /// Construct a `ProcessIo` from its shared resources. Callers wrap
     /// the result in `Arc` and share with every `ShardLoop` plus
     /// off-thread closure capture sites.
+    #[allow(clippy::too_many_arguments)] // every field threads through one constructor
     pub(crate) const fn new(
         network: Arc<N>,
         dispatch: D,
@@ -84,6 +91,7 @@ where
         topology_snapshot: SharedTopologySnapshot,
         dispatch_handles: Arc<DispatchHandles<S, N>>,
         tx_validator: Arc<TransactionValidation>,
+        beacon_storage: Arc<dyn BeaconStorage>,
     ) -> Self {
         Self {
             network,
@@ -92,6 +100,7 @@ where
             topology_snapshot,
             dispatch_handles,
             tx_validator,
+            beacon_storage,
         }
     }
 

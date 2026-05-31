@@ -9,6 +9,8 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use crossbeam::channel::{Receiver, Sender, unbounded};
+use hyperscale_beacon::coordinator::BeaconCoordinator;
+use hyperscale_beacon::genesis::build_genesis_beacon_state;
 use hyperscale_core::{ProtocolEvent, TimerId};
 use hyperscale_dispatch_sync::SyncDispatch;
 use hyperscale_engine::{GenesisConfig, RadixExecutor, TransactionValidation};
@@ -22,12 +24,14 @@ use hyperscale_node::shard_loop::{ShardEvent, StepOutput};
 use hyperscale_node::{NodeConfig, NodeHost, NodeStateMachine, TimerOp, VnodeInit, timer_event};
 use hyperscale_provisions::{ProvisionConfig, ProvisionStore};
 use hyperscale_shard::ShardConsensusConfig;
-use hyperscale_storage::{RecoveredState, ShardChainReader};
-use hyperscale_storage_memory::SimShardStorage;
+use hyperscale_storage::{BeaconStorage, RecoveredState, ShardChainReader};
+use hyperscale_storage_memory::{SimBeaconStorage, SimShardStorage};
 use hyperscale_types::{
-    BlockHeight, Bls12381G1PrivateKey, Bls12381G1PublicKey, CertifiedBlock, LocalTimestamp, NodeId,
-    ShardGroupId, TopologySnapshot, TransactionStatus, TxHash, ValidatorId, ValidatorInfo,
-    ValidatorSet, Verified, VotePower, bls_keypair_from_seed, shard_for_node,
+    BEACON_SIGNER_COUNT, BeaconGenesisConfig, BlockHeight, Bls12381G1PrivateKey,
+    Bls12381G1PublicKey, CertifiedBeaconBlock, CertifiedBlock, GenesisPool, GenesisValidator,
+    LocalTimestamp, MIN_STAKE_FLOOR, NodeId, Randomness, ShardGroupId, Stake, StakePoolId,
+    TopologySnapshot, TransactionStatus, TxHash, ValidatorId, ValidatorInfo, ValidatorSet,
+    Verified, VotePower, bls_keypair_from_seed, genesis_config_hash, shard_for_node,
 };
 use radix_common::math::Decimal;
 use radix_common::network::NetworkDefinition;
@@ -206,6 +210,46 @@ impl SimulationRunner {
             shard_committees.clone(),
         ));
 
+        // Beacon genesis: one config + derived (block, state) reused
+        // across every host's per-vnode `BeaconCoordinator`. All
+        // validators land in a single pool; the first
+        // `BEACON_SIGNER_COUNT` form the beacon committee.
+        let (beacon_genesis_block, beacon_genesis_state, beacon_config_hash, beacon_network) = {
+            let network = NetworkDefinition::simulator();
+            let pool_id = StakePoolId::new(0);
+            let n = u128::from(total_validators);
+            let initial_validators: Vec<GenesisValidator> = (0..total_validators)
+                .map(|i| GenesisValidator {
+                    id: ValidatorId::new(u64::from(i)),
+                    pool: pool_id,
+                    pubkey: public_keys[i as usize],
+                })
+                .collect();
+            let initial_pools = vec![GenesisPool {
+                id: pool_id,
+                total_stake: Stake::from_attos(n * MIN_STAKE_FLOOR.attos()),
+            }];
+            let beacon_committee_size = (total_validators as usize).min(BEACON_SIGNER_COUNT) as u64;
+            let initial_beacon_committee: Vec<ValidatorId> =
+                (0..beacon_committee_size).map(ValidatorId::new).collect();
+            let initial_shard_committees: BTreeMap<ShardGroupId, Vec<ValidatorId>> =
+                shard_committees
+                    .iter()
+                    .map(|(s, v)| (*s, v.clone()))
+                    .collect();
+            let config = BeaconGenesisConfig {
+                initial_validators,
+                initial_pools,
+                initial_beacon_committee,
+                initial_shard_committees,
+                initial_randomness: Randomness::new([0x42; 32]),
+            };
+            let state = Arc::new(build_genesis_beacon_state(&config));
+            let config_hash = genesis_config_hash(&config, &network);
+            let block = Arc::new(Verified::<CertifiedBeaconBlock>::genesis(config_hash));
+            (block, state, config_hash, network)
+        };
+
         // Build the host→validators layout based on the hosting mode.
         // Each host carries a list of (validator_idx, shard) tuples.
         let vnodes_per_host = network_config.vnodes_per_host;
@@ -254,12 +298,21 @@ impl SimulationRunner {
                         Bls12381G1PrivateKey::from_bytes(&key_bytes).expect("valid key bytes"),
                     );
 
+                    let beacon_coordinator = BeaconCoordinator::new(
+                        Arc::clone(&beacon_genesis_block),
+                        (*beacon_genesis_state).clone(),
+                        validator_id,
+                        beacon_network.clone(),
+                        beacon_config_hash,
+                    );
+
                     let state = NodeStateMachine::new(
                         validator_id,
                         *shard,
                         Arc::clone(&shared_topology),
                         &ShardConsensusConfig::default(),
                         RecoveredState::default(),
+                        beacon_coordinator,
                         MempoolConfig::default(),
                         ProvisionConfig::default(),
                         Arc::clone(provision_store),
@@ -289,9 +342,11 @@ impl SimulationRunner {
             // shards through `event_rx` deterministically.
             let shard_event_senders: HashMap<ShardGroupId, Sender<ShardEvent>> =
                 by_shard.keys().map(|s| (*s, event_tx.clone())).collect();
+            let beacon_storage: Arc<dyn BeaconStorage> = Arc::new(SimBeaconStorage::new());
             let host = NodeHost::new(
                 vnode_inits,
                 storages,
+                beacon_storage,
                 executor,
                 network.create_adapter(
                     NodeIndex::try_from(host_index).expect("host_index fits NodeIndex"),

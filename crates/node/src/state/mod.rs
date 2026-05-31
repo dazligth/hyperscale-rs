@@ -17,6 +17,7 @@
 //! [`proposal`] for proposer-side construction, [`sync`] for catch-up,
 //! and [`timers`] for timeout dispatch.
 
+mod beacon;
 mod execution;
 mod proposal;
 mod provisions;
@@ -30,6 +31,7 @@ mod test_support;
 
 use std::sync::Arc;
 
+use hyperscale_beacon::coordinator::BeaconCoordinator;
 use hyperscale_core::{Action, ProtocolEvent, StateMachine};
 use hyperscale_execution::{ExecCertStore, ExecutionCoordinator, FinalizedWaveStore};
 use hyperscale_mempool::{MempoolConfig, MempoolCoordinator, TxStore};
@@ -57,6 +59,13 @@ use tracing::instrument;
 pub struct NodeStateMachine {
     /// Network topology — passed by reference to subsystem methods.
     topology_snapshot: Arc<TopologySnapshot>,
+
+    /// Beacon-chain consensus state (PC + SPC + skip + adoption).
+    /// One coordinator per vnode; all vnodes on the same host share an
+    /// `Arc<dyn BeaconStorage>` on the runner side via [`ProcessIo`].
+    ///
+    /// [`ProcessIo`]: crate::process_io::ProcessIo
+    beacon_coordinator: BeaconCoordinator,
 
     /// Shard consensus state (includes implicit round advancement).
     shard_coordinator: ShardCoordinator,
@@ -113,6 +122,7 @@ impl NodeStateMachine {
         topology_snapshot: Arc<TopologySnapshot>,
         shard_config: &ShardConsensusConfig,
         recovered: RecoveredState,
+        beacon_coordinator: BeaconCoordinator,
         mempool_config: MempoolConfig,
         provision_config: ProvisionConfig,
         provision_store: Arc<ProvisionStore>,
@@ -121,6 +131,7 @@ impl NodeStateMachine {
         finalized_wave_store: Arc<FinalizedWaveStore>,
     ) -> Self {
         Self {
+            beacon_coordinator,
             shard_coordinator: ShardCoordinator::new(
                 me,
                 local_shard,
@@ -305,7 +316,7 @@ impl StateMachine for NodeStateMachine {
             | ProtocolEvent::CommittedStateRestored { .. }) => self.handle_sync(evt),
 
             // ── Beacon ───────────────────────────────────────────────────
-            ProtocolEvent::UnverifiedPcVote1Received { .. }
+            evt @ (ProtocolEvent::UnverifiedPcVote1Received { .. }
             | ProtocolEvent::UnverifiedPcVote2Received { .. }
             | ProtocolEvent::UnverifiedPcVote3Received { .. }
             | ProtocolEvent::VerifiedPcVote1Received { .. }
@@ -334,7 +345,7 @@ impl StateMachine for NodeStateMachine {
             | ProtocolEvent::BeaconCommitteeStartTimer
             | ProtocolEvent::BeaconSkipTimer
             | ProtocolEvent::BeaconSpcViewTimer
-            | ProtocolEvent::BeaconBlockPersisted { .. } => Vec::new(),
+            | ProtocolEvent::BeaconBlockPersisted { .. }) => self.handle_beacon(evt),
         };
 
         // Drain any state root verifications that became ready during this event.
