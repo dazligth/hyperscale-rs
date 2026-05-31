@@ -17,9 +17,10 @@ use std::sync::Arc;
 
 use hyperscale_core::{CommitSource, ProtocolEvent};
 use hyperscale_types::{
-    BeaconWitnessCommit, BlockHeight, Bls12381G1PublicKey, Bls12381G2Signature, CertifiedBlock,
-    CertifiedBlockHeader, ElidedCertifiedBlock, HeaderFetchCount, ProvisionHash,
-    RoutableTransaction, ShardGroupId, TxHash, ValidatorId, Verifiable, Verified, WaveId,
+    BeaconWitnessCommit, BlockHash, BlockHeight, Bls12381G1PublicKey, Bls12381G2Signature,
+    CertifiedBlock, CertifiedBlockHeader, ElidedCertifiedBlock, Epoch, HeaderFetchCount, LeafIndex,
+    ProvisionHash, RoutableTransaction, ShardGroupId, TxHash, ValidatorId, Verifiable, Verified,
+    WaveId,
 };
 
 use crate::shard_io::block_commit::QcOnlyDivergence;
@@ -286,6 +287,22 @@ pub enum ShardScopedInput {
         hashes: Vec<WaveId>,
     },
 
+    /// A shard-witness fetch failed (network error, empty response, or
+    /// peer reported the witness as pruned). Per-id so multiple
+    /// in-flight leaves can fail independently.
+    ShardWitnessesFetchFailed {
+        /// Per-leaf identities that failed to fetch.
+        ids: Vec<(ShardGroupId, BlockHeight, BlockHash, LeafIndex)>,
+    },
+
+    /// A beacon-proposal fetch failed (network error, or the peer
+    /// didn't have the proposal pooled). Per-id so multiple parallel
+    /// missing-proposal fetches can fail independently.
+    BeaconProposalFetchFailed {
+        /// `(epoch, validator)` pairs whose fetch failed.
+        ids: Vec<(Epoch, ValidatorId)>,
+    },
+
     /// JMT prep for a QC-only commit completed off-thread; the block's
     /// `PreparedCommit` and `PendingChain` entry have been inserted by
     /// the worker, so the shard can hand the commit straight into the
@@ -367,6 +384,8 @@ impl ShardScopedInput {
             | Self::ExecCertFetchFailed { .. }
             | Self::LocalProvisionsFetchFailed { .. }
             | Self::FinalizedWavesFetchFailed { .. }
+            | Self::ShardWitnessesFetchFailed { .. }
+            | Self::BeaconProposalFetchFailed { .. }
             | Self::QcOnlyCommitPrepared { .. }
             | Self::QcOnlyCommitDiverged { .. } => EventPriority::Internal,
         }

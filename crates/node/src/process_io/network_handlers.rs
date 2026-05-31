@@ -7,19 +7,31 @@ use hyperscale_dispatch::Dispatch;
 use hyperscale_metrics::record_fetch_response_sent;
 use hyperscale_network::Network;
 use hyperscale_storage::ShardStorage;
+use hyperscale_types::network::gossip::beacon::{
+    BeaconBlockGossip, SkipCertGossip, SkipRequestGossip,
+};
 use hyperscale_types::network::gossip::{CertifiedBlockHeaderGossip, TransactionGossip};
+use hyperscale_types::network::notification::beacon::{
+    BeaconProposalNotification, PcVote1Notification, PcVote2Notification, PcVote3Notification,
+    SpcEmptyViewMsgNotification, SpcNewCommitNotification, SpcNewViewNotification,
+};
 use hyperscale_types::network::notification::{
     BlockHeaderNotification, BlockVoteNotification, ExecutionCertificatesNotification,
     ExecutionVotesNotification, ProvisionsNotification, ReadySignalNotification,
 };
-use hyperscale_types::network::request::beacon::GetShardWitnessesRequest;
+use hyperscale_types::network::request::beacon::{
+    GetBeaconProposalRequest, GetShardWitnessesRequest,
+};
 use hyperscale_types::network::request::{
     GetExecutionCertsRequest, GetFinalizedWavesRequest, GetLocalProvisionsRequest,
 };
+use hyperscale_types::network::response::beacon::GetBeaconProposalResponse;
 use hyperscale_types::network::response::{
     GetLocalProvisionsResponse, GetProvisionResponse, LocalProvisionEntry,
 };
-use hyperscale_types::{ExecutionCertificate, ShardGroupId, Verifiable, ready_signal_message};
+use hyperscale_types::{
+    ExecutionCertificate, ShardGroupId, ValidatorId, Verifiable, ready_signal_message,
+};
 use tracing::warn;
 
 use crate::event::ShardScopedInput;
@@ -354,6 +366,21 @@ where
                 .register_request_handler::<GetShardWitnessesRequest>(shard, move |req| {
                     serve_shard_witnesses_request(&pending_chain, &req)
                 });
+
+            // ── beacon.proposal.request → empty-response responder ─────
+            //
+            // The per-vnode `BeaconProposalPool` isn't reachable from a
+            // tokio blocking-pool handler thread (it lives on the
+            // pinned shard thread). Returning empty here pushes the
+            // requester to the next peer in its rotation; bounded by
+            // `BEACON_SIGNER_COUNT`. A pump-through-the-shard-loop
+            // responder is the right fix and lands with the runner
+            // integration test.
+            self.process
+                .network
+                .register_request_handler::<GetBeaconProposalRequest>(shard, |_req| {
+                    GetBeaconProposalResponse::empty()
+                });
         } // end for shard in hosted_shards
     }
 
@@ -364,6 +391,7 @@ where
     /// the network framework computes the per-vnode fan-out from each
     /// type's [`GossipMessage::SCOPE`] and [`GossipMessage::source_shard`].
     /// Closures here just translate into `ShardScopedInput`.
+    #[allow(clippy::too_many_lines)] // single registration table; one closure per gossip type
     pub(crate) fn register_gossip_handlers(&self) {
         use hyperscale_network::GossipVerdict;
 
@@ -432,6 +460,73 @@ where
                             public_key,
                             sender_signature: gossip.sender_signature,
                         },
+                    );
+                    GossipVerdict::Accept
+                },
+            );
+
+        // ── beacon.block → ProtocolEvent::BeaconBlockReceived ───────
+        //
+        // Beacon-block gossip is `TopicScope::Global`; the framework
+        // fans it out to every hosted shard. Each shard's vnodes
+        // process the gossip independently through `handle_beacon` —
+        // `pending_blocks` dedups at the coordinator level.
+        let senders = self.process.shard_event_senders.clone();
+        self.process
+            .network
+            .register_gossip_handler::<BeaconBlockGossip>(
+                move |gossip: BeaconBlockGossip, target_shard: ShardGroupId| -> GossipVerdict {
+                    let Some(tx) = senders.get(&target_shard) else {
+                        warn!(
+                            target_shard = target_shard.inner(),
+                            "Dropping beacon block gossip: shard not hosted"
+                        );
+                        return GossipVerdict::Reject;
+                    };
+                    push_protocol_event(
+                        tx,
+                        target_shard,
+                        ProtocolEvent::BeaconBlockReceived {
+                            block: gossip.block,
+                        },
+                    );
+                    GossipVerdict::Accept
+                },
+            );
+
+        // ── beacon.skip_request → ProtocolEvent::UnverifiedSkipRequestReceived ──
+        let senders = self.process.shard_event_senders.clone();
+        self.process
+            .network
+            .register_gossip_handler::<SkipRequestGossip>(
+                move |gossip: SkipRequestGossip, target_shard: ShardGroupId| -> GossipVerdict {
+                    let Some(tx) = senders.get(&target_shard) else {
+                        return GossipVerdict::Reject;
+                    };
+                    push_protocol_event(
+                        tx,
+                        target_shard,
+                        ProtocolEvent::UnverifiedSkipRequestReceived {
+                            request: gossip.request,
+                        },
+                    );
+                    GossipVerdict::Accept
+                },
+            );
+
+        // ── beacon.skip_cert → ProtocolEvent::SkipCertReceived ─────
+        let senders = self.process.shard_event_senders.clone();
+        self.process
+            .network
+            .register_gossip_handler::<SkipCertGossip>(
+                move |gossip: SkipCertGossip, target_shard: ShardGroupId| -> GossipVerdict {
+                    let Some(tx) = senders.get(&target_shard) else {
+                        return GossipVerdict::Reject;
+                    };
+                    push_protocol_event(
+                        tx,
+                        target_shard,
+                        ProtocolEvent::SkipCertReceived { cert: gossip.cert },
                     );
                     GossipVerdict::Accept
                 },
@@ -719,6 +814,157 @@ where
                                 signal: signal.clone(),
                             },
                         );
+                    }
+                },
+            );
+
+        // ── beacon.proposal → Unverified/VerifiedBeaconProposalReceived ──
+        //
+        // Beacon-committee unicast. Fan to every hosted shard's
+        // vnodes; each vnode's coordinator decides admission. Wire
+        // decode lands the wrapper as `Unverified`; local-dispatched
+        // sends preserve the `Verified` marker.
+        let senders = self.process.shard_event_senders.clone();
+        self.process
+            .network
+            .register_notification_handler::<BeaconProposalNotification>(
+                move |gossip: BeaconProposalNotification| {
+                    let from = gossip.sender;
+                    let epoch = gossip.epoch;
+                    let event = match Arc::unwrap_or_clone(gossip.proposal).into_verified() {
+                        Ok(verified) => ProtocolEvent::VerifiedBeaconProposalReceived {
+                            from,
+                            epoch,
+                            proposal: Arc::new(verified),
+                        },
+                        Err(unverified) => ProtocolEvent::UnverifiedBeaconProposalReceived {
+                            from,
+                            epoch,
+                            proposal: Arc::new(unverified.into()),
+                        },
+                    };
+                    for (hosted_shard, tx) in &senders {
+                        push_protocol_event(tx, *hosted_shard, event.clone());
+                    }
+                },
+            );
+
+        // ── beacon.pc.vote1/2/3 → Unverified/VerifiedPcVote{N}Received ──
+        //
+        // PC votes carry the wrapping `view` because the inner vote
+        // doesn't encode its SPC view; the receiver routes by view.
+        macro_rules! register_pc_vote_handler {
+            ($note_ty:ty, $unv:ident, $ver:ident, $vote_ty:ty $(, $box:tt)?) => {{
+                let senders = self.process.shard_event_senders.clone();
+                self.process.network.register_notification_handler::<$note_ty>(
+                    move |gossip: $note_ty| {
+                        let view = gossip.view;
+                        let event = match Arc::unwrap_or_clone(gossip.vote).into_verified() {
+                            Ok(verified) => {
+                                let from = verified.as_ref().validator();
+                                ProtocolEvent::$ver {
+                                    from,
+                                    view,
+                                    vote: register_pc_vote_handler!(@wrap $($box)? verified),
+                                }
+                            }
+                            Err(unverified) => {
+                                let from = unverified.validator();
+                                ProtocolEvent::$unv {
+                                    from,
+                                    view,
+                                    vote: register_pc_vote_handler!(@wrap $($box)? unverified.into()),
+                                }
+                            }
+                        };
+                        for (hosted_shard, tx) in &senders {
+                            push_protocol_event(tx, *hosted_shard, event.clone());
+                        }
+                    },
+                );
+            }};
+            (@wrap box $e:expr) => { Box::new($e) };
+            (@wrap $e:expr) => { $e };
+        }
+        register_pc_vote_handler!(
+            PcVote1Notification,
+            UnverifiedPcVote1Received,
+            VerifiedPcVote1Received,
+            PcVote1
+        );
+        register_pc_vote_handler!(
+            PcVote2Notification,
+            UnverifiedPcVote2Received,
+            VerifiedPcVote2Received,
+            PcVote2,
+            box
+        );
+        register_pc_vote_handler!(
+            PcVote3Notification,
+            UnverifiedPcVote3Received,
+            VerifiedPcVote3Received,
+            PcVote3,
+            box
+        );
+
+        // ── beacon.spc.new_view → ProtocolEvent::SpcNewViewReceived ─
+        //
+        // SpcNewView / SpcNewCommit notifications don't carry an
+        // explicit sender id on the wire — the embedded cert /
+        // QC3 self-authenticates the message. The receiver-side
+        // pipeline-slot bookkeeping currently keys on `from`, so we
+        // pass `ValidatorId::ZERO` here as a sentinel; the slot
+        // dedup still works (every wire-arrived NewView shares the
+        // same sentinel) but per-sender dedup is lost. Adding an
+        // explicit `sender` field to the notification is a clean
+        // wire-format follow-up.
+        let senders = self.process.shard_event_senders.clone();
+        self.process
+            .network
+            .register_notification_handler::<SpcNewViewNotification>(
+                move |gossip: SpcNewViewNotification| {
+                    let event = ProtocolEvent::SpcNewViewReceived {
+                        from: ValidatorId::new(0),
+                        proposal: gossip.proposal,
+                    };
+                    for (hosted_shard, tx) in &senders {
+                        push_protocol_event(tx, *hosted_shard, event.clone());
+                    }
+                },
+            );
+
+        // ── beacon.spc.new_commit → ProtocolEvent::SpcNewCommitReceived ──
+        let senders = self.process.shard_event_senders.clone();
+        self.process
+            .network
+            .register_notification_handler::<SpcNewCommitNotification>(
+                move |gossip: SpcNewCommitNotification| {
+                    let event = ProtocolEvent::SpcNewCommitReceived {
+                        from: ValidatorId::new(0),
+                        msg: gossip.msg,
+                    };
+                    for (hosted_shard, tx) in &senders {
+                        push_protocol_event(tx, *hosted_shard, event.clone());
+                    }
+                },
+            );
+
+        // ── beacon.spc.empty_view → Unverified/VerifiedSpcEmptyViewReceived ──
+        let senders = self.process.shard_event_senders.clone();
+        self.process
+            .network
+            .register_notification_handler::<SpcEmptyViewMsgNotification>(
+                move |gossip: SpcEmptyViewMsgNotification| {
+                    let event = match Arc::unwrap_or_clone(gossip.msg).into_verified() {
+                        Ok(verified) => ProtocolEvent::VerifiedSpcEmptyViewReceived {
+                            msg: Box::new(verified),
+                        },
+                        Err(unverified) => ProtocolEvent::UnverifiedSpcEmptyViewReceived {
+                            msg: Arc::new(unverified.into()),
+                        },
+                    };
+                    for (hosted_shard, tx) in &senders {
+                        push_protocol_event(tx, *hosted_shard, event.clone());
                     }
                 },
             );

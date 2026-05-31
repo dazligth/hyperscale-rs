@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use hyperscale_beacon::coordinator::BeaconCoordinator;
 use hyperscale_beacon::genesis::build_genesis_beacon_state;
-use hyperscale_core::Action;
+use hyperscale_core::{Action, FetchRequest};
 use hyperscale_types::network::request::beacon::GetBeaconProposalRequest;
 use hyperscale_types::{
     BEACON_SIGNER_COUNT, BeaconCert, BeaconGenesisConfig, BeaconProposal, BeaconState,
@@ -219,6 +219,7 @@ impl CoordinatorSim {
                     Arc::clone(&genesis_block),
                     initial_state.clone(),
                     members[i].0,
+                    ShardGroupId::new(0),
                     network.clone(),
                     config_hash,
                 )
@@ -935,18 +936,27 @@ impl CoordinatorSim {
                 );
                 self.absorb(emitter_idx, post);
             }
-            Action::FetchBeaconProposal {
+            Action::Fetch(FetchRequest::BeaconProposal {
+                shard: _,
                 epoch,
                 validator,
-                peers,
-            } => {
-                // Walk the recipient peers, ask each in turn for the
-                // proposal via its `serve_beacon_proposal_request`
-                // method, and queue the first non-empty response back
-                // to the emitter. Empty if no peer has it.
+                preferred,
+                class: _,
+            }) => {
+                // Walk every other coordinator (with `preferred` first if
+                // set), ask each for the proposal via its
+                // `serve_beacon_proposal_request` method, and queue the
+                // first non-empty response back to the emitter. Empty if
+                // no peer has it.
                 let req = GetBeaconProposalRequest::new(epoch, validator);
-                let proposal = peers.iter().find_map(|peer| {
-                    let peer_idx = self.idx_of(*peer);
+                let mut peer_order: Vec<usize> = (0..self.coordinators.len())
+                    .filter(|&i| i != emitter_idx)
+                    .collect();
+                if let Some(p) = preferred {
+                    let preferred_idx = self.idx_of(p);
+                    peer_order.sort_by_key(|&i| i32::from(i != preferred_idx));
+                }
+                let proposal = peer_order.iter().find_map(|&peer_idx| {
                     self.coordinators[peer_idx]
                         .serve_beacon_proposal_request(&req)
                         .proposal
@@ -960,9 +970,15 @@ impl CoordinatorSim {
                     },
                 });
             }
-            Action::SetTimer { .. }
+            Action::Fetch(_)
+            | Action::AbandonFetch(_)
+            | Action::SetTimer { .. }
             | Action::CancelTimer { .. }
-            | Action::TopologyChanged { .. } => {}
+            | Action::TopologyChanged { .. } => {
+                // Other Fetch/Abandon variants don't surface from the
+                // beacon coordinator under this sim; timers + topology
+                // are runner concerns the sim doesn't model.
+            }
             other => panic!(
                 "CoordinatorSim received unmodelled action variant: {}",
                 other.type_name(),

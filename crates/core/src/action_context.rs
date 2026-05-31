@@ -52,8 +52,9 @@ pub struct ActionContext<'a, S: ShardStorage, N: Network> {
     /// Send a [`ProtocolEvent`] back to the state machine. The single
     /// sink for delegated-action outcomes — the dispatch wrapper at
     /// the I/O loop boundary stamps the emitting vnode's shard and
-    /// re-enters the next `step()`.
-    pub notify: &'a (dyn Fn(ProtocolEvent) + Send + Sync),
+    /// re-enters the next `step()`. Owned so handlers can clone it
+    /// into network-callback closures that outlive the action call.
+    pub notify: Arc<dyn Fn(ProtocolEvent) + Send + Sync>,
     /// Hand a freshly prepared block to the `io_loop` for insertion into
     /// `PendingChain` + `prepared_commits`. Only `BuildProposal` and
     /// `VerifyStateRoot` produce these.

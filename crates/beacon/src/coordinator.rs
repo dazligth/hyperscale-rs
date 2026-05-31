@@ -20,7 +20,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use hyperscale_core::{Action, TimerId};
+use hyperscale_core::{Action, FetchRequest, TimerId};
 use hyperscale_types::network::request::beacon::GetBeaconProposalRequest;
 use hyperscale_types::network::response::beacon::GetBeaconProposalResponse;
 use hyperscale_types::{
@@ -116,6 +116,12 @@ pub struct BeaconCoordinator {
 
     me: ValidatorId,
 
+    /// Shard the host vnode belongs to. Beacon is process-wide
+    /// consensus, but the coordinator stamps fetch requests with the
+    /// dispatching vnode's shard so the runner's network adapter has a
+    /// committee handle for peer selection.
+    local_shard: ShardGroupId,
+
     /// Mixed into every signing helper's domain bytes; carried so
     /// per-epoch SPC instances and outbound canonical-bytes
     /// encoders don't re-thread it from the runner.
@@ -159,10 +165,12 @@ impl BeaconCoordinator {
     /// In debug builds, panics if `latest_block.is_genesis()` and the
     /// cert's `config_hash` doesn't match `expected_config_hash`.
     #[must_use]
+    #[allow(clippy::too_many_arguments)] // identity + storage state both threaded explicitly
     pub fn new(
         latest_block: Arc<Verified<CertifiedBeaconBlock>>,
         latest_state: BeaconState,
         me: ValidatorId,
+        local_shard: ShardGroupId,
         network: NetworkDefinition,
         expected_config_hash: GenesisConfigHash,
     ) -> Self {
@@ -186,6 +194,7 @@ impl BeaconCoordinator {
             sync: BeaconBlockSyncManager::new(),
             proposal_pool: BeaconProposalPool::new(next_epoch),
             pending_assembly: None,
+            local_shard,
             topology_snapshot,
             me,
             network,
@@ -1398,9 +1407,13 @@ impl BeaconCoordinator {
     /// SPC has decided this epoch. When every committed-vector
     /// element resolves to a pooled proposal, assemble the block
     /// directly. Otherwise stash the cert + output and emit one
-    /// [`Action::FetchBeaconProposal`] per missing element; assembly
-    /// resumes from [`Self::on_beacon_proposal_fetched`] once every
-    /// awaited fetch lands.
+    /// `Action::Fetch(FetchRequest::BeaconProposal { … })` per
+    /// missing element; assembly resumes from
+    /// [`Self::on_beacon_proposal_fetched`] once every awaited fetch
+    /// lands. The fetch's routing `shard` is the dispatching vnode's
+    /// `local_shard` (peer selection rides the local committee);
+    /// `preferred` rotates through the beacon committee so multiple
+    /// missing proposals don't all target the same peer.
     fn on_spc_output_high(
         &mut self,
         epoch: Epoch,
@@ -1420,12 +1433,19 @@ impl BeaconCoordinator {
                     return Vec::new();
                 }
                 let peers = self.spc_recipients();
+                let local_shard = self.local_shard;
                 let actions: Vec<Action> = missing
                     .iter()
-                    .map(|&validator| Action::FetchBeaconProposal {
-                        epoch,
-                        validator,
-                        peers: peers.clone(),
+                    .enumerate()
+                    .map(|(i, &validator)| {
+                        let preferred = peers.get(i % peers.len().max(1)).copied();
+                        Action::Fetch(FetchRequest::BeaconProposal {
+                            shard: local_shard,
+                            epoch,
+                            validator,
+                            preferred,
+                            class: None,
+                        })
                     })
                     .collect();
                 self.pending_assembly = Some(PendingCommitAssembly {
@@ -1854,6 +1874,7 @@ mod tests {
             block,
             state,
             me,
+            ShardGroupId::new(0),
             NetworkDefinition::simulator(),
             config_hash,
         )
@@ -1924,6 +1945,7 @@ mod tests {
             Arc::clone(&block),
             state,
             ValidatorId::new(0),
+            ShardGroupId::new(0),
             NetworkDefinition::simulator(),
             config_hash,
         );
@@ -1957,6 +1979,7 @@ mod tests {
             Arc::new(mismatched_block),
             state,
             ValidatorId::new(0),
+            ShardGroupId::new(0),
             NetworkDefinition::simulator(),
             GenesisConfigHash::ZERO,
         );

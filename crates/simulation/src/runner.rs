@@ -302,6 +302,7 @@ impl SimulationRunner {
                         Arc::clone(&beacon_genesis_block),
                         (*beacon_genesis_state).clone(),
                         validator_id,
+                        *shard,
                         beacon_network.clone(),
                         beacon_config_hash,
                     );

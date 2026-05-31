@@ -9,7 +9,8 @@
 
 use super::FetchConfig;
 use super::binding::{
-    ExecCertFetch, FinalizedWaveFetch, LocalProvisionFetch, ProvisionFetch, TransactionFetch,
+    BeaconProposalFetch, ExecCertFetch, FinalizedWaveFetch, LocalProvisionFetch, ProvisionFetch,
+    ShardWitnessFetch, TransactionFetch,
 };
 use crate::config::NodeConfig;
 
@@ -29,6 +30,12 @@ pub struct FetchHost {
 
     /// Cross-shard execution-cert fetch (rotates through source committee).
     pub exec_cert: ExecCertFetch,
+
+    /// Cross-shard beacon-witness fetch (rotates through source committee).
+    pub shard_witness: ShardWitnessFetch,
+
+    /// Missing-proposal fetch (rotates through beacon committee).
+    pub beacon_proposal: BeaconProposalFetch,
 }
 
 impl FetchHost {
@@ -55,6 +62,14 @@ impl FetchHost {
             ),
             provision: ProvisionFetch::new("provision", config.provision_fetch.clone()),
             exec_cert: ExecCertFetch::new("exec_cert", config.exec_cert_fetch.clone()),
+            shard_witness: ShardWitnessFetch::new(
+                "shard_witness",
+                config.shard_witness_fetch.clone(),
+            ),
+            beacon_proposal: BeaconProposalFetch::new(
+                "beacon_proposal",
+                config.beacon_proposal_fetch.clone(),
+            ),
         }
     }
 
@@ -68,6 +83,8 @@ impl FetchHost {
             || self.finalized_wave.has_pending()
             || self.provision.has_pending()
             || self.exec_cert.has_pending()
+            || self.shard_witness.has_pending()
+            || self.beacon_proposal.has_pending()
     }
 
     /// Snapshot per-binding fetch counts. The I/O loop flattens this into
@@ -90,6 +107,12 @@ impl FetchHost {
             exec_cert_in_flight: self.exec_cert.in_flight_count(),
             exec_cert_pending: self.exec_cert.pending_count(),
             exec_cert_oldest_in_flight_age_ms: self.exec_cert.oldest_in_flight_age_ms(),
+            shard_witness_in_flight: self.shard_witness.in_flight_count(),
+            shard_witness_pending: self.shard_witness.pending_count(),
+            shard_witness_oldest_in_flight_age_ms: self.shard_witness.oldest_in_flight_age_ms(),
+            beacon_proposal_in_flight: self.beacon_proposal.in_flight_count(),
+            beacon_proposal_pending: self.beacon_proposal.pending_count(),
+            beacon_proposal_oldest_in_flight_age_ms: self.beacon_proposal.oldest_in_flight_age_ms(),
         }
     }
 }
@@ -121,4 +144,10 @@ pub struct FetchMetrics {
     pub exec_cert_in_flight: usize,
     pub exec_cert_pending: usize,
     pub exec_cert_oldest_in_flight_age_ms: u64,
+    pub shard_witness_in_flight: usize,
+    pub shard_witness_pending: usize,
+    pub shard_witness_oldest_in_flight_age_ms: u64,
+    pub beacon_proposal_in_flight: usize,
+    pub beacon_proposal_pending: usize,
+    pub beacon_proposal_oldest_in_flight_age_ms: u64,
 }

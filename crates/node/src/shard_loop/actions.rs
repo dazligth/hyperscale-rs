@@ -26,8 +26,8 @@ use crate::shard_io::block_commit::{
 };
 use crate::shard_io::fetch::FetchInput;
 use crate::shard_io::fetch::binding::{
-    ExecCertBinding, FinalizedWaveBinding, LocalProvisionBinding, ProvisionBinding,
-    TransactionBinding,
+    BeaconProposalBinding, ExecCertBinding, FinalizedWaveBinding, LocalProvisionBinding,
+    ProvisionBinding, ShardWitnessBinding, TransactionBinding,
 };
 use crate::shard_io::sync::block::BlockSyncInput;
 
@@ -89,8 +89,6 @@ where
             | Action::BroadcastBeaconBlock { .. }
             | Action::BroadcastSkipRequest { .. }
             | Action::BroadcastSkipCert { .. }
-            | Action::FetchShardWitnesses { .. }
-            | Action::FetchBeaconProposal { .. }
             | Action::VerifyBeaconBlock { .. }
             | Action::VerifySkipRequest { .. }
             | Action::VerifyPcVote1 { .. }
@@ -486,6 +484,7 @@ where
     /// the end of `NodeHost::step`.
     ///
     /// [`FetchHost`]: crate::shard_io::fetch::FetchHost
+    #[allow(clippy::too_many_lines)] // single dispatch over FetchRequest variants
     fn process_fetch_request(&mut self, req: FetchRequest) {
         match req {
             FetchRequest::Transactions {
@@ -550,6 +549,39 @@ where
                 self.drive_fetch::<ExecCertBinding>(FetchInput::Request {
                     ids: vec![wave_id],
                     shard: source_shard,
+                    preferred,
+                    class,
+                });
+            }
+            FetchRequest::ShardWitnesses {
+                source_shard,
+                block_height,
+                committed_block_hash,
+                leaf_indices,
+                preferred,
+                class,
+            } => {
+                let ids: Vec<_> = leaf_indices
+                    .into_iter()
+                    .map(|leaf| (source_shard, block_height, committed_block_hash, leaf))
+                    .collect();
+                self.drive_fetch::<ShardWitnessBinding>(FetchInput::Request {
+                    ids,
+                    shard: source_shard,
+                    preferred,
+                    class,
+                });
+            }
+            FetchRequest::BeaconProposal {
+                shard,
+                epoch,
+                validator,
+                preferred,
+                class,
+            } => {
+                self.drive_fetch::<BeaconProposalBinding>(FetchInput::Request {
+                    ids: vec![(epoch, validator)],
+                    shard,
                     preferred,
                     class,
                 });
@@ -624,10 +656,12 @@ where
                 .expect("hosted shard derived from vnode");
             // Action handlers emit `ProtocolEvent`s; stamp each with the
             // dispatching vnode's shard so the receiver routes back to
-            // the right `ShardLoop`.
-            let notify = move |event: ProtocolEvent| {
+            // the right `ShardLoop`. `Arc`-shaped so handlers can clone
+            // it into network-callback closures that outlive the action
+            // call (used by `FetchShardWitnesses`, `FetchBeaconProposal`).
+            let notify: Arc<dyn Fn(ProtocolEvent) + Send + Sync> = Arc::new(move |event| {
                 push_protocol_event(&event_tx, shard, event);
-            };
+            });
             let commit_prepared = make_commit_prepared(
                 Arc::clone(&shard_handles.pending_chain),
                 Arc::clone(&shard_handles.prepared_commits),
@@ -641,7 +675,7 @@ where
                 execution_cache: &handles.execution_cache,
                 network: &handles.network,
                 signing_key: &signing_key,
-                notify: &notify,
+                notify,
                 commit_prepared: &commit_prepared,
                 par,
             };

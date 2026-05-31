@@ -48,8 +48,8 @@ use crate::shard_io::ShardIo;
 use crate::shard_io::block_commit::PreparedCommitMap;
 use crate::shard_io::fetch::FetchInput;
 use crate::shard_io::fetch::binding::{
-    ExecCertBinding, FinalizedWaveBinding, LocalProvisionBinding, ProvisionBinding,
-    TransactionBinding,
+    BeaconProposalBinding, ExecCertBinding, FinalizedWaveBinding, LocalProvisionBinding,
+    ProvisionBinding, ShardWitnessBinding, TransactionBinding,
 };
 use crate::vnode::Vnode;
 
@@ -374,6 +374,12 @@ where
             }
             ShardScopedInput::FinalizedWavesFetchFailed { ids } => {
                 self.drive_fetch::<FinalizedWaveBinding>(FetchInput::Failed { ids });
+            }
+            ShardScopedInput::ShardWitnessesFetchFailed { ids } => {
+                self.drive_fetch::<ShardWitnessBinding>(FetchInput::Failed { ids });
+            }
+            ShardScopedInput::BeaconProposalFetchFailed { ids } => {
+                self.drive_fetch::<BeaconProposalBinding>(FetchInput::Failed { ids });
             }
 
             // ── Certified header (gossip → BLS verify → state machine) ──

@@ -18,7 +18,8 @@
 //! the fetch key (no id-set to enumerate).
 
 use hyperscale_types::{
-    BlockHeight, MessageClass, ProvisionHash, ShardGroupId, TxHash, ValidatorId, WaveId,
+    BlockHash, BlockHeight, Epoch, LeafIndex, MessageClass, ProvisionHash, ShardGroupId, TxHash,
+    ValidatorId, WaveId,
 };
 
 /// Fetch family — one variant per payload type.
@@ -91,6 +92,44 @@ pub enum FetchRequest {
         /// Wave whose execution certificate is missing.
         wave_id: WaveId,
         /// Always `None` for this variant; see variant-level doc.
+        preferred: Option<ValidatorId>,
+        /// Optional class override; see enum-level doc.
+        class: Option<MessageClass>,
+    },
+    /// Cross-shard beacon-witness fetch keyed by the source shard's
+    /// `(block_height, committed_block_hash, leaf_index)`. Routing
+    /// shard is `source_shard` (the shard whose committee anchors the
+    /// witness accumulator).
+    ShardWitnesses {
+        /// Source shard whose witnesses we want.
+        source_shard: ShardGroupId,
+        /// Height of the anchor block in the source-shard chain.
+        block_height: BlockHeight,
+        /// Hash of the anchor block; binds responses to the right
+        /// `beacon_witness_root`.
+        committed_block_hash: BlockHash,
+        /// Leaf indices to fetch in the anchor block's accumulator.
+        leaf_indices: Vec<LeafIndex>,
+        /// Canonical-source hint, when one exists.
+        preferred: Option<ValidatorId>,
+        /// Optional class override; see enum-level doc.
+        class: Option<MessageClass>,
+    },
+    /// Missing-proposal fetch for a beacon committee member at an
+    /// in-flight epoch. The responding committee is the beacon
+    /// committee at `epoch`; the runner routes via the requesting
+    /// vnode's local shard (the network layer's peer selection
+    /// resolves through the topology snapshot).
+    BeaconProposal {
+        /// Local shard the requesting vnode belongs to; threaded so
+        /// the network layer has a valid committee handle for peer
+        /// selection. `preferred` pins the actual destination.
+        shard: ShardGroupId,
+        /// Epoch the proposal targets.
+        epoch: Epoch,
+        /// Validator whose proposal we're fetching.
+        validator: ValidatorId,
+        /// Beacon-committee peer to try first.
         preferred: Option<ValidatorId>,
         /// Optional class override; see enum-level doc.
         class: Option<MessageClass>,

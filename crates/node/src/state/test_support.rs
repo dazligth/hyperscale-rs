@@ -149,7 +149,7 @@ fn test_beacon_coordinator(
     let state = build_genesis_beacon_state(&config);
     let config_hash = genesis_config_hash(&config, &network);
     let block = Arc::new(Verified::<CertifiedBeaconBlock>::genesis(config_hash));
-    BeaconCoordinator::new(block, state, me, network, config_hash)
+    BeaconCoordinator::new(block, state, me, ShardGroupId::new(0), network, config_hash)
 }
 
 // ─── Action-stream assertions ─────────────────────────────────────────

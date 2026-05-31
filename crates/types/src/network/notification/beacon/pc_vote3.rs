@@ -4,17 +4,20 @@ use std::sync::Arc;
 
 use sbor::prelude::BasicSbor;
 
-use crate::{MessageClass, NetworkMessage, PcVote3, Verifiable};
+use crate::{MessageClass, NetworkMessage, PcVote3, SpcView, Verifiable};
 
 /// PC round-3 vote sent via unicast to peers in the slot's committee.
 ///
 /// The inner [`PcVote3`] is self-authenticating — it carries the signer
 /// id, an individual sig over the certified mcp `x_p`, and the round-2
-/// QC anchoring `x_p`. Wire decode lands the wrapper as
-/// `Verifiable::Unverified`; local-dispatched sends from a colocated
-/// voter preserve `Verifiable::Verified`.
+/// QC anchoring `x_p`. The wrapping `view` rides alongside because PC
+/// votes don't carry their SPC view internally. Wire decode lands the
+/// wrapper as `Verifiable::Unverified`; local-dispatched sends from a
+/// colocated voter preserve `Verifiable::Verified`.
 #[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
 pub struct PcVote3Notification {
+    /// SPC view whose inner PC produced this vote.
+    pub view: SpcView,
     /// The vote.
     pub vote: Arc<Verifiable<PcVote3>>,
 }
@@ -23,8 +26,11 @@ impl PcVote3Notification {
     /// Wrap a [`PcVote3`] for notification. Accepts a raw vote or a
     /// `Verified<PcVote3>`.
     #[must_use]
-    pub fn new(vote: impl Into<Arc<Verifiable<PcVote3>>>) -> Self {
-        Self { vote: vote.into() }
+    pub fn new(view: SpcView, vote: impl Into<Arc<Verifiable<PcVote3>>>) -> Self {
+        Self {
+            view,
+            vote: vote.into(),
+        }
     }
 
     /// Get the inner vote (raw view, regardless of verification state).
@@ -56,7 +62,9 @@ mod tests {
     use sbor::prelude::*;
 
     use super::*;
-    use crate::{Bls12381G2Signature, PcQc2, PcVector, PcXpProof, SignerBitfield, ValidatorId};
+    use crate::{
+        Bls12381G2Signature, PcQc2, PcVector, PcXpProof, SignerBitfield, SpcView, ValidatorId,
+    };
 
     fn sample_qc2() -> PcQc2 {
         let mut signers = SignerBitfield::new(4);
@@ -80,7 +88,8 @@ mod tests {
 
     #[test]
     fn sbor_round_trip() {
-        let n = PcVote3Notification::new(Arc::new(Verifiable::from(sample_vote())));
+        let n =
+            PcVote3Notification::new(SpcView::new(2), Arc::new(Verifiable::from(sample_vote())));
         let bytes = basic_encode(&n).unwrap();
         let decoded: PcVote3Notification = basic_decode(&bytes).unwrap();
         assert_eq!(n, decoded);

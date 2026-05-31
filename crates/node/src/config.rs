@@ -18,6 +18,10 @@ pub struct NodeConfig {
     pub provision_fetch: FetchConfig,
     /// Execution-certificate fetch configuration.
     pub exec_cert_fetch: FetchConfig,
+    /// Cross-shard beacon-witness fetch configuration.
+    pub shard_witness_fetch: FetchConfig,
+    /// Missing-proposal fetch configuration.
+    pub beacon_proposal_fetch: FetchConfig,
     /// Batch-window configuration.
     pub batch: BatchConfig,
 }

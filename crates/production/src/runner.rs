@@ -501,6 +501,7 @@ impl ProductionRunnerBuilder {
                     Arc::clone(&beacon_genesis_block),
                     (*beacon_genesis_state).clone(),
                     cfg.validator_id,
+                    cfg.local_shard,
                     beacon_network.clone(),
                     beacon_config_hash,
                 );

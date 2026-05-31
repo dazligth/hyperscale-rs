@@ -47,7 +47,7 @@ where
                 Verified::<PcVote1>::sign_local(ctx.signing_key, me, network, &pc_ctx, v_in);
             ctx.network.notify(
                 &recipients,
-                &PcVote1Notification::new(Arc::new(Verifiable::from(verified.clone()))),
+                &PcVote1Notification::new(view, Arc::new(Verifiable::from(verified.clone()))),
             );
             ctx.notify_protocol(ProtocolEvent::VerifiedPcVote1Received {
                 from: me,
@@ -66,7 +66,7 @@ where
                 Verified::<PcVote2>::sign_local(ctx.signing_key, me, network, &pc_ctx, *qc1);
             ctx.network.notify(
                 &recipients,
-                &PcVote2Notification::new(Arc::new(Verifiable::from(verified.clone()))),
+                &PcVote2Notification::new(view, Arc::new(Verifiable::from(verified.clone()))),
             );
             ctx.notify_protocol(ProtocolEvent::VerifiedPcVote2Received {
                 from: me,
@@ -85,7 +85,7 @@ where
                 Verified::<PcVote3>::sign_local(ctx.signing_key, me, network, &pc_ctx, *qc2);
             ctx.network.notify(
                 &recipients,
-                &PcVote3Notification::new(Arc::new(Verifiable::from(verified.clone()))),
+                &PcVote3Notification::new(view, Arc::new(Verifiable::from(verified.clone()))),
             );
             ctx.notify_protocol(ProtocolEvent::VerifiedPcVote3Received {
                 from: me,
@@ -176,18 +176,6 @@ where
                 .broadcast_global(&SkipCertGossip::new(Arc::new(Verifiable::from(
                     (*cert).clone(),
                 ))));
-        }
-        Action::FetchShardWitnesses { .. } => {
-            // Awaits a beacon event sender on the runner so the
-            // response callback can push ShardWitnessesReceived back
-            // into the state machine.
-            unimplemented!("FetchShardWitnesses handler awaits runner-side event sender");
-        }
-        Action::FetchBeaconProposal { .. } => {
-            // Same dependency as FetchShardWitnesses — the callback
-            // needs a runner-side beacon event sender to push
-            // BeaconProposalFetched back.
-            unimplemented!("FetchBeaconProposal handler awaits runner-side event sender");
         }
         Action::VerifyBeaconBlock {
             block,

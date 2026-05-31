@@ -9,14 +9,13 @@ use hyperscale_types::{
     BeaconState, BeaconWitnessCommit, BeaconWitnessLeafCount, BeaconWitnessRoot, BlockHash,
     BlockHeader, BlockHeight, BlockManifest, BlockVote, Bls12381G1PublicKey, CertificateRoot,
     CertifiedBeaconBlock, CertifiedBlock, CertifiedBlockHeader, Epoch, ExecutionCertificate,
-    ExecutionVote, FinalizedWave, GlobalReceiptRoot, Hash, InFlightCount, LeafIndex,
-    LocalReceiptRoot, NodeId, PcQc1, PcQc2, PcVector, PcVote1, PcVote2, PcVote3, ProposerTimestamp,
-    ProvisionHash, ProvisionTxRootsMap, Provisions, ProvisionsRoot, QuorumCertificate, ReadySignal,
-    Round, RoutableTransaction, ShardGroupId, SharedCertificates, SharedTransactions,
-    SkipEpochCert, SkipRequest, SpcEmptyViewMsg, SpcHighTriple, SpcNewCommitMsg, SpcProposalObject,
-    SpcView, StateRoot, SubstateEntry, TopologySnapshot, TransactionRoot, TransactionStatus,
-    TxHash, TxOutcome, ValidatorId, Verifiable, Verified, VotePower, WaveId, WeightedTimestamp,
-    Witness,
+    ExecutionVote, FinalizedWave, GlobalReceiptRoot, Hash, InFlightCount, LocalReceiptRoot, NodeId,
+    PcQc1, PcQc2, PcVector, PcVote1, PcVote2, PcVote3, ProposerTimestamp, ProvisionHash,
+    ProvisionTxRootsMap, Provisions, ProvisionsRoot, QuorumCertificate, ReadySignal, Round,
+    RoutableTransaction, ShardGroupId, SharedCertificates, SharedTransactions, SkipEpochCert,
+    SkipRequest, SpcEmptyViewMsg, SpcHighTriple, SpcNewCommitMsg, SpcProposalObject, SpcView,
+    StateRoot, SubstateEntry, TopologySnapshot, TransactionRoot, TransactionStatus, TxHash,
+    TxOutcome, ValidatorId, Verifiable, Verified, VotePower, WaveId, WeightedTimestamp, Witness,
 };
 
 use crate::{CommitSource, FetchAbandon, FetchRequest, ProtocolEvent, TimerId};
@@ -931,34 +930,6 @@ pub enum Action {
         cert: Arc<Verified<SkipEpochCert>>,
     },
 
-    /// Fetch a batch of shard witnesses by leaf index from a remote
-    /// shard's committee.
-    FetchShardWitnesses {
-        /// Source shard whose witnesses we want.
-        shard_id: ShardGroupId,
-        /// Hash of the source-shard block whose `beacon_witness_root`
-        /// anchors the requested leaves.
-        committed_block_hash: BlockHash,
-        /// Leaf indices to fetch.
-        leaf_indices: Vec<LeafIndex>,
-        /// Source-shard committee members; any can serve.
-        peers: Vec<ValidatorId>,
-    },
-
-    /// Fetch one committee member's `BeaconProposal` for an in-flight
-    /// epoch from a peer who has it pooled. Emitted when SPC's
-    /// `OutputHigh` references a `(validator, epoch)` the local
-    /// `BeaconProposalPool` never observed. The result returns via
-    /// [`ProtocolEvent::BeaconProposalFetched`].
-    FetchBeaconProposal {
-        /// Epoch the proposal targets.
-        epoch: Epoch,
-        /// Validator whose proposal is being fetched.
-        validator: ValidatorId,
-        /// Beacon-committee members (excluding self) who may serve.
-        peers: Vec<ValidatorId>,
-    },
-
     /// Verify the cert authenticating a beacon block (SPC cert on a
     /// Normal block, pool-quorum cert on a Skip block — the handler
     /// reads `block.cert()` to branch) **and** every
@@ -1135,8 +1106,6 @@ impl Action {
             | Self::BroadcastBeaconBlock { .. }
             | Self::BroadcastSkipRequest { .. }
             | Self::BroadcastSkipCert { .. }
-            | Self::FetchShardWitnesses { .. }
-            | Self::FetchBeaconProposal { .. }
             | Self::VerifyBeaconBlock { .. }
             | Self::VerifySkipRequest { .. }
             | Self::VerifyPcVote1 { .. }
@@ -1204,8 +1173,6 @@ impl Action {
             | Self::BroadcastBeaconBlock { .. }
             | Self::BroadcastSkipRequest { .. }
             | Self::BroadcastSkipCert { .. }
-            | Self::FetchShardWitnesses { .. }
-            | Self::FetchBeaconProposal { .. }
             | Self::VerifyBeaconBlock { .. }
             | Self::VerifySkipRequest { .. }
             | Self::VerifyPcVote1 { .. }

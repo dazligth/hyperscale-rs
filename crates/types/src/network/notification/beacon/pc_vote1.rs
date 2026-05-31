@@ -4,16 +4,21 @@ use std::sync::Arc;
 
 use sbor::prelude::BasicSbor;
 
-use crate::{MessageClass, NetworkMessage, PcVote1, Verifiable};
+use crate::{MessageClass, NetworkMessage, PcVote1, SpcView, Verifiable};
 
 /// PC round-1 vote sent via unicast to peers in the slot's committee.
 ///
 /// The inner [`PcVote1`] is self-authenticating — it carries the signer
-/// id and one BLS signature per prefix of `v_in`. Wire decode lands the
-/// wrapper as `Verifiable::Unverified`; local-dispatched sends from a
-/// colocated voter preserve `Verifiable::Verified`.
+/// id and one BLS signature per prefix of `v_in`. The wrapping `view`
+/// rides alongside because PC votes don't carry their SPC view
+/// internally and the receiver needs it to route the vote to the
+/// right SPC sub-instance. Wire decode lands the wrapper as
+/// `Verifiable::Unverified`; local-dispatched sends from a colocated
+/// voter preserve `Verifiable::Verified`.
 #[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
 pub struct PcVote1Notification {
+    /// SPC view whose inner PC produced this vote.
+    pub view: SpcView,
     /// The vote.
     pub vote: Arc<Verifiable<PcVote1>>,
 }
@@ -22,8 +27,11 @@ impl PcVote1Notification {
     /// Wrap a [`PcVote1`] for notification. Accepts a raw vote or a
     /// `Verified<PcVote1>` — the wrapper preserves the marker.
     #[must_use]
-    pub fn new(vote: impl Into<Arc<Verifiable<PcVote1>>>) -> Self {
-        Self { vote: vote.into() }
+    pub fn new(view: SpcView, vote: impl Into<Arc<Verifiable<PcVote1>>>) -> Self {
+        Self {
+            view,
+            vote: vote.into(),
+        }
     }
 
     /// Get the inner vote (raw view, regardless of verification state).
@@ -67,7 +75,8 @@ mod tests {
 
     #[test]
     fn sbor_round_trip() {
-        let n = PcVote1Notification::new(Arc::new(Verifiable::from(sample_vote())));
+        let n =
+            PcVote1Notification::new(SpcView::new(2), Arc::new(Verifiable::from(sample_vote())));
         let bytes = basic_encode(&n).unwrap();
         let decoded: PcVote1Notification = basic_decode(&bytes).unwrap();
         assert_eq!(n, decoded);
