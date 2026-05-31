@@ -27,8 +27,8 @@ use thiserror::Error;
 
 use crate::{
     BeaconBlock, BeaconBlockHash, BeaconCert, Bls12381G1PublicKey, Epoch, GenesisConfigHash,
-    NetworkDefinition, ValidatorId, Verified, Verify, Witness, spc_context, verify_block_cert,
-    verify_skip_cert, verify_vote_equivocation,
+    NetworkDefinition, PcValueElement, ValidatorId, Verified, Verify, Witness, spc_context,
+    verify_block_cert, verify_skip_cert, verify_vote_equivocation,
 };
 
 /// A beacon block paired with the cert that authenticates it.
@@ -247,6 +247,47 @@ pub struct CertifiedBeaconBlockVerifyContext<'a> {
     pub equivocation_signers: &'a [(ValidatorId, Bls12381G1PublicKey)],
 }
 
+/// Bind a block's committed proposals to the value its cert
+/// authenticates.
+///
+/// A `Normal` cert's [`committed_value`](crate::SpcCert::committed_value)
+/// is the committee-agreed `PcVector`: one
+/// [`pc_element_hash`](crate::BeaconProposal::pc_element_hash) per
+/// committee position, `ZERO` where no proposal was committed. A
+/// well-formed block carries exactly those proposals — each at its
+/// proposer's committee position. This recomputes the vector from the
+/// block's proposals and requires byte equality, so a relay can't pair
+/// a genuine cert with substituted proposal bytes. `Skip`/`Genesis`
+/// carry no proposals (enforced by the pairing invariant) and bind
+/// trivially.
+///
+/// `committee` is the cert's signer pool in positional order (committee
+/// for `Normal`) — the same slice the cert itself verifies against.
+#[must_use]
+fn verify_committed_proposal_binding(
+    block: &CertifiedBeaconBlock,
+    committee: &[(ValidatorId, Bls12381G1PublicKey)],
+) -> bool {
+    let BeaconCert::Normal(cert) = block.cert() else {
+        return true;
+    };
+    let certified: Vec<PcValueElement> = cert.committed_value().iter().copied().collect();
+    let epoch = block.epoch();
+    let mut canonical = vec![PcValueElement::ZERO; certified.len()];
+    for (validator, proposal) in block.block().committed_proposals() {
+        let Some(pos) = committee.iter().position(|(id, _)| id == validator) else {
+            return false;
+        };
+        // A second proposal at the same position, or a position past the
+        // certified vector, can't be a faithful reconstruction.
+        if pos >= canonical.len() || canonical[pos] != PcValueElement::ZERO {
+            return false;
+        }
+        canonical[pos] = proposal.pc_element_hash(epoch);
+    }
+    canonical == certified
+}
+
 /// Failure modes of a certified beacon block.
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum CertifiedBeaconBlockVerifyError {
@@ -259,6 +300,11 @@ pub enum CertifiedBeaconBlockVerifyError {
     /// against the equivocation signer pool.
     #[error("embedded equivocation witness rejected")]
     BadEquivocationWitness,
+    /// The block's committed proposals don't reconstruct the
+    /// `PcVector` the cert authenticates — a relay paired a genuine
+    /// cert with substituted proposal bytes.
+    #[error("committed proposals don't match the authenticating cert")]
+    ProposalCertMismatch,
 }
 
 impl Verify<&CertifiedBeaconBlockVerifyContext<'_>> for CertifiedBeaconBlock {
@@ -277,6 +323,9 @@ impl Verify<&CertifiedBeaconBlockVerifyContext<'_>> for CertifiedBeaconBlock {
         }
         if !verify_block_equivocations(self, ctx.network, ctx.equivocation_signers) {
             return Err(CertifiedBeaconBlockVerifyError::BadEquivocationWitness);
+        }
+        if !verify_committed_proposal_binding(self, ctx.signers) {
+            return Err(CertifiedBeaconBlockVerifyError::ProposalCertMismatch);
         }
         Ok(Verified::new_unchecked(self.clone()))
     }
@@ -369,7 +418,7 @@ mod tests {
     use crate::{
         BeaconBlockHash, BeaconProposal, Bls12381G2Signature, Hash, PcQc2, PcQc3, PcSignerLengths,
         PcVector, PcXpProof, SignerBitfield, SkipEpochCert, SpcCert, SpcView, VRF_PROOF_BYTES,
-        ValidatorId, VrfOutput, VrfProof,
+        ValidatorId, VrfOutput, VrfProof, bls_keypair_from_seed,
     };
 
     fn proposal(seed: u8) -> BeaconProposal {
@@ -401,6 +450,46 @@ mod tests {
             value: PcVector::empty(),
             proof: proof.into(),
         }
+    }
+
+    fn committee_of(n: u64) -> Vec<(ValidatorId, Bls12381G1PublicKey)> {
+        (0..n)
+            .map(|i| {
+                let mut seed = [0u8; 32];
+                seed[..8].copy_from_slice(&i.to_le_bytes());
+                (
+                    ValidatorId::new(i),
+                    bls_keypair_from_seed(&seed).public_key(),
+                )
+            })
+            .collect()
+    }
+
+    /// A `Normal` cert whose committed value is `value`. The binding
+    /// check only reads `committed_value()`, so the embedded proof is a
+    /// placeholder — this exercises `verify_committed_proposal_binding`
+    /// in isolation, not the cert's BLS verification.
+    fn normal_cert_with_value(value: PcVector) -> BeaconCert {
+        let qc2 = PcQc2::new(
+            value.clone(),
+            SignerBitfield::new(4),
+            Bls12381G2Signature([0x11; 96]),
+            PcXpProof::Full,
+        );
+        let proof = PcQc3::new(
+            value.clone(),
+            qc2,
+            None,
+            None,
+            SignerBitfield::new(4),
+            PcSignerLengths::Uniform(0),
+            Bls12381G2Signature([0x33; 96]),
+        );
+        BeaconCert::Normal(Box::new(SpcCert::Direct {
+            prev_view: SpcView::new(1),
+            value,
+            proof: proof.into(),
+        }))
     }
 
     fn skip_cert() -> SkipEpochCert {
@@ -451,6 +540,47 @@ mod tests {
         let bytes = basic_encode(&pair).unwrap();
         let decoded: CertifiedBeaconBlock = basic_decode(&bytes).unwrap();
         assert_eq!(pair, decoded);
+    }
+
+    /// A `Normal` block binds to its cert only when every committed
+    /// proposal hashes, at its committee position, to the matching
+    /// element of the cert's committed value. Substituted proposal
+    /// bytes, a wrong position, or a missing proposal all break the
+    /// binding — the C1 forgery defence.
+    #[test]
+    fn committed_proposals_bind_to_cert_value() {
+        let epoch = Epoch::new(5);
+        let prev = BeaconBlockHash::from_raw(Hash::from_bytes(b"prev"));
+        let committee = committee_of(4);
+        let proposer = ValidatorId::new(1);
+        let good = proposal(7);
+        let h = good.pc_element_hash(epoch);
+        // Committed value: the proposer sits at committee position 1.
+        let value = PcVector::new([
+            PcValueElement::ZERO,
+            h,
+            PcValueElement::ZERO,
+            PcValueElement::ZERO,
+        ]);
+
+        let bind = |proposals: Vec<(ValidatorId, BeaconProposal)>| {
+            let block = BeaconBlock::new(epoch, prev, proposals);
+            let certified =
+                CertifiedBeaconBlock::new_checked(block, normal_cert_with_value(value.clone()))
+                    .unwrap();
+            verify_committed_proposal_binding(&certified, &committee)
+        };
+
+        // Faithful block binds.
+        assert!(bind(vec![(proposer, good.clone())]));
+        // Substituted proposal bytes (different VRF) hash differently.
+        assert!(!bind(vec![(proposer, proposal(8))]));
+        // Right proposal, wrong committee position.
+        assert!(!bind(vec![(ValidatorId::new(2), good.clone())]));
+        // Cert expects a proposal the block omits.
+        assert!(!bind(Vec::new()));
+        // A proposer absent from the committee can't be placed.
+        assert!(!bind(vec![(ValidatorId::new(9), good)]));
     }
 
     /// Two different `SkipEpochCert`s (different signer subsets) paired

@@ -91,15 +91,16 @@ fn hash_proposal_object(po: &SpcProposalObject) -> PcValueElement {
 
 /// `Parent(view, value)` — walk a value vector's first non-bottom
 /// element to its proposal-object preimage, returning the cert's
-/// parent `(view, value)`. Used by [`commit`] to chain back to view
-/// 1.
+/// parent `(view, value)` alongside the verified cert that proves it.
+/// Used by [`commit`] to chain back to view 1; on reaching view 1 the
+/// returned cert is what authenticates the committed beacon block.
 ///
 /// `view = 1` has no parent (returns `None`).
 fn parent_of(
     view: SpcView,
     value: &PcVector,
     proposals: &BTreeMap<PcValueElement, Verified<SpcProposalObject>>,
-) -> Option<(SpcView, PcVector)> {
+) -> Option<(SpcView, PcVector, Verified<SpcCert>)> {
     if view.inner() == 1 {
         return None;
     }
@@ -107,7 +108,7 @@ fn parent_of(
         if *el != HASH_BOTTOM
             && let Some(po) = proposals.get(el)
         {
-            return Some(match &po.cert {
+            let (parent_view, parent_value) = match &po.cert {
                 SpcCert::Direct {
                     prev_view, value, ..
                 } => (*prev_view, value.clone()),
@@ -116,7 +117,8 @@ fn parent_of(
                     target_value,
                     ..
                 } => (*target_view, target_value.clone()),
-            });
+            };
+            return Some((parent_view, parent_value, po.verified_cert()));
         }
     }
     None
@@ -215,8 +217,12 @@ pub enum SpcEffect {
         duration: Duration,
     },
     /// Agreed high output — terminal effect for this SPC instance.
-    /// `cert` is the [`SpcCert::Direct`] that proves view 1's PC
-    /// produced this high; it authenticates the resulting beacon block.
+    /// `cert` is the cert the commit walk resolved to view 1's high
+    /// (a `Direct` with `prev_view == 1`, or an `Indirect` carrying it
+    /// forward with `target_view == 1`); it authenticates the resulting
+    /// beacon block. `cert.committed_value() == value` by construction,
+    /// so a remote verifier can bind the block's committed proposals to
+    /// it.
     OutputHigh {
         /// Committed high vector.
         value: PcVector,
@@ -361,11 +367,6 @@ pub struct SpcInstance {
     pending_empty_views: BTreeMap<SpcView, BTreeMap<ValidatorId, Verified<SpcEmptyViewMsg>>>,
 
     high_output: Option<PcVector>,
-    /// Cert authenticating the eventual high output — stashed in
-    /// `on_vpc_output_high` for view 1's PC output, retrieved by
-    /// `commit()` when the walk reaches view-1's parent and emits
-    /// [`SpcEffect::OutputHigh`].
-    high_decisive_cert: Option<Verified<SpcCert>>,
 }
 
 impl SpcInstance {
@@ -405,7 +406,6 @@ impl SpcInstance {
             max_high: None,
             pending_empty_views: BTreeMap::new(),
             high_output: None,
-            high_decisive_cert: None,
         }
     }
 
@@ -593,9 +593,6 @@ impl SpcInstance {
             };
             let next = SpcView::new(next_raw);
             let cert = Verified::<SpcCert>::from_qc3_attestation(view, proof);
-            // Stash for later retrieval when commit() walks back to
-            // view 1 and emits `OutputHigh`.
-            self.high_decisive_cert = Some(cert.clone());
             // Self-process: enter view+1 and broadcast. `from = me`
             // because we're the relay for our own proposal-object.
             out.extend(self.enter_view(self.me, next, cert.clone()));
@@ -885,17 +882,21 @@ impl SpcInstance {
         if view.inner() == 1 {
             return out;
         }
-        if let Some((parent_view, parent_value)) = parent_of(view, value, &self.proposals_by_hash) {
+        if let Some((parent_view, parent_value, parent_cert)) =
+            parent_of(view, value, &self.proposals_by_hash)
+        {
             if parent_view.inner() == 1 {
                 if self.high_output.is_none() {
                     self.high_output = Some(parent_value.clone());
-                    let cert = self
-                        .high_decisive_cert
-                        .clone()
-                        .expect("on_vpc_output_high stashes the cert before commit walks here");
+                    // The authenticating cert is the one the walk just
+                    // resolved to `(1, parent_value)` — so
+                    // `cert.committed_value() == parent_value == value`
+                    // holds by construction, which is what lets a remote
+                    // verifier bind a block's committed proposals to its
+                    // cert.
                     out.push(SpcEffect::OutputHigh {
                         value: parent_value,
-                        cert: Box::new(cert),
+                        cert: Box::new(parent_cert),
                     });
                     // Instance is done: free the proposal table.
                     self.proposals_by_hash.clear();
@@ -1092,8 +1093,13 @@ mod tests {
 
         // Search vector: [BOTTOM, h] — second element resolves.
         let search = PcVector::new([HASH_BOTTOM, h]);
-        let parent = parent_of(SpcView::new(3), &search, &proposals);
-        assert_eq!(parent, Some((SpcView::new(2), parent_value)));
+        let (parent_view, resolved_value, resolved_cert) =
+            parent_of(SpcView::new(3), &search, &proposals).expect("resolves");
+        assert_eq!(parent_view, SpcView::new(2));
+        assert_eq!(resolved_value, parent_value);
+        // The lifted cert is exactly the proposal object's cert, so its
+        // committed value matches the resolved parent value.
+        assert_eq!(resolved_cert.committed_value(), &parent_value);
     }
 
     /// `hash_proposal_object` is deterministic + never returns

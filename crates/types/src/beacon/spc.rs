@@ -232,6 +232,22 @@ impl SpcCert {
     pub fn encode_bytes(&self) -> Vec<u8> {
         basic_encode(self).expect("SpcCert SBOR encoding is infallible")
     }
+
+    /// The agreement `PcVector` this cert authenticates — the high value
+    /// a `Direct` cert proves directly (`value`) or an `Indirect` cert
+    /// carries forward across an empty view (`target_value`). The cert's
+    /// verifier predicate ties this to a committee QC3
+    /// (`proof.x_pe() == value`). For the cert authenticating a beacon
+    /// block, this is the committed proposal vector: each non-`ZERO`
+    /// element is the [`pc_element_hash`](crate::BeaconProposal::pc_element_hash)
+    /// of the proposal at that committee position.
+    #[must_use]
+    pub const fn committed_value(&self) -> &PcVector {
+        match self {
+            Self::Direct { value, .. } => value,
+            Self::Indirect { target_value, .. } => target_value,
+        }
+    }
 }
 
 // ─── Pure helpers ──────────────────────────────────────────────────────────
@@ -936,6 +952,15 @@ impl Verified<SpcProposalObject> {
             view,
             cert: cert.into_inner(),
         })
+    }
+
+    /// Recover the verified cert embedded in this proposal object. The
+    /// object's verifier predicate is `verify_cert(po.cert, po.view, …)`,
+    /// so a verified object carries a verified cert — the SPC commit
+    /// walk lifts it back out to authenticate the committed beacon block.
+    #[must_use]
+    pub fn verified_cert(&self) -> Verified<SpcCert> {
+        Verified::new_unchecked(self.as_ref().cert.clone())
     }
 }
 

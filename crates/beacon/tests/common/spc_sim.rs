@@ -14,8 +14,8 @@ use std::time::Duration;
 use hyperscale_beacon::spc::{SpcEffect, SpcEvent, SpcInstance};
 use hyperscale_types::{
     Bls12381G1PrivateKey, Bls12381G1PublicKey, Epoch, NetworkDefinition, PcVector, PcVote1,
-    PcVote2, PcVote3, SpcEmptyViewMsg, SpcView, ValidatorId, Verified, bls_keypair_from_seed,
-    pc_context, spc_context,
+    PcVote2, PcVote3, SpcCert, SpcEmptyViewMsg, SpcView, ValidatorId, Verified,
+    bls_keypair_from_seed, pc_context, spc_context,
 };
 
 /// One pending event in the network: an `SpcEvent` addressed to a
@@ -33,6 +33,10 @@ pub struct SpcSim {
     epoch: Epoch,
     pending: VecDeque<Envelope>,
     pub outputs: Vec<Option<PcVector>>,
+    /// The cert each party latched alongside its `OutputHigh`, parallel
+    /// to `outputs`. Lets a test assert the authenticator commits to the
+    /// committed value (`cert.committed_value() == value`).
+    output_certs: Vec<Option<Verified<SpcCert>>>,
 }
 
 impl SpcSim {
@@ -56,6 +60,7 @@ impl SpcSim {
             .map(|i| SpcInstance::new(epoch, members.clone(), members[i].0, view_timeout))
             .collect();
         let outputs = vec![None; n];
+        let output_certs = vec![None; n];
         Self {
             instances,
             members,
@@ -64,6 +69,7 @@ impl SpcSim {
             epoch,
             pending: VecDeque::new(),
             outputs,
+            output_certs,
         }
     }
 
@@ -117,6 +123,12 @@ impl SpcSim {
     #[must_use]
     pub fn output(&self, idx: usize) -> Option<&PcVector> {
         self.outputs[idx].as_ref()
+    }
+
+    /// Read the cert party `idx` latched alongside its high output.
+    #[must_use]
+    pub fn output_cert(&self, idx: usize) -> Option<&Verified<SpcCert>> {
+        self.output_certs[idx].as_ref()
     }
 
     fn absorb(&mut self, sender_idx: usize, effects: Vec<SpcEffect>) {
@@ -178,8 +190,9 @@ impl SpcSim {
                 SpcEffect::SetTimer { .. } | SpcEffect::Equivocation { .. } => {
                     // Honest path: no timer firing, no equivocation to absorb.
                 }
-                SpcEffect::OutputHigh { value, cert: _ } => {
+                SpcEffect::OutputHigh { value, cert } => {
                     self.outputs[sender_idx] = Some(value);
+                    self.output_certs[sender_idx] = Some(*cert);
                 }
             }
         }

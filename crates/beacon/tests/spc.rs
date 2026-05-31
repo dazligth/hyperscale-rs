@@ -195,6 +195,18 @@ fn sim_n4_honest_path_converges_on_high() {
     for i in 1..4 {
         assert_eq!(*sim.output(i).unwrap(), baseline);
     }
+    // The authenticating cert commits to the committed value: the commit
+    // walk emits the view-1 cert it resolved to, so
+    // `cert.committed_value() == value`. This is what lets a remote
+    // verifier bind a block's committed proposals to its cert.
+    for i in 0..4 {
+        let cert = sim.output_cert(i).expect("decided party latched a cert");
+        assert_eq!(cert.committed_value(), sim.output(i).unwrap());
+        assert!(
+            matches!(cert.as_ref(), SpcCert::Direct { prev_view, .. } if prev_view.inner() == 1),
+            "block authenticator is the view-1 direct cert",
+        );
+    }
 }
 
 /// Same at n=7 (q=5, f=2) — catches sizing assumptions baked into
