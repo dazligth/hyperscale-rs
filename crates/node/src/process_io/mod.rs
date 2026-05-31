@@ -14,6 +14,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use crossbeam::channel::Sender;
+use hyperscale_beacon::proposal_pool::BeaconProposalPool;
 use hyperscale_dispatch::Dispatch;
 use hyperscale_engine::TransactionValidation;
 use hyperscale_storage::{BeaconStorage, ShardStorage};
@@ -73,6 +74,13 @@ where
     /// handler. The implementation serializes writes internally
     /// (`RocksDbBeaconStorage::commit_lock`); reads remain lock-free.
     pub(crate) beacon_storage: Arc<dyn BeaconStorage>,
+
+    /// Host-shared per-epoch `BeaconProposal` pool. Same `Arc` lives
+    /// on every co-hosted vnode's `BeaconCoordinator` and on the
+    /// inbound `GetBeaconProposalRequest` network handler closure;
+    /// writes (admit / reset) come only from the shard pinned thread,
+    /// reads from the network worker are wait-free.
+    pub(crate) beacon_proposal_pool: Arc<BeaconProposalPool>,
 }
 
 impl<S, N, D> ProcessIo<S, N, D>
@@ -92,6 +100,7 @@ where
         dispatch_handles: Arc<DispatchHandles<S, N>>,
         tx_validator: Arc<TransactionValidation>,
         beacon_storage: Arc<dyn BeaconStorage>,
+        beacon_proposal_pool: Arc<BeaconProposalPool>,
     ) -> Self {
         Self {
             network,
@@ -101,6 +110,7 @@ where
             dispatch_handles,
             tx_validator,
             beacon_storage,
+            beacon_proposal_pool,
         }
     }
 

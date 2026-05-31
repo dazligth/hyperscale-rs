@@ -40,7 +40,7 @@ use tracing::{trace, warn};
 use crate::block_sync::BeaconBlockSyncManager;
 use crate::equivocations::EquivocationObservations;
 use crate::pending_blocks::PendingBeaconBlocks;
-use crate::proposal_pool::BeaconProposalPool;
+use crate::proposal_pool::{BeaconProposalPool, serve_beacon_proposal_request};
 use crate::skip_tracker::SkipTracker;
 use crate::spc::{SpcEffect, SpcEvent, SpcInstance};
 use crate::state::{apply_epoch, apply_input_for};
@@ -97,8 +97,10 @@ pub struct BeaconCoordinator {
 
     /// Per-epoch cache of committee members' `BeaconProposal`s.
     /// Scoped to the in-flight epoch (`state.current_epoch.next()`);
-    /// reset on commit.
-    proposal_pool: BeaconProposalPool,
+    /// reset on commit. Shared with the `GetBeaconProposalRequest`
+    /// network responder and with every co-hosted vnode's
+    /// `BeaconCoordinator` — single `Arc` per host.
+    proposal_pool: Arc<BeaconProposalPool>,
 
     /// Stashed SPC-decided epoch whose committed proposals reference
     /// at least one `BeaconProposal` the local pool never observed.
@@ -174,6 +176,7 @@ impl BeaconCoordinator {
         local_shard: ShardGroupId,
         network: NetworkDefinition,
         expected_config_hash: GenesisConfigHash,
+        proposal_pool: Arc<BeaconProposalPool>,
     ) -> Self {
         if let BeaconCert::Genesis(config_hash) = latest_block.cert() {
             debug_assert_eq!(
@@ -181,7 +184,6 @@ impl BeaconCoordinator {
                 "genesis block config_hash doesn't match operator config",
             );
         }
-        let next_epoch = latest_state.current_epoch.next();
         let topology_snapshot = Arc::new(latest_state.derive_topology_snapshot(network.clone()));
         Self {
             state: latest_state,
@@ -193,7 +195,7 @@ impl BeaconCoordinator {
             skip_tracker: SkipTracker::new(),
             equivocations: EquivocationObservations::new(),
             sync: BeaconBlockSyncManager::new(),
-            proposal_pool: BeaconProposalPool::new(next_epoch),
+            proposal_pool,
             pending_assembly: None,
             local_shard,
             topology_snapshot,
@@ -1688,22 +1690,17 @@ impl BeaconCoordinator {
 
     /// Serve an inbound
     /// [`GetBeaconProposalRequest`](hyperscale_types::network::request::beacon::GetBeaconProposalRequest)
-    /// from this vnode's `BeaconProposalPool`. The runner registers
-    /// one closure per hosted vnode capturing a handle to the
-    /// matching coordinator.
+    /// from this coordinator's pool. Delegates to the free
+    /// [`serve_beacon_proposal_request`](crate::proposal_pool::serve_beacon_proposal_request)
+    /// so the network handler can call the same lookup directly
+    /// against an `Arc<BeaconProposalPool>` without holding a
+    /// coordinator reference.
     #[must_use]
     pub fn serve_beacon_proposal_request(
         &self,
         req: &GetBeaconProposalRequest,
     ) -> GetBeaconProposalResponse {
-        if req.epoch != self.proposal_pool.epoch() {
-            return GetBeaconProposalResponse::empty();
-        }
-        let proposal = self
-            .proposal_pool
-            .get(req.validator)
-            .map(|verified| Arc::new(Verifiable::from((**verified).clone())));
-        GetBeaconProposalResponse::new(proposal)
+        serve_beacon_proposal_request(&self.proposal_pool, req)
     }
 
     /// Beacon-committee members excluding the local validator —
@@ -1942,6 +1939,7 @@ mod tests {
 
     fn new_coord(me: ValidatorId) -> BeaconCoordinator {
         let (block, state, config_hash) = genesis_trio();
+        let pool = Arc::new(BeaconProposalPool::new(state.current_epoch.next()));
         BeaconCoordinator::new(
             block,
             state,
@@ -1949,6 +1947,7 @@ mod tests {
             ShardGroupId::new(0),
             NetworkDefinition::simulator(),
             config_hash,
+            pool,
         )
     }
 
@@ -2013,6 +2012,7 @@ mod tests {
     fn new_carries_latest_block() {
         let (block, state, config_hash) = genesis_trio();
         let block_hash = block.block_hash();
+        let pool = Arc::new(BeaconProposalPool::new(state.current_epoch.next()));
         let coord = BeaconCoordinator::new(
             Arc::clone(&block),
             state,
@@ -2020,6 +2020,7 @@ mod tests {
             ShardGroupId::new(0),
             NetworkDefinition::simulator(),
             config_hash,
+            pool,
         );
         assert_eq!(coord.latest_block().block_hash(), block_hash);
     }
@@ -2047,6 +2048,7 @@ mod tests {
         let mismatched_block = Verified::<CertifiedBeaconBlock>::genesis(
             GenesisConfigHash::from_raw(Hash::from_bytes(b"other-config")),
         );
+        let pool = Arc::new(BeaconProposalPool::new(state.current_epoch.next()));
         let _coord = BeaconCoordinator::new(
             Arc::new(mismatched_block),
             state,
@@ -2054,6 +2056,7 @@ mod tests {
             ShardGroupId::new(0),
             NetworkDefinition::simulator(),
             GenesisConfigHash::ZERO,
+            pool,
         );
     }
 

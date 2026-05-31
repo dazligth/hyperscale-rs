@@ -11,6 +11,7 @@ use arc_swap::ArcSwap;
 use crossbeam::channel::{Receiver, Sender, unbounded};
 use hyperscale_beacon::coordinator::BeaconCoordinator;
 use hyperscale_beacon::genesis::build_genesis_beacon_state;
+use hyperscale_beacon::proposal_pool::BeaconProposalPool;
 use hyperscale_core::{ProtocolEvent, TimerId};
 use hyperscale_dispatch_sync::SyncDispatch;
 use hyperscale_engine::{GenesisConfig, RadixExecutor, TransactionValidation};
@@ -290,6 +291,13 @@ impl SimulationRunner {
                 );
             }
 
+            // One `Arc<BeaconProposalPool>` per host, shared across every
+            // co-hosted vnode's coordinator and the inbound
+            // `GetBeaconProposalRequest` handler.
+            let beacon_proposal_pool = Arc::new(BeaconProposalPool::new(
+                beacon_genesis_state.current_epoch.next(),
+            ));
+
             let mut vnode_inits: Vec<VnodeInit> = Vec::with_capacity(host_vnodes.len());
             for (shard, validator_idxs) in &by_shard {
                 let (provision_store, tx_store, exec_cert_store, fw_store) =
@@ -308,6 +316,7 @@ impl SimulationRunner {
                         *shard,
                         beacon_network.clone(),
                         beacon_config_hash,
+                        Arc::clone(&beacon_proposal_pool),
                     );
 
                     let state = NodeStateMachine::new(
@@ -351,6 +360,7 @@ impl SimulationRunner {
                 vnode_inits,
                 storages,
                 beacon_storage,
+                Arc::clone(&beacon_proposal_pool),
                 executor,
                 network.create_adapter(
                     NodeIndex::try_from(host_index).expect("host_index fits NodeIndex"),

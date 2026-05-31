@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use hyperscale_beacon::proposal_pool::serve_beacon_proposal_request;
 use hyperscale_core::ProtocolEvent;
 use hyperscale_dispatch::Dispatch;
 use hyperscale_metrics::record_fetch_response_sent;
@@ -25,7 +26,6 @@ use hyperscale_types::network::request::beacon::{
 use hyperscale_types::network::request::{
     GetExecutionCertsRequest, GetFinalizedWavesRequest, GetLocalProvisionsRequest,
 };
-use hyperscale_types::network::response::beacon::GetBeaconProposalResponse;
 use hyperscale_types::network::response::{
     GetLocalProvisionsResponse, GetProvisionResponse, LocalProvisionEntry,
 };
@@ -365,19 +365,12 @@ where
                     serve_shard_witnesses_request(&pending_chain, &req)
                 });
 
-            // ── beacon.proposal.request → empty-response responder ─────
-            //
-            // The per-vnode `BeaconProposalPool` isn't reachable from a
-            // tokio blocking-pool handler thread (it lives on the
-            // pinned shard thread). Returning empty here pushes the
-            // requester to the next peer in its rotation; bounded by
-            // `BEACON_SIGNER_COUNT`. A pump-through-the-shard-loop
-            // responder is the right fix and lands with the runner
-            // integration test.
+            // ── beacon.proposal.request → host-shared pool lookup ──────
+            let beacon_proposal_pool = Arc::clone(&self.process.beacon_proposal_pool);
             self.process
                 .network
-                .register_request_handler::<GetBeaconProposalRequest>(shard, |_req| {
-                    GetBeaconProposalResponse::empty()
+                .register_request_handler::<GetBeaconProposalRequest>(shard, move |req| {
+                    serve_beacon_proposal_request(&beacon_proposal_pool, &req)
                 });
         } // end for shard in hosted_shards
     }

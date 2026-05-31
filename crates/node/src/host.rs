@@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crossbeam::channel::Sender;
+use hyperscale_beacon::proposal_pool::BeaconProposalPool;
 use hyperscale_dispatch::Dispatch;
 use hyperscale_engine::{ProcessExecutionCache, RadixExecutor, TransactionValidation};
 use hyperscale_network::Network;
@@ -102,6 +103,7 @@ where
         vnodes: Vec<VnodeInit>,
         mut storages: HashMap<ShardGroupId, S>,
         beacon_storage: Arc<dyn BeaconStorage>,
+        beacon_proposal_pool: Arc<BeaconProposalPool>,
         executor: RadixExecutor,
         network: N,
         dispatch: D,
@@ -216,6 +218,7 @@ where
             dispatch_handles,
             tx_validator,
             beacon_storage,
+            beacon_proposal_pool,
         ));
 
         // Second pass: assemble ShardLoops with cloned Arc<ProcessIo>.

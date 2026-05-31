@@ -31,7 +31,9 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use hyperscale_types::{BeaconProposal, Epoch, ValidatorId, Verified};
+use hyperscale_types::network::request::beacon::GetBeaconProposalRequest;
+use hyperscale_types::network::response::beacon::GetBeaconProposalResponse;
+use hyperscale_types::{BeaconProposal, Epoch, ValidatorId, Verifiable, Verified};
 use papaya::HashMap;
 
 /// Per-epoch cache of verified `BeaconProposal`s indexed by sender.
@@ -122,6 +124,27 @@ impl BeaconProposalPool {
     pub fn is_empty(&self) -> bool {
         self.proposals.is_empty()
     }
+}
+
+/// Serve an inbound [`GetBeaconProposalRequest`] from a pool.
+///
+/// Returns an empty response when the request's epoch doesn't match
+/// the pool's tracked epoch or when the named validator has no entry.
+/// The network handler captures `Arc<BeaconProposalPool>` and calls
+/// this synchronously on the network-worker thread; lock-free reads
+/// against papaya make it wait-free in the common case.
+#[must_use]
+pub fn serve_beacon_proposal_request(
+    pool: &BeaconProposalPool,
+    req: &GetBeaconProposalRequest,
+) -> GetBeaconProposalResponse {
+    if req.epoch != pool.epoch() {
+        return GetBeaconProposalResponse::empty();
+    }
+    let proposal = pool
+        .get(req.validator)
+        .map(|verified| Arc::new(Verifiable::from((*verified).clone())));
+    GetBeaconProposalResponse::new(proposal)
 }
 
 #[cfg(test)]

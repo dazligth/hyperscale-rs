@@ -28,6 +28,7 @@ use crossbeam::channel::{Receiver, Sender, unbounded};
 use hex::encode as hex_encode;
 use hyperscale_beacon::coordinator::BeaconCoordinator;
 use hyperscale_beacon::genesis::build_genesis_beacon_state;
+use hyperscale_beacon::proposal_pool::BeaconProposalPool;
 use hyperscale_core::{ProtocolEvent, TimerId};
 use hyperscale_dispatch::{Dispatch, DispatchPool};
 use hyperscale_dispatch_pooled::{PooledDispatch, ThreadPoolConfig};
@@ -478,6 +479,14 @@ impl ProductionRunnerBuilder {
             .map(|s| (*s, Arc::new(FinalizedWaveStore::new())))
             .collect();
 
+        // One `Arc<BeaconProposalPool>` per host (beacon is process-
+        // wide consensus), shared across every co-hosted vnode's
+        // coordinator and the inbound `GetBeaconProposalRequest`
+        // handler.
+        let beacon_proposal_pool = Arc::new(BeaconProposalPool::new(
+            beacon_genesis_state.current_epoch.next(),
+        ));
+
         let vnode_inits: Vec<VnodeInit> = vnode_configs
             .into_iter()
             .map(|cfg| {
@@ -509,6 +518,7 @@ impl ProductionRunnerBuilder {
                     cfg.local_shard,
                     beacon_network.clone(),
                     beacon_config_hash,
+                    Arc::clone(&beacon_proposal_pool),
                 );
                 let state = NodeStateMachine::new(
                     cfg.validator_id,
@@ -571,6 +581,7 @@ impl ProductionRunnerBuilder {
             vnode_inits,
             shared_storages,
             self.beacon_storage,
+            beacon_proposal_pool,
             executor,
             libp2p_network,
             (*dispatch).clone(),
