@@ -15,11 +15,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use hyperscale_types::{
-    BeaconGenesisConfig, BeaconState, Epoch, ShardCommittee, ShardGroupId, Stake, StakePool,
-    StakePoolId, ValidatorId, ValidatorRecord, ValidatorStatus,
+    BEACON_SIGNER_COUNT, BeaconGenesisConfig, BeaconState, Epoch, MIN_STAKE_FLOOR, SHARD_CAPACITY,
+    ShardCommittee, ShardGroupId, Stake, StakePool, StakePoolId, ValidatorId, ValidatorRecord,
+    ValidatorStatus,
 };
-
-use crate::constants::{BEACON_SIGNER_COUNT, MIN_STAKE_FLOOR, SHARD_CAPACITY};
 
 // ─── builder ───────────────────────────────────────────────────────────────
 

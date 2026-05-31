@@ -3,10 +3,10 @@
 
 use std::collections::BTreeMap;
 
-use hyperscale_types::{BeaconState, Stake, StakePoolId, ValidatorId, ValidatorStatus};
-
-use crate::constants::{EMISSIONS_PER_EPOCH, READY_TIMEOUT_EPOCHS};
-use crate::state::derived::{current_active_count, max_active_count};
+use hyperscale_types::{
+    BeaconState, EMISSIONS_PER_EPOCH, READY_TIMEOUT_EPOCHS, Stake, StakePoolId, ValidatorId,
+    ValidatorStatus,
+};
 
 /// Promote `InsufficientStake` validators back to `Pooled` for every
 /// pool that has newly-available capacity, looping until no pool can
@@ -42,8 +42,8 @@ pub(super) fn auto_reactivate(state: &mut BeaconState) -> Vec<ValidatorId> {
             let (cur, max) = {
                 let pool = state.pools.get(&pool_id).expect("just iterated");
                 (
-                    current_active_count(pool, state),
-                    max_active_count(pool, state),
+                    pool.current_active_count(state),
+                    pool.max_active_count(state),
                 )
             };
             if cur >= max {
@@ -88,7 +88,7 @@ pub(super) fn auto_reactivate(state: &mut BeaconState) -> Vec<ValidatorId> {
 ///
 /// Integer-division rounding remainder is burned — the per-year
 /// emission envelope
-/// ([`TOKENS_PER_YEAR_TARGET`](crate::constants::TOKENS_PER_YEAR_TARGET))
+/// ([`TOKENS_PER_YEAR_TARGET`](hyperscale_types::TOKENS_PER_YEAR_TARGET))
 /// is a sizing target, not a hard cap, so the per-epoch remainder
 /// (at most `active_pools − 1` attos) drops on the floor rather than
 /// accumulating in state.
@@ -167,8 +167,9 @@ mod tests {
     use std::collections::BTreeSet;
 
     use hyperscale_types::{
-        BeaconState, Epoch, JailReason, ShardCommittee, ShardGroupId, ShardWitnessPayload, Stake,
-        StakePool, StakePoolId, ValidatorId, ValidatorRecord, ValidatorStatus,
+        BeaconState, Epoch, JailReason, MIN_STAKE_FLOOR, ShardCommittee, ShardGroupId,
+        ShardWitnessPayload, Stake, StakePool, StakePoolId, UNBONDING_WINDOW_EPOCHS, ValidatorId,
+        ValidatorRecord, ValidatorStatus,
     };
 
     use super::super::test_fixtures::{
@@ -176,7 +177,6 @@ mod tests {
         state_with_pending_withdrawal, validator_record, vrf_proposal_with_witnesses,
     };
     use super::distribute_epoch_rewards;
-    use crate::constants::{MIN_STAKE_FLOOR, UNBONDING_WINDOW_EPOCHS};
     // ─── auto_reactivate ─────────────────────────────────────────────────
 
     /// Build a pool with `n_active` validators (`OnShard`) plus
@@ -343,7 +343,7 @@ mod tests {
 
     // ─── distribute_epoch_rewards ────────────────────────────────────────
 
-    use crate::constants::EMISSIONS_PER_EPOCH;
+    use hyperscale_types::EMISSIONS_PER_EPOCH;
 
     /// State with no `OnShard { ready: true }` validators returns no
     /// credits — the whole epoch's emission burns.
@@ -572,7 +572,7 @@ mod tests {
 
     // ─── auto_ready_timeout ──────────────────────────────────────────────
 
-    use crate::constants::READY_TIMEOUT_EPOCHS;
+    use hyperscale_types::READY_TIMEOUT_EPOCHS;
 
     /// Helper: place validator `id` on shard 0 at `placed_at_epoch`
     /// with `ready: false`. Inserts into pool 0's validator set so

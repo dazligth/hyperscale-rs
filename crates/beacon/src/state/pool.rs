@@ -4,7 +4,6 @@
 use hyperscale_types::{BeaconState, ShardGroupId, ValidatorId, ValidatorStatus};
 
 use crate::sampling::draw_from_pool;
-use crate::state::derived::pooled_validators;
 
 /// Draw one validator from the global pool and place them on `shard`
 /// as `OnShard { ready: false, placed_at_epoch: state.current_epoch }`.
@@ -31,7 +30,7 @@ use crate::state::derived::pooled_validators;
 /// above) is absent from `state.validators`. Structurally
 /// unreachable.
 pub fn pool_draw(state: &mut BeaconState, shard: ShardGroupId) -> Option<ValidatorId> {
-    let pool = pooled_validators(state);
+    let pool = state.pooled_validators();
     let chosen = draw_from_pool(
         &pool,
         state.randomness.as_bytes(),
@@ -61,13 +60,12 @@ mod tests {
     use std::collections::BTreeSet;
 
     use hyperscale_types::{
-        BeaconState, Epoch, Randomness, ShardCommittee, ShardGroupId, Stake, StakePool,
-        StakePoolId, ValidatorId, ValidatorStatus,
+        BeaconState, Epoch, MIN_STAKE_FLOOR, Randomness, ShardCommittee, ShardGroupId, Stake,
+        StakePool, StakePoolId, ValidatorId, ValidatorStatus,
     };
 
     use super::super::test_fixtures::{empty_state, validator_record};
     use super::*;
-    use crate::constants::MIN_STAKE_FLOOR;
 
     // ─── pool_draw ───────────────────────────────────────────────────────
 
@@ -128,7 +126,7 @@ mod tests {
         let pick_b = pool_draw(&mut b, ShardGroupId::new(0)).unwrap();
         assert_eq!(pick_a, pick_b);
         assert_eq!(a.shard_committees, b.shard_committees);
-        assert_eq!(pooled_validators(&a), pooled_validators(&b));
+        assert_eq!(a.pooled_validators(), b.pooled_validators());
     }
 
     /// Two draws at the same `(epoch, shard)` pick distinct validators
@@ -146,7 +144,7 @@ mod tests {
         assert_eq!(members.len(), 2);
         assert!(members.contains(&first));
         assert!(members.contains(&second));
-        assert_eq!(pooled_validators(&state).len(), 8 - 2);
+        assert_eq!(state.pooled_validators().len(), 8 - 2);
     }
 
     /// Chosen validator transitions to `OnShard { ready: false }` with

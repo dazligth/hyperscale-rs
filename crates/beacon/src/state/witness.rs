@@ -4,15 +4,12 @@
 use std::collections::BTreeSet;
 
 use hyperscale_types::{
-    BeaconProposal, BeaconState, Bls12381G1PublicKey, JailReason, LeafIndex, NetworkDefinition,
-    PcVoteEquivocation, PendingWithdrawal, ShardGroupId, ShardWitness, ShardWitnessPayload, Stake,
-    StakePool, ValidatorId, ValidatorRecord, ValidatorStatus, Witness, verify_vote_equivocation,
+    BeaconProposal, BeaconState, Bls12381G1PublicKey, JAIL_COOLDOWN_EPOCHS, JailReason, LeafIndex,
+    MAX_WITNESSES_PER_SLOT, MISSED_PROPOSAL_JAIL_THRESHOLD, NetworkDefinition, PcVoteEquivocation,
+    PendingWithdrawal, ShardGroupId, ShardWitness, ShardWitnessPayload, Stake, StakePool,
+    ValidatorId, ValidatorRecord, ValidatorStatus, Witness, verify_vote_equivocation,
 };
 
-use crate::constants::{
-    JAIL_COOLDOWN_EPOCHS, MAX_WITNESSES_PER_SLOT, MISSED_PROPOSAL_JAIL_THRESHOLD,
-};
-use crate::state::derived::{current_active_count, effective_stake, max_active_count};
 use crate::state::vrf::jail_validator;
 use crate::state::withdrawals::deactivate_to_insufficient_stake;
 
@@ -228,7 +225,7 @@ pub(super) fn apply_shard_payload(
             // an over-withdrawal that `saturating_sub` would silently
             // clamp.
             let pool = state.pools.get_mut(pool_id)?;
-            if *amount > effective_stake(pool) {
+            if *amount > pool.effective_stake() {
                 return None;
             }
             pool.pending_withdrawals.push(PendingWithdrawal {
@@ -252,7 +249,7 @@ pub(super) fn apply_shard_payload(
             // Pool must exist and have capacity at the current dynamic
             // `min_stake` for one more active validator.
             let pool = state.pools.get(pool_id)?;
-            if current_active_count(pool, state) + 1 > max_active_count(pool, state) {
+            if pool.current_active_count(state) + 1 > pool.max_active_count(state) {
                 return None;
             }
             // We accept any 48-byte BLS pubkey at registration. Radix's
@@ -329,7 +326,7 @@ pub(super) fn apply_shard_payload(
             }
             let pool_id = rec.pool;
             let pool = state.pools.get(&pool_id)?;
-            if current_active_count(pool, state) + 1 > max_active_count(pool, state) {
+            if pool.current_active_count(state) + 1 > pool.max_active_count(state) {
                 return None;
             }
             state
@@ -405,7 +402,8 @@ mod tests {
 
     // ─── ingest_witnesses framework + stake variants ─────────────────────
     use hyperscale_types::{
-        BeaconProposal, BeaconState, Epoch, JailReason, LeafIndex, ShardCommittee, ShardGroupId,
+        BeaconProposal, BeaconState, EMISSIONS_PER_EPOCH, Epoch, JAIL_COOLDOWN_EPOCHS, JailReason,
+        LeafIndex, MIN_STAKE_FLOOR, MISSED_PROPOSAL_JAIL_THRESHOLD, ShardCommittee, ShardGroupId,
         ShardWitnessPayload, Stake, StakePool, StakePoolId, ValidatorId, ValidatorStatus,
     };
 
@@ -414,9 +412,6 @@ mod tests {
         single_pool_state, validator_record, vrf_proposal_with_witnesses,
     };
     use super::*;
-    use crate::constants::{
-        EMISSIONS_PER_EPOCH, JAIL_COOLDOWN_EPOCHS, MIN_STAKE_FLOOR, MISSED_PROPOSAL_JAIL_THRESHOLD,
-    };
 
     /// `StakeDeposit` for an unknown pool implicitly creates the pool
     /// and accumulates `total_stake`. Subsequent deposits accumulate
@@ -468,7 +463,7 @@ mod tests {
         state.current_epoch = Epoch::new(3);
         let pool_id = StakePoolId::new(0);
         let pre_total = state.pools.get(&pool_id).unwrap().total_stake;
-        let pre_effective = effective_stake(state.pools.get(&pool_id).unwrap());
+        let pre_effective = state.pools.get(&pool_id).unwrap().effective_stake();
 
         let w = shard_witness(
             0,
@@ -505,7 +500,7 @@ mod tests {
         // effective_stake = total_stake − pending; pending up by 1000
         // whole tokens, total up by the epoch emission.
         assert_eq!(
-            effective_stake(pool),
+            pool.effective_stake(),
             pre_effective
                 .saturating_add(EMISSIONS_PER_EPOCH)
                 .saturating_sub(Stake::from_whole_tokens(1_000)),
@@ -521,7 +516,7 @@ mod tests {
         let mut state = single_pool_state(4);
         state.committee = (0u64..4).map(ValidatorId::new).collect();
         let pool_id = StakePoolId::new(0);
-        let effective = effective_stake(state.pools.get(&pool_id).unwrap());
+        let effective = state.pools.get(&pool_id).unwrap().effective_stake();
 
         let w = shard_witness(
             0,

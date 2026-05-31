@@ -33,6 +33,7 @@
 pub mod block;
 pub mod cert;
 pub mod certified;
+pub mod constants;
 pub mod genesis;
 pub mod limits;
 pub mod pc;
@@ -49,6 +50,12 @@ pub use cert::BeaconCert;
 pub use certified::{
     CertifiedBeaconBlock, CertifiedBeaconBlockPairingError, CertifiedBeaconBlockVerifyContext,
     CertifiedBeaconBlockVerifyError, verify_block_equivocations, verify_certified,
+};
+pub use constants::{
+    BEACON_SIGNER_COUNT, EMISSIONS_PER_EPOCH, EPOCHS_PER_YEAR, JAIL_COOLDOWN_EPOCHS,
+    MAX_WITNESSES_PER_SLOT, MIN_STAKE_FLOOR, MISSED_PROPOSAL_JAIL_THRESHOLD, POOL_BUFFER_TARGET,
+    READY_TIMEOUT_EPOCHS, SHARD_CAPACITY, SHUFFLE_INTERVAL_EPOCHS, SPC_VIEW_TIMEOUT,
+    TOKENS_PER_YEAR_TARGET, UNBONDING_WINDOW_EPOCHS,
 };
 pub use genesis::{BeaconGenesisConfig, GenesisPool, GenesisValidator, genesis_config_hash};
 pub use limits::{

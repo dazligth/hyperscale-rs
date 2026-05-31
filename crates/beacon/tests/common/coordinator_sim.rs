@@ -16,19 +16,19 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
-use hyperscale_beacon::constants::{BEACON_SIGNER_COUNT, MIN_STAKE_FLOOR};
 use hyperscale_beacon::coordinator::BeaconCoordinator;
 use hyperscale_beacon::genesis::build_genesis_beacon_state;
 use hyperscale_core::Action;
 use hyperscale_types::{
-    BeaconCert, BeaconGenesisConfig, BeaconProposal, BeaconState, Bls12381G1PrivateKey,
-    Bls12381G1PublicKey, CertifiedBeaconBlock, CertifiedBeaconBlockVerifyContext, Epoch,
-    GenesisPool, GenesisValidator, NetworkDefinition, PcValueElement, PcVector, PcVote1, PcVote2,
-    PcVote3, PcVoteVerifyContext, Randomness, ShardGroupId, SkipEpochCert, SkipRequest,
-    SkipVerifyContext, SpcEmptyViewMsg, SpcNewCommitMsg, SpcProposalObject, SpcVerifyContext,
-    SpcView, Stake, StakePoolId, ValidatorId, Verifiable, Verified, Witness, bls_keypair_from_seed,
-    genesis_config_hash, pc_context, sign_empty_view_msg, sign_vote1, sign_vote2, sign_vote3,
-    spc_context, verify_skip_cert, verify_vote1, verify_vote2, verify_vote3, vrf_sign,
+    BEACON_SIGNER_COUNT, BeaconCert, BeaconGenesisConfig, BeaconProposal, BeaconState,
+    Bls12381G1PrivateKey, Bls12381G1PublicKey, CertifiedBeaconBlock,
+    CertifiedBeaconBlockVerifyContext, Epoch, GenesisPool, GenesisValidator, MIN_STAKE_FLOOR,
+    NetworkDefinition, PcValueElement, PcVector, PcVote1, PcVote2, PcVote3, PcVoteVerifyContext,
+    Randomness, ShardGroupId, SkipEpochCert, SkipRequest, SkipVerifyContext, SpcEmptyViewMsg,
+    SpcNewCommitMsg, SpcProposalObject, SpcVerifyContext, SpcView, Stake, StakePoolId, ValidatorId,
+    Verifiable, Verified, Witness, bls_keypair_from_seed, genesis_config_hash, pc_context,
+    sign_empty_view_msg, sign_vote1, sign_vote2, sign_vote3, spc_context, verify_skip_cert,
+    verify_vote1, verify_vote2, verify_vote3, vrf_sign,
 };
 
 /// Adversarial transform a flagged replica applies to its next matching

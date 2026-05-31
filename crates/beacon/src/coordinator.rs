@@ -25,25 +25,21 @@ use hyperscale_types::{
     CertifiedBeaconBlock, CertifiedBeaconBlockVerifyError, EPOCH_DURATION, Epoch,
     GenesisConfigHash, Hash, LeafIndex, LocalTimestamp, MAX_WITNESSES_PER_PROPOSER,
     NetworkDefinition, PcQc3, PcValueElement, PcVector, PcVote1, PcVote1VerifyError, PcVote2,
-    PcVote2VerifyError, PcVote3, PcVote3VerifyError, PcVoteRound, SKIP_TIMEOUT, ShardGroupId,
-    ShardWitness, SkipEpochCert, SkipRequest, SkipRequestVerifyError, SpcCert, SpcEmptyViewMsg,
-    SpcEmptyViewMsgVerifyError, SpcNewCommitMsg, SpcNewCommitMsgVerifyError, SpcProposalObject,
-    SpcProposalObjectVerifyError, SpcView, TopologySnapshot, ValidatorId, Verifiable, Verified,
-    Verify, WeightedTimestamp, Witness,
+    PcVote2VerifyError, PcVote3, PcVote3VerifyError, PcVoteRound, SKIP_TIMEOUT, SPC_VIEW_TIMEOUT,
+    ShardGroupId, ShardWitness, SkipEpochCert, SkipRequest, SkipRequestVerifyError, SpcCert,
+    SpcEmptyViewMsg, SpcEmptyViewMsgVerifyError, SpcNewCommitMsg, SpcNewCommitMsgVerifyError,
+    SpcProposalObject, SpcProposalObjectVerifyError, SpcView, TopologySnapshot, ValidatorId,
+    Verifiable, Verified, Verify, WeightedTimestamp, Witness,
 };
 use tracing::{trace, warn};
 
 use crate::block_sync::BeaconBlockSyncManager;
-use crate::constants::SPC_VIEW_TIMEOUT;
 use crate::equivocations::EquivocationObservations;
 use crate::pending_blocks::PendingBeaconBlocks;
 use crate::proposal_pool::BeaconProposalPool;
 use crate::skip_tracker::SkipTracker;
 use crate::spc::{SpcEffect, SpcEvent, SpcInstance};
-use crate::state::{
-    apply_epoch, apply_input_for, derive_active_pool, derive_beacon_committee,
-    derive_topology_snapshot, signer_pool_for,
-};
+use crate::state::{apply_epoch, apply_input_for};
 use crate::verification::{BeaconVerificationPipeline, SpcMsgKind};
 use crate::witness_fetcher::ShardWitnessFetchTracker;
 
@@ -146,7 +142,7 @@ impl BeaconCoordinator {
             );
         }
         let next_epoch = latest_state.current_epoch.next();
-        let topology_snapshot = Arc::new(derive_topology_snapshot(&latest_state, network.clone()));
+        let topology_snapshot = Arc::new(latest_state.derive_topology_snapshot(network.clone()));
         Self {
             state: latest_state,
             latest_block,
@@ -866,7 +862,7 @@ impl BeaconCoordinator {
     /// on-chain committee, so the skip is defensive rather than
     /// expected.
     fn bootstrap_spc_for_next_epoch(&mut self) {
-        let committee = derive_beacon_committee(&self.state);
+        let committee = self.state.derive_beacon_committee();
         self.bootstrap_spc_with_committee(committee);
     }
 
@@ -915,7 +911,7 @@ impl BeaconCoordinator {
     /// Whether the skip tracker has accumulated quorum to abandon
     /// `current_epoch.next()` at the local tip's anchor.
     fn skip_quorum_at_tip(&self) -> bool {
-        let active_pool_size = derive_active_pool(&self.state).len();
+        let active_pool_size = self.state.derive_active_pool().len();
         self.skip_tracker.quorum_reached(
             self.latest_block.block_hash(),
             self.state.current_epoch.next(),
@@ -979,7 +975,7 @@ impl BeaconCoordinator {
             );
             return Vec::new();
         }
-        let Some(signers) = signer_pool_for(&block, &self.state) else {
+        let Some(signers) = self.state.signer_pool_for(&block) else {
             warn!(
                 epoch = epoch.inner(),
                 "BeaconBlockReceived with Genesis cert past tip — dropping",
@@ -1077,7 +1073,7 @@ impl BeaconCoordinator {
             return Vec::new();
         }
 
-        let active_pool = derive_active_pool(&self.state);
+        let active_pool = self.state.derive_active_pool();
         if !active_pool.iter().any(|(id, _)| *id == request.signer()) {
             trace!(
                 signer = ?request.signer(),
@@ -1127,7 +1123,7 @@ impl BeaconCoordinator {
             );
             return Vec::new();
         }
-        let active_pool = derive_active_pool(&self.state);
+        let active_pool = self.state.derive_active_pool();
         let anchor = self.latest_block.block_hash();
         let raw_cert = Arc::unwrap_or_clone(cert).into_unverified();
         let block = BeaconBlock::skip(expected_epoch, anchor);
@@ -1240,7 +1236,7 @@ impl BeaconCoordinator {
         if !self.skip_tracker.observe(request) {
             return Vec::new();
         }
-        let active_pool = derive_active_pool(&self.state);
+        let active_pool = self.state.derive_active_pool();
         if !self
             .skip_tracker
             .quorum_reached(anchor, expected_epoch, active_pool.len())
@@ -1325,7 +1321,7 @@ impl BeaconCoordinator {
         self.latest_block = Arc::clone(&block);
         self.spc = None;
         self.topology_snapshot =
-            Arc::new(derive_topology_snapshot(&self.state, self.network.clone()));
+            Arc::new(self.state.derive_topology_snapshot(self.network.clone()));
 
         // Witness fetcher uses mark-not-remove on drain; physical
         // eviction is driven by the chain's `consumed_through`
@@ -1612,14 +1608,13 @@ mod tests {
     use hyperscale_types::{
         BeaconBlock, BeaconBlockHash, BeaconGenesisConfig, Bls12381G1PrivateKey,
         Bls12381G1PublicKey, CertifiedBlockHeader, Epoch, GenesisConfigHash, GenesisPool,
-        GenesisValidator, NetworkDefinition, PcVector, Randomness, ShardGroupId, ShardWitness,
-        SpcCert, SpcView, Stake, StakePoolId, ValidatorId, bls_keypair_from_seed, build_qc1,
-        build_qc2, build_qc3, genesis_config_hash, pc_context, sign_vote1, sign_vote2, sign_vote3,
-        spc_context,
+        GenesisValidator, MIN_STAKE_FLOOR, NetworkDefinition, PcVector, Randomness, ShardGroupId,
+        ShardWitness, SpcCert, SpcView, Stake, StakePoolId, ValidatorId, bls_keypair_from_seed,
+        build_qc1, build_qc2, build_qc3, genesis_config_hash, pc_context, sign_vote1, sign_vote2,
+        sign_vote3, spc_context,
     };
 
     use super::*;
-    use crate::constants::MIN_STAKE_FLOOR;
     use crate::genesis::build_genesis_beacon_state;
 
     fn keypair(seed: u64) -> Bls12381G1PrivateKey {

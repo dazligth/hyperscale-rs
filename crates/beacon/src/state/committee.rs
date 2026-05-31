@@ -5,13 +5,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use blake3::Hasher;
 use hyperscale_types::{
-    BeaconState, CommitteeTransition, ShardGroupId, TransitionCause, ValidatorId, ValidatorStatus,
+    BEACON_SIGNER_COUNT, BeaconState, CommitteeTransition, SHUFFLE_INTERVAL_EPOCHS, ShardGroupId,
+    TransitionCause, ValidatorId, ValidatorStatus,
 };
 use rand::RngExt;
 
-use crate::constants::{BEACON_SIGNER_COUNT, SHUFFLE_INTERVAL_EPOCHS};
 use crate::sampling::{prng_from, sample_committee};
-use crate::state::derived::beacon_eligible;
 use crate::state::pool::pool_draw;
 
 /// Domain tag for [`run_shuffle_step`]'s victim-selection seed. Distinct
@@ -127,7 +126,8 @@ pub(super) fn resample_beacon_committee(
     cause: TransitionCause,
 ) -> CommitteeTransition {
     let prior = std::mem::take(&mut state.committee);
-    let eligible: Vec<ValidatorId> = beacon_eligible(state)
+    let eligible: Vec<ValidatorId> = state
+        .beacon_eligible()
         .into_iter()
         .filter(|id| !excluded.contains(id))
         .collect();
@@ -200,16 +200,14 @@ mod tests {
     use std::collections::BTreeSet;
 
     use hyperscale_types::{
-        BeaconState, Epoch, JailReason, Randomness, ShardCommittee, ShardGroupId, Stake, StakePool,
-        StakePoolId, TransitionCause, ValidatorId, ValidatorStatus,
+        BEACON_SIGNER_COUNT, BeaconState, Epoch, JailReason, MIN_STAKE_FLOOR, Randomness,
+        SHUFFLE_INTERVAL_EPOCHS, ShardCommittee, ShardGroupId, Stake, StakePool, StakePoolId,
+        TransitionCause, ValidatorId, ValidatorStatus,
     };
 
     use super::super::test_fixtures::{
         apply_next_epoch, empty_state, single_pool_state, validator_record,
     };
-    use super::*;
-    use crate::constants::{BEACON_SIGNER_COUNT, MIN_STAKE_FLOOR, SHUFFLE_INTERVAL_EPOCHS};
-    use crate::state::pooled_validators;
     // ─── run_shuffle_step + shard_committee_transitions diff ─────────────
 
     /// Two shards, `per_shard` ready members each, `pool_extras`
@@ -294,7 +292,7 @@ mod tests {
         let initial_members = state.shard_committees[&ShardGroupId::new(0)]
             .members
             .clone();
-        let initial_pool = pooled_validators(&state);
+        let initial_pool = state.pooled_validators();
 
         let effects = apply_next_epoch(&mut state, &[]);
 
@@ -302,7 +300,7 @@ mod tests {
             state.shard_committees[&ShardGroupId::new(0)].members,
             initial_members
         );
-        assert_eq!(pooled_validators(&state), initial_pool);
+        assert_eq!(state.pooled_validators(), initial_pool);
         assert!(effects.shard_committee_transitions.is_empty());
     }
 
@@ -410,7 +408,7 @@ mod tests {
         let mut state = single_pool_state(4);
         state.committee = (0u64..4).map(ValidatorId::new).collect();
         state.current_epoch = Epoch::new(SHUFFLE_INTERVAL_EPOCHS - 1);
-        assert!(pooled_validators(&state).is_empty());
+        assert!(state.pooled_validators().is_empty());
 
         let initial_members = state.shard_committees[&ShardGroupId::new(0)]
             .members
@@ -423,7 +421,7 @@ mod tests {
             3
         );
         // Victim ended up in the pool, not back on the shard.
-        let pool_now = pooled_validators(&state);
+        let pool_now = state.pooled_validators();
         assert_eq!(pool_now.len(), 1);
         let victim = pool_now[0];
         assert!(initial_members.contains(&victim));
@@ -529,7 +527,7 @@ mod tests {
             validator_record(5, 0, ValidatorStatus::InsufficientStake),
         );
 
-        assert_eq!(beacon_eligible(&state), vec![ready_id]);
+        assert_eq!(state.beacon_eligible(), vec![ready_id]);
     }
 
     /// `apply_epoch` always populates `committee_changed = true` and a
@@ -564,7 +562,7 @@ mod tests {
     fn resample_picks_subset_when_eligible_oversize() {
         // 2 shards × 4 ready actives = 8 eligible, BEACON_SIGNER_COUNT = 4.
         let mut state = multi_shard_state(2, 4, 0);
-        let eligible: BTreeSet<ValidatorId> = beacon_eligible(&state).into_iter().collect();
+        let eligible: BTreeSet<ValidatorId> = state.beacon_eligible().into_iter().collect();
         assert!(eligible.len() > BEACON_SIGNER_COUNT);
 
         apply_next_epoch(&mut state, &[]);

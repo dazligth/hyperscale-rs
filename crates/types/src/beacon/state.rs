@@ -1,12 +1,11 @@
 //! Beacon-chain data types: validator records, pool aggregates, the
-//! full `BeaconState`, and the effect bundle returned by
-//! `apply_epoch`.
+//! full `BeaconState`, and the effect bundle returned by `apply_epoch`.
 //!
-//! Pure data shapes only. The epoch-pipeline behavior
-//! (`apply_epoch` and its sub-stages) and the pure derived helpers
-//! (`effective_stake`, `current_active_count`, etc.) live in
-//! `hyperscale_beacon::state` — they need beacon-side protocol
-//! constants and are not part of the consumer-facing type surface.
+//! Pure derived queries over these shapes (`effective_stake`,
+//! `current_active_count`, `min_stake`, `derive_topology_snapshot`, …)
+//! sit as inherent methods on [`BeaconState`] and [`StakePool`] at the
+//! bottom of this file. The epoch-pipeline behavior (`apply_epoch` and
+//! its sub-stages) lives in `hyperscale_beacon::state`.
 //!
 //! Light clients re-execute `apply_epoch` over committed
 //! [`BeaconBlock`](crate::BeaconBlock)s instead of verifying merkle
@@ -23,15 +22,21 @@
 //! **epochs**, not slots. Anything counting wall-clock duration
 //! (cooldowns, unbonding windows, ready timeouts) keys off
 //! `current_epoch` against the corresponding `*_EPOCHS` constant in
-//! `hyperscale_beacon::constants`.
+//! [`crate::beacon::constants`].
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use radix_common::network::NetworkDefinition;
 use sbor::prelude::*;
 
+use crate::beacon::cert::BeaconCert;
+use crate::beacon::certified::CertifiedBeaconBlock;
+use crate::beacon::constants::{MIN_STAKE_FLOOR, POOL_BUFFER_TARGET, SHARD_CAPACITY};
+use crate::topology::snapshot::TopologySnapshot;
+use crate::topology::validator::{ValidatorInfo, ValidatorSet};
 use crate::{
     Bls12381G1PublicKey, Epoch, LeafIndex, Randomness, ShardGroupId, Stake, StakePoolId,
-    ValidatorId,
+    ValidatorId, VotePower,
 };
 
 // ─── pool types ──────────────────────────────────────────────────────────────
@@ -329,4 +334,535 @@ pub struct SlotEffects {
     /// integer-division remainder. Empty when no pool had a ready
     /// `OnShard` validator (whole epoch's share burned).
     pub rewards_credited: BTreeMap<StakePoolId, Stake>,
+}
+
+// ─── derived queries ────────────────────────────────────────────────────────
+//
+// Every helper re-derives its value from `self` — no caching, no
+// two-piece state to keep in sync. Inherent methods rather than free
+// functions so consumers chain `state.min_stake()` directly instead of
+// threading a separate module path.
+
+impl StakePool {
+    /// Stake available to support active validators on this pool after
+    /// accounting for in-flight withdrawals.
+    ///
+    /// Pending withdrawals reduce effective stake immediately even though
+    /// `total_stake` doesn't drop until the unbonding window completes —
+    /// this is what blocks new registrations that would have relied on the
+    /// withdrawn amount.
+    #[must_use]
+    pub fn effective_stake(&self) -> Stake {
+        let pending = self
+            .pending_withdrawals
+            .iter()
+            .fold(Stake::ZERO, |acc, w| acc.saturating_add(w.amount));
+        self.total_stake.saturating_sub(pending)
+    }
+
+    /// How many of this pool's validators are currently consuming an
+    /// activation epoch under `state`.
+    ///
+    /// Counts `Pooled` and `OnShard`; excludes `Jailed` (epoch may stay
+    /// jailed indefinitely; locking stake against an uncertain return is
+    /// wrong) and `InsufficientStake` (already represents "not consuming
+    /// an epoch").
+    #[must_use]
+    pub fn current_active_count(&self, state: &BeaconState) -> usize {
+        self.validators
+            .iter()
+            .filter(|id| {
+                matches!(
+                    state.validators.get(id).map(|r| &r.status),
+                    Some(ValidatorStatus::Pooled | ValidatorStatus::OnShard { .. })
+                )
+            })
+            .count()
+    }
+
+    /// Cap on how many of this pool's validators can be active at the
+    /// current dynamic [`min_stake`](BeaconState::min_stake).
+    ///
+    /// Equals `effective_stake / min_stake(state)`. The invariant
+    /// `current_active_count(state) ≤ max_active_count(state)` is
+    /// enforced at `RegisterValidator` and `Unjail` application.
+    #[must_use]
+    pub fn max_active_count(&self, state: &BeaconState) -> usize {
+        let t = state.min_stake();
+        if t == Stake::ZERO {
+            return usize::MAX;
+        }
+        let e = self.effective_stake().attos();
+        (e / t.attos()) as usize
+    }
+}
+
+impl BeaconState {
+    /// Validators currently waiting in the global pool.
+    ///
+    /// Derived from `validators` rather than stored as a separate
+    /// field, so there's no two-piece state to keep in sync. Returned
+    /// sorted by `ValidatorId` for deterministic indexing inside pool
+    /// draws.
+    ///
+    /// Membership is exactly `status == Pooled`. A validator becomes
+    /// `Pooled` on registration, on `Unjail` after cooldown, on trickled
+    /// shuffle exit, and on auto-reactivation; they leave `Pooled` when a
+    /// pool draw flips them to `OnShard`, or when a witness moves them to
+    /// another status.
+    #[must_use]
+    pub fn pooled_validators(&self) -> Vec<ValidatorId> {
+        self.validators
+            .iter()
+            .filter(|(_, r)| matches!(r.status, ValidatorStatus::Pooled))
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    /// Validators eligible to serve on the beacon committee: status is
+    /// `OnShard { ready: true, .. }` on any shard.
+    ///
+    /// Every beacon committee member is therefore a signer on some shard
+    /// — an offline validator can't escape detection by hiding in the
+    /// beacon set. Pooled, jailed, insufficient-stake, and not-yet-ready
+    /// validators are all excluded.
+    ///
+    /// Returned sorted by `ValidatorId` (`BTreeMap` iteration order) for
+    /// deterministic Fisher–Yates input downstream.
+    #[must_use]
+    pub fn beacon_eligible(&self) -> Vec<ValidatorId> {
+        self.validators
+            .iter()
+            .filter(|(_, r)| matches!(r.status, ValidatorStatus::OnShard { ready: true, .. }))
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    /// Resolve the beacon committee into `(validator_id, pubkey)` pairs
+    /// in committee-declaration order.
+    ///
+    /// The order matches `self.committee` exactly, which is the same
+    /// positional enumeration `SignerBitfield` is indexed against. SPC
+    /// cert verifiers, beacon-block verifiers, and the SPC FSM all
+    /// consume this resolved form.
+    ///
+    /// Validators present in `self.committee` but missing from
+    /// `self.validators` are silently dropped. The caller should treat
+    /// any length mismatch from `self.committee.len()` as a state
+    /// invariant violation; this function does not panic so callers can
+    /// make their own decision.
+    #[must_use]
+    pub fn derive_beacon_committee(&self) -> Vec<(ValidatorId, Bls12381G1PublicKey)> {
+        self.committee
+            .iter()
+            .filter_map(|id| self.validators.get(id).map(|r| (*id, r.pubkey)))
+            .collect()
+    }
+
+    /// Derive an immutable [`TopologySnapshot`] from this state.
+    ///
+    /// The snapshot is the read-only consumer-facing view of validator
+    /// placement: shard committees, per-validator pubkeys, and the
+    /// global validator set. Re-derived on every epoch commit and
+    /// shared via `ArcSwap` with the `io_loop`.
+    ///
+    /// All validators are assigned uniform [`VotePower::new(1)`] until
+    /// stake-weighted voting power lands.
+    #[must_use]
+    pub fn derive_topology_snapshot(&self, network: NetworkDefinition) -> TopologySnapshot {
+        let validators: Vec<ValidatorInfo> = self
+            .validators
+            .values()
+            .map(|r| ValidatorInfo {
+                validator_id: r.id,
+                public_key: r.pubkey,
+                voting_power: VotePower::new(1),
+            })
+            .collect();
+        let validator_set = ValidatorSet::new(validators);
+
+        let shard_committees: HashMap<ShardGroupId, Vec<ValidatorId>> = self
+            .shard_committees
+            .iter()
+            .map(|(sid, sc)| (*sid, sc.members.clone()))
+            .collect();
+
+        let num_shards = u64::try_from(self.shard_committees.len()).unwrap_or(u64::MAX);
+
+        TopologySnapshot::with_shard_committees(
+            network,
+            num_shards,
+            &validator_set,
+            shard_committees,
+        )
+    }
+
+    /// Active-duty validator pool: every validator `OnShard { ready: true }`
+    /// on any shard, paired with their pubkey. Returned in `BTreeMap`
+    /// iteration order over `self.validators` (sorted by `ValidatorId`).
+    ///
+    /// This is the quorum substrate for skip:
+    /// [`SkipRequest`](crate::SkipRequest)s are signed by members of this
+    /// pool and assembled into a [`SkipEpochCert`](crate::SkipEpochCert)
+    /// whose `signers` bitfield is positionally indexed against the same
+    /// ordering.
+    #[must_use]
+    pub fn derive_active_pool(&self) -> Vec<(ValidatorId, Bls12381G1PublicKey)> {
+        self.validators
+            .iter()
+            .filter(|(_, r)| matches!(r.status, ValidatorStatus::OnShard { ready: true, .. }))
+            .map(|(id, r)| (*id, r.pubkey))
+            .collect()
+    }
+
+    /// Pick the signer pool a certified block's cert verifies against.
+    ///
+    /// Beacon committee for a Normal cert, active pool for a Skip cert.
+    /// Returns `None` for `BeaconCert::Genesis` — past-tip genesis blocks
+    /// have no signer pool to verify against.
+    #[must_use]
+    pub fn signer_pool_for(
+        &self,
+        block: &CertifiedBeaconBlock,
+    ) -> Option<Vec<(ValidatorId, Bls12381G1PublicKey)>> {
+        match block.cert() {
+            BeaconCert::Normal(_) => Some(self.derive_beacon_committee()),
+            BeaconCert::Skip(_) => Some(self.derive_active_pool()),
+            BeaconCert::Genesis(_) => None,
+        }
+    }
+
+    /// Dynamic per-validator minimum stake.
+    ///
+    /// Pure function of state — no stored "current `min_stake`" field.
+    /// Evaluated fresh at every site that needs it (registration
+    /// validation, unjail validation, withdrawal-completion checks).
+    ///
+    /// Three forces:
+    ///   - `t_no_eject`: the highest level that wouldn't force any
+    ///     currently-active validator into `InsufficientStake`. The
+    ///     tightest pool's `effective_stake / current_active_count`.
+    ///   - `t_admit`: the level low enough that pools collectively *could*
+    ///     support the target validator population (one full shard
+    ///     committee per shard plus [`POOL_BUFFER_TARGET`] reserves).
+    ///   - [`MIN_STAKE_FLOOR`]: governance-set absolute minimum, Sybil
+    ///     backstop.
+    ///
+    /// Resolution: `min(t_no_eject, t_admit).max(MIN_STAKE_FLOOR)`.
+    /// `t_no_eject` is a ceiling, not a trigger — a rising `min_stake`
+    /// doesn't cause involuntary deactivations.
+    #[must_use]
+    pub fn min_stake(&self) -> Stake {
+        let ne = self.t_no_eject();
+        let ad = self.admit_threshold();
+        Stake::from_attos(ne.attos().min(ad.attos()).max(MIN_STAKE_FLOOR.attos()))
+    }
+
+    /// Highest `min_stake` could be without forcing any active validator
+    /// into `InsufficientStake`.
+    ///
+    /// Equals the minimum across pools (with at least one active
+    /// validator) of `effective_stake / current_active_count`.
+    /// [`Stake::MAX`] when no pool yet has an active validator (e.g. at
+    /// bootstrap).
+    fn t_no_eject(&self) -> Stake {
+        self.pools
+            .values()
+            .filter_map(|pool| {
+                let active = pool.current_active_count(self);
+                if active == 0 {
+                    None
+                } else {
+                    Some(pool.effective_stake().attos() / active as u128)
+                }
+            })
+            .min()
+            .map_or(Stake::MAX, Stake::from_attos)
+    }
+
+    /// Marginal price at which exactly the target epoch count is offered
+    /// across all pools.
+    ///
+    /// Each pool offers a descending sequence (`effective_stake / 1, / 2,
+    /// …`) — "if I had to support k validators, my budget per validator
+    /// would be e/k." Gather every pool's offerings, sort descending,
+    /// return the entry at position `target - 1`.
+    ///
+    /// Target is `shard_count × SHARD_CAPACITY + POOL_BUFFER_TARGET`. The
+    /// shard count isn't a stored field — it's `shard_committees.len()`.
+    /// Returns [`Stake::MAX`] for a zero target; returns [`MIN_STAKE_FLOOR`]
+    /// when pools collectively can't fill the target even at floor pricing
+    /// (anything below the floor would be clamped away by `min_stake`'s
+    /// `.max(...)` anyway).
+    fn admit_threshold(&self) -> Stake {
+        let target = self.shard_committees.len() * SHARD_CAPACITY + POOL_BUFFER_TARGET;
+        if target == 0 {
+            return Stake::MAX;
+        }
+
+        let mut offerings: Vec<u128> = Vec::new();
+        for pool in self.pools.values() {
+            let e = pool.effective_stake().attos();
+            if e == 0 {
+                continue;
+            }
+            // Cap per-pool at `target`: a pool's k-th offering for
+            // k > target can't enter the global top-`target`, because
+            // the same pool already contributed k-1 higher offerings
+            // ranked ahead of it. Also cap at `floor(e / MIN_STAKE_FLOOR)`
+            // since offerings below the floor would be clamped away in
+            // `min_stake` anyway.
+            let floor_cap = if MIN_STAKE_FLOOR == Stake::ZERO {
+                target
+            } else {
+                (e / MIN_STAKE_FLOOR.attos()) as usize
+            };
+            let k_max = floor_cap.min(target);
+            for k in 1..=k_max {
+                offerings.push(e / k as u128);
+            }
+        }
+
+        if offerings.len() < target {
+            return MIN_STAKE_FLOOR;
+        }
+
+        offerings.sort_unstable_by(|a, b| b.cmp(a));
+        Stake::from_attos(offerings[target - 1])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::JailReason;
+    use crate::crypto::keys::bls_keypair_from_seed;
+
+    fn pubkey(seed: u64) -> Bls12381G1PublicKey {
+        let mut s = [0u8; 32];
+        s[..8].copy_from_slice(&seed.to_le_bytes());
+        bls_keypair_from_seed(&s).public_key()
+    }
+
+    fn validator_record(id: u64, pool: u32, status: ValidatorStatus) -> ValidatorRecord {
+        ValidatorRecord {
+            id: ValidatorId::new(id),
+            pool: StakePoolId::new(pool),
+            status,
+            registered_at_epoch: Epoch::GENESIS,
+            pubkey: pubkey(id),
+        }
+    }
+
+    fn empty_state() -> BeaconState {
+        BeaconState {
+            current_epoch: Epoch::GENESIS,
+            validators: BTreeMap::new(),
+            pools: BTreeMap::new(),
+            randomness: Randomness::ZERO,
+            committee: Vec::new(),
+            shard_committees: BTreeMap::new(),
+            consumed_through: BTreeMap::new(),
+            miss_counters: BTreeMap::new(),
+        }
+    }
+
+    /// Build a state with one shard, one pool, and `n_active` validators
+    /// placed `OnShard { ready: true }`. The pool's `total_stake` is
+    /// `n_active * MIN_STAKE_FLOOR` — just enough to cover the active
+    /// set at the floor.
+    fn single_pool_state(n_active: u64) -> BeaconState {
+        let mut state = empty_state();
+        let pool_id = StakePoolId::new(0);
+        let shard = ShardGroupId::new(0);
+
+        let mut pool_validators = BTreeSet::new();
+        let mut members = Vec::new();
+        for i in 0..n_active {
+            let id = ValidatorId::new(i);
+            pool_validators.insert(id);
+            members.push(id);
+            state.validators.insert(
+                id,
+                validator_record(
+                    i,
+                    0,
+                    ValidatorStatus::OnShard {
+                        shard,
+                        ready: true,
+                        placed_at_epoch: Epoch::GENESIS,
+                    },
+                ),
+            );
+        }
+        state.pools.insert(
+            pool_id,
+            StakePool {
+                id: pool_id,
+                total_stake: Stake::from_attos(u128::from(n_active) * MIN_STAKE_FLOOR.attos()),
+                validators: pool_validators,
+                pending_withdrawals: Vec::new(),
+            },
+        );
+        state
+            .shard_committees
+            .insert(shard, ShardCommittee { members });
+        state
+    }
+
+    // ─── effective_stake ──────────────────────────────────────────────
+
+    #[test]
+    fn effective_stake_subtracts_pending_withdrawals() {
+        let pool = StakePool {
+            id: StakePoolId::new(0),
+            total_stake: Stake::from_whole_tokens(1_000),
+            validators: BTreeSet::new(),
+            pending_withdrawals: vec![
+                PendingWithdrawal {
+                    amount: Stake::from_whole_tokens(100),
+                    initiated_at_epoch: Epoch::new(1),
+                },
+                PendingWithdrawal {
+                    amount: Stake::from_whole_tokens(250),
+                    initiated_at_epoch: Epoch::new(2),
+                },
+            ],
+        };
+        assert_eq!(pool.effective_stake(), Stake::from_whole_tokens(650));
+    }
+
+    /// Defense-in-depth: an over-withdrawal (bookkeeping drift, hostile
+    /// shard) clamps `effective_stake` to zero rather than wrapping.
+    #[test]
+    fn effective_stake_saturates_when_pending_exceeds_total() {
+        let pool = StakePool {
+            id: StakePoolId::new(0),
+            total_stake: Stake::from_whole_tokens(100),
+            validators: BTreeSet::new(),
+            pending_withdrawals: vec![PendingWithdrawal {
+                amount: Stake::from_whole_tokens(500),
+                initiated_at_epoch: Epoch::GENESIS,
+            }],
+        };
+        assert_eq!(pool.effective_stake(), Stake::ZERO);
+    }
+
+    // ─── current_active_count ─────────────────────────────────────────
+
+    #[test]
+    fn current_active_count_includes_pooled_and_on_shard() {
+        let state = single_pool_state(4);
+        let pool = state.pools.get(&StakePoolId::new(0)).unwrap();
+        assert_eq!(pool.current_active_count(&state), 4);
+    }
+
+    #[test]
+    fn current_active_count_excludes_jailed_and_insufficient_stake() {
+        let mut state = single_pool_state(4);
+        // Jail one, mark another InsufficientStake — both must drop out.
+        state
+            .validators
+            .get_mut(&ValidatorId::new(0))
+            .unwrap()
+            .status = ValidatorStatus::Jailed {
+            since_epoch: Epoch::GENESIS,
+            reason: JailReason::Performance,
+        };
+        state
+            .validators
+            .get_mut(&ValidatorId::new(1))
+            .unwrap()
+            .status = ValidatorStatus::InsufficientStake;
+        let pool = state.pools.get(&StakePoolId::new(0)).unwrap();
+        assert_eq!(pool.current_active_count(&state), 2);
+    }
+
+    // ─── pooled_validators ────────────────────────────────────────────
+
+    #[test]
+    fn pooled_validators_returns_only_pooled_in_id_order() {
+        let mut state = single_pool_state(0);
+        // Insert out of id order to confirm BTreeMap iteration sorts.
+        for id in [3u64, 0, 2, 1] {
+            state.validators.insert(
+                ValidatorId::new(id),
+                validator_record(id, 0, ValidatorStatus::Pooled),
+            );
+        }
+        // Insert a non-Pooled validator that must be filtered out.
+        state.validators.insert(
+            ValidatorId::new(99),
+            validator_record(99, 0, ValidatorStatus::InsufficientStake),
+        );
+        assert_eq!(
+            state.pooled_validators(),
+            vec![
+                ValidatorId::new(0),
+                ValidatorId::new(1),
+                ValidatorId::new(2),
+                ValidatorId::new(3),
+            ]
+        );
+    }
+
+    // ─── min_stake ────────────────────────────────────────────────────
+
+    /// Empty state — no pools, no active validators. `t_no_eject` and
+    /// `admit_threshold` both default high; `min_stake` clamps to
+    /// `MIN_STAKE_FLOOR`.
+    #[test]
+    fn min_stake_floor_on_empty_state() {
+        let state = empty_state();
+        assert_eq!(state.min_stake(), MIN_STAKE_FLOOR);
+    }
+
+    /// One pool, four active validators, total stake exactly `4 ×
+    /// MIN_STAKE_FLOOR`. `t_no_eject = MIN_STAKE_FLOOR` (tightest
+    /// pool's ratio), so `min_stake` lands at the floor.
+    #[test]
+    fn min_stake_clamps_to_floor_at_tight_pool() {
+        let state = single_pool_state(4);
+        assert_eq!(state.min_stake(), MIN_STAKE_FLOOR);
+    }
+
+    // ─── max_active_count ─────────────────────────────────────────────
+
+    #[test]
+    fn max_active_count_equals_effective_over_min_stake() {
+        let state = single_pool_state(4);
+        let pool = state.pools.get(&StakePoolId::new(0)).unwrap();
+        // 4 floors of stake, `min_stake = floor` ⇒ cap of 4.
+        assert_eq!(pool.max_active_count(&state), 4);
+    }
+
+    /// A pending withdrawal that empties the pool's effective stake
+    /// drops `max_active_count` to zero, even though `total_stake`
+    /// remains funded.
+    #[test]
+    fn max_active_count_respects_pending_withdrawals() {
+        let mut state = single_pool_state(4);
+        let pool_mut = state.pools.get_mut(&StakePoolId::new(0)).unwrap();
+        pool_mut.pending_withdrawals.push(PendingWithdrawal {
+            amount: pool_mut.total_stake,
+            initiated_at_epoch: Epoch::GENESIS,
+        });
+        let pool = state.pools.get(&StakePoolId::new(0)).unwrap();
+        assert_eq!(pool.max_active_count(&state), 0);
+    }
+
+    // ─── miss counter sanity ──────────────────────────────────────────
+
+    /// Pins the `miss_counters` field shape (per-validator `u32`
+    /// counter) so a future refactor that changes the value type is
+    /// caught. The scoping invariants (per-epoch reset, status-
+    /// transition reset) live with `apply_epoch`, not the type.
+    #[test]
+    fn miss_counters_field_is_per_validator_u32_map() {
+        let mut state = empty_state();
+        state.miss_counters.insert(ValidatorId::new(5), 3);
+        state.miss_counters.insert(ValidatorId::new(7), 12);
+        assert_eq!(state.miss_counters.get(&ValidatorId::new(5)), Some(&3));
+        assert_eq!(state.miss_counters.get(&ValidatorId::new(7)), Some(&12));
+    }
 }

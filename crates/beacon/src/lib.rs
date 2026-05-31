@@ -13,7 +13,6 @@
 
 pub mod action_handlers;
 pub mod block_sync;
-pub mod constants;
 pub mod coordinator;
 pub mod equivocations;
 pub mod genesis;

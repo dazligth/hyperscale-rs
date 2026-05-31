@@ -361,8 +361,7 @@ fn silenced_replica_recovers_via_view_2_timeout() {
 /// touching the committee size.
 #[test]
 fn injected_topology_witness_mutates_state_at_commit() {
-    use hyperscale_beacon::constants::MIN_STAKE_FLOOR;
-    use hyperscale_types::{Stake, StakePoolId};
+    use hyperscale_types::{MIN_STAKE_FLOOR, Stake, StakePoolId};
 
     let mut sim = CoordinatorSim::new(4, 0x7010);
     let pool_id = StakePoolId::new(0);

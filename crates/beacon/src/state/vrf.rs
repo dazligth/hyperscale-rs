@@ -158,13 +158,12 @@ pub(super) fn jail_validator(
 mod tests {
 
     use hyperscale_types::{
-        JailReason, ShardGroupId, Stake, StakePoolId, ValidatorId, ValidatorStatus,
+        JailReason, MIN_STAKE_FLOOR, ShardGroupId, Stake, StakePoolId, ValidatorId, ValidatorStatus,
     };
 
     use super::super::test_fixtures::{
         apply_next_epoch, malformed_vrf_proposal, single_pool_state, validator_record, vrf_proposal,
     };
-    use crate::constants::MIN_STAKE_FLOOR;
     // ─── filter_and_roll_randomness ──────────────────────────────────────
 
     /// Randomness rolls even on an all-empty epoch. The mixer runs over

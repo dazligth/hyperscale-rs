@@ -5,20 +5,21 @@
 //! a `BeaconConfig` struct) so that altering one is a visible source-level
 //! edit, not a runtime knob someone can tweak by accident.
 //!
-//! Consumed by `BeaconState::apply_epoch` to drive shuffles, jail
-//! cooldowns, unbonding windows, and reward emission. Workspace-wide
-//! timing constants ([`EPOCH_DURATION`](hyperscale_types::EPOCH_DURATION)
-//! and friends) live in [`hyperscale_types::time`].
+//! Consumed by [`BeaconState::apply_epoch`](crate::BeaconState) (in
+//! `hyperscale_beacon`) to drive shuffles, jail cooldowns, unbonding
+//! windows, and reward emission. Workspace-wide timing constants
+//! ([`EPOCH_DURATION`](crate::EPOCH_DURATION) and friends) live in
+//! [`crate::time`].
 //!
 //! # Epoch-keyed time
 //!
 //! Time-scoped constants are denominated in **epochs**. Every committed
 //! block (Normal or Skip) advances the epoch counter by exactly one
-//! and represents roughly one
-//! [`EPOCH_DURATION`](hyperscale_types::EPOCH_DURATION) of wall-clock
-//! time, so anything counting wall-clock duration (cooldowns,
-//! unbonding windows, shuffle cadence) keys off epoch transitions to
-//! stay faithful to time even when the chain skips a stalled epoch.
+//! and represents roughly one [`EPOCH_DURATION`](crate::EPOCH_DURATION)
+//! of wall-clock time, so anything counting wall-clock duration
+//! (cooldowns, unbonding windows, shuffle cadence) keys off epoch
+//! transitions to stay faithful to time even when the chain skips a
+//! stalled epoch.
 //!
 //! The numerical values are ported from the prototype's defaults — fine
 //! for tests, almost certainly wrong for production (e.g. a 32-epoch
@@ -27,7 +28,7 @@
 
 use std::time::Duration;
 
-use hyperscale_types::{MAX_WITNESSES_PER_PROPOSER, Stake};
+use crate::{MAX_WITNESSES_PER_PROPOSER, Stake};
 
 // ─── Consensus timeouts ────────────────────────────────────────────────────
 
@@ -41,7 +42,7 @@ use hyperscale_types::{MAX_WITNESSES_PER_PROPOSER, Stake};
 /// leader to broadcast the proposal-object, gather inner-PC voting
 /// material, and circulate the cert; short enough that a stalled
 /// epoch clears via view rotation well inside the 45 s
-/// [`SKIP_TIMEOUT`](hyperscale_types::SKIP_TIMEOUT) trigger.
+/// [`SKIP_TIMEOUT`](crate::SKIP_TIMEOUT) trigger.
 pub const SPC_VIEW_TIMEOUT: Duration = Duration::from_secs(15);
 
 // ─── Committee sizing ──────────────────────────────────────────────────────
@@ -143,8 +144,8 @@ pub const TOKENS_PER_YEAR_TARGET: u64 = 300_000_000;
 /// Epochs per year at the target epoch cadence.
 ///
 /// `(60 / 5) * 24 * 365` at 5-minute epochs
-/// ([`EPOCH_DURATION`](hyperscale_types::EPOCH_DURATION)). Maintainers
-/// who change `EPOCH_DURATION` must update this number too.
+/// ([`EPOCH_DURATION`](crate::EPOCH_DURATION)). Maintainers who change
+/// `EPOCH_DURATION` must update this number too.
 pub const EPOCHS_PER_YEAR: u64 = (60 / 5) * 24 * 365;
 
 /// Per-epoch tokens credited to active stake pools, split pro-rata

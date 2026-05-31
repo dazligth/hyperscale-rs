@@ -1,10 +1,10 @@
 //! Pending-withdrawal maturation, plus the shared
 //! [`deactivate_to_insufficient_stake`] cascade primitive.
 
-use hyperscale_types::{BeaconState, Stake, StakePoolId, ValidatorId, ValidatorStatus};
+use hyperscale_types::{
+    BeaconState, Stake, StakePoolId, UNBONDING_WINDOW_EPOCHS, ValidatorId, ValidatorStatus,
+};
 
-use crate::constants::UNBONDING_WINDOW_EPOCHS;
-use crate::state::derived::{current_active_count, max_active_count};
 use crate::state::pool::pool_draw;
 
 /// Transition `victim_id` to `InsufficientStake` with the standard
@@ -106,8 +106,8 @@ pub(super) fn complete_pending_withdrawals(state: &mut BeaconState) -> Withdrawa
             let (cur, max) = {
                 let pool = state.pools.get(&pool_id).expect("present");
                 (
-                    current_active_count(pool, state),
-                    max_active_count(pool, state),
+                    pool.current_active_count(state),
+                    pool.max_active_count(state),
                 )
             };
             if cur <= max {
@@ -140,11 +140,11 @@ pub(super) fn complete_pending_withdrawals(state: &mut BeaconState) -> Withdrawa
 mod tests {
 
     use hyperscale_types::{
-        Epoch, PendingWithdrawal, ShardGroupId, Stake, StakePoolId, ValidatorId, ValidatorStatus,
+        EMISSIONS_PER_EPOCH, Epoch, MIN_STAKE_FLOOR, PendingWithdrawal, ShardGroupId, Stake,
+        StakePoolId, UNBONDING_WINDOW_EPOCHS, ValidatorId, ValidatorStatus,
     };
 
     use super::super::test_fixtures::{apply_next_epoch, state_with_pending_withdrawal};
-    use crate::constants::{EMISSIONS_PER_EPOCH, MIN_STAKE_FLOOR, UNBONDING_WINDOW_EPOCHS};
     // ─── complete_pending_withdrawals ────────────────────────────────────
 
     /// A withdrawal still within the unbonding window stays pending —

@@ -10,13 +10,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use hyperscale_types::{
     BeaconProposal, BeaconState, BlockHash, Bls12381G1PrivateKey, Bls12381G1PublicKey, BoundedVec,
-    Epoch, LeafIndex, NetworkDefinition, PendingWithdrawal, Randomness, ShardCommittee,
-    ShardGroupId, ShardWitness, ShardWitnessPayload, ShardWitnessProof, SlotEffects, Stake,
-    StakePool, StakePoolId, ValidatorId, ValidatorRecord, ValidatorStatus, VrfProof, Witness,
-    bls_keypair_from_seed, vrf_output_from_proof, vrf_sign,
+    Epoch, LeafIndex, MIN_STAKE_FLOOR, NetworkDefinition, PendingWithdrawal, Randomness,
+    ShardCommittee, ShardGroupId, ShardWitness, ShardWitnessPayload, ShardWitnessProof,
+    SlotEffects, Stake, StakePool, StakePoolId, ValidatorId, ValidatorRecord, ValidatorStatus,
+    VrfProof, Witness, bls_keypair_from_seed, vrf_output_from_proof, vrf_sign,
 };
 
-use crate::constants::MIN_STAKE_FLOOR;
 use crate::state::{ApplyEpochInput, apply_epoch};
 
 pub fn keypair(seed: u64) -> Bls12381G1PrivateKey {

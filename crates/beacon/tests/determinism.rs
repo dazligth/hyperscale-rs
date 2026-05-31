@@ -18,12 +18,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use hyperscale_beacon::constants::MIN_STAKE_FLOOR;
 use hyperscale_beacon::state::{ApplyEpochInput, apply_epoch};
 use hyperscale_types::{
-    BeaconState, Bls12381G1PublicKey, Epoch, NetworkDefinition, Randomness, ShardCommittee,
-    ShardGroupId, Stake, StakePool, StakePoolId, ValidatorId, ValidatorRecord, ValidatorStatus,
-    bls_keypair_from_seed,
+    BeaconState, Bls12381G1PublicKey, Epoch, MIN_STAKE_FLOOR, NetworkDefinition, Randomness,
+    ShardCommittee, ShardGroupId, Stake, StakePool, StakePoolId, ValidatorId, ValidatorRecord,
+    ValidatorStatus, bls_keypair_from_seed,
 };
 
 const V: usize = 3;
