@@ -20,9 +20,9 @@ use hyperscale_types::network::notification::{
     SpcEmptyViewMsgNotification, SpcNewCommitNotification, SpcNewViewNotification,
 };
 use hyperscale_types::{
-    BeaconProposal, CertifiedBeaconBlockVerifyContext, PcVote1, PcVote2, PcVote3,
-    PcVoteVerifyContext, SkipVerifyContext, SpcEmptyViewMsg, SpcVerifyContext, Verifiable,
-    Verified, pc_context, spc_context,
+    BeaconProposal, CertifiedBeaconBlockVerifyContext, DOMAIN_SPC_NEW_COMMIT, DOMAIN_SPC_NEW_VIEW,
+    PcVote1, PcVote2, PcVote3, PcVoteVerifyContext, SkipVerifyContext, SpcEmptyViewMsg,
+    SpcVerifyContext, Verifiable, Verified, pc_context, spc_context, spc_relay_signing_message,
 };
 
 /// Dispatch a beacon-owned [`Action`] on the consensus pool. Panics on
@@ -117,23 +117,38 @@ where
             });
         }
         Action::BroadcastSpcNewView {
-            epoch: _,
+            epoch,
             proposal,
             recipients,
         } => {
+            let view = proposal.view;
+            let proposal_hash = proposal.hash();
+            let signing_msg = spc_relay_signing_message(
+                network,
+                DOMAIN_SPC_NEW_VIEW,
+                epoch,
+                view,
+                &proposal_hash,
+            );
+            let sig = ctx.signing_key.sign_v1(&signing_msg);
             ctx.network.notify(
                 &recipients,
-                &SpcNewViewNotification::new(Arc::new(Verifiable::from(*proposal))),
+                &SpcNewViewNotification::new(epoch, me, sig, Arc::new(Verifiable::from(*proposal))),
             );
         }
         Action::BroadcastSpcNewCommit {
-            epoch: _,
+            epoch,
             msg,
             recipients,
         } => {
+            let view = msg.view;
+            let msg_hash = msg.hash();
+            let signing_msg =
+                spc_relay_signing_message(network, DOMAIN_SPC_NEW_COMMIT, epoch, view, &msg_hash);
+            let sig = ctx.signing_key.sign_v1(&signing_msg);
             ctx.network.notify(
                 &recipients,
-                &SpcNewCommitNotification::new(Arc::new(Verifiable::from(*msg))),
+                &SpcNewCommitNotification::new(epoch, me, sig, Arc::new(Verifiable::from(*msg))),
             );
         }
         Action::BuildAndBroadcastBeaconProposal {

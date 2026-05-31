@@ -29,9 +29,7 @@ use hyperscale_types::network::response::beacon::GetBeaconProposalResponse;
 use hyperscale_types::network::response::{
     GetLocalProvisionsResponse, GetProvisionResponse, LocalProvisionEntry,
 };
-use hyperscale_types::{
-    ExecutionCertificate, ShardGroupId, ValidatorId, Verifiable, ready_signal_message,
-};
+use hyperscale_types::{ExecutionCertificate, ShardGroupId, Verifiable, ready_signal_message};
 use tracing::warn;
 
 use crate::event::ShardScopedInput;
@@ -909,22 +907,26 @@ where
 
         // ── beacon.spc.new_view → ProtocolEvent::SpcNewViewReceived ─
         //
-        // SpcNewView / SpcNewCommit notifications don't carry an
-        // explicit sender id on the wire — the embedded cert /
-        // QC3 self-authenticates the message. The receiver-side
-        // pipeline-slot bookkeeping currently keys on `from`, so we
-        // pass `ValidatorId::ZERO` here as a sentinel; the slot
-        // dedup still works (every wire-arrived NewView shares the
-        // same sentinel) but per-sender dedup is lost. Adding an
-        // explicit `sender` field to the notification is a clean
-        // wire-format follow-up.
+        // The wrapper carries `sender + sender_signature` for relay
+        // accountability — the embedded cert self-authenticates content,
+        // the wrapper sig attributes "this validator relayed it" so the
+        // coordinator can key per-`(epoch, view, sender)` pipeline slots.
+        // We verify the sig under the sender's pubkey before fanning in;
+        // BLS check fails → drop (`verify_signed_by_proposer` already
+        // warns).
         let senders = self.process.shard_event_senders.clone();
+        let topology = self.process.topology_snapshot.clone();
         self.process
             .network
             .register_notification_handler::<SpcNewViewNotification>(
                 move |gossip: SpcNewViewNotification| {
+                    let topo = topology.load();
+                    if !verify_signed_by_proposer(&topo, &gossip, "spc_new_view", "SPC new view") {
+                        return;
+                    }
+                    let from = gossip.sender;
                     let event = ProtocolEvent::SpcNewViewReceived {
-                        from: ValidatorId::new(0),
+                        from,
                         proposal: gossip.proposal,
                     };
                     for (hosted_shard, tx) in &senders {
@@ -935,12 +937,23 @@ where
 
         // ── beacon.spc.new_commit → ProtocolEvent::SpcNewCommitReceived ──
         let senders = self.process.shard_event_senders.clone();
+        let topology = self.process.topology_snapshot.clone();
         self.process
             .network
             .register_notification_handler::<SpcNewCommitNotification>(
                 move |gossip: SpcNewCommitNotification| {
+                    let topo = topology.load();
+                    if !verify_signed_by_proposer(
+                        &topo,
+                        &gossip,
+                        "spc_new_commit",
+                        "SPC new commit",
+                    ) {
+                        return;
+                    }
+                    let from = gossip.sender;
                     let event = ProtocolEvent::SpcNewCommitReceived {
-                        from: ValidatorId::new(0),
+                        from,
                         msg: gossip.msg,
                     };
                     for (hosted_shard, tx) in &senders {

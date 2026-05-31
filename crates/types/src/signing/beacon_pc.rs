@@ -2,7 +2,7 @@
 
 use std::ops::Deref;
 
-use crate::{Epoch, NetworkDefinition, PC_VALUE_ELEMENT_BYTES, PcVector, SpcView};
+use crate::{Epoch, Hash, NetworkDefinition, PC_VALUE_ELEMENT_BYTES, PcVector, SpcView};
 
 /// Per-epoch SPC signing context. Holds the byte-encoding that binds
 /// SPC-level signatures (block certs, empty-views, recovery
@@ -79,6 +79,22 @@ pub const DOMAIN_PC_VOTE3: &[u8] = b"HYPERSCALE_PC_VOTE3_v1";
 /// pair `(empty_view, reported_max_view)` for the view-change protocol.
 pub const DOMAIN_PC_EMPTY_VIEW: &[u8] = b"HYPERSCALE_PC_EMPTY_VIEW_v1";
 
+/// Domain tag for the sender-attestation signature on
+/// [`SpcNewViewNotification`](crate::network::notification::beacon::SpcNewViewNotification).
+///
+/// The relay sig attributes "this validator relayed this
+/// `SpcProposalObject` for `(epoch, view)`" — the inner cert is
+/// self-authenticating, so this is purely accountability +
+/// pipeline-slot dedup, not content authentication.
+pub const DOMAIN_SPC_NEW_VIEW: &[u8] = b"HYPERSCALE_SPC_NEW_VIEW_v1";
+
+/// Domain tag for the sender-attestation signature on
+/// [`SpcNewCommitNotification`](crate::network::notification::beacon::SpcNewCommitNotification).
+///
+/// Same shape as [`DOMAIN_SPC_NEW_VIEW`] — relay accountability over
+/// the inner `SpcNewCommitMsg` payload.
+pub const DOMAIN_SPC_NEW_COMMIT: &[u8] = b"HYPERSCALE_SPC_NEW_COMMIT_v1";
+
 /// Derive an SPC instance's domain context from its epoch.
 ///
 /// Used as the per-epoch binding when constructing PC signing messages
@@ -137,6 +153,32 @@ pub fn pc_vote_signing_message(
     for el in vector.iter() {
         out.extend_from_slice(el.as_bytes());
     }
+    out
+}
+
+/// Sender-attestation signing message for SPC relay notifications.
+///
+/// Layout: `domain || network.id || epoch (u64 LE) || view (u64 LE) ||
+/// content_hash (32 bytes)`. The `content_hash` is
+/// [`SpcProposalObject::hash`](crate::SpcProposalObject::hash) for
+/// `DOMAIN_SPC_NEW_VIEW` and [`SpcNewCommitMsg::hash`](crate::SpcNewCommitMsg::hash)
+/// for `DOMAIN_SPC_NEW_COMMIT`. Binds the relay attestation to one
+/// specific payload at one specific `(epoch, view)` — a swapped
+/// payload or a replay across `(epoch, view)` invalidates the sig.
+#[must_use]
+pub fn spc_relay_signing_message(
+    network: &NetworkDefinition,
+    domain: &[u8],
+    epoch: Epoch,
+    view: SpcView,
+    content_hash: &Hash,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(domain.len() + 1 + 8 + 8 + 32);
+    out.extend_from_slice(domain);
+    out.push(network.id);
+    out.extend_from_slice(&epoch.inner().to_le_bytes());
+    out.extend_from_slice(&view.inner().to_le_bytes());
+    out.extend_from_slice(content_hash.as_bytes());
     out
 }
 

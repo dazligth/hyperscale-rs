@@ -42,7 +42,8 @@ mod validator_bind;
 
 pub use beacon_pc::{
     DOMAIN_PC_EMPTY_VIEW, DOMAIN_PC_VOTE1, DOMAIN_PC_VOTE2, DOMAIN_PC_VOTE2_LENGTH,
-    DOMAIN_PC_VOTE3, PcContext, SpcContext, pc_context, pc_vote_signing_message, spc_context,
+    DOMAIN_PC_VOTE3, DOMAIN_SPC_NEW_COMMIT, DOMAIN_SPC_NEW_VIEW, PcContext, SpcContext, pc_context,
+    pc_vote_signing_message, spc_context, spc_relay_signing_message,
 };
 pub use beacon_skip::{DOMAIN_SKIP_REQUEST, skip_request_message};
 pub use beacon_vrf::{

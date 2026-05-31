@@ -4,32 +4,62 @@ use std::sync::Arc;
 
 use sbor::prelude::BasicSbor;
 
-use crate::{MessageClass, NetworkMessage, SpcProposalObject, Verifiable};
+use crate::{
+    Bls12381G2Signature, DOMAIN_SPC_NEW_VIEW, Epoch, MessageClass, NetworkDefinition,
+    NetworkMessage, Signed, SpcProposalObject, ValidatorId, Verifiable, spc_relay_signing_message,
+};
 
-/// View-entry authorization sent by the leader of an SPC view.
+/// View-entry authorization sent by a beacon-committee member to the
+/// rest of the committee.
 ///
 /// The inner [`SpcProposalObject`] carries the view this proposal
 /// authorizes entry to and the certificate backing the authorization
 /// (either the previous view's verifiable output, or an indirect cert
 /// built from `f+1` empty-view attestations). The cert is
 /// self-authenticating — verifiers check the embedded `PcQc3` (Direct)
-/// or `f+1` skip-sig set (Indirect) — so the notification carries no
-/// outer signature. Wire decode lands the wrapper as
-/// `Verifiable::Unverified`; locally-dispatched sends preserve the
-/// `Verified` marker.
+/// or `f+1` skip-sig set (Indirect) — so the inner payload doesn't
+/// need a sender signature for content authentication.
+///
+/// `sender` + `sender_signature` ride on the wrapper for relay
+/// accountability: the signature is a BLS sig under the sender's key
+/// over `(network, epoch, view, proposal.hash())`. The receiver uses
+/// the verified sender to key per-`(epoch, view, sender)` pipeline
+/// slots; peer-scoring + topology committee-membership gates ride on
+/// the same attribution.
+///
+/// Wire decode lands the inner wrapper as `Verifiable::Unverified`;
+/// locally-dispatched sends preserve the `Verified` marker.
 #[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
 pub struct SpcNewViewNotification {
+    /// Epoch the inner SPC instance belongs to. Bound into the
+    /// signing message so a swap across epochs invalidates the sig.
+    pub epoch: Epoch,
+    /// Validator relaying this proposal — the implicit signer of
+    /// `sender_signature`.
+    pub sender: ValidatorId,
+    /// BLS signature over `spc_relay_signing_message(network,
+    /// DOMAIN_SPC_NEW_VIEW, epoch, proposal.view, proposal.hash())`.
+    pub sender_signature: Bls12381G2Signature,
     /// The proposal object.
     pub proposal: Arc<Verifiable<SpcProposalObject>>,
 }
 
 impl SpcNewViewNotification {
-    /// Wrap an [`SpcProposalObject`] for notification. Accepts a raw
-    /// proposal or a `Verified<SpcProposalObject>` — the wrapper
-    /// preserves the marker.
+    /// Wrap an [`SpcProposalObject`] for notification with the
+    /// relay-attestation sender + signature. The caller produces
+    /// `sender_signature` over [`spc_relay_signing_message`] with
+    /// [`DOMAIN_SPC_NEW_VIEW`].
     #[must_use]
-    pub fn new(proposal: impl Into<Arc<Verifiable<SpcProposalObject>>>) -> Self {
+    pub fn new(
+        epoch: Epoch,
+        sender: ValidatorId,
+        sender_signature: Bls12381G2Signature,
+        proposal: impl Into<Arc<Verifiable<SpcProposalObject>>>,
+    ) -> Self {
         Self {
+            epoch,
+            sender,
+            sender_signature,
             proposal: proposal.into(),
         }
     }
@@ -49,6 +79,26 @@ impl SpcNewViewNotification {
     }
 }
 
+impl Signed for SpcNewViewNotification {
+    fn signer(&self) -> ValidatorId {
+        self.sender
+    }
+
+    fn signature(&self) -> &Bls12381G2Signature {
+        &self.sender_signature
+    }
+
+    fn signing_message(&self, network: &NetworkDefinition) -> Vec<u8> {
+        spc_relay_signing_message(
+            network,
+            DOMAIN_SPC_NEW_VIEW,
+            self.epoch,
+            self.proposal.as_unverified().view,
+            &self.proposal.as_unverified().hash(),
+        )
+    }
+}
+
 impl NetworkMessage for SpcNewViewNotification {
     fn message_type_id() -> &'static str {
         "beacon.spc.new_view"
@@ -65,8 +115,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        Bls12381G2Signature, PcQc2, PcQc3, PcSignerLengths, PcVector, PcXpProof, SignerBitfield,
-        SpcCert, SpcView,
+        Bls12381G2Signature, Epoch, PcQc2, PcQc3, PcSignerLengths, PcVector, PcXpProof,
+        SignerBitfield, SpcCert, SpcView, ValidatorId,
     };
 
     fn sample_pc_qc3() -> PcQc3 {
@@ -102,7 +152,12 @@ mod tests {
 
     #[test]
     fn sbor_round_trip() {
-        let n = SpcNewViewNotification::new(Arc::new(Verifiable::from(sample_proposal())));
+        let n = SpcNewViewNotification::new(
+            Epoch::new(7),
+            ValidatorId::new(3),
+            Bls12381G2Signature([0x44; 96]),
+            Arc::new(Verifiable::from(sample_proposal())),
+        );
         let bytes = basic_encode(&n).unwrap();
         let decoded: SpcNewViewNotification = basic_decode(&bytes).unwrap();
         assert_eq!(n, decoded);

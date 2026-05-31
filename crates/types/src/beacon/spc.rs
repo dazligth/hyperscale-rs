@@ -167,6 +167,22 @@ pub struct SpcProposalObject {
     pub cert: SpcCert,
 }
 
+impl SpcProposalObject {
+    /// Content hash over the SBOR encoding. Used by sender-signature
+    /// schemes (see [`SpcNewViewNotification`](crate::network::notification::beacon::SpcNewViewNotification))
+    /// to bind a relay attestation to the exact payload being relayed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if SBOR encoding fails — `SpcProposalObject` is a closed
+    /// SBOR type and encoding is infallible in practice.
+    #[must_use]
+    pub fn hash(&self) -> Hash {
+        let bytes = basic_encode(self).expect("SpcProposalObject serialization should never fail");
+        Hash::from_bytes(&bytes)
+    }
+}
+
 /// `new-commit` message — an SPC participant announces a committed-low
 /// value at `view` along with the round-3 cert anchoring it as
 /// `proof.x_pp`.
@@ -186,6 +202,22 @@ pub struct SpcNewCommitMsg {
     /// [`Verified::<SpcNewCommitMsg>::from_verified_proof`] preserve the
     /// embedded marker.
     pub proof: Verifiable<PcQc3>,
+}
+
+impl SpcNewCommitMsg {
+    /// Content hash over the SBOR encoding. Used by sender-signature
+    /// schemes (see [`SpcNewCommitNotification`](crate::network::notification::beacon::SpcNewCommitNotification))
+    /// to bind a relay attestation to the exact payload being relayed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if SBOR encoding fails — `SpcNewCommitMsg` is a closed
+    /// SBOR type and encoding is infallible in practice.
+    #[must_use]
+    pub fn hash(&self) -> Hash {
+        let bytes = basic_encode(self).expect("SpcNewCommitMsg serialization should never fail");
+        Hash::from_bytes(&bytes)
+    }
 }
 
 impl SpcCert {
