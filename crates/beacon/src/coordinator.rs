@@ -22,8 +22,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hyperscale_core::{Action, FetchRequest, TimerId};
-use hyperscale_types::network::request::beacon::GetBeaconProposalRequest;
-use hyperscale_types::network::response::beacon::GetBeaconProposalResponse;
 use hyperscale_types::{
     BeaconBlock, BeaconCert, BeaconProposal, BeaconProposalVerifyContext, BeaconState,
     Bls12381G1PublicKey, CertifiedBeaconBlock, CertifiedBeaconBlockVerifyError, Epoch,
@@ -40,7 +38,7 @@ use tracing::{trace, warn};
 use crate::block_sync::BeaconBlockSyncManager;
 use crate::equivocations::EquivocationObservations;
 use crate::pending_blocks::PendingBeaconBlocks;
-use crate::proposal_pool::{BeaconProposalPool, serve_beacon_proposal_request};
+use crate::proposal_pool::BeaconProposalPool;
 use crate::skip_tracker::SkipTracker;
 use crate::spc::{SpcEffect, SpcEvent, SpcInstance};
 use crate::state::{apply_epoch, apply_input_for};
@@ -1688,19 +1686,13 @@ impl BeaconCoordinator {
         }
     }
 
-    /// Serve an inbound
-    /// [`GetBeaconProposalRequest`](hyperscale_types::network::request::beacon::GetBeaconProposalRequest)
-    /// from this coordinator's pool. Delegates to the free
-    /// [`serve_beacon_proposal_request`](crate::proposal_pool::serve_beacon_proposal_request)
-    /// so the network handler can call the same lookup directly
-    /// against an `Arc<BeaconProposalPool>` without holding a
-    /// coordinator reference.
+    /// Shared handle to this coordinator's proposal pool. Lets the
+    /// host hand the same `Arc` to the network-worker responder at
+    /// `crates/node/src/shard_io/fetch/beacon_proposal_serve.rs` and
+    /// lets tests run lookups without going through the network path.
     #[must_use]
-    pub fn serve_beacon_proposal_request(
-        &self,
-        req: &GetBeaconProposalRequest,
-    ) -> GetBeaconProposalResponse {
-        serve_beacon_proposal_request(&self.proposal_pool, req)
+    pub const fn proposal_pool(&self) -> &Arc<BeaconProposalPool> {
+        &self.proposal_pool
     }
 
     /// Beacon-committee members excluding the local validator —

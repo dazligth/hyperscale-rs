@@ -20,7 +20,6 @@ use hyperscale_beacon::coordinator::BeaconCoordinator;
 use hyperscale_beacon::genesis::build_genesis_beacon_state;
 use hyperscale_beacon::proposal_pool::BeaconProposalPool;
 use hyperscale_core::{Action, FetchRequest};
-use hyperscale_types::network::request::beacon::GetBeaconProposalRequest;
 use hyperscale_types::{
     BEACON_SIGNER_COUNT, BeaconCert, BeaconChainConfig, BeaconGenesisConfig, BeaconProposal,
     BeaconState, Bls12381G1PrivateKey, Bls12381G1PublicKey, CertifiedBeaconBlock,
@@ -966,11 +965,9 @@ impl CoordinatorSim {
                 class: _,
             }) => {
                 // Walk every other coordinator (with `preferred` first if
-                // set), ask each for the proposal via its
-                // `serve_beacon_proposal_request` method, and queue the
-                // first non-empty response back to the emitter. Empty if
-                // no peer has it.
-                let req = GetBeaconProposalRequest::new(epoch, validator);
+                // set), look up the proposal directly in its
+                // `proposal_pool`, and queue the first non-empty response
+                // back to the emitter. Empty if no peer has it.
                 let mut peer_order: Vec<usize> = (0..self.coordinators.len())
                     .filter(|&i| i != emitter_idx)
                     .collect();
@@ -979,9 +976,12 @@ impl CoordinatorSim {
                     peer_order.sort_by_key(|&i| i32::from(i != preferred_idx));
                 }
                 let proposal = peer_order.iter().find_map(|&peer_idx| {
-                    self.coordinators[peer_idx]
-                        .serve_beacon_proposal_request(&req)
-                        .proposal
+                    let pool = self.coordinators[peer_idx].proposal_pool();
+                    if pool.epoch() != epoch {
+                        return None;
+                    }
+                    pool.get(validator)
+                        .map(|verified| Arc::new(Verifiable::from((*verified).clone())))
                 });
                 self.loopback_q.push_back(Envelope {
                     to_idx: emitter_idx,

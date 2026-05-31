@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use hyperscale_beacon::proposal_pool::serve_beacon_proposal_request;
 use hyperscale_core::ProtocolEvent;
 use hyperscale_dispatch::Dispatch;
 use hyperscale_metrics::record_fetch_response_sent;
@@ -59,6 +58,7 @@ where
             GetBlockRequest, GetProvisionsRequest, GetRemoteHeadersRequest, GetTransactionsRequest,
         };
 
+        use crate::shard_io::fetch::beacon_proposal_serve::serve_beacon_proposal_request;
         use crate::shard_io::fetch::exec_cert_serve::serve_execution_certs_request;
         use crate::shard_io::fetch::finalized_wave_serve::serve_finalized_waves_request;
         use crate::shard_io::fetch::provision_serve::serve_provision_request;
@@ -370,12 +370,7 @@ where
             self.process
                 .network
                 .register_request_handler::<GetBeaconProposalRequest>(shard, move |req| {
-                    let response = serve_beacon_proposal_request(&beacon_proposal_pool, &req);
-                    record_fetch_response_sent(
-                        "beacon_proposal",
-                        usize::from(response.proposal.is_some()),
-                    );
-                    response
+                    serve_beacon_proposal_request(&beacon_proposal_pool, &req)
                 });
         } // end for shard in hosted_shards
     }
