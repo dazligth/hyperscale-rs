@@ -370,7 +370,12 @@ where
             self.process
                 .network
                 .register_request_handler::<GetBeaconProposalRequest>(shard, move |req| {
-                    serve_beacon_proposal_request(&beacon_proposal_pool, &req)
+                    let response = serve_beacon_proposal_request(&beacon_proposal_pool, &req);
+                    record_fetch_response_sent(
+                        "beacon_proposal",
+                        usize::from(response.proposal.is_some()),
+                    );
+                    response
                 });
         } // end for shard in hosted_shards
     }

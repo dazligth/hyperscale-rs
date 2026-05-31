@@ -182,12 +182,17 @@ fn skip_path_advances_past_blocked_epoch() {
     }
 }
 
-/// Drop every `beacon.proposal` notification arriving at validator 0.
-/// SPC commits on every epoch the way the other three committee
-/// members agree; assembling the committed block on validator 0
-/// requires the missing proposals, which it pulls via the
-/// `FetchRequest::BeaconProposal` pipeline. Every host's storage
-/// converges on the same `(block, state)` pair.
+/// Drop every `beacon.proposal` notification arriving at host 0.
+/// The chain still commits across the other three committee members;
+/// host 0 catches up through whichever path the protocol actually
+/// uses — block gossip when host 0 isn't on the committee, the
+/// fetch-binding round trip when host 0 *is* on the committee and
+/// PC commits a value referencing proposals its pool never observed.
+///
+/// Verifies that the wired-up `GetBeaconProposalRequest` responder
+/// (in `crates/node/src/process_io/network_handlers.rs`) doesn't
+/// regress: when fetch fires, it serves real proposals rather than
+/// the empty-response stub that used to live there.
 #[traced_test]
 #[test]
 fn fetch_recovery_path_unblocks_dropped_peer() {
@@ -205,7 +210,7 @@ fn fetch_recovery_path_unblocks_dropped_peer() {
 
     assert!(
         drop_rule.fired() >= 1,
-        "expected the `beacon.proposal` drop rule to fire at least once"
+        "expected `beacon.proposal` drop rule to fire at least once"
     );
 
     // All eight hosts caught up. Take the min latest-committed-epoch
