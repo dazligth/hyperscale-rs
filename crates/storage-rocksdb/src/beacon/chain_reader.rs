@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use hyperscale_storage::BeaconChainReader;
-use hyperscale_types::{BeaconBlockHash, BeaconState, CertifiedBeaconBlock, Epoch};
+use hyperscale_types::{BeaconBlockHash, BeaconState, CertifiedBeaconBlock, Epoch, Verified};
 use rocksdb::IteratorMode;
 
 use super::column_families::{BeaconBlocksByEpochCf, BeaconHashToEpochCf, BeaconStateByEpochCf};
@@ -11,14 +11,21 @@ use super::core::RocksDbBeaconStorage;
 use crate::typed_cf::TypedCf;
 
 impl BeaconChainReader for RocksDbBeaconStorage {
-    fn get_beacon_block_by_epoch(&self, epoch: Epoch) -> Option<Arc<CertifiedBeaconBlock>> {
+    fn get_beacon_block_by_epoch(
+        &self,
+        epoch: Epoch,
+    ) -> Option<Arc<Verified<CertifiedBeaconBlock>>> {
         self.cf_get::<BeaconBlocksByEpochCf>(&epoch.inner())
-            .map(Arc::new)
+            .map(|block| Arc::new(Verified::<CertifiedBeaconBlock>::from_persisted(block)))
     }
 
-    fn get_beacon_block_by_hash(&self, hash: BeaconBlockHash) -> Option<Arc<CertifiedBeaconBlock>> {
+    fn get_beacon_block_by_hash(
+        &self,
+        hash: BeaconBlockHash,
+    ) -> Option<Arc<Verified<CertifiedBeaconBlock>>> {
         let epoch = self.cf_get::<BeaconHashToEpochCf>(&hash.into_raw())?;
-        self.cf_get::<BeaconBlocksByEpochCf>(&epoch).map(Arc::new)
+        self.cf_get::<BeaconBlocksByEpochCf>(&epoch)
+            .map(|block| Arc::new(Verified::<CertifiedBeaconBlock>::from_persisted(block)))
     }
 
     fn get_state_by_epoch(&self, epoch: Epoch) -> Option<Arc<BeaconState>> {
@@ -39,7 +46,7 @@ impl BeaconChainReader for RocksDbBeaconStorage {
         Some(Epoch::new(u64::from_be_bytes(bytes)))
     }
 
-    fn latest_committed(&self) -> Option<(Arc<CertifiedBeaconBlock>, Arc<BeaconState>)> {
+    fn latest_committed(&self) -> Option<(Arc<Verified<CertifiedBeaconBlock>>, Arc<BeaconState>)> {
         let epoch = self.latest_committed_epoch()?;
         let block = self.get_beacon_block_by_epoch(epoch)?;
         let state = self.get_state_by_epoch(epoch)?;

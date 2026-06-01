@@ -132,13 +132,9 @@ where
             // ─── Beacon-local effects ──────────────────────────────────────
             Action::CommitBeaconBlock { block, state } => {
                 let epoch = block.epoch();
-                // Storage strips the `Verified` marker; the next
-                // load-from-storage path will need to re-wrap. Same
-                // shape as shard storage's `commit_block` API.
-                let block_for_storage = Arc::new((**block).clone());
                 self.process
                     .beacon_storage
-                    .commit_beacon_block(&block_for_storage, &state);
+                    .commit_beacon_block(&block, &state);
                 // Advance the beacon sync FSM's committed watermark on
                 // every commit (gossip or sync) so a later
                 // StartBeaconBlockSync fetches from current+1, and so

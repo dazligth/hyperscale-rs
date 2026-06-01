@@ -391,6 +391,22 @@ impl Verified<CertifiedBeaconBlock> {
     pub const fn genesis(config_hash: GenesisConfigHash) -> Self {
         Self::new_unchecked(CertifiedBeaconBlock::genesis(config_hash))
     }
+
+    /// Re-wrap a beacon block decoded from storage. The block satisfied
+    /// the [`Verified<CertifiedBeaconBlock>`] predicate at admission (the
+    /// cert verified against the variant's signer pool, equivocation
+    /// witnesses checked), so re-reading it post-restart returns a value
+    /// whose predicate already held at write time. The beacon storage
+    /// write entry point (`commit_beacon_block`) takes
+    /// `&Arc<Verified<CertifiedBeaconBlock>>`, so unverified blocks can't
+    /// reach the write path. Mirror of
+    /// [`Verified::<CertifiedBlock>::from_persisted`] on the shard side;
+    /// callers in storage adapters or recovery paths use this
+    /// constructor, any other caller is misusing it.
+    #[must_use]
+    pub const fn from_persisted(block: CertifiedBeaconBlock) -> Self {
+        Self::new_unchecked(block)
+    }
 }
 
 impl<E: Encoder<NoCustomValueKind>> Encode<NoCustomValueKind, E> for CertifiedBeaconBlock {

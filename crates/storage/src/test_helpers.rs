@@ -219,15 +219,17 @@ fn placeholder_cert() -> SpcCert {
 /// placeholder. Suitable for storage round-trip tests, not for
 /// consensus verification.
 #[must_use]
-pub fn make_test_beacon_block(epoch: u64, tag: &[u8]) -> Arc<CertifiedBeaconBlock> {
+pub fn make_test_beacon_block(epoch: u64, tag: &[u8]) -> Arc<Verified<CertifiedBeaconBlock>> {
     let block = BeaconBlock::new(
         Epoch::new(epoch),
         BeaconBlockHash::from_raw(Hash::from_bytes(tag)),
         Vec::new(),
     );
-    Arc::new(CertifiedBeaconBlock::new_unchecked(
-        block,
-        BeaconCert::Normal(Box::new(placeholder_cert())),
+    Arc::new(Verified::new_unchecked_for_test(
+        CertifiedBeaconBlock::new_unchecked(
+            block,
+            BeaconCert::Normal(Box::new(placeholder_cert())),
+        ),
     ))
 }
 
@@ -267,7 +269,7 @@ pub fn make_test_beacon_state(epoch: u64, tag: &[u8]) -> Arc<BeaconState> {
 pub fn make_test_block_and_state(
     epoch: u64,
     tag: &[u8],
-) -> (Arc<CertifiedBeaconBlock>, Arc<BeaconState>) {
+) -> (Arc<Verified<CertifiedBeaconBlock>>, Arc<BeaconState>) {
     let state = make_test_beacon_state(epoch, tag);
     let block = make_test_beacon_block(epoch, tag);
     (block, state)

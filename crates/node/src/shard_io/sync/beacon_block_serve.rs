@@ -28,7 +28,7 @@ pub fn serve_beacon_block_request(
     let response = storage
         .get_beacon_block_by_epoch(req.epoch)
         .map_or_else(GetBeaconBlockResponse::not_found, |block| {
-            GetBeaconBlockResponse::found(Arc::new(Verifiable::from((*block).clone())))
+            GetBeaconBlockResponse::found(Arc::new(Verifiable::from((**block).clone())))
         });
     record_fetch_response_sent("beacon_block", usize::from(response.block.is_some()));
     response

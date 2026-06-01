@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
-use hyperscale_types::{BeaconBlockHash, BeaconState, CertifiedBeaconBlock, Epoch};
+use hyperscale_types::{BeaconBlockHash, BeaconState, CertifiedBeaconBlock, Epoch, Verified};
 
 /// In-memory implementation of the beacon storage tier.
 ///
@@ -30,7 +30,7 @@ pub struct SimBeaconStorage {
 pub(super) struct Inner {
     /// Primary block store keyed by epoch. `BTreeMap` so iteration is
     /// naturally epoch-ordered for latest-key lookup.
-    pub(super) blocks_by_epoch: BTreeMap<Epoch, Arc<CertifiedBeaconBlock>>,
+    pub(super) blocks_by_epoch: BTreeMap<Epoch, Arc<Verified<CertifiedBeaconBlock>>>,
     /// Secondary index `block_hash → epoch`.
     pub(super) hash_to_epoch: BTreeMap<BeaconBlockHash, Epoch>,
     /// Parallel state store keyed by epoch. Written in the same
