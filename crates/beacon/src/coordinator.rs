@@ -1513,6 +1513,10 @@ impl BeaconCoordinator {
                     .notify_consumed_advanced(shard, watermark),
             );
         }
+        // Bound the verified-header maps to the unconsumed sliding window
+        // (the pool eviction above only covers witnesses, not headers).
+        self.witness_fetcher
+            .prune_stale_headers(&self.state.consumed_through);
 
         let next_epoch = self.state.current_epoch.next();
         self.proposal_pool.reset(next_epoch);

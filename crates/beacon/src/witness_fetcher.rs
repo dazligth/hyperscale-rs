@@ -17,11 +17,12 @@ use hyperscale_types::{
 ///
 /// Four internal maps:
 ///
-/// - `shard_headers` — verified source-shard headers, one per
-///   committed block, populated from every verified remote header
-///   regardless of committee membership; needed by off-committee vnodes
-///   to verify incoming `BeaconBlock`s' witness Merkle paths and used
-///   as the verify context for inbound [`ShardWitness`]es.
+/// - `shard_headers` — verified source-shard headers, populated from
+///   every verified remote header regardless of committee membership;
+///   needed by off-committee vnodes to verify incoming `BeaconBlock`s'
+///   witness Merkle paths and used as the verify context for inbound
+///   [`ShardWitness`]es. Bounded to a sliding window of recent /
+///   unconsumed headers by [`prune_stale_headers`](Self::prune_stale_headers).
 /// - `pool` — verified witnesses ready for inclusion. Empty when the
 ///   local validator is off-committee. `drain_for_proposal` clones
 ///   eligible entries out without removing them; physical eviction
@@ -188,6 +189,41 @@ impl ShardWitnessFetchTracker {
             }
         }
         evicted
+    }
+
+    /// Evict source-shard headers whose leaves are all consumed,
+    /// bounding `shard_headers` to a sliding window. For each shard,
+    /// keeps the latest header (highest height — needed by
+    /// [`is_ready_to_propose`](Self::is_ready_to_propose) to prove the
+    /// shard crossed an epoch boundary) and any header still holding
+    /// unconsumed leaves (`beacon_witness_leaf_count > consumed_through`,
+    /// needed for eligibility and to verify inbound witnesses /
+    /// `BeaconBlock`s referencing those leaves). Headers below the
+    /// consumed watermark hold only already-consumed leaves and can't
+    /// appear in a future proposal or witness, so they're dropped.
+    ///
+    /// Without this, `shard_headers` grows once per committed source
+    /// block forever — the witness pool is bounded by
+    /// [`notify_consumed_advanced`](Self::notify_consumed_advanced) but
+    /// the headers were not. Called from the coordinator's `adopt_block`
+    /// after `apply_epoch` advances `consumed_through`. Covers every
+    /// shard with stored headers, including any not yet present in
+    /// `consumed_through` (treated as watermark 0).
+    pub fn prune_stale_headers(&mut self, consumed_through: &BTreeMap<ShardGroupId, LeafIndex>) {
+        for (shard, headers) in &mut self.shard_headers {
+            let Some(&latest_height) = headers.keys().next_back() else {
+                continue;
+            };
+            let watermark = consumed_through
+                .get(shard)
+                .copied()
+                .unwrap_or(LeafIndex::new(0))
+                .inner();
+            headers.retain(|&height, h| {
+                height == latest_height
+                    || h.header().beacon_witness_leaf_count().inner() > watermark
+            });
+        }
     }
 
     /// Whether the local proposer can build an epoch's contribution:
@@ -553,6 +589,58 @@ mod tests {
         t.notify_consumed_advanced(shard(0), LeafIndex::new(3));
         t.notify_consumed_advanced(shard(0), LeafIndex::new(3));
         assert_eq!(t.pool_len(shard(0)), 2);
+    }
+
+    /// `prune_stale_headers` drops headers whose leaves are all consumed
+    /// (`leaf_count ≤ watermark`) while keeping unconsumed headers and
+    /// each shard's latest header.
+    #[test]
+    fn prune_stale_headers_drops_consumed_keeps_unconsumed_and_latest() {
+        let mut t = ShardWitnessFetchTracker::new();
+        // Heights 1..=4; leaf counts 2, 4, 6, 6 (height 4 added no leaves).
+        t.on_verified_remote_header(verified_header(shard(0), 1, 1_000, 2));
+        t.on_verified_remote_header(verified_header(shard(0), 2, 2_000, 4));
+        t.on_verified_remote_header(verified_header(shard(0), 3, 3_000, 6));
+        t.on_verified_remote_header(verified_header(shard(0), 4, 4_000, 6));
+
+        let mut consumed = BTreeMap::new();
+        consumed.insert(shard(0), LeafIndex::new(4));
+        t.prune_stale_headers(&consumed);
+
+        // leaf_count ≤ 4 and not latest → dropped.
+        assert!(t.header(shard(0), BlockHeight::new(1)).is_none());
+        assert!(t.header(shard(0), BlockHeight::new(2)).is_none());
+        // leaf_count 6 > 4 → kept; latest (height 4) always kept.
+        assert!(t.header(shard(0), BlockHeight::new(3)).is_some());
+        assert!(t.header(shard(0), BlockHeight::new(4)).is_some());
+    }
+
+    /// The latest header is retained even when fully consumed, since
+    /// `is_ready_to_propose` needs it to prove the shard crossed the
+    /// epoch boundary.
+    #[test]
+    fn prune_stale_headers_keeps_latest_even_when_fully_consumed() {
+        let mut t = ShardWitnessFetchTracker::new();
+        t.on_verified_remote_header(verified_header(shard(0), 1, 1_000, 5));
+        t.on_verified_remote_header(verified_header(shard(0), 2, 2_000, 5));
+        let mut consumed = BTreeMap::new();
+        consumed.insert(shard(0), LeafIndex::new(10));
+        t.prune_stale_headers(&consumed);
+        assert!(t.header(shard(0), BlockHeight::new(1)).is_none());
+        assert!(t.header(shard(0), BlockHeight::new(2)).is_some());
+    }
+
+    /// A shard absent from `consumed_through` is treated as watermark 0:
+    /// only its zero-leaf headers (below the latest) are dropped.
+    #[test]
+    fn prune_stale_headers_treats_absent_shard_as_watermark_zero() {
+        let mut t = ShardWitnessFetchTracker::new();
+        t.on_verified_remote_header(verified_header(shard(0), 1, 1_000, 0));
+        t.on_verified_remote_header(verified_header(shard(0), 2, 2_000, 3));
+        let consumed = BTreeMap::new();
+        t.prune_stale_headers(&consumed);
+        assert!(t.header(shard(0), BlockHeight::new(1)).is_none());
+        assert!(t.header(shard(0), BlockHeight::new(2)).is_some());
     }
 
     #[test]
