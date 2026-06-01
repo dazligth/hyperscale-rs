@@ -15,8 +15,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use hyperscale_types::{
-    BeaconGenesisConfig, BeaconState, Epoch, MIN_STAKE_FLOOR, ShardCommittee, ShardGroupId, Stake,
-    StakePool, StakePoolId, ValidatorId, ValidatorRecord, ValidatorStatus,
+    BeaconGenesisConfig, BeaconState, Epoch, MAX_VOTE_VECTOR_LEN, MIN_STAKE_FLOOR, ShardCommittee,
+    ShardGroupId, Stake, StakePool, StakePoolId, ValidatorId, ValidatorRecord, ValidatorStatus,
 };
 
 // ─── builder ───────────────────────────────────────────────────────────────
@@ -184,6 +184,11 @@ fn validate_config(config: &BeaconGenesisConfig) -> BTreeMap<ValidatorId, ShardG
     }
     let beacon_committee_cap = config.chain_config.beacon_committee_size as usize;
     assert!(
+        beacon_committee_cap <= MAX_VOTE_VECTOR_LEN,
+        "chain_config.beacon_committee_size ({beacon_committee_cap}) exceeds \
+         MAX_VOTE_VECTOR_LEN ({MAX_VOTE_VECTOR_LEN}); SPC view-input vectors can't hold it",
+    );
+    assert!(
         config.initial_beacon_committee.len() <= beacon_committee_cap,
         "initial_beacon_committee ({} members) exceeds chain_config.beacon_committee_size ({})",
         config.initial_beacon_committee.len(),
@@ -217,8 +222,8 @@ fn validate_config(config: &BeaconGenesisConfig) -> BTreeMap<ValidatorId, ShardG
 #[cfg(test)]
 mod tests {
     use hyperscale_types::{
-        BeaconChainConfig, Bls12381G1PublicKey, GenesisPool, GenesisValidator, Randomness,
-        bls_keypair_from_seed,
+        BeaconChainConfig, Bls12381G1PublicKey, GenesisPool, GenesisValidator, MAX_VOTE_VECTOR_LEN,
+        Randomness, bls_keypair_from_seed,
     };
 
     use super::*;
@@ -479,6 +484,35 @@ mod tests {
                 total_stake: Stake::from_attos(5 * MIN_STAKE_FLOOR.attos()),
             }],
             initial_beacon_committee: (0u64..5).map(ValidatorId::new).collect(),
+            initial_shard_committees: BTreeMap::new(),
+            initial_randomness: Randomness::ZERO,
+        };
+        let _ = build_genesis_beacon_state(&cfg);
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds MAX_VOTE_VECTOR_LEN")]
+    fn rejects_beacon_committee_size_over_vote_vector_cap() {
+        // A committee past the cap would overflow the `PcVector` that
+        // every SPC view input fills; reject the config rather than let
+        // `compute_view_input` panic at the first epoch rollover.
+        let pool_id = StakePoolId::new(0);
+        let cfg = BeaconGenesisConfig {
+            chain_config: BeaconChainConfig {
+                beacon_committee_size: u32::try_from(MAX_VOTE_VECTOR_LEN + 1)
+                    .expect("cap + 1 fits in u32"),
+                ..BeaconChainConfig::default()
+            },
+            initial_validators: vec![GenesisValidator {
+                id: ValidatorId::new(0),
+                pool: pool_id,
+                pubkey: pubkey(0),
+            }],
+            initial_pools: vec![GenesisPool {
+                id: pool_id,
+                total_stake: Stake::from_attos(MIN_STAKE_FLOOR.attos()),
+            }],
+            initial_beacon_committee: vec![],
             initial_shard_committees: BTreeMap::new(),
             initial_randomness: Randomness::ZERO,
         };

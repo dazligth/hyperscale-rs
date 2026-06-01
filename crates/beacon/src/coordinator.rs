@@ -1268,8 +1268,6 @@ impl BeaconCoordinator {
 
     /// Build the skip block paired with `cert`, adopt it via the
     /// shared adoption path, and emit a broadcast so peers converge.
-    /// Also forgets the anchor in the local `SkipTracker` so it doesn't
-    /// keep accumulating stale buckets.
     fn commit_skip_block(&mut self, cert: Verified<SkipEpochCert>) -> Vec<Action> {
         let anchor = self.latest_block.block_hash();
         let raw_cert = cert.into_inner();
@@ -1281,10 +1279,6 @@ impl BeaconCoordinator {
         )
         .expect("skip block pairs with skip cert by construction");
         let block_arc = Arc::new(certified);
-
-        // Forget the anchor before adoption advances the tip — once we
-        // commit, further requests at the now-prior anchor are stale.
-        self.skip_tracker.forget_anchor(anchor);
 
         let mut actions = self.adopt_block(Arc::clone(&block_arc));
         actions.push(Action::BroadcastBeaconBlock { block: block_arc });
@@ -1503,12 +1497,17 @@ impl BeaconCoordinator {
     /// broadcast (caller decides whether the local node is the
     /// originator).
     fn adopt_block(&mut self, block: Arc<Verified<CertifiedBeaconBlock>>) -> Vec<Action> {
+        // The anchor we're committing past. Its skip-request buckets are
+        // stale on any commit path once the tip advances, so drop them
+        // here.
+        let prior_tip = self.latest_block.block_hash();
         let mut new_state = self.state.clone();
         let input = apply_input_for(&block);
         apply_epoch(&mut new_state, &self.network, block.epoch(), input);
         self.state = new_state;
         self.latest_block = Arc::clone(&block);
         self.spc = None;
+        self.skip_tracker.forget_anchor(prior_tip);
         self.topology_snapshot =
             Arc::new(self.state.derive_topology_snapshot(self.network.clone()));
 
@@ -2670,6 +2669,36 @@ mod tests {
         let block = valid_block_at(&coord, Epoch::new(1), BeaconBlockHash::ZERO);
         let actions = coord.on_beacon_block_received(block);
         assert!(actions.is_empty());
+    }
+
+    /// Committing an epoch *normally* forgets the prior tip's
+    /// skip-request buckets, not just the skip-commit path — otherwise a
+    /// bucket leaks for every epoch that saw a skip request before
+    /// committing normally.
+    #[test]
+    fn normal_commit_forgets_prior_tip_skip_buckets() {
+        use hyperscale_types::SkipRequest;
+        let mut coord = fresh_coord();
+        let genesis_tip = coord.latest_block.block_hash();
+        // A skip request observed at the genesis tip for the in-flight
+        // epoch.
+        let req = Verified::<SkipRequest>::sign_local(
+            &keypair(0),
+            ValidatorId::new(0),
+            &NetworkDefinition::simulator(),
+            genesis_tip,
+            Epoch::new(1),
+        );
+        assert!(coord.skip_tracker.observe(req));
+        assert_eq!(coord.skip_tracker.bucket_count(), 1);
+
+        // Commit epoch 1 normally (a valid peer block chaining off genesis).
+        let block = valid_block_at(&coord, Epoch::new(1), genesis_tip);
+        let dispatched = coord.on_beacon_block_received(block);
+        let _ = complete_verifications(&mut coord, dispatched);
+
+        assert_eq!(coord.current_epoch(), Epoch::new(1));
+        assert_eq!(coord.skip_tracker.bucket_count(), 0);
     }
 
     #[test]

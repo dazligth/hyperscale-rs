@@ -26,9 +26,9 @@ use std::time::Duration;
 
 use blake3::Hasher;
 use hyperscale_types::{
-    Bls12381G1PublicKey, Epoch, PC_VALUE_ELEMENT_BYTES, PcQc1, PcQc2, PcQc3, PcValueElement,
-    PcVector, PcVote1, PcVote2, PcVote3, PcVoteEquivocation, SpcCert, SpcEmptyViewMsg,
-    SpcHighTriple, SpcProposalObject, SpcView, ValidatorId, Verified,
+    Bls12381G1PublicKey, Epoch, MAX_VOTE_VECTOR_LEN, PC_VALUE_ELEMENT_BYTES, PcQc1, PcQc2, PcQc3,
+    PcValueElement, PcVector, PcVote1, PcVote2, PcVote3, PcVoteEquivocation, SpcCert,
+    SpcEmptyViewMsg, SpcHighTriple, SpcProposalObject, SpcView, ValidatorId, Verified,
 };
 
 use crate::pc::{PcEffect, PcEvent, PcInstance};
@@ -387,6 +387,13 @@ impl SpcInstance {
     /// # Panics
     ///
     /// Panics if `committee.len() < 4` (inherited from `PcInstance`).
+    /// Panics if `committee.len() > MAX_VOTE_VECTOR_LEN`: every view's
+    /// input is an `n`-element [`PcVector`], whose constructor rejects
+    /// more than `MAX_VOTE_VECTOR_LEN` entries, so a larger committee
+    /// would otherwise panic deep in `compute_view_input`. Asserting
+    /// here fails fast with an attributable message. Genesis caps
+    /// `beacon_committee_size` at the same bound, so a validated config
+    /// can't reach this.
     #[must_use]
     pub fn new(
         epoch: Epoch,
@@ -394,6 +401,12 @@ impl SpcInstance {
         me: ValidatorId,
         view_timeout: Duration,
     ) -> Self {
+        assert!(
+            committee.len() <= MAX_VOTE_VECTOR_LEN,
+            "SPC committee ({}) exceeds MAX_VOTE_VECTOR_LEN ({MAX_VOTE_VECTOR_LEN}); \
+             view-input vectors can't hold it",
+            committee.len(),
+        );
         let mut views = BTreeMap::new();
         views.insert(
             SpcView::new(1),
