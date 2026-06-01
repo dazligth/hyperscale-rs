@@ -830,22 +830,14 @@ where
                     move |gossip: $note_ty| {
                         let view = gossip.view;
                         let event = match Arc::unwrap_or_clone(gossip.vote).into_verified() {
-                            Ok(verified) => {
-                                let from = verified.as_ref().validator();
-                                ProtocolEvent::$ver {
-                                    from,
-                                    view,
-                                    vote: register_pc_vote_handler!(@wrap $($box)? verified),
-                                }
-                            }
-                            Err(unverified) => {
-                                let from = unverified.validator();
-                                ProtocolEvent::$unv {
-                                    from,
-                                    view,
-                                    vote: register_pc_vote_handler!(@wrap $($box)? unverified.into()),
-                                }
-                            }
+                            Ok(verified) => ProtocolEvent::$ver {
+                                view,
+                                vote: register_pc_vote_handler!(@wrap $($box)? verified),
+                            },
+                            Err(unverified) => ProtocolEvent::$unv {
+                                view,
+                                vote: register_pc_vote_handler!(@wrap $($box)? unverified.into()),
+                            },
                         };
                         for (hosted_shard, tx) in &senders {
                             push_protocol_event(tx, *hosted_shard, event.clone());

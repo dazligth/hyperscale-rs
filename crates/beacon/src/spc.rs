@@ -337,7 +337,12 @@ impl ViewState {
 /// `MAX_PENDING_EMPTY_VIEW_AHEAD × n` entries. Beyond this we drop —
 /// the message is far enough ahead of `current_view` that catching
 /// up via state-sync is the right move.
-const MAX_PENDING_EMPTY_VIEW_AHEAD: u32 = 4;
+///
+/// Also the forward edge of the coordinator's pre-verification view
+/// window (see `BeaconCoordinator::spc_admission_ctx`): a message for a
+/// view beyond `current + MAX_PENDING_EMPTY_VIEW_AHEAD` is one the FSM
+/// wouldn't act on, so it's dropped before the BLS dispatch.
+pub(crate) const MAX_PENDING_EMPTY_VIEW_AHEAD: u32 = 4;
 
 /// One SPC FSM instance, scoped to a single epoch.
 ///

@@ -38,7 +38,7 @@ use tracing::{trace, warn};
 use crate::equivocations::EquivocationObservations;
 use crate::proposal_pool::BeaconProposalPool;
 use crate::skip_tracker::SkipTracker;
-use crate::spc::{SpcEffect, SpcEvent, SpcInstance};
+use crate::spc::{MAX_PENDING_EMPTY_VIEW_AHEAD, SpcEffect, SpcEvent, SpcInstance};
 use crate::state::{apply_epoch, apply_input_for};
 use crate::verification::{BeaconVerificationPipeline, SpcMsgKind};
 use crate::witness_fetcher::ShardWitnessFetchTracker;
@@ -291,16 +291,12 @@ impl BeaconCoordinator {
     /// mark the slot in-flight, and dispatch the BLS check to the
     /// crypto pool. Admission happens in [`Self::on_pc_vote1_verified`]
     /// when the result lands.
-    pub fn on_pc_vote1_received(
-        &mut self,
-        from: ValidatorId,
-        view: SpcView,
-        vote: PcVote1,
-    ) -> Vec<Action> {
-        let Some((epoch, committee)) = self.spc_admission_ctx(from, "PcVote") else {
+    pub fn on_pc_vote1_received(&mut self, view: SpcView, vote: PcVote1) -> Vec<Action> {
+        let validator = vote.validator();
+        let Some((epoch, committee)) = self.spc_admission_ctx(validator, view, "PcVote") else {
             return Vec::new();
         };
-        let key = (epoch, view, vote.validator(), PcVoteRound::Vote1);
+        let key = (epoch, view, validator, PcVoteRound::Vote1);
         if !self.verification.mark_pc_vote_in_flight(key) {
             return Vec::new();
         }
@@ -313,16 +309,12 @@ impl BeaconCoordinator {
     }
 
     /// A peer's round-2 PC vote arrived.
-    pub fn on_pc_vote2_received(
-        &mut self,
-        from: ValidatorId,
-        view: SpcView,
-        vote: Box<PcVote2>,
-    ) -> Vec<Action> {
-        let Some((epoch, committee)) = self.spc_admission_ctx(from, "PcVote") else {
+    pub fn on_pc_vote2_received(&mut self, view: SpcView, vote: Box<PcVote2>) -> Vec<Action> {
+        let validator = vote.validator();
+        let Some((epoch, committee)) = self.spc_admission_ctx(validator, view, "PcVote") else {
             return Vec::new();
         };
-        let key = (epoch, view, vote.validator(), PcVoteRound::Vote2);
+        let key = (epoch, view, validator, PcVoteRound::Vote2);
         if !self.verification.mark_pc_vote_in_flight(key) {
             return Vec::new();
         }
@@ -335,16 +327,12 @@ impl BeaconCoordinator {
     }
 
     /// A peer's round-3 PC vote arrived.
-    pub fn on_pc_vote3_received(
-        &mut self,
-        from: ValidatorId,
-        view: SpcView,
-        vote: Box<PcVote3>,
-    ) -> Vec<Action> {
-        let Some((epoch, committee)) = self.spc_admission_ctx(from, "PcVote") else {
+    pub fn on_pc_vote3_received(&mut self, view: SpcView, vote: Box<PcVote3>) -> Vec<Action> {
+        let validator = vote.validator();
+        let Some((epoch, committee)) = self.spc_admission_ctx(validator, view, "PcVote") else {
             return Vec::new();
         };
-        let key = (epoch, view, vote.validator(), PcVoteRound::Vote3);
+        let key = (epoch, view, validator, PcVoteRound::Vote3);
         if !self.verification.mark_pc_vote_in_flight(key) {
             return Vec::new();
         }
@@ -365,10 +353,10 @@ impl BeaconCoordinator {
         from: ValidatorId,
         proposal: Arc<Verifiable<SpcProposalObject>>,
     ) -> Vec<Action> {
-        let Some((epoch, committee)) = self.spc_admission_ctx(from, "NewView") else {
+        let view = proposal.view;
+        let Some((epoch, committee)) = self.spc_admission_ctx(from, view, "NewView") else {
             return Vec::new();
         };
-        let view = proposal.view;
         let key = (epoch, view, from, SpcMsgKind::NewView);
         if !self.verification.mark_spc_msg_in_flight(key) {
             return Vec::new();
@@ -390,10 +378,10 @@ impl BeaconCoordinator {
         from: ValidatorId,
         msg: Arc<Verifiable<SpcNewCommitMsg>>,
     ) -> Vec<Action> {
-        let Some((epoch, committee)) = self.spc_admission_ctx(from, "NewCommit") else {
+        let view = msg.view;
+        let Some((epoch, committee)) = self.spc_admission_ctx(from, view, "NewCommit") else {
             return Vec::new();
         };
-        let view = msg.view;
         let key = (epoch, view, from, SpcMsgKind::NewCommit);
         if !self.verification.mark_spc_msg_in_flight(key) {
             return Vec::new();
@@ -417,7 +405,7 @@ impl BeaconCoordinator {
     ) -> Vec<Action> {
         let signer = msg.signer;
         let view = msg.view;
-        let Some((epoch, committee)) = self.spc_admission_ctx(signer, "EmptyView") else {
+        let Some((epoch, committee)) = self.spc_admission_ctx(signer, view, "EmptyView") else {
             return Vec::new();
         };
         let key = (epoch, view, signer, SpcMsgKind::EmptyView);
@@ -442,7 +430,7 @@ impl BeaconCoordinator {
     ) -> Vec<Action> {
         let signer = msg.signer;
         if self
-            .spc_admission_ctx(signer, "VerifiedEmptyView")
+            .spc_admission_ctx(signer, msg.view, "VerifiedEmptyView")
             .is_none()
         {
             return Vec::new();
@@ -450,26 +438,59 @@ impl BeaconCoordinator {
         self.dispatch_spc_event(signer, SpcEvent::EmptyViewVerified(msg))
     }
 
-    /// Common gating for the three SPC receive entries: returns the
-    /// `(epoch, committee)` pair if the local instance is bootstrapped
-    /// and skip-quorum hasn't been reached at the local tip; logs and
-    /// returns `None` otherwise.
+    /// Common gating for the SPC receive entries: returns the
+    /// `(epoch, committee)` pair if the message is admissible, else logs
+    /// and returns `None`. Four gates, all cheap and applied before the
+    /// BLS dispatch so a flood can't mint verification slots:
+    ///
+    /// 1. The local SPC instance is bootstrapped.
+    /// 2. Skip-quorum hasn't been reached at the local tip.
+    /// 3. `signer` (the claimed vote/message signer, which keys the
+    ///    verification slot) is a current committee member — a
+    ///    non-committee signer can't contribute to consensus.
+    /// 4. `view` is within `[current_view, current_view +
+    ///    MAX_PENDING_EMPTY_VIEW_AHEAD]` — the window the FSM can act on.
+    ///
+    /// Gates 3 and 4 bound the `(signer, view)` slot key to
+    /// `committee_size × window`, so a peer flooding fabricated signers
+    /// or views can't grow the in-flight verification pools without
+    /// bound.
     fn spc_admission_ctx(
         &self,
-        from: ValidatorId,
+        signer: ValidatorId,
+        view: SpcView,
         kind: &'static str,
     ) -> Option<(Epoch, Vec<(ValidatorId, Bls12381G1PublicKey)>)> {
         let Some(spc) = self.spc.as_ref() else {
             trace!(
-                ?from,
+                ?signer,
                 kind, "SPC message received but no SPC instance bootstrapped",
             );
             return None;
         };
         if self.skip_quorum_at_tip() {
             trace!(
-                ?from,
+                ?signer,
                 kind, "SPC message received but skip-quorum reached at local tip — dropping",
+            );
+            return None;
+        }
+        if !spc.committee().iter().any(|(id, _)| *id == signer) {
+            trace!(
+                ?signer,
+                kind, "SPC message from non-committee signer — dropping before dispatch",
+            );
+            return None;
+        }
+        let current = spc.current_view().inner();
+        if view.inner() < current
+            || view.inner() > current.saturating_add(MAX_PENDING_EMPTY_VIEW_AHEAD)
+        {
+            trace!(
+                view = view.inner(),
+                current,
+                kind,
+                "SPC message view outside the actionable window — dropping before dispatch",
             );
             return None;
         }
@@ -706,14 +727,13 @@ impl BeaconCoordinator {
     /// dispatch and routes straight to the SPC sub-machine.
     pub fn on_verified_pc_vote1_received(
         &mut self,
-        from: ValidatorId,
         view: SpcView,
         vote: Verified<PcVote1>,
     ) -> Vec<Action> {
-        let Some((epoch, _)) = self.spc_admission_ctx(from, "PcVote") else {
+        let signer = vote.validator();
+        let Some((epoch, _)) = self.spc_admission_ctx(signer, view, "PcVote") else {
             return Vec::new();
         };
-        let signer = vote.validator();
         self.clear_pc_vote_slot(epoch, view, signer, PcVoteRound::Vote1, true);
         if self.spc.as_ref().is_some_and(|s| s.epoch() != epoch) {
             return Vec::new();
@@ -724,14 +744,13 @@ impl BeaconCoordinator {
     /// A round-2 PC vote that the coordinator received already verified.
     pub fn on_verified_pc_vote2_received(
         &mut self,
-        from: ValidatorId,
         view: SpcView,
         vote: Box<Verified<PcVote2>>,
     ) -> Vec<Action> {
-        let Some((epoch, _)) = self.spc_admission_ctx(from, "PcVote") else {
+        let signer = vote.validator();
+        let Some((epoch, _)) = self.spc_admission_ctx(signer, view, "PcVote") else {
             return Vec::new();
         };
-        let signer = vote.validator();
         self.clear_pc_vote_slot(epoch, view, signer, PcVoteRound::Vote2, true);
         if self.spc.as_ref().is_some_and(|s| s.epoch() != epoch) {
             return Vec::new();
@@ -742,14 +761,13 @@ impl BeaconCoordinator {
     /// A round-3 PC vote that the coordinator received already verified.
     pub fn on_verified_pc_vote3_received(
         &mut self,
-        from: ValidatorId,
         view: SpcView,
         vote: Box<Verified<PcVote3>>,
     ) -> Vec<Action> {
-        let Some((epoch, _)) = self.spc_admission_ctx(from, "PcVote") else {
+        let signer = vote.validator();
+        let Some((epoch, _)) = self.spc_admission_ctx(signer, view, "PcVote") else {
             return Vec::new();
         };
-        let signer = vote.validator();
         self.clear_pc_vote_slot(epoch, view, signer, PcVoteRound::Vote3, true);
         if self.spc.as_ref().is_some_and(|s| s.epoch() != epoch) {
             return Vec::new();
@@ -2210,8 +2228,62 @@ mod tests {
             PcVector::empty(),
             vec![Bls12381G2Signature([0u8; 96])],
         );
-        let actions = coord.on_pc_vote1_received(ValidatorId::new(1), SpcView::new(1), vote);
+        let actions = coord.on_pc_vote1_received(SpcView::new(1), vote);
         assert!(actions.is_empty());
+    }
+
+    /// A PC vote whose claimed signer is outside the committee is dropped
+    /// before the BLS dispatch, so it can't mint a verification slot.
+    #[test]
+    fn pc_vote_from_non_committee_signer_dropped_before_dispatch() {
+        use hyperscale_types::{Bls12381G2Signature, PcVote1};
+        let mut coord = fresh_coord();
+        coord.bootstrap_spc_for_next_epoch();
+        // The committee is validators 0..4; 9 is not a member.
+        let vote = PcVote1::new(
+            ValidatorId::new(9),
+            PcVector::empty(),
+            vec![Bls12381G2Signature([0u8; 96])],
+        );
+        let actions = coord.on_pc_vote1_received(SpcView::new(1), vote);
+        assert!(actions.is_empty());
+        assert_eq!(coord.verification.in_flight_count(), 0);
+    }
+
+    /// A PC vote for a view far outside `[current, current +
+    /// MAX_PENDING_EMPTY_VIEW_AHEAD]` is dropped before dispatch.
+    #[test]
+    fn pc_vote_for_out_of_window_view_dropped_before_dispatch() {
+        use hyperscale_types::{Bls12381G2Signature, PcVote1};
+        let mut coord = fresh_coord();
+        coord.bootstrap_spc_for_next_epoch();
+        // current_view is 1; the window is [1, 5], so view 6 is out.
+        let vote = PcVote1::new(
+            ValidatorId::new(1),
+            PcVector::empty(),
+            vec![Bls12381G2Signature([0u8; 96])],
+        );
+        let actions = coord.on_pc_vote1_received(SpcView::new(6), vote);
+        assert!(actions.is_empty());
+        assert_eq!(coord.verification.in_flight_count(), 0);
+    }
+
+    /// A committee signer's vote within the view window passes the gate
+    /// and dispatches a verification (one in-flight slot).
+    #[test]
+    fn pc_vote_from_committee_in_window_dispatches_verification() {
+        use hyperscale_types::{Bls12381G2Signature, PcVote1};
+        let mut coord = fresh_coord();
+        coord.bootstrap_spc_for_next_epoch();
+        let vote = PcVote1::new(
+            ValidatorId::new(1),
+            PcVector::empty(),
+            vec![Bls12381G2Signature([0u8; 96])],
+        );
+        let actions = coord.on_pc_vote1_received(SpcView::new(1), vote);
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], Action::VerifyPcVote1 { .. }));
+        assert_eq!(coord.verification.in_flight_count(), 1);
     }
 
     #[test]

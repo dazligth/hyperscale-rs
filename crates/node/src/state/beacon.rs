@@ -28,24 +28,24 @@ impl NodeStateMachine {
     #[allow(clippy::too_many_lines)] // single dispatch over beacon ProtocolEvent variants
     pub(super) fn handle_beacon(&mut self, event: ProtocolEvent) -> Vec<Action> {
         match event {
-            ProtocolEvent::UnverifiedPcVote1Received { from, view, vote } => self
+            ProtocolEvent::UnverifiedPcVote1Received { view, vote } => {
+                self.beacon_coordinator.on_pc_vote1_received(view, vote)
+            }
+            ProtocolEvent::UnverifiedPcVote2Received { view, vote } => {
+                self.beacon_coordinator.on_pc_vote2_received(view, vote)
+            }
+            ProtocolEvent::UnverifiedPcVote3Received { view, vote } => {
+                self.beacon_coordinator.on_pc_vote3_received(view, vote)
+            }
+            ProtocolEvent::VerifiedPcVote1Received { view, vote } => self
                 .beacon_coordinator
-                .on_pc_vote1_received(from, view, vote),
-            ProtocolEvent::UnverifiedPcVote2Received { from, view, vote } => self
+                .on_verified_pc_vote1_received(view, vote),
+            ProtocolEvent::VerifiedPcVote2Received { view, vote } => self
                 .beacon_coordinator
-                .on_pc_vote2_received(from, view, vote),
-            ProtocolEvent::UnverifiedPcVote3Received { from, view, vote } => self
+                .on_verified_pc_vote2_received(view, vote),
+            ProtocolEvent::VerifiedPcVote3Received { view, vote } => self
                 .beacon_coordinator
-                .on_pc_vote3_received(from, view, vote),
-            ProtocolEvent::VerifiedPcVote1Received { from, view, vote } => self
-                .beacon_coordinator
-                .on_verified_pc_vote1_received(from, view, vote),
-            ProtocolEvent::VerifiedPcVote2Received { from, view, vote } => self
-                .beacon_coordinator
-                .on_verified_pc_vote2_received(from, view, vote),
-            ProtocolEvent::VerifiedPcVote3Received { from, view, vote } => self
-                .beacon_coordinator
-                .on_verified_pc_vote3_received(from, view, vote),
+                .on_verified_pc_vote3_received(view, vote),
             ProtocolEvent::SpcNewViewReceived { from, proposal } => self
                 .beacon_coordinator
                 .on_spc_new_view_received(from, proposal),

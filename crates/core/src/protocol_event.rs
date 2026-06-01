@@ -656,33 +656,27 @@ pub enum ProtocolEvent {
     /// checked. Produced by the gossip handler — wire decode lands the
     /// wrapper as `Verifiable::Unverified`.
     UnverifiedPcVote1Received {
-        /// Sender id (transport-level).
-        from: ValidatorId,
         /// SPC view this vote belongs to.
         view: SpcView,
-        /// The vote.
+        /// The vote. Self-identifying via `vote.validator()`.
         vote: PcVote1,
     },
 
     /// Round-2 PC vote received whose signature still needs to be
     /// checked.
     UnverifiedPcVote2Received {
-        /// Sender id (transport-level).
-        from: ValidatorId,
         /// SPC view this vote belongs to.
         view: SpcView,
-        /// The vote.
+        /// The vote. Self-identifying via `vote.validator()`.
         vote: Box<PcVote2>,
     },
 
     /// Round-3 PC vote received whose signature still needs to be
     /// checked.
     UnverifiedPcVote3Received {
-        /// Sender id (transport-level).
-        from: ValidatorId,
         /// SPC view this vote belongs to.
         view: SpcView,
-        /// The vote.
+        /// The vote. Self-identifying via `vote.validator()`.
         vote: Box<PcVote3>,
     },
 
@@ -694,11 +688,10 @@ pub enum ProtocolEvent {
     ///
     /// [`Action::VerifyPcVote1`]: crate::Action::VerifyPcVote1
     VerifiedPcVote1Received {
-        /// Sender id (transport-level).
-        from: ValidatorId,
         /// SPC view this vote belongs to.
         view: SpcView,
         /// Verified vote, sealed via [`Verified::<PcVote1>::sign_local`].
+        /// Self-identifying via `vote.validator()`.
         vote: Verified<PcVote1>,
     },
 
@@ -707,11 +700,10 @@ pub enum ProtocolEvent {
     ///
     /// [`Action::VerifyPcVote2`]: crate::Action::VerifyPcVote2
     VerifiedPcVote2Received {
-        /// Sender id (transport-level).
-        from: ValidatorId,
         /// SPC view this vote belongs to.
         view: SpcView,
         /// Verified vote, sealed via [`Verified::<PcVote2>::sign_local`].
+        /// Self-identifying via `vote.validator()`.
         vote: Box<Verified<PcVote2>>,
     },
 
@@ -720,11 +712,10 @@ pub enum ProtocolEvent {
     ///
     /// [`Action::VerifyPcVote3`]: crate::Action::VerifyPcVote3
     VerifiedPcVote3Received {
-        /// Sender id (transport-level).
-        from: ValidatorId,
         /// SPC view this vote belongs to.
         view: SpcView,
         /// Verified vote, sealed via [`Verified::<PcVote3>::sign_local`].
+        /// Self-identifying via `vote.validator()`.
         vote: Box<Verified<PcVote3>>,
     },
 

@@ -51,7 +51,6 @@ where
                 &PcVote1Notification::new(view, Arc::new(Verifiable::from(verified.clone()))),
             );
             ctx.notify_protocol(ProtocolEvent::VerifiedPcVote1Received {
-                from: me,
                 view,
                 vote: verified,
             });
@@ -70,7 +69,6 @@ where
                 &PcVote2Notification::new(view, Arc::new(Verifiable::from(verified.clone()))),
             );
             ctx.notify_protocol(ProtocolEvent::VerifiedPcVote2Received {
-                from: me,
                 view,
                 vote: Box::new(verified),
             });
@@ -89,7 +87,6 @@ where
                 &PcVote3Notification::new(view, Arc::new(Verifiable::from(verified.clone()))),
             );
             ctx.notify_protocol(ProtocolEvent::VerifiedPcVote3Received {
-                from: me,
                 view,
                 vote: Box::new(verified),
             });

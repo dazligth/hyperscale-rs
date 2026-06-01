@@ -480,14 +480,14 @@ impl CoordinatorSim {
 
     fn deliver(&mut self, env: Envelope) -> Vec<Action> {
         match env.event {
-            SimEvent::PcVote1 { from, view, vote } => {
-                self.coordinators[env.to_idx].on_pc_vote1_received(from, view, vote)
+            SimEvent::PcVote1 { view, vote, .. } => {
+                self.coordinators[env.to_idx].on_pc_vote1_received(view, vote)
             }
-            SimEvent::PcVote2 { from, view, vote } => {
-                self.coordinators[env.to_idx].on_pc_vote2_received(from, view, vote)
+            SimEvent::PcVote2 { view, vote, .. } => {
+                self.coordinators[env.to_idx].on_pc_vote2_received(view, vote)
             }
-            SimEvent::PcVote3 { from, view, vote } => {
-                self.coordinators[env.to_idx].on_pc_vote3_received(from, view, vote)
+            SimEvent::PcVote3 { view, vote, .. } => {
+                self.coordinators[env.to_idx].on_pc_vote3_received(view, vote)
             }
             SimEvent::SpcNewView { from, proposal } => {
                 self.coordinators[env.to_idx].on_spc_new_view_received(from, proposal)
