@@ -8,7 +8,7 @@
 //! decoding, and forward delivered headers through the existing
 //! `RemoteHeaderReceived` path.
 
-use hyperscale_types::ShardGroupId;
+use hyperscale_types::{BlockHeight, ShardGroupId};
 
 use super::{Sync, SyncBinding, SyncConfig, SyncInput, SyncOutput};
 
@@ -41,6 +41,7 @@ pub struct RemoteHeaderSyncBinding;
 
 impl SyncBinding for RemoteHeaderSyncBinding {
     type Scope = ShardGroupId;
+    type Key = BlockHeight;
     type State = ();
     const NAME: &'static str = "remote_header_sync";
     /// The remote-header responder walks a contiguous height range and

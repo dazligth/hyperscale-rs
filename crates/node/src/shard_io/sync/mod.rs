@@ -49,7 +49,7 @@ use std::fmt::Debug;
 use std::hash::Hash;
 use std::time::{Duration, Instant};
 
-use hyperscale_types::BlockHeight;
+use hyperscale_types::{BlockHeight, Epoch};
 use serde::Serialize;
 use tracing::{info, trace};
 
@@ -145,14 +145,62 @@ pub struct ScopeStatus {
     pub queued_heights: usize,
 }
 
+/// The per-height watermark a binding syncs over.
+///
+/// The generic tracks a monotonic ordinal — block height for the shard
+/// chain, epoch for the beacon chain — so the key type only has to
+/// expose a genesis value, its `u64` ordinal (for window arithmetic and
+/// status gauges), and forward offsetting. Implemented for the concrete
+/// newtypes rather than working in raw `u64` so a binding can't
+/// accidentally cross a `BlockHeight` with an `Epoch`.
+pub trait SyncKey: Copy + Ord + Hash + Debug + 'static {
+    /// The watermark a fresh scope starts at (nothing committed yet).
+    const GENESIS: Self;
+
+    /// Raw ordinal — window math (`committed + window_size`), the
+    /// blocks-behind gauge, and trace/log fields read through this.
+    fn as_u64(self) -> u64;
+
+    /// This watermark advanced by `n` positions (saturating).
+    fn offset(self, n: u64) -> Self;
+}
+
+impl SyncKey for BlockHeight {
+    const GENESIS: Self = Self::GENESIS;
+
+    fn as_u64(self) -> u64 {
+        self.inner()
+    }
+
+    fn offset(self, n: u64) -> Self {
+        Self::new(self.inner().saturating_add(n))
+    }
+}
+
+impl SyncKey for Epoch {
+    const GENESIS: Self = Self::GENESIS;
+
+    fn as_u64(self) -> u64 {
+        self.inner()
+    }
+
+    fn offset(self, n: u64) -> Self {
+        Self::new(self.inner().saturating_add(n))
+    }
+}
+
 /// Trait carrying the per-binding type info the generic needs.
 ///
 /// `Scope` is the per-instance key (e.g. `()` for single-instance sync,
-/// `ShardGroupId` for multi-instance). `State` is binding-private mutable
-/// state owned by [`Sync`].
+/// `ShardGroupId` for multi-instance). `Key` is the watermark type the
+/// scope syncs over ([`BlockHeight`] or [`Epoch`]). `State` is
+/// binding-private mutable state owned by [`Sync`].
 pub trait SyncBinding: 'static {
     /// Scope key. Use `()` for single-instance bindings.
     type Scope: Clone + Ord + Hash + Debug + 'static;
+
+    /// Per-height watermark this binding syncs over.
+    type Key: SyncKey;
 
     /// Binding-private mutable state. Use `()` if none is needed.
     type State: Default + 'static;
@@ -175,31 +223,31 @@ pub trait SyncBinding: 'static {
     /// auxiliary state (e.g. block-sync's `force_full_refetch`) clean up
     /// entries at or below `committed` here. Default no-op.
     #[allow(unused_variables)]
-    fn on_admitted(state: &mut Self::State, scope: &Self::Scope, committed: BlockHeight) {}
+    fn on_admitted(state: &mut Self::State, scope: &Self::Scope, committed: Self::Key) {}
 
     /// Hook fired when a scope reaches its target and emits `Complete`.
     /// Binding can clear all per-id state at this point. Default no-op.
     #[allow(unused_variables)]
-    fn on_complete(state: &mut Self::State, scope: &Self::Scope, height: BlockHeight) {}
+    fn on_complete(state: &mut Self::State, scope: &Self::Scope, height: Self::Key) {}
 }
 
 /// Per-scope sliding-window state.
-struct ScopeState {
+struct ScopeState<K: SyncKey> {
     /// Highest known target. Advances on [`SyncInput::StartSync`] and
     /// implicitly when a delivered height exceeds the current target
     /// (the responder's possession of a height is proof of existence).
-    target: BlockHeight,
+    target: K,
     /// Highest admitted height.
-    committed: BlockHeight,
+    committed: K,
     /// Heights ready to fetch (lowest-first).
-    heights_to_fetch: BinaryHeap<Reverse<BlockHeight>>,
+    heights_to_fetch: BinaryHeap<Reverse<K>>,
     /// Membership for `heights_to_fetch` to dedupe pushes.
-    heights_queued: HashSet<BlockHeight>,
+    heights_queued: HashSet<K>,
     /// Heights currently in a dispatched fetch range.
-    in_flight: HashSet<BlockHeight>,
+    in_flight: HashSet<K>,
     /// Heights whose last fetch failed; held out of `heights_to_fetch`
     /// until their backoff deadline elapses.
-    deferred: HashMap<BlockHeight, DeferralBackoff>,
+    deferred: HashMap<K, DeferralBackoff>,
     /// Heights delivered by the network but not yet admitted by the
     /// consumer (admission is async — e.g. cross-shard QC verification
     /// on a thread pool). Held out of `heights_to_fetch` until either
@@ -208,17 +256,17 @@ struct ScopeState {
     /// `queue_window` would re-queue every just-delivered range and
     /// `emit_fetches` would dispatch a duplicate fetch for the bytes
     /// we just received.
-    pending_admission: HashMap<BlockHeight, Instant>,
+    pending_admission: HashMap<K, Instant>,
     /// Number of in-flight fetch ranges for this scope. Bounded by
     /// `max_concurrent_per_scope`.
     in_flight_ranges: usize,
 }
 
-impl ScopeState {
-    fn new(target: BlockHeight) -> Self {
+impl<K: SyncKey> ScopeState<K> {
+    fn new(target: K) -> Self {
         Self {
             target,
-            committed: BlockHeight::GENESIS,
+            committed: K::GENESIS,
             heights_to_fetch: BinaryHeap::new(),
             heights_queued: HashSet::new(),
             in_flight: HashSet::new(),
@@ -228,7 +276,7 @@ impl ScopeState {
         }
     }
 
-    fn queue_height(&mut self, height: BlockHeight) {
+    fn queue_height(&mut self, height: K) {
         if self.in_flight.contains(&height)
             || self.deferred.contains_key(&height)
             || self.pending_admission.contains_key(&height)
@@ -240,7 +288,7 @@ impl ScopeState {
         }
     }
 
-    fn pop_next_height(&mut self) -> Option<BlockHeight> {
+    fn pop_next_height(&mut self) -> Option<K> {
         while let Some(Reverse(height)) = self.heights_to_fetch.pop() {
             if self.heights_queued.remove(&height) && !self.in_flight.contains(&height) {
                 return Some(height);
@@ -255,7 +303,7 @@ impl ScopeState {
     /// applying the same validity filter — without this, `peek` can return
     /// a stale entry that `pop_next_height` then skips, breaking callers
     /// that assume a successful peek implies a successful pop.
-    fn peek_next_height(&mut self) -> Option<BlockHeight> {
+    fn peek_next_height(&mut self) -> Option<K> {
         while let Some(&Reverse(top)) = self.heights_to_fetch.peek() {
             if self.heights_queued.contains(&top) && !self.in_flight.contains(&top) {
                 return Some(top);
@@ -274,36 +322,30 @@ pub use crate::shard_loop::FetchFailureKind;
 pub enum SyncInput<B: SyncBinding> {
     /// Set or raise the sync target for `scope`. Idempotent if `target`
     /// hasn't moved forward.
-    StartSync {
-        scope: B::Scope,
-        target: BlockHeight,
-    },
+    StartSync { scope: B::Scope, target: B::Key },
     /// A response was received covering `[from, from + count)`.
     /// `delivered_heights` lists the heights actually returned (subset of
     /// the range). Heights in the range that are not in
     /// `delivered_heights` get deferred.
     FetchSucceeded {
         scope: B::Scope,
-        from: BlockHeight,
+        from: B::Key,
         count: u64,
-        delivered_heights: Vec<BlockHeight>,
+        delivered_heights: Vec<B::Key>,
         now: Instant,
     },
     /// The fetch round-trip failed. Heights are re-queued; whether they
     /// pay an exponential-backoff penalty depends on `kind`.
     FetchFailed {
         scope: B::Scope,
-        from: BlockHeight,
+        from: B::Key,
         count: u64,
         kind: FetchFailureKind,
         now: Instant,
     },
     /// The consumer admitted a height for `scope` (e.g. via QC verification).
     /// Advances per-scope `committed`; may emit `Complete`.
-    Admitted {
-        scope: B::Scope,
-        height: BlockHeight,
-    },
+    Admitted { scope: B::Scope, height: B::Key },
     /// Periodic tick: promotes deferred heights past their backoff and
     /// emits any newly-ready fetches.
     Tick { now: Instant },
@@ -316,21 +358,18 @@ pub enum SyncOutput<B: SyncBinding> {
     /// Issue a fetch covering `[from, from + count)` for `scope`.
     Fetch {
         scope: B::Scope,
-        from: BlockHeight,
+        from: B::Key,
         count: u64,
     },
     /// `scope` caught up to `height`. Emitted at most once per
     /// caught-up cycle.
-    Complete {
-        scope: B::Scope,
-        height: BlockHeight,
-    },
+    Complete { scope: B::Scope, height: B::Key },
 }
 
 /// Generic sliding-window sync state machine.
 pub struct Sync<B: SyncBinding> {
     config: SyncConfig,
-    scopes: BTreeMap<B::Scope, ScopeState>,
+    scopes: BTreeMap<B::Scope, ScopeState<B::Key>>,
     binding_state: B::State,
 }
 
@@ -375,7 +414,7 @@ impl<B: SyncBinding> Sync<B> {
     pub fn total_blocks_behind(&self) -> u64 {
         self.scopes
             .values()
-            .map(|s| s.target.inner().saturating_sub(s.committed.inner()))
+            .map(|s| s.target.as_u64().saturating_sub(s.committed.as_u64()))
             .sum()
     }
 
@@ -387,7 +426,7 @@ impl<B: SyncBinding> Sync<B> {
 
     /// Per-scope target. `None` if the scope has no entry yet.
     #[must_use]
-    pub fn target(&self, scope: &B::Scope) -> Option<BlockHeight> {
+    pub fn target(&self, scope: &B::Scope) -> Option<B::Key> {
         self.scopes.get(scope).map(|s| s.target)
     }
 
@@ -397,9 +436,9 @@ impl<B: SyncBinding> Sync<B> {
         self.scopes
             .get(scope)
             .map(|s| ScopeStatus {
-                target_height: s.target.inner(),
-                current_height: s.committed.inner(),
-                blocks_behind: s.target.inner().saturating_sub(s.committed.inner()),
+                target_height: s.target.as_u64(),
+                current_height: s.committed.as_u64(),
+                blocks_behind: s.target.as_u64().saturating_sub(s.committed.as_u64()),
                 pending_fetches: s.in_flight_ranges,
                 queued_heights: s.heights_queued.len()
                     + s.deferred.len()
@@ -435,7 +474,7 @@ impl<B: SyncBinding> Sync<B> {
     // Input Handlers
     // ═══════════════════════════════════════════════════════════════════════
 
-    fn handle_start_sync(&mut self, scope: &B::Scope, target: BlockHeight) -> Vec<SyncOutput<B>> {
+    fn handle_start_sync(&mut self, scope: &B::Scope, target: B::Key) -> Vec<SyncOutput<B>> {
         // Distinguish "first sync for this scope" from "raise an existing
         // target": a freshly created entry has `target == GENESIS`, so we
         // always proceed into the window-queue path on its first call.
@@ -443,7 +482,7 @@ impl<B: SyncBinding> Sync<B> {
         let state = self
             .scopes
             .entry(scope.clone())
-            .or_insert_with(|| ScopeState::new(BlockHeight::GENESIS));
+            .or_insert_with(|| ScopeState::new(B::Key::GENESIS));
 
         if !is_new && state.target >= target {
             return vec![];
@@ -452,8 +491,8 @@ impl<B: SyncBinding> Sync<B> {
         info!(
             binding = B::NAME,
             ?scope,
-            target = target.inner(),
-            committed = state.committed.inner(),
+            target = target.as_u64(),
+            committed = state.committed.as_u64(),
             "sync: target raised"
         );
 
@@ -466,9 +505,9 @@ impl<B: SyncBinding> Sync<B> {
     fn handle_fetch_succeeded(
         &mut self,
         scope: &B::Scope,
-        from: BlockHeight,
+        from: B::Key,
         count: u64,
-        delivered_heights: &[BlockHeight],
+        delivered_heights: &[B::Key],
         now: Instant,
     ) -> Vec<SyncOutput<B>> {
         let Some(state) = self.scopes.get_mut(scope) else {
@@ -476,7 +515,7 @@ impl<B: SyncBinding> Sync<B> {
         };
         state.in_flight_ranges = state.in_flight_ranges.saturating_sub(1);
 
-        let delivered: HashSet<BlockHeight> = delivered_heights.iter().copied().collect();
+        let delivered: HashSet<B::Key> = delivered_heights.iter().copied().collect();
         let pending_deadline = now + PENDING_ADMISSION_TIMEOUT;
 
         // For prefix-responder bindings, a short response signals the
@@ -496,15 +535,14 @@ impl<B: SyncBinding> Sync<B> {
             // a contiguous-prefix responder shouldn't produce) falls
             // back to the default deferred-retry path so a buggy peer
             // can't trick us into abandoning a real fetch range.
-            let is_prefix =
-                (0..len).all(|i| delivered.contains(&BlockHeight::new(from.inner() + i)));
+            let is_prefix = (0..len).all(|i| delivered.contains(&from.offset(i)));
             if is_prefix {
                 let inferred_tip = if len == 0 {
                     // Tip is strictly below `from`; floor at `committed`
                     // (we never lower `target` past what we already have).
                     state.committed
                 } else {
-                    BlockHeight::new(from.inner() + len - 1)
+                    from.offset(len - 1)
                 };
                 if inferred_tip < state.target {
                     state.target = inferred_tip.max(state.committed);
@@ -521,7 +559,7 @@ impl<B: SyncBinding> Sync<B> {
         }
 
         for offset in 0..count {
-            let h = BlockHeight::new(from.inner() + offset);
+            let h = from.offset(offset);
             state.in_flight.remove(&h);
             if delivered.contains(&h) {
                 if h > state.committed {
@@ -546,11 +584,9 @@ impl<B: SyncBinding> Sync<B> {
         if let Some(max_delivered) = delivered.iter().max().copied()
             && max_delivered > state.target
         {
-            let cap = BlockHeight::new(
-                state
-                    .committed
-                    .inner()
-                    .saturating_add(self.config.window_size)
+            let cap = state.committed.offset(
+                self.config
+                    .window_size
                     .saturating_add(self.config.max_per_request),
             );
             state.target = max_delivered.min(cap);
@@ -563,7 +599,7 @@ impl<B: SyncBinding> Sync<B> {
     fn handle_fetch_failed(
         &mut self,
         scope: &B::Scope,
-        from: BlockHeight,
+        from: B::Key,
         count: u64,
         kind: FetchFailureKind,
         now: Instant,
@@ -573,7 +609,7 @@ impl<B: SyncBinding> Sync<B> {
         };
         state.in_flight_ranges = state.in_flight_ranges.saturating_sub(1);
         for offset in 0..count {
-            let h = BlockHeight::new(from.inner() + offset);
+            let h = from.offset(offset);
             if state.in_flight.remove(&h) && h <= state.target && h > state.committed {
                 match kind {
                     // The request manager already retried against rotated
@@ -602,14 +638,14 @@ impl<B: SyncBinding> Sync<B> {
         self.emit_fetches()
     }
 
-    fn handle_admitted(&mut self, scope: &B::Scope, height: BlockHeight) -> Vec<SyncOutput<B>> {
+    fn handle_admitted(&mut self, scope: &B::Scope, height: B::Key) -> Vec<SyncOutput<B>> {
         // Always track the latest committed height for this scope, even if
         // sync hasn't been started yet. Otherwise a future `StartSync`
         // would re-fetch heights the consumer has already admitted.
         let state = self
             .scopes
             .entry(scope.clone())
-            .or_insert_with(|| ScopeState::new(BlockHeight::GENESIS));
+            .or_insert_with(|| ScopeState::new(B::Key::GENESIS));
 
         // `Complete` should only fire on the transition from "syncing" to
         // "caught up" — i.e. the consumer admitted the height that closes
@@ -639,7 +675,7 @@ impl<B: SyncBinding> Sync<B> {
             info!(
                 binding = B::NAME,
                 ?scope,
-                height = committed.inner(),
+                height = committed.as_u64(),
                 "sync: caught up"
             );
             B::on_complete(&mut self.binding_state, scope, committed);
@@ -663,7 +699,7 @@ impl<B: SyncBinding> Sync<B> {
             // arrived, every candidate sender's QC failed, and the only
             // way forward is to re-fetch and find different senders. An
             // additional `deferred` backoff just delays that.
-            let stale: Vec<BlockHeight> = state
+            let stale: Vec<B::Key> = state
                 .pending_admission
                 .iter()
                 .filter_map(|(h, deadline)| (now >= *deadline).then_some(*h))
@@ -676,7 +712,7 @@ impl<B: SyncBinding> Sync<B> {
             }
 
             // Promote ready deferred heights back into the heap.
-            let ready: Vec<BlockHeight> = state
+            let ready: Vec<B::Key> = state
                 .deferred
                 .iter()
                 .filter_map(|(h, b)| b.is_ready(now).then_some(*h))
@@ -702,18 +738,21 @@ impl<B: SyncBinding> Sync<B> {
 
     /// Queue heights `[committed+1, min(committed+window_size, target)]`.
     /// Idempotent — already-tracked heights are skipped.
-    fn queue_window(state: &mut ScopeState, config: &SyncConfig) {
+    fn queue_window(state: &mut ScopeState<B::Key>, config: &SyncConfig) {
         if state.committed >= state.target {
             return;
         }
-        let first = state.committed.inner() + 1;
+        let committed = state.committed.as_u64();
         let window_end = if config.window_size == 0 {
-            state.target.inner()
+            state.target.as_u64()
         } else {
-            (state.committed.inner() + config.window_size).min(state.target.inner())
+            (committed + config.window_size).min(state.target.as_u64())
         };
-        for h in first..=window_end {
-            state.queue_height(BlockHeight::new(h));
+        // Queue `(committed, window_end]` via forward offsets so the key
+        // type stays opaque (no construction from a raw ordinal).
+        let base = state.committed;
+        for i in 1..=window_end.saturating_sub(committed) {
+            state.queue_height(base.offset(i));
         }
     }
 
@@ -732,7 +771,7 @@ impl<B: SyncBinding> Sync<B> {
                 };
                 // Pack: pull lowest queued height, then keep pulling while
                 // the next is contiguous and under the per-request cap.
-                let mut covered: Vec<BlockHeight> = Vec::new();
+                let mut covered: Vec<B::Key> = Vec::new();
                 let mut next = range_start;
                 while covered.len() < max_per_usize {
                     let Some(peek) = state.peek_next_height() else {
@@ -744,7 +783,7 @@ impl<B: SyncBinding> Sync<B> {
                     let popped = state.pop_next_height().expect("peek matched");
                     state.in_flight.insert(popped);
                     covered.push(popped);
-                    next = BlockHeight::new(next.inner() + 1);
+                    next = next.offset(1);
                 }
                 if covered.is_empty() {
                     break;
@@ -754,7 +793,7 @@ impl<B: SyncBinding> Sync<B> {
                 trace!(
                     binding = B::NAME,
                     ?scope_id,
-                    from = range_start.inner(),
+                    from = range_start.as_u64(),
                     count,
                     "sync: emitting fetch"
                 );
@@ -777,6 +816,7 @@ mod tests {
     struct UnitBinding;
     impl SyncBinding for UnitBinding {
         type Scope = ();
+        type Key = BlockHeight;
         type State = ();
         const NAME: &'static str = "test_unit";
     }
@@ -785,6 +825,7 @@ mod tests {
     struct ShardBinding;
     impl SyncBinding for ShardBinding {
         type Scope = u64;
+        type Key = BlockHeight;
         type State = ();
         const NAME: &'static str = "test_shard";
     }
@@ -794,6 +835,7 @@ mod tests {
     struct PrefixBinding;
     impl SyncBinding for PrefixBinding {
         type Scope = u64;
+        type Key = BlockHeight;
         type State = ();
         const NAME: &'static str = "test_prefix";
         const RESPONDER_SERVES_CONTIGUOUS_PREFIX: bool = true;
@@ -1030,6 +1072,7 @@ mod tests {
         }
         impl SyncBinding for StatefulBinding {
             type Scope = ();
+            type Key = BlockHeight;
             type State = State;
             const NAME: &'static str = "stateful";
         }

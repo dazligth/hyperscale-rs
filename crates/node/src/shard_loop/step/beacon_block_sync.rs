@@ -7,9 +7,8 @@
 //! validation — the block is delivered straight to the coordinator,
 //! which runs the same cert verification + adoption as a gossiped block.
 //!
-//! The generic is keyed by [`BlockHeight`]; the beacon chain's key is
-//! [`Epoch`]. They convert 1:1 (`u64` newtypes, one block per epoch) at
-//! this boundary.
+//! The binding's `Key` is [`Epoch`], so the generic schedules over
+//! epochs directly — no `BlockHeight` conversion at this boundary.
 
 use std::sync::Arc;
 
@@ -19,7 +18,7 @@ use hyperscale_network::{Network, RequestError, ResponseVerdict};
 use hyperscale_storage::ShardStorage;
 use hyperscale_types::network::request::beacon::GetBeaconBlockRequest;
 use hyperscale_types::network::response::beacon::GetBeaconBlockResponse;
-use hyperscale_types::{BlockHeight, CertifiedBeaconBlock, Epoch, Verifiable};
+use hyperscale_types::{CertifiedBeaconBlock, Epoch, Verifiable};
 
 use crate::shard_io::sync::SyncOutput;
 use crate::shard_io::sync::beacon_block::{BeaconBlockSyncInput, BeaconBlockSyncOutput};
@@ -51,25 +50,30 @@ where
                 .beacon_block
                 .handle(BeaconBlockSyncInput::Admitted {
                     scope: (),
-                    height: BlockHeight::new(tip.inner()),
+                    height: tip,
                 });
         }
         let outputs = self
             .io
             .syncs
             .beacon_block
-            .handle(BeaconBlockSyncInput::StartSync {
-                scope: (),
-                target: BlockHeight::new(target.inner()),
-            });
+            .handle(BeaconBlockSyncInput::StartSync { scope: (), target });
         self.process_beacon_block_sync_outputs(outputs);
     }
 
     /// A beacon-block sync response landed. `None` (peer didn't have the
     /// epoch) re-queues via fetch-failed. Otherwise deliver the block to
-    /// the beacon coordinator and tell the FSM the epoch was delivered;
-    /// the FSM holds it in `pending_admission` until the block commits,
-    /// which feeds `Admitted` from the commit action handler.
+    /// the beacon coordinator and tell the FSM the epoch was delivered.
+    ///
+    /// Note `FetchSucceeded` means "the bytes arrived," not "the block is
+    /// valid" — verification happens coordinator-side (it owns the
+    /// committee), so we can't gate success on it here the way the shard
+    /// path validates in the io-loop. The FSM parks the epoch in
+    /// `pending_admission`; a valid block commits and feeds `Admitted`,
+    /// while a block that fails verification is simply never admitted, so
+    /// the FSM re-fetches it after `PENDING_ADMISSION_TIMEOUT` (rotating
+    /// to another peer). Relying on that timeout is the deliberate
+    /// trade-off for not duplicating committee-aware verification here.
     pub(in crate::shard_loop) fn handle_beacon_block_sync_response_received(
         &mut self,
         epoch: Epoch,
@@ -82,16 +86,15 @@ where
             return;
         };
         self.dispatch_event(ProtocolEvent::BeaconBlockSyncReadyToApply { block });
-        let height = BlockHeight::new(epoch.inner());
         let outputs = self
             .io
             .syncs
             .beacon_block
             .handle(BeaconBlockSyncInput::FetchSucceeded {
                 scope: (),
-                from: height,
+                from: epoch,
                 count: 1,
-                delivered_heights: vec![height],
+                delivered_heights: vec![epoch],
                 now: std::time::Instant::now(),
             });
         self.process_beacon_block_sync_outputs(outputs);
@@ -116,7 +119,7 @@ where
         for output in outputs {
             match output {
                 SyncOutput::Fetch { from, .. } => {
-                    self.dispatch_beacon_block_sync_fetch(Epoch::new(from.inner()));
+                    self.dispatch_beacon_block_sync_fetch(from);
                 }
                 SyncOutput::Complete { height, .. } => {
                     tracing::info!(epoch = height.inner(), "Beacon block sync complete");
@@ -171,7 +174,7 @@ where
             .beacon_block
             .handle(BeaconBlockSyncInput::FetchFailed {
                 scope: (),
-                from: BlockHeight::new(epoch.inner()),
+                from: epoch,
                 count: 1,
                 kind,
                 now: std::time::Instant::now(),

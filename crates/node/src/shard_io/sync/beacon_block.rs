@@ -8,11 +8,12 @@
 //! beacon coordinator's `epoch == tip + 1` adoption guard, so no
 //! consumer-side ordering buffer is needed.
 //!
-//! The beacon chain commits one block per epoch and `Epoch` is a `u64`
-//! newtype, so the generic's [`BlockHeight`](hyperscale_types::BlockHeight)
-//! key stands in for the epoch number. Conversions live at the io-loop
-//! boundary (`step::beacon_block_sync`); this binding only names the
-//! per-binding type info and config.
+//! The binding sets `Key = Epoch` (the beacon chain commits one block
+//! per epoch), so the generic schedules over epochs directly — no
+//! `BlockHeight` pun. This module only names the per-binding type info
+//! and config.
+
+use hyperscale_types::Epoch;
 
 use super::{Sync, SyncBinding, SyncConfig, SyncInput, SyncOutput};
 
@@ -30,12 +31,22 @@ pub type BeaconBlockSyncOutput = SyncOutput<BeaconBlockSyncBinding>;
 
 impl SyncBinding for BeaconBlockSyncBinding {
     type Scope = ();
+    type Key = Epoch;
     type State = ();
     const NAME: &'static str = "beacon_block_sync";
 }
 
 /// Serial, admission-gated config: one epoch fetched at a time, the next
 /// gated on the prior committing.
+///
+/// `window_size = 1` is load-bearing, not a tuning knob: it's what makes
+/// the coordinator's delivery handler able to reuse the gossip
+/// verify+adopt path unchanged. Delivery stays in order, so every synced
+/// block arrives at `epoch == tip + 1` and clears the `adopt_block`
+/// regression guard. Widening the window would let blocks arrive out of
+/// order — the coordinator would drop the early ones as past/future-tip
+/// — so it can't be raised without first giving the coordinator a
+/// reorder buffer.
 #[must_use]
 pub const fn beacon_block_sync_config() -> SyncConfig {
     SyncConfig {
@@ -49,12 +60,10 @@ pub const fn beacon_block_sync_config() -> SyncConfig {
 mod tests {
     use std::time::Instant;
 
-    use hyperscale_types::BlockHeight;
-
     use super::*;
 
-    fn h(n: u64) -> BlockHeight {
-        BlockHeight::new(n)
+    fn h(n: u64) -> Epoch {
+        Epoch::new(n)
     }
 
     fn fetch_targets(outputs: &[BeaconBlockSyncOutput]) -> Vec<u64> {

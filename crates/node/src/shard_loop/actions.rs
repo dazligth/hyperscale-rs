@@ -149,7 +149,7 @@ where
                     .beacon_block
                     .handle(BeaconBlockSyncInput::Admitted {
                         scope: (),
-                        height: BlockHeight::new(epoch.inner()),
+                        height: epoch,
                     });
                 self.process_beacon_block_sync_outputs(outputs);
                 push_protocol_event(

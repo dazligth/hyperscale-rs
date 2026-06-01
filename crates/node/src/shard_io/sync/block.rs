@@ -52,6 +52,7 @@ pub struct BlockSyncState {
 
 impl SyncBinding for BlockSyncBinding {
     type Scope = ();
+    type Key = BlockHeight;
     type State = BlockSyncState;
     const NAME: &'static str = "block_sync";
 
