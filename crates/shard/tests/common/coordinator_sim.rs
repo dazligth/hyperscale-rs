@@ -84,6 +84,11 @@ pub enum HoldFilter {
     /// header that validator broadcasts is diverted at the
     /// receiver before delivery.
     BlockHeaderFromProposer(ValidatorId),
+    /// Match block-vote envelopes (verified or unverified) cast at
+    /// `(height, round)`. Lets a test pin which replica aggregates
+    /// a given block's QC by withholding that block's votes from
+    /// every other would-be aggregator.
+    VoteAtHeightRound(BlockHeight, Round),
 }
 
 impl HoldFilter {
@@ -95,6 +100,11 @@ impl HoldFilter {
             Self::BlockHeaderFromProposer(v) => {
                 matches!(event, SimEvent::BlockHeader { header, .. } if header.proposer() == v)
             }
+            Self::VoteAtHeightRound(h, r) => match event {
+                SimEvent::UnverifiedVote { vote } => vote.height() == h && vote.round() == r,
+                SimEvent::VerifiedVote { vote } => vote.height() == h && vote.round() == r,
+                _ => false,
+            },
         }
     }
 }
@@ -401,6 +411,16 @@ impl ShardCoordinatorSim {
             let actions = self.try_propose_for(idx);
             self.absorb(idx, actions);
         }
+    }
+
+    /// Trigger a single replica's `try_propose` at its current view
+    /// and absorb the result. Used by tests that hand-advance one
+    /// replica's view and need it to (re)propose at the new round
+    /// without disturbing the others.
+    pub fn propose_on(&mut self, replica: ValidatorId) {
+        let idx = self.idx_of(replica);
+        let actions = self.try_propose_for(idx);
+        self.absorb(idx, actions);
     }
 
     /// Admit `tx` into every replica's local pool. See
