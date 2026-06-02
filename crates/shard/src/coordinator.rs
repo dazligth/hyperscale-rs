@@ -1024,12 +1024,14 @@ impl ShardCoordinator {
         );
 
         let sync_actions = self.absorb_parent_qc_from_header(header);
-        self.sync_view_to_header_round(header);
 
         if self.reject_invalid_header(topology_snapshot, header) {
             return vec![];
         }
 
+        // View sync runs only after validation, so a header that fails the
+        // proposer, timestamp, or quorum checks can't nudge the local view.
+        self.sync_view_to_header_round(header);
         self.record_header_activity(height, round);
 
         if self.pending_blocks.contains_key(block_hash) {
@@ -1157,15 +1159,17 @@ impl ShardCoordinator {
         actions
     }
 
-    /// Advance the local view to the header's round if the header is ahead,
-    /// so late joiners converge faster than QC-based view sync alone.
+    /// Advance the local view toward the header's round if the header is
+    /// ahead, so late joiners converge faster than QC-based view sync alone.
+    /// The header is one validator's unverified round claim, so the advance
+    /// is capped per [`ViewChangeController::sync_to_observed_round`].
     fn sync_view_to_header_round(&mut self, header: &BlockHeader) {
         let old_view = self.view_change.view;
-        if self.view_change.sync_to_qc_round(header.round()) {
+        if self.view_change.sync_to_observed_round(header.round()) {
             info!(
                 validator = ?self.me,
                 old_view = old_view.inner(),
-                new_view = header.round().inner(),
+                new_view = self.view_change.view.inner(),
                 header_height = header.height().inner(),
                 "View synchronization: advancing view to match received block header"
             );
@@ -1691,11 +1695,11 @@ impl ShardCoordinator {
         let validator_id = self.me;
         for (_, vote, _) in &verified_votes {
             let old_view = self.view_change.view;
-            if self.view_change.sync_to_qc_round(vote.round()) {
+            if self.view_change.sync_to_observed_round(vote.round()) {
                 info!(
                     validator = ?validator_id,
                     old_view = old_view.inner(),
-                    new_view = vote.round().inner(),
+                    new_view = self.view_change.view.inner(),
                     vote_anchor_ts = vote.height().inner(),
                     voter = ?vote.voter(),
                     "View synchronization: advancing view to match verified vote"

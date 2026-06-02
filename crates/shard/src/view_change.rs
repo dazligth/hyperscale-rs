@@ -18,8 +18,8 @@
 use std::time::Duration;
 
 use hyperscale_types::{
-    BlockHeight, LocalTimestamp, Round, VIEW_CHANGE_TIMEOUT, VIEW_CHANGE_TIMEOUT_INCREMENT,
-    VIEW_CHANGE_TIMEOUT_MAX,
+    BlockHeight, LocalTimestamp, MAX_ROUND_GAP, Round, VIEW_CHANGE_TIMEOUT,
+    VIEW_CHANGE_TIMEOUT_INCREMENT, VIEW_CHANGE_TIMEOUT_MAX,
 };
 
 pub struct ViewChangeController {
@@ -143,9 +143,9 @@ impl ViewChangeController {
         self.view
     }
 
-    /// Synchronize the local round to a higher round seen on a QC, header,
-    /// or vote. Keeps us from falling behind the rest of the network after
-    /// a partition or when peers are timing out faster than we are.
+    /// Synchronize the local round to a higher round proven by a verified
+    /// quorum certificate. A QC at round R proves 2f+1 validators reached R,
+    /// so the target reflects real network progress and is adopted as-is.
     /// Returns `true` if the view was advanced.
     pub fn sync_to_qc_round(&mut self, qc_round: Round) -> bool {
         if qc_round > self.view {
@@ -155,6 +155,20 @@ impl ViewChangeController {
         } else {
             false
         }
+    }
+
+    /// Synchronize the local round to a higher round observed on a single
+    /// validator's header or vote. Unlike [`Self::sync_to_qc_round`], the
+    /// source is one validator's unverified round claim, so the advance is
+    /// capped at `MAX_ROUND_GAP` beyond the current view. This lets a lagging
+    /// node converge a bounded amount per observation while denying a
+    /// Byzantine validator the ability to fling the view toward `Round`'s
+    /// overflow boundary, where the next [`Self::advance`] would panic. A node
+    /// further behind than the cap catches up through verified QC sync as it
+    /// applies blocks. Returns `true` if the view was advanced.
+    pub fn sync_to_observed_round(&mut self, observed_round: Round) -> bool {
+        let ceiling = Round::new(self.view.inner().saturating_add(MAX_ROUND_GAP));
+        self.sync_to_qc_round(observed_round.min(ceiling))
     }
 }
 
@@ -228,6 +242,34 @@ mod tests {
 
         assert!(vc.sync_to_qc_round(Round::new(10)));
         assert_eq!(vc.view, Round::new(10));
+    }
+
+    #[test]
+    fn sync_to_observed_round_caps_advance_at_max_gap() {
+        let mut vc = ViewChangeController::new();
+
+        // A far-ahead claim advances the view by at most MAX_ROUND_GAP.
+        assert!(vc.sync_to_observed_round(Round::new(u64::MAX)));
+        assert_eq!(vc.view, Round::new(MAX_ROUND_GAP));
+
+        // A second far-ahead claim advances by another bounded step, so the
+        // view can never be flung to Round's overflow boundary in one message.
+        assert!(vc.sync_to_observed_round(Round::new(u64::MAX)));
+        assert_eq!(vc.view, Round::new(2 * MAX_ROUND_GAP));
+    }
+
+    #[test]
+    fn sync_to_observed_round_adopts_nearby_round_exactly() {
+        let mut vc = ViewChangeController::new();
+        vc.view = Round::new(10);
+
+        // Within the cap: adopted verbatim.
+        assert!(vc.sync_to_observed_round(Round::new(20)));
+        assert_eq!(vc.view, Round::new(20));
+
+        // Not ahead: no advance.
+        assert!(!vc.sync_to_observed_round(Round::new(15)));
+        assert_eq!(vc.view, Round::new(20));
     }
 
     #[test]

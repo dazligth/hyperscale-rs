@@ -19,9 +19,9 @@ use std::sync::Arc;
 #[cfg(test)]
 use hyperscale_types::{BeaconWitnessLeafCount, BeaconWitnessRoot};
 use hyperscale_types::{
-    Block, BlockHeader, BlockHeight, LocalTimestamp, MAX_TIMESTAMP_DELAY, MAX_TIMESTAMP_RUSH,
-    ProvisionHash, QuorumCertificate, RoutableTransaction, ShardGroupId, TopologySnapshot, TxHash,
-    Verifiable, VotePower, WaveId, compute_waves,
+    Block, BlockHeader, BlockHeight, LocalTimestamp, MAX_ROUND_GAP, MAX_TIMESTAMP_DELAY,
+    MAX_TIMESTAMP_RUSH, ProvisionHash, QuorumCertificate, RoutableTransaction, ShardGroupId,
+    TopologySnapshot, TxHash, Verifiable, VotePower, WaveId, compute_waves,
 };
 
 use crate::commit_dedup::CommitDedupIndex;
@@ -76,6 +76,28 @@ pub fn validate_header(
             "wrong proposer: expected {:?}, got {:?}",
             expected_proposer,
             header.proposer()
+        ));
+    }
+
+    // The round span between the parent QC and this block is the number of
+    // skipped rounds every validator materializes as `MissedProposal`
+    // beacon-witness leaves. Bound it so a Byzantine proposer (the
+    // deterministic proposer for arbitrarily large rounds) can't name itself
+    // at a runaway round and force an unbounded per-block allocation.
+    let parent_round = header.parent_qc().round();
+    if round < parent_round {
+        return Err(format!(
+            "round {} is below parent QC round {}",
+            round.inner(),
+            parent_round.inner()
+        ));
+    }
+    if round.inner() - parent_round.inner() > MAX_ROUND_GAP {
+        return Err(format!(
+            "round gap {} exceeds maximum {MAX_ROUND_GAP} (round {}, parent QC round {})",
+            round.inner() - parent_round.inner(),
+            round.inner(),
+            parent_round.inner()
         ));
     }
 
@@ -547,6 +569,38 @@ mod tests {
         let header_normal =
             header_with_overrides(&base, Some(Round::new(5)), Some(false), None, None);
         assert!(validate_timestamp(&header_normal, now).is_err());
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // validate_header round-gap bound
+    // ═══════════════════════════════════════════════════════════════════════
+
+    fn header_at_round(height: BlockHeight, round: Round, topo: &TopologySnapshot) -> BlockHeader {
+        let base = header_at_height(height, 100_000);
+        let proposer = topo.proposer_for(local_shard(), height, round);
+        header_with_overrides(&base, Some(round), None, None, Some(proposer))
+    }
+
+    #[test]
+    fn validate_header_rejects_runaway_round_gap() {
+        let topo = topology();
+        let now = LocalTimestamp::from_millis(100_000);
+        let height = BlockHeight::new(1);
+        let header = header_at_round(height, Round::new(MAX_ROUND_GAP + 1), &topo);
+
+        let err =
+            validate_header(&topo, local_shard(), &header, BlockHeight::new(0), now).unwrap_err();
+        assert!(err.contains("round gap"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_header_accepts_round_gap_at_cap() {
+        let topo = topology();
+        let now = LocalTimestamp::from_millis(100_000);
+        let height = BlockHeight::new(1);
+        let header = header_at_round(height, Round::new(MAX_ROUND_GAP), &topo);
+
+        assert!(validate_header(&topo, local_shard(), &header, BlockHeight::new(0), now).is_ok());
     }
 
     // ═══════════════════════════════════════════════════════════════════════

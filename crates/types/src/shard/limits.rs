@@ -48,3 +48,21 @@ pub const MAX_PROVISIONS_PER_BLOCK: usize = 256;
 /// transactions. Not operator-tunable: the right value is fully
 /// determined by block size and pipeline depth.
 pub const MAX_TX_IN_FLIGHT: usize = MAX_TXS_PER_BLOCK * 3;
+
+/// Hard cap on `header.round() - header.parent_qc().round()` — how many
+/// skipped consensus rounds a single block may span.
+///
+/// Every validator re-derives one `MissedProposal` beacon-witness leaf per
+/// skipped round when verifying and committing a block (see
+/// [`missed_proposals_since_prev_commit`](crate::missed_proposals_since_prev_commit)),
+/// so an unbounded round gap is an unbounded per-block allocation. The
+/// proposer for `(height, round)` rotates with `round`, so a Byzantine
+/// validator is the deterministic proposer for arbitrarily large rounds:
+/// without this cap, one self-named header at `round ≈ u64::MAX` forces
+/// every honest validator to materialize a `Vec` of that length.
+///
+/// Each gap unit corresponds to a genuine view-change timeout, so honest
+/// liveness keeps the gap within a handful even under sustained leader
+/// failure. The cap sits far above any value reachable by real consensus
+/// while bounding the derivation to a few tens of megabytes.
+pub const MAX_ROUND_GAP: u64 = 100_000;
