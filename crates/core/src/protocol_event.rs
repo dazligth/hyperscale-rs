@@ -8,19 +8,20 @@
 use std::sync::Arc;
 
 use hyperscale_types::{
-    BeaconProposal, BeaconWitnessRoot, BeaconWitnessRootVerifyError, Block, BlockHash, BlockHeader,
-    BlockHeight, BlockManifest, BlockVote, CertRootVerifyError, CertificateRoot,
-    CertifiedBeaconBlock, CertifiedBeaconBlockVerifyError, CertifiedBlock, CertifiedBlockHeader,
-    CertifiedHeaderVerifyError, Epoch, ExecutionCertificate, ExecutionCertificateVerifyError,
-    ExecutionVote, FinalizedWave, FinalizedWaveVerifyError, LocalReceiptRoot,
-    LocalReceiptRootVerifyError, PcVote1, PcVote1VerifyError, PcVote2, PcVote2VerifyError, PcVote3,
-    PcVote3VerifyError, ProvisionRootVerifyError, ProvisionTxRootsMap, ProvisionTxRootsVerifyError,
-    Provisions, ProvisionsRoot, ProvisionsVerifyError, QcVerifyError, QuorumCertificate,
-    ReadySignal, Round, RoutableTransaction, ShardGroupId, ShardWitness, SkipEpochCert,
-    SkipRequest, SkipRequestVerifyError, SpcEmptyViewMsg, SpcEmptyViewMsgVerifyError,
-    SpcNewCommitMsg, SpcNewCommitMsgVerifyError, SpcProposalObject, SpcProposalObjectVerifyError,
-    SpcView, StateRoot, StateRootVerifyError, StoredReceipt, TransactionRoot, TxOutcome,
-    TxRootVerifyError, ValidatorId, Verifiable, Verified, VotePower, WaveId, WeightedTimestamp,
+    BeaconBlockHash, BeaconProposal, BeaconWitnessRoot, BeaconWitnessRootVerifyError, Block,
+    BlockHash, BlockHeader, BlockHeight, BlockManifest, BlockVote, CertRootVerifyError,
+    CertificateRoot, CertifiedBeaconBlock, CertifiedBeaconBlockVerifyError, CertifiedBlock,
+    CertifiedBlockHeader, CertifiedHeaderVerifyError, Epoch, ExecutionCertificate,
+    ExecutionCertificateVerifyError, ExecutionVote, FinalizedWave, FinalizedWaveVerifyError,
+    LocalReceiptRoot, LocalReceiptRootVerifyError, PcVote1, PcVote1VerifyError, PcVote2,
+    PcVote2VerifyError, PcVote3, PcVote3VerifyError, ProvisionRootVerifyError, ProvisionTxRootsMap,
+    ProvisionTxRootsVerifyError, Provisions, ProvisionsRoot, ProvisionsVerifyError, QcVerifyError,
+    QuorumCertificate, ReadySignal, Round, RoutableTransaction, ShardGroupId, ShardWitness,
+    SkipEpochCert, SkipRequest, SkipRequestVerifyError, SpcEmptyViewMsg,
+    SpcEmptyViewMsgVerifyError, SpcNewCommitMsg, SpcNewCommitMsgVerifyError, SpcProposalObject,
+    SpcProposalObjectVerifyError, SpcView, StateRoot, StateRootVerifyError, StoredReceipt,
+    TransactionRoot, TxOutcome, TxRootVerifyError, ValidatorId, Verifiable, Verified, VotePower,
+    WaveId, WeightedTimestamp,
 };
 
 /// How a node learned about the certifying QC that commits a given block.
@@ -865,6 +866,17 @@ pub enum ProtocolEvent {
 
     /// Result of an [`Action::VerifySkipRequest`] dispatch.
     SkipRequestVerified {
+        /// Request anchor, extracted from the unverified payload at
+        /// dispatch time. Carried with `epoch_to_skip` and `signer` in
+        /// both result arms so the coordinator can clear the
+        /// per-`(anchor, epoch_to_skip, signer)` pipeline slot regardless
+        /// of the verify outcome.
+        anchor: BeaconBlockHash,
+        /// Epoch the request asks to skip.
+        epoch_to_skip: Epoch,
+        /// Claimed signer; keys the verification slot alongside the
+        /// anchor and epoch.
+        signer: ValidatorId,
         /// Verified request on success; the typed error otherwise.
         result: Result<Verified<SkipRequest>, SkipRequestVerifyError>,
     },

@@ -23,16 +23,17 @@ use std::time::Duration;
 
 use hyperscale_core::{Action, FetchAbandon, FetchRequest, TimerId};
 use hyperscale_types::{
-    BeaconBlock, BeaconCert, BeaconProposal, BeaconProposalVerifyContext, BeaconState, BlockHash,
-    BlockHeight, Bls12381G1PublicKey, CertifiedBeaconBlock, CertifiedBeaconBlockVerifyError,
-    CertifiedBlockHeader, Epoch, GenesisConfigHash, Hash, LeafIndex, LocalTimestamp,
-    MAX_EQUIVOCATIONS_PER_PROPOSER, MAX_SHARD_WITNESSES_PER_PROPOSER, MIN_BEACON_COMMITTEE_SIZE,
-    NetworkDefinition, PcQc3, PcValueElement, PcVector, PcVote1, PcVote1VerifyError, PcVote2,
-    PcVote2VerifyError, PcVote3, PcVote3VerifyError, PcVoteEquivocation, PcVoteEquivocationContext,
-    PcVoteRound, SKIP_TIMEOUT, SPC_VIEW_TIMEOUT, ShardGroupId, ShardWitness, SkipEpochCert,
-    SkipRequest, SkipRequestVerifyError, SpcCert, SpcEmptyViewMsg, SpcEmptyViewMsgVerifyError,
-    SpcNewCommitMsg, SpcNewCommitMsgVerifyError, SpcProposalObject, SpcProposalObjectVerifyError,
-    SpcView, TopologySnapshot, ValidatorId, Verifiable, Verified, Verify, WeightedTimestamp,
+    BeaconBlock, BeaconBlockHash, BeaconCert, BeaconProposal, BeaconProposalVerifyContext,
+    BeaconState, BlockHash, BlockHeight, Bls12381G1PublicKey, CertifiedBeaconBlock,
+    CertifiedBeaconBlockVerifyError, CertifiedBlockHeader, Epoch, GenesisConfigHash, LeafIndex,
+    LocalTimestamp, MAX_EQUIVOCATIONS_PER_PROPOSER, MAX_SHARD_WITNESSES_PER_PROPOSER,
+    MIN_BEACON_COMMITTEE_SIZE, NetworkDefinition, PcQc3, PcValueElement, PcVector, PcVote1,
+    PcVote1VerifyError, PcVote2, PcVote2VerifyError, PcVote3, PcVote3VerifyError,
+    PcVoteEquivocation, PcVoteEquivocationContext, PcVoteRound, SKIP_TIMEOUT, SPC_VIEW_TIMEOUT,
+    ShardGroupId, ShardWitness, SkipEpochCert, SkipRequest, SkipRequestVerifyError, SpcCert,
+    SpcEmptyViewMsg, SpcEmptyViewMsgVerifyError, SpcNewCommitMsg, SpcNewCommitMsgVerifyError,
+    SpcProposalObject, SpcProposalObjectVerifyError, SpcView, TopologySnapshot, ValidatorId,
+    Verifiable, Verified, Verify, WeightedTimestamp,
 };
 use tracing::{trace, warn};
 
@@ -1339,7 +1340,11 @@ impl BeaconCoordinator {
             return Vec::new();
         }
 
-        let key = Hash::from_bytes(&request.encode_bytes());
+        let key = (
+            request.anchor_hash(),
+            request.epoch_to_skip(),
+            request.signer(),
+        );
         if !self.verification.mark_skip_request_in_flight(key) {
             return Vec::new();
         }
@@ -1449,20 +1454,28 @@ impl BeaconCoordinator {
     }
 
     /// A previously-dispatched [`Action::VerifySkipRequest`] has
-    /// returned. Clear the pipeline slot, and on success admit the
+    /// returned. Clears the `(anchor, epoch_to_skip, signer)` pipeline
+    /// slot on both arms — the key fields ride back in the result event
+    /// so a verification failure can't pin a signer's slot in-flight and
+    /// block their later honest request — and on success admits the
     /// request to the [`SkipTracker`].
     pub fn on_skip_request_verified(
         &mut self,
+        anchor: BeaconBlockHash,
+        epoch_to_skip: Epoch,
+        signer: ValidatorId,
         result: Result<Verified<SkipRequest>, SkipRequestVerifyError>,
     ) -> Vec<Action> {
+        let key = (anchor, epoch_to_skip, signer);
         let request = match result {
             Ok(r) => r,
             Err(err) => {
+                self.verification.on_skip_request_result(key, false);
+                self.verification.forget_skip_request(key);
                 warn!(%err, "SkipRequest BLS verification failed — dropping");
                 return Vec::new();
             }
         };
-        let key = Hash::from_bytes(&request.encode_bytes());
         self.verification.on_skip_request_result(key, true);
         self.verification.forget_skip_request(key);
         self.admit_verified_skip_request(request)
@@ -2239,13 +2252,17 @@ mod tests {
                     out.extend(complete_verifications(coord, post));
                 }
                 Action::VerifySkipRequest { request, signers } => {
+                    let anchor = request.anchor_hash();
+                    let epoch_to_skip = request.epoch_to_skip();
+                    let signer = request.signer();
                     let result = (*request)
                         .upgrade(&SkipVerifyContext {
                             network: &net,
                             active_pool: &signers,
                         })
                         .map_err(|(_, e)| e);
-                    let post = coord.on_skip_request_verified(result);
+                    let post =
+                        coord.on_skip_request_verified(anchor, epoch_to_skip, signer, result);
                     out.extend(complete_verifications(coord, post));
                 }
                 other => out.push(other),
@@ -2483,6 +2500,79 @@ mod tests {
             .collect();
         coord.bootstrap_spc_with_committee(committee);
         assert!(coord.spc.is_some());
+    }
+
+    /// Two skip requests from the same signer at the same anchor/epoch
+    /// but with different signature bytes collapse to one verification
+    /// slot: the slot key is `(anchor, epoch_to_skip, signer)`, not the
+    /// encoded-request hash, so a forged-sig flood can't mint extra
+    /// in-flight BLS checks.
+    #[test]
+    fn skip_request_verification_keys_on_signer_not_signature() {
+        use hyperscale_types::{Bls12381G2Signature, SkipRequest};
+        let mut coord = fresh_coord();
+        let anchor = coord.latest_block().block_hash();
+        let epoch = coord.current_epoch().next();
+        let signer = ValidatorId::new(1); // a peer on the active pool
+
+        let req = |sig_byte: u8| {
+            Arc::new(Verifiable::from(SkipRequest::new(
+                anchor,
+                epoch,
+                signer,
+                Bls12381G2Signature([sig_byte; 96]),
+            )))
+        };
+
+        // First request dispatches one verification.
+        let first = coord.on_unverified_skip_request_received(req(0));
+        assert_eq!(first.len(), 1);
+        assert!(matches!(first[0], Action::VerifySkipRequest { .. }));
+        assert_eq!(coord.verification.in_flight_count(), 1);
+
+        // Same triple, different signature — deduped before dispatch.
+        let second = coord.on_unverified_skip_request_received(req(1));
+        assert!(second.is_empty());
+        assert_eq!(coord.verification.in_flight_count(), 1);
+    }
+
+    /// A skip request that fails BLS verification releases its slot, so
+    /// a later request for the same `(anchor, epoch, signer)` triple
+    /// re-dispatches. Without clearing on the failure arm, a forged
+    /// request could pin a signer's slot in-flight and block their
+    /// honest request from ever being verified.
+    #[test]
+    fn failed_skip_request_verification_releases_slot() {
+        use hyperscale_types::{Bls12381G2Signature, SkipRequest};
+        let mut coord = fresh_coord();
+        let anchor = coord.latest_block().block_hash();
+        let epoch = coord.current_epoch().next();
+        let signer = ValidatorId::new(1);
+
+        let forged = Arc::new(Verifiable::from(SkipRequest::new(
+            anchor,
+            epoch,
+            signer,
+            Bls12381G2Signature([0u8; 96]), // garbage sig — fails BLS verify
+        )));
+        let dispatched = coord.on_unverified_skip_request_received(forged);
+        assert_eq!(coord.verification.in_flight_count(), 1);
+
+        // Drive the (failing) verification to completion — the slot clears.
+        let _ = complete_verifications(&mut coord, dispatched);
+        assert_eq!(coord.verification.in_flight_count(), 0);
+
+        // A fresh request for the same triple re-dispatches rather than
+        // being deduped against a pinned slot.
+        let retry = Arc::new(Verifiable::from(SkipRequest::new(
+            anchor,
+            epoch,
+            signer,
+            Bls12381G2Signature([2u8; 96]),
+        )));
+        let redispatched = coord.on_unverified_skip_request_received(retry);
+        assert_eq!(redispatched.len(), 1);
+        assert!(matches!(redispatched[0], Action::VerifySkipRequest { .. }));
     }
 
     #[test]

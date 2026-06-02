@@ -7,7 +7,7 @@
 
 use std::collections::BTreeSet;
 
-use hyperscale_types::{BeaconBlockHash, Epoch, Hash, PcVoteRound, SpcView, ValidatorId};
+use hyperscale_types::{BeaconBlockHash, Epoch, PcVoteRound, SpcView, ValidatorId};
 
 /// In-flight + verified slots over an arbitrary key.
 ///
@@ -90,13 +90,25 @@ pub enum SpcMsgKind {
 /// Slot key for a pending SPC message verification.
 pub type SpcMsgSlotKey = (Epoch, SpcView, ValidatorId, SpcMsgKind);
 
+/// Slot key for a pending skip-request sig verification.
+///
+/// Per-`(anchor, epoch_to_skip, signer)` — the canonical identity of a
+/// skip request, independent of its signature bytes. Keying on identity
+/// rather than the encoded-request hash bounds a Byzantine peer to one
+/// in-flight slot per claimed signer: replaying the same triple with
+/// forged signatures can't mint additional verification slots. The slot
+/// clears on both verify arms (the key rides back in the result event),
+/// so a failed forgery can't pin a signer's slot and block their later
+/// honest request.
+pub type SkipRequestSlotKey = (BeaconBlockHash, Epoch, ValidatorId);
+
 /// Tracks asynchronous beacon verifications dispatched to the crypto
 /// pool.
 ///
 /// Four domains:
 /// - Block-cert verifications, keyed on [`BeaconBlockHash`].
-/// - Skip-request sig verifications, keyed on the request's content
-///   hash.
+/// - Skip-request sig verifications, keyed on
+///   `(anchor, epoch_to_skip, signer)`.
 /// - PC-vote verifications, keyed on `(epoch, view, signer, round)`.
 /// - SPC message verifications, keyed on
 ///   `(epoch, view, sender, msg-kind)`.
@@ -106,7 +118,7 @@ pub type SpcMsgSlotKey = (Epoch, SpcView, ValidatorId, SpcMsgKind);
 #[derive(Debug, Default)]
 pub struct BeaconVerificationPipeline {
     blocks: VerificationSlots<BeaconBlockHash>,
-    skip_requests: VerificationSlots<Hash>,
+    skip_requests: VerificationSlots<SkipRequestSlotKey>,
     pc_votes: VerificationSlots<PcVoteSlotKey>,
     spc_msgs: VerificationSlots<SpcMsgSlotKey>,
 }
@@ -140,18 +152,18 @@ impl BeaconVerificationPipeline {
 
     /// Mark a skip-request sig verification in flight. Same semantics
     /// as [`Self::mark_block_in_flight`].
-    pub fn mark_skip_request_in_flight(&mut self, key: Hash) -> bool {
+    pub fn mark_skip_request_in_flight(&mut self, key: SkipRequestSlotKey) -> bool {
         self.skip_requests.mark_in_flight(key)
     }
 
     /// Apply a skip-request sig verification result.
-    pub fn on_skip_request_result(&mut self, key: Hash, valid: bool) {
+    pub fn on_skip_request_result(&mut self, key: SkipRequestSlotKey, valid: bool) {
         self.skip_requests.on_result(&key, valid);
     }
 
     /// Drop the skip-request slot. Called after admission to the
     /// [`SkipTracker`](crate::skip_tracker::SkipTracker).
-    pub fn forget_skip_request(&mut self, key: Hash) {
+    pub fn forget_skip_request(&mut self, key: SkipRequestSlotKey) {
         self.skip_requests.forget(&key);
     }
 
@@ -202,12 +214,12 @@ impl BeaconVerificationPipeline {
     }
 
     #[must_use]
-    pub fn is_skip_request_in_flight(&self, key: Hash) -> bool {
+    pub fn is_skip_request_in_flight(&self, key: SkipRequestSlotKey) -> bool {
         self.skip_requests.is_in_flight(&key)
     }
 
     #[must_use]
-    pub fn is_skip_request_verified(&self, key: Hash) -> bool {
+    pub fn is_skip_request_verified(&self, key: SkipRequestSlotKey) -> bool {
         self.skip_requests.is_verified(&key)
     }
 
@@ -250,14 +262,20 @@ impl BeaconVerificationPipeline {
 
 #[cfg(test)]
 mod tests {
+    use hyperscale_types::Hash;
+
     use super::*;
 
     fn block_hash(seed: u8) -> BeaconBlockHash {
         BeaconBlockHash::from_raw(Hash::from_bytes(&[seed]))
     }
 
-    fn skip_key(seed: u8) -> Hash {
-        Hash::from_bytes(&[seed])
+    fn skip_key(seed: u8) -> SkipRequestSlotKey {
+        (
+            BeaconBlockHash::from_raw(Hash::from_bytes(&[seed])),
+            Epoch::new(u64::from(seed)),
+            ValidatorId::new(u64::from(seed)),
+        )
     }
 
     #[test]

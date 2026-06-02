@@ -98,9 +98,17 @@ impl NodeStateMachine {
             ProtocolEvent::BeaconBlockVerified { result } => {
                 self.beacon_coordinator.on_beacon_block_verified(result)
             }
-            ProtocolEvent::SkipRequestVerified { result } => {
-                self.beacon_coordinator.on_skip_request_verified(result)
-            }
+            ProtocolEvent::SkipRequestVerified {
+                anchor,
+                epoch_to_skip,
+                signer,
+                result,
+            } => self.beacon_coordinator.on_skip_request_verified(
+                anchor,
+                epoch_to_skip,
+                signer,
+                result,
+            ),
             ProtocolEvent::PcVote1Verified {
                 epoch,
                 view,

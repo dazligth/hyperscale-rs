@@ -223,13 +223,21 @@ where
             ctx.notify_protocol(ProtocolEvent::BeaconBlockVerified { result });
         }
         Action::VerifySkipRequest { request, signers } => {
+            let anchor = request.anchor_hash();
+            let epoch_to_skip = request.epoch_to_skip();
+            let signer = request.signer();
             let result = (*request)
                 .upgrade(&SkipVerifyContext {
                     network,
                     active_pool: &signers,
                 })
                 .map_err(|(_, e)| e);
-            ctx.notify_protocol(ProtocolEvent::SkipRequestVerified { result });
+            ctx.notify_protocol(ProtocolEvent::SkipRequestVerified {
+                anchor,
+                epoch_to_skip,
+                signer,
+                result,
+            });
         }
         Action::VerifyPcVote1 {
             epoch,

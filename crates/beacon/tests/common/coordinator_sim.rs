@@ -380,13 +380,21 @@ impl CoordinatorSim {
                     out.extend(self.resolve_verifications(replica_idx, post));
                 }
                 Action::VerifySkipRequest { request, signers } => {
+                    let anchor = request.anchor_hash();
+                    let epoch_to_skip = request.epoch_to_skip();
+                    let signer = request.signer();
                     let result = (*request)
                         .upgrade(&SkipVerifyContext {
                             network: &self.network,
                             active_pool: &signers,
                         })
                         .map_err(|(_, e)| e);
-                    let post = self.coordinators[replica_idx].on_skip_request_verified(result);
+                    let post = self.coordinators[replica_idx].on_skip_request_verified(
+                        anchor,
+                        epoch_to_skip,
+                        signer,
+                        result,
+                    );
                     out.extend(self.resolve_verifications(replica_idx, post));
                 }
                 other => out.push(other),
@@ -882,13 +890,21 @@ impl CoordinatorSim {
                 self.absorb(emitter_idx, post);
             }
             Action::VerifySkipRequest { request, signers } => {
+                let anchor = request.anchor_hash();
+                let epoch_to_skip = request.epoch_to_skip();
+                let signer = request.signer();
                 let result = (*request)
                     .upgrade(&SkipVerifyContext {
                         network: &self.network,
                         active_pool: &signers,
                     })
                     .map_err(|(_, e)| e);
-                let post = self.coordinators[emitter_idx].on_skip_request_verified(result);
+                let post = self.coordinators[emitter_idx].on_skip_request_verified(
+                    anchor,
+                    epoch_to_skip,
+                    signer,
+                    result,
+                );
                 self.absorb(emitter_idx, post);
             }
             Action::VerifyPcVote1 {
