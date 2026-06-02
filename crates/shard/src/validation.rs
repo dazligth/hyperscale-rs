@@ -138,10 +138,12 @@ pub fn validate_header(
 /// The timestamp must not be more than [`MAX_TIMESTAMP_DELAY`] behind our
 /// clock nor more than [`MAX_TIMESTAMP_RUSH`] ahead.
 ///
-/// Skipped for genesis blocks (fixed zero timestamp) and fallback blocks
-/// (they inherit parent weighted-timestamp, which can be older than the
-/// delay threshold during extended view changes). Fallback blocks are
-/// empty and carry a QC-validated timestamp, so this carve-out is safe.
+/// Skipped for genesis blocks (fixed zero timestamp) and fallback blocks,
+/// which inherit the parent's weighted timestamp and so can sit below the
+/// delay threshold during extended view changes. The carve-out is sound
+/// because `header.timestamp()` is a non-authenticated liveness hint with
+/// no consensus consumer — the BFT clock is the QC's `weighted_timestamp`,
+/// aggregated from voters' own clocks, not this field.
 pub fn validate_timestamp(header: &BlockHeader, now: LocalTimestamp) -> Result<(), String> {
     if header.is_genesis() {
         return Ok(());

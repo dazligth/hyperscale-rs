@@ -86,7 +86,8 @@ pub enum Action {
         height: BlockHeight,
         /// Round at which the vote is being cast.
         round: Round,
-        /// Proposer timestamp from the block header (echoed in the vote).
+        /// Voter's local timestamp at vote time. Aggregated stake-weighted
+        /// across votes into the QC's `weighted_timestamp` — the BFT clock.
         timestamp: ProposerTimestamp,
         /// Local-shard validators eligible to propose the next block; they
         /// need this vote to assemble the QC.
