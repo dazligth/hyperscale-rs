@@ -153,9 +153,9 @@ impl<'a> IntoIterator for &'a PcVector {
 
 // ── Round-1 ──────────────────────────────────────────────────────────────────
 
-/// Round-1 vote — a signer's input vector with an `L+1` prefix-sig
-/// fan-out (one signature per prefix of `v_in`, including the empty
-/// prefix epoch).
+/// Round-1 vote — a signer's input vector with a `|v_in| + 1`
+/// prefix-sig fan-out (one signature per prefix of `v_in`, including
+/// the empty prefix).
 #[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
 pub struct PcVote1 {
     validator: ValidatorId,

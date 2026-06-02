@@ -59,8 +59,9 @@ impl BeaconProposal {
         }
     }
 
-    /// Empty proposal — no observations, given VRF reveal. Useful for
-    /// committee members with nothing to observe in a given slot.
+    /// Empty proposal — no observations, carrying only the given VRF
+    /// reveal. Useful for committee members with nothing to observe in
+    /// a given slot.
     #[must_use]
     pub const fn vrf_only(vrf_proof: VrfProof) -> Self {
         Self {

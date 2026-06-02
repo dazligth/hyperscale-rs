@@ -876,8 +876,7 @@ impl SpcInstance {
     /// `proposals_by_hash` insert must follow with a call here —
     /// `has_parent` flips from false to true when the value's first
     /// non-bottom hash gains a preimage, and entries waiting on that
-    /// would otherwise stall. Today only `enter_view` inserts; the
-    /// rescan-on-insert is colocated there.
+    /// would otherwise stall.
     fn rescan_pending_empty_views(&mut self) -> Vec<SpcEffect> {
         let current = self.current_view;
         self.pending_empty_views
@@ -1064,10 +1063,10 @@ mod tests {
         assert!(second.is_empty());
     }
 
-    /// `VpcMsg` for an unknown view is dropped — no buffering, no
+    /// A PC vote for an unknown view is dropped — no buffering, no
     /// effects.
     #[test]
-    fn spc_vpc_msg_for_unknown_view_dropped() {
+    fn spc_pc_vote_for_unknown_view_dropped() {
         let mut fsm = fsm_instance(0);
         let (_sks, members) = fsm_committee(4);
         // Build a stub Vote1 from peer 1 under view 99 (we've only

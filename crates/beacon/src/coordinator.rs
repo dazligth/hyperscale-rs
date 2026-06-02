@@ -1677,9 +1677,8 @@ impl BeaconCoordinator {
         self.proposal_pool.reset(next_epoch);
         self.evaluated_proposers.clear();
 
-        // Emit on every commit. Suppression for no-op transitions
-        // (committee unchanged) is a future optimisation — at n=128
-        // production it'd matter, at n=4 dev it's noise.
+        // TopologyChanged emits on every commit, whether or not the
+        // committee actually changed.
         let mut actions = vec![
             Action::CommitBeaconBlock {
                 block,
@@ -1985,7 +1984,7 @@ impl BeaconCoordinator {
 
     /// Translate the sub-machine's local effect enum into beacon
     /// actions plus internal state mutations (equivocation pool,
-    /// future commit pipeline).
+    /// commit assembly).
     fn lift_spc_effects(
         &mut self,
         epoch: Epoch,
@@ -2068,8 +2067,8 @@ impl BeaconCoordinator {
 /// Canonical end-of-epoch [`WeightedTimestamp`] derived from `epoch`
 /// and the chain's configured epoch duration. Beacon blocks carry no
 /// explicit `weighted_timestamp` field; the value is `epoch.inner() ×
-/// epoch_duration_ms` by construction (slot-epoch refactor item 5),
-/// matching how shards stamp their accumulators' eligibility windows.
+/// epoch_duration_ms` by construction, matching how shards stamp their
+/// accumulators' eligibility windows.
 const fn epoch_end_weighted_timestamp(epoch: Epoch, epoch_duration_ms: u64) -> WeightedTimestamp {
     WeightedTimestamp::from_millis(epoch.inner().saturating_mul(epoch_duration_ms))
 }
@@ -3068,9 +3067,8 @@ mod tests {
 
     /// `on_spc_output_high` emits `CommitBeaconBlock` immediately
     /// followed by `BroadcastBeaconBlock` — no intermediate
-    /// sig-collection step. Pins acceptance criterion #6 from the
-    /// cert-as-authenticator design: no round-trip from `OutputHigh`
-    /// to `CommitBeaconBlock`.
+    /// sig-collection step, no round-trip from `OutputHigh` to
+    /// `CommitBeaconBlock`.
     #[test]
     fn output_high_emits_commit_and_broadcast_directly() {
         let mut coord = fresh_coord();

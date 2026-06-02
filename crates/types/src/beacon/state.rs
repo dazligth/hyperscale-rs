@@ -471,8 +471,7 @@ impl BeaconState {
     /// global validator set. Re-derived on every epoch commit and
     /// shared via `ArcSwap` with the `io_loop`.
     ///
-    /// All validators are assigned uniform [`VotePower::new(1)`] until
-    /// stake-weighted voting power lands.
+    /// All validators are assigned uniform [`VotePower::new(1)`].
     #[must_use]
     pub fn derive_topology_snapshot(&self, network: NetworkDefinition) -> TopologySnapshot {
         let validators: Vec<ValidatorInfo> = self
@@ -860,10 +859,9 @@ mod tests {
 
     // ─── miss counter sanity ──────────────────────────────────────────
 
-    /// Pins the `miss_counters` field shape (per-validator `u32`
-    /// counter) so a future refactor that changes the value type is
-    /// caught. The scoping invariants (per-epoch reset, status-
-    /// transition reset) live with `apply_epoch`, not the type.
+    /// Pins the `miss_counters` field shape: a per-validator `u32` map.
+    /// The scoping invariants (per-epoch reset, status-transition reset)
+    /// live with `apply_epoch`, not the type.
     #[test]
     fn miss_counters_field_is_per_validator_u32_map() {
         let mut state = empty_state();

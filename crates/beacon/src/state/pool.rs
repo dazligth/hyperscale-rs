@@ -71,8 +71,8 @@ mod tests {
 
     /// Build a state with `n` validators all sitting in the global pool
     /// (status `Pooled`), one empty shard, and the given randomness +
-    /// `current_epoch`. `pool_draw` reads `state.current_epoch` and
-    /// `state.current_epoch` so the caller sets it up explicitly.
+    /// `current_epoch`. `pool_draw` reads `state.randomness` and
+    /// `state.current_epoch` so the caller sets them up explicitly.
     fn state_with_pool(n: u64, randomness: Randomness, current_epoch: Epoch) -> BeaconState {
         let mut state = empty_state();
         state.current_epoch = current_epoch;

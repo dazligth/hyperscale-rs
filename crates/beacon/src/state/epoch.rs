@@ -149,7 +149,7 @@ mod tests {
 
     // ─── apply_epoch regression check + epoch advance ──────────────────────
 
-    /// `apply_epoch` rejects a epoch that doesn't strictly advance
+    /// `apply_epoch` rejects an epoch that doesn't strictly advance
     /// `state.current_epoch`. Catches runner bugs that replay or
     /// re-order SPC commits before the chain-difference math
     /// (cooldown, unbonding, ready-timeout) silently underflows.

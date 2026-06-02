@@ -315,8 +315,6 @@ pub fn hash_high_value(v: &PcVector) -> Hash {
 /// Verify an [`SpcEmptyViewMsg`] — the signer attested to their
 /// `max_high` at the time of timing out on `msg.view`.
 ///
-/// Verify the canonical predicate gates of an [`SpcEmptyViewMsg`].
-///
 /// # Errors
 ///
 /// Returns a [`SpcEmptyViewMsgVerifyError`] variant naming the failing predicate.
@@ -697,7 +695,7 @@ pub fn build_indirect_cert(
 pub struct SpcVerifyContext<'a> {
     /// Network the signer was bound to.
     pub network: &'a NetworkDefinition,
-    /// Canonical signing context for this `epoch`.
+    /// Canonical SPC signing context every signer was bound to.
     pub spc_ctx: &'a SpcContext,
     /// Committee membership and pubkeys.
     pub committee: &'a [(ValidatorId, Bls12381G1PublicKey)],

@@ -205,7 +205,7 @@ impl ShardWitnessFetchTracker {
     /// Without this, `shard_headers` grows once per committed source
     /// block forever — the witness pool is bounded by
     /// [`notify_consumed_advanced`](Self::notify_consumed_advanced) but
-    /// the headers were not. Called from the coordinator's `adopt_block`
+    /// the headers are not. Called from the coordinator's `adopt_block`
     /// after `apply_epoch` advances `consumed_through`. Covers every
     /// shard with stored headers, including any not yet present in
     /// `consumed_through` (treated as watermark 0).

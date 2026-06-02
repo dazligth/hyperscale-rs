@@ -21,8 +21,8 @@
 //! transitions to stay faithful to time even when the chain skips a
 //! stalled epoch.
 //!
-//! The numerical values are ported from the prototype's defaults — fine
-//! for tests, almost certainly wrong for production (e.g. a 32-epoch
+//! The numerical values are test-grade defaults — fine for tests,
+//! almost certainly wrong for production (e.g. a 32-epoch
 //! unbonding window is ≈ 2.5 hours at 5-min epochs, where real networks
 //! use weeks). Tuning lands when operational data warrants.
 

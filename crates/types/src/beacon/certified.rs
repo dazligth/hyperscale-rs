@@ -589,7 +589,7 @@ mod tests {
     /// proposal hashes, at its committee position, to the matching
     /// element of the cert's committed value. Substituted proposal
     /// bytes, a wrong position, or a missing proposal all break the
-    /// binding — the C1 forgery defence.
+    /// binding — the forgery defence.
     #[test]
     fn committed_proposals_bind_to_cert_value() {
         let epoch = Epoch::new(5);

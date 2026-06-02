@@ -27,9 +27,6 @@ const DOMAIN_BEACON_GENESIS: &[u8] = b"HYPERSCALE_BEACON_GENESIS_v1";
 /// Sizing knobs for a beacon chain. Lives on [`BeaconGenesisConfig`]
 /// and is copied verbatim into `BeaconState.chain_config` at genesis,
 /// where every consensus-critical sizing decision reads it.
-///
-/// Stored as `u64` ms rather than [`Duration`] so the SBOR-canonical
-/// encoding stays stable across host platforms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BasicSbor)]
 pub struct BeaconChainConfig {
     /// Wall-clock milliseconds per epoch. Drives the
@@ -55,8 +52,8 @@ impl BeaconChainConfig {
 }
 
 impl Default for BeaconChainConfig {
-    /// Defaults match the legacy compile-time constants: 5-minute
-    /// epochs, 2 shards, shard size 4, beacon committee 4.
+    /// Defaults: 5-minute epochs, 2 shards, shard size 4, beacon
+    /// committee 4.
     fn default() -> Self {
         Self {
             epoch_duration_ms: u64::try_from(EPOCH_DURATION.as_millis()).unwrap_or(u64::MAX),

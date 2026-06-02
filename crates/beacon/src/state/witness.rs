@@ -240,8 +240,8 @@ pub(super) fn apply_shard_payload(
             }
             // We accept any 48-byte BLS pubkey at registration. Radix's
             // `Bls12381G1PublicKey` doesn't validate G1 membership at
-            // construction and exposes no public validator, so the
-            // prototype's eager-reject path isn't available here. A
+            // construction and exposes no public validator, so
+            // registration cannot eagerly reject a malformed key. A
             // malformed key just fails every signature verification it
             // touches; the validator never signs successfully and gets
             // jailed via the miss-counter, costing at most one stalled
@@ -267,7 +267,7 @@ pub(super) fn apply_shard_payload(
         ShardWitnessPayload::DeactivateValidator { validator_id } => {
             // Operator-initiated retirement. Flips to
             // `InsufficientStake` from every status except those that
-            // already represent "not consuming a epoch" or "permanently
+            // already represent "not consuming an epoch" or "permanently
             // out": `InsufficientStake` itself and
             // `Jailed { Equivocation }`. Fault-cause jails
             // (`Performance`) can still be deactivated — the operator
@@ -530,8 +530,7 @@ mod tests {
     }
 
     /// Within-epoch dedup: the same `(shard_id, leaf_index)` carried by
-    /// multiple proposers counts as one event. Pins the dedup gate
-    /// against a future refactor.
+    /// multiple proposers counts as one event.
     #[test]
     fn witness_dedup_by_shard_and_leaf_index() {
         let mut state = single_pool_state(4);

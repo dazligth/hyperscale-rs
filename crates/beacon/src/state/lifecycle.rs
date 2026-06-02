@@ -778,22 +778,14 @@ mod tests {
             .members
             .push(ValidatorId::new(0));
 
-        // Validator 1: not-yet-ready, gets explicit Ready witness.
-        insert_unready_on_shard(&mut state, 1, Epoch::new(0));
-        // Validator 2: not-yet-ready, will hit timeout.
+        // Validator 1: placed fresh (age 0, under the timeout
+        // threshold) so it readies via the explicit Ready witness rather
+        // than the timeout path.
+        let fresh_epoch = state.current_epoch;
+        insert_unready_on_shard(&mut state, 1, fresh_epoch);
+        // Validator 2: placed in the distant past, so it readies via the
+        // timeout path.
         insert_unready_on_shard(&mut state, 2, Epoch::new(0));
-        // Wait — both were placed at 0, both past timeout. Place
-        // validator 1 fresh so the witness path is exercised
-        // distinctly from the timeout path.
-        state
-            .validators
-            .get_mut(&ValidatorId::new(1))
-            .unwrap()
-            .status = ValidatorStatus::OnShard {
-            shard: ShardGroupId::new(0),
-            ready: false,
-            placed_at_epoch: state.current_epoch, // age 0 — under threshold
-        };
 
         let ready_witness = shard_witness(
             0,

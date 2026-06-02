@@ -275,7 +275,6 @@ mod tests {
         let cfg = sample_config(4, 4, 4);
         let state = build_genesis_beacon_state(&cfg);
         assert_eq!(state.current_epoch, Epoch::GENESIS);
-        assert_eq!(state.current_epoch, Epoch::GENESIS);
         assert_eq!(state.randomness, cfg.initial_randomness);
         assert!(state.consumed_through.is_empty());
         assert!(state.miss_counters.is_empty());

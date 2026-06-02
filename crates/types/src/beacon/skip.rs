@@ -686,18 +686,16 @@ mod tests {
         assert!(verify_skip_cert(&tampered, &net(), &active).is_err());
     }
 
-    /// Two disjoint signer subsets at the same `(anchor, epoch)` both
+    /// Two distinct signer subsets at the same `(anchor, epoch)` both
     /// pass `verify_skip_cert`. This is the load-bearing property that
     /// lets the skip flow tolerate multiple valid certs converging on a
     /// single block hash via the wrapper.
     #[test]
-    fn two_disjoint_quorum_subsets_both_verify() {
+    fn two_distinct_quorum_subsets_both_verify() {
         // Pool of 10, quorum = ⌈20/3⌉ + 1 = 7 + 1 = 8.
         let (active, keys) = pool(10);
-        // The two subsets must each be ≥ 8 in a pool of 10 — they
-        // overlap on at least 6, so disjoint isn't literally achievable
-        // at quorum=8. Use overlapping-but-distinct subsets instead:
-        // {0..=7} and {2..=9}.
+        // Two distinct quorums of 8 in a pool of 10: {0..=7} and
+        // {2..=9}, overlapping on 6.
         let make_subset = |range: std::ops::Range<u64>| -> Vec<SkipRequest> {
             range
                 .map(|i| {

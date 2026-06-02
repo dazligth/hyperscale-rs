@@ -66,7 +66,7 @@ pub fn sample_committee(
 /// Pick one validator from `pool` for placement on `shard` at `epoch`.
 ///
 /// Uses `randomness` blended with `(epoch, shard)` so draws across
-/// shards-in-a-epoch and across slots-on-a-shard don't share a PRNG
+/// shards in an epoch and across epochs on one shard don't share a PRNG
 /// stream. Returns `None` if the pool is empty.
 ///
 /// Pure: the caller mutates `BeaconState` based on the returned id.
