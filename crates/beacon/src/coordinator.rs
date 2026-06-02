@@ -27,13 +27,13 @@ use hyperscale_types::{
     BeaconState, BlockHash, BlockHeight, Bls12381G1PublicKey, CertifiedBeaconBlock,
     CertifiedBeaconBlockVerifyError, CertifiedBlockHeader, Epoch, GenesisConfigHash, LeafIndex,
     LocalTimestamp, MAX_EQUIVOCATIONS_PER_PROPOSER, MAX_SHARD_WITNESSES_PER_PROPOSER,
-    MIN_BEACON_COMMITTEE_SIZE, NetworkDefinition, PcQc3, PcValueElement, PcVector, PcVote1,
-    PcVote1VerifyError, PcVote2, PcVote2VerifyError, PcVote3, PcVote3VerifyError,
-    PcVoteEquivocation, PcVoteEquivocationContext, PcVoteRound, SKIP_TIMEOUT, SPC_VIEW_TIMEOUT,
-    ShardGroupId, ShardWitness, SkipEpochCert, SkipRequest, SkipRequestVerifyError, SpcCert,
-    SpcEmptyViewMsg, SpcEmptyViewMsgVerifyError, SpcNewCommitMsg, SpcNewCommitMsgVerifyError,
-    SpcProposalObject, SpcProposalObjectVerifyError, SpcView, TopologySnapshot, ValidatorId,
-    Verifiable, Verified, Verify, WeightedTimestamp,
+    MAX_WITNESSES_PER_FETCH, MIN_BEACON_COMMITTEE_SIZE, NetworkDefinition, PcQc3, PcValueElement,
+    PcVector, PcVote1, PcVote1VerifyError, PcVote2, PcVote2VerifyError, PcVote3,
+    PcVote3VerifyError, PcVoteEquivocation, PcVoteEquivocationContext, PcVoteRound, SKIP_TIMEOUT,
+    SPC_VIEW_TIMEOUT, ShardGroupId, ShardWitness, SkipEpochCert, SkipRequest,
+    SkipRequestVerifyError, SpcCert, SpcEmptyViewMsg, SpcEmptyViewMsgVerifyError, SpcNewCommitMsg,
+    SpcNewCommitMsgVerifyError, SpcProposalObject, SpcProposalObjectVerifyError, SpcView,
+    TopologySnapshot, ValidatorId, Verifiable, Verified, Verify, WeightedTimestamp,
 };
 use tracing::{trace, warn};
 
@@ -1574,11 +1574,20 @@ impl BeaconCoordinator {
     /// Record a verified source-shard header. Off-committee vnodes
     /// retain the header (their inbound `BeaconBlock` verifier needs
     /// it to check witness Merkle paths) and emit nothing. On-committee
-    /// vnodes additionally fetch the witnesses for any new leaves the
-    /// header makes addressable — every leaf above the local
+    /// vnodes additionally fetch the witnesses for the new leaves the
+    /// header makes addressable — leaves above the local
     /// `consumed_through[shard]` watermark and at-or-below the
     /// header's `beacon_witness_leaf_count`, dedup-filtered against
     /// already-pooled and already-pending leaves.
+    ///
+    /// Fetching is bounded to a sliding window of at most
+    /// [`MAX_WITNESSES_PER_FETCH`] leaves above the watermark per call.
+    /// Witnesses are consumed in strict `watermark + 1` order (see
+    /// [`ingest_witnesses`](crate::state)), so leaves further ahead can't
+    /// be folded in until the gap below them fills; capping the
+    /// per-header enumeration keeps the work bounded when the beacon
+    /// chain has fallen behind a shard's accumulator, and the window
+    /// slides forward as `consumed_through` advances on later commits.
     pub fn on_verified_remote_header(
         &mut self,
         certified_header: &Arc<Verified<CertifiedBlockHeader>>,
@@ -1600,9 +1609,20 @@ impl BeaconCoordinator {
             .copied()
             .unwrap_or(LeafIndex::new(0));
 
+        // Cap the enumeration at a sliding window above the watermark.
+        // Leaves beyond it can't be consumed yet (consumption is strict
+        // `watermark + 1` order) and are picked up on later headers, so
+        // a large producer/consumer gap can't make a single header do
+        // unbounded work.
+        let window_end = leaf_count.inner().min(
+            watermark
+                .inner()
+                .saturating_add(MAX_WITNESSES_PER_FETCH as u64),
+        );
+
         let mut leaves_to_fetch: Vec<LeafIndex> = Vec::new();
         let mut idx = watermark.inner().saturating_add(1);
-        while idx <= leaf_count.inner() {
+        while idx <= window_end {
             let leaf = LeafIndex::new(idx);
             if self.witness_fetcher.register_pending_fetch(
                 shard,
@@ -3428,6 +3448,42 @@ mod tests {
         };
         let witness = Arc::new(ShardWitness { payload, proof });
         (witness, certified_header)
+    }
+
+    /// A remote header announcing far more accumulator leaves than the
+    /// beacon chain has consumed enqueues at most `MAX_WITNESSES_PER_FETCH`
+    /// leaves per call — the enumeration is a bounded sliding window above
+    /// the watermark, not the full producer/consumer gap. The remainder
+    /// is picked up on later headers as `consumed_through` advances.
+    #[test]
+    fn on_verified_remote_header_caps_leaf_fetch_window() {
+        use hyperscale_types::{MAX_WITNESSES_PER_FETCH, ShardGroupId};
+        let mut coord = fresh_coord();
+        let shard = ShardGroupId::new(0);
+
+        // Watermark is 0 (nothing consumed); the header announces a gap
+        // far larger than the fetch window.
+        let total_leaves = u64::try_from(MAX_WITNESSES_PER_FETCH + 50).unwrap();
+        let (_witness, header) = make_verifiable_witness_and_header(shard, 1, 0, total_leaves);
+
+        let actions = coord.on_verified_remote_header(&header);
+
+        let leaf_indices = actions
+            .iter()
+            .find_map(|a| match a {
+                Action::Fetch(FetchRequest::ShardWitnesses { leaf_indices, .. }) => {
+                    Some(leaf_indices)
+                }
+                _ => None,
+            })
+            .expect("expected a ShardWitnesses fetch");
+        assert_eq!(leaf_indices.len(), MAX_WITNESSES_PER_FETCH);
+        // Contiguous window [1, MAX] above the watermark.
+        assert_eq!(leaf_indices.first().copied(), Some(LeafIndex::new(1)));
+        assert_eq!(
+            leaf_indices.last().copied(),
+            Some(LeafIndex::new(MAX_WITNESSES_PER_FETCH as u64)),
+        );
     }
 
     #[test]
