@@ -393,12 +393,24 @@ impl StakePool {
     /// enforced at `RegisterValidator` and `Unjail` application.
     #[must_use]
     pub fn max_active_count(&self, state: &BeaconState) -> usize {
-        let t = state.min_stake();
-        if t == Stake::ZERO {
+        self.max_active_count_at(state.min_stake())
+    }
+
+    /// [`max_active_count`](Self::max_active_count) evaluated against a
+    /// precomputed `min_stake`.
+    ///
+    /// The per-epoch reactivation fixpoint tests capacity across every
+    /// pool under a single `min_stake`. Deriving it per pool is an
+    /// O(pools) walk each time; since it shifts only when a validator's
+    /// active status flips, the caller computes it once and refreshes
+    /// after each flip, keeping the sweep linear in the pool count.
+    #[must_use]
+    pub fn max_active_count_at(&self, min_stake: Stake) -> usize {
+        if min_stake == Stake::ZERO {
             return usize::MAX;
         }
         let e = self.effective_stake().attos();
-        (e / t.attos()) as usize
+        (e / min_stake.attos()) as usize
     }
 }
 

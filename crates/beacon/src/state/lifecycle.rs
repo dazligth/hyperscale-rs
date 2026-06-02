@@ -27,6 +27,13 @@ use hyperscale_types::{
 /// which runs inside this loop. The loop terminates in O(N²) at
 /// worst, in practice O(N).
 ///
+/// `min_stake` is global and shifts only when a flip changes some pool's
+/// active count, so it's computed once and refreshed after each flip
+/// rather than re-derived per pool — without that, every sweep would be
+/// O(pools²), which a dust-deposit pool flood could inflate at will. An
+/// empty `InsufficientStake` set (the common steady state) skips the
+/// sweep outright.
+///
 /// The "doesn't immediately re-promote a just-deactivated validator"
 /// property is provided by the gate: the pool that triggered the
 /// deactivation in
@@ -34,7 +41,16 @@ use hyperscale_types::{
 /// now has `cur >= max` (the deactivation was *because* of
 /// over-commitment), so this loop skips it.
 pub(super) fn auto_reactivate(state: &mut BeaconState) -> Vec<ValidatorId> {
+    let nothing_waiting = !state
+        .validators
+        .values()
+        .any(|r| matches!(r.status, ValidatorStatus::InsufficientStake));
+    if nothing_waiting {
+        return Vec::new();
+    }
+
     let mut reactivated = Vec::new();
+    let mut min_stake = state.min_stake();
     loop {
         let mut did_any = false;
         let pool_ids: Vec<StakePoolId> = state.pools.keys().copied().collect();
@@ -43,7 +59,7 @@ pub(super) fn auto_reactivate(state: &mut BeaconState) -> Vec<ValidatorId> {
                 let pool = state.pools.get(&pool_id).expect("just iterated");
                 (
                     pool.current_active_count(state),
-                    pool.max_active_count(state),
+                    pool.max_active_count_at(min_stake),
                 )
             };
             if cur >= max {
@@ -72,6 +88,10 @@ pub(super) fn auto_reactivate(state: &mut BeaconState) -> Vec<ValidatorId> {
                 .status = ValidatorStatus::Pooled;
             reactivated.push(rev_id);
             did_any = true;
+            // The flip raised this pool's active count, so `t_no_eject`
+            // (and thus `min_stake`) may have moved; refresh before the
+            // next pool reads it.
+            min_stake = state.min_stake();
         }
         if !did_any {
             break;
@@ -309,6 +329,48 @@ mod tests {
             state.validators.get(&ValidatorId::new(5)).unwrap().status,
             ValidatorStatus::InsufficientStake,
         );
+    }
+
+    /// Funded-but-empty "dust" pools don't change the reactivation
+    /// outcome — exercises the cached-`min_stake` sweep under a pool
+    /// flood and pins that it yields the same flips a clean state does.
+    #[test]
+    fn auto_reactivate_outcome_unaffected_by_dust_pools() {
+        let base_attos = 3 * MIN_STAKE_FLOOR.attos();
+        let mut baseline = state_with_insufficient(1, &[5, 7, 9], base_attos);
+        let mut flooded = state_with_insufficient(1, &[5, 7, 9], base_attos);
+        for i in 100u32..160 {
+            flooded.pools.insert(
+                StakePoolId::new(i),
+                StakePool {
+                    id: StakePoolId::new(i),
+                    total_stake: Stake::from_attos(1),
+                    validators: BTreeSet::new(),
+                    pending_withdrawals: Vec::new(),
+                },
+            );
+        }
+
+        let base_effects = apply_next_epoch(&mut baseline, &[]);
+        let flood_effects = apply_next_epoch(&mut flooded, &[]);
+
+        assert_eq!(base_effects.reactivated, flood_effects.reactivated);
+        assert_eq!(
+            base_effects.reactivated,
+            vec![ValidatorId::new(9), ValidatorId::new(7)],
+        );
+        for id in [5u64, 7, 9] {
+            assert_eq!(
+                baseline
+                    .validators
+                    .get(&ValidatorId::new(id))
+                    .map(|r| r.status),
+                flooded
+                    .validators
+                    .get(&ValidatorId::new(id))
+                    .map(|r| r.status),
+            );
+        }
     }
 
     /// A validator just deactivated by `complete_pending_withdrawals`
