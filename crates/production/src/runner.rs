@@ -402,7 +402,6 @@ impl ProductionRunnerBuilder {
         // `chain_config.beacon_committee_size` form the beacon
         // committee. Shard committees mirror the topology snapshot's
         // view so the beacon-state placement agrees with tx-routing.
-        // Storage-loading on restart is a follow-up.
         let (beacon_genesis_block, beacon_genesis_state, beacon_config_hash, beacon_network) = {
             let network = NetworkDefinition::simulator();
             let pool_id = StakePoolId::new(0);
@@ -451,6 +450,19 @@ impl ProductionRunnerBuilder {
             (block, state, config_hash, network)
         };
 
+        // Warm-restart: resume the beacon coordinator from the latest
+        // committed (block, state) in storage. On an empty store, commit the
+        // genesis pair first so fresh-start and restart converge on the same
+        // load — the coordinator's resume epoch is whatever state it's handed.
+        if self.beacon_storage.latest_committed_epoch().is_none() {
+            self.beacon_storage
+                .commit_beacon_block(&beacon_genesis_block, &beacon_genesis_state);
+        }
+        let (beacon_latest_block, beacon_latest_state) = self
+            .beacon_storage
+            .latest_committed()
+            .expect("beacon chain is non-empty after the genesis commit above");
+
         // One `ProvisionStore` + `TxStore` + `ExecCertStore` +
         // `FinalizedWaveStore` per hosted shard, shared across every same-
         // shard vnode and into the `NodeHost`'s `SharedCaches`. Determinism
@@ -484,7 +496,7 @@ impl ProductionRunnerBuilder {
         // coordinator and the inbound `GetBeaconProposalRequest`
         // handler.
         let beacon_proposal_pool = Arc::new(BeaconProposalPool::new(
-            beacon_genesis_state.current_epoch.next(),
+            beacon_latest_state.current_epoch.next(),
         ));
 
         let vnode_inits: Vec<VnodeInit> = vnode_configs
@@ -512,8 +524,8 @@ impl ProductionRunnerBuilder {
                         .expect("hosted shard derived from vnodes"),
                 );
                 let beacon_coordinator = BeaconCoordinator::new(
-                    Arc::clone(&beacon_genesis_block),
-                    (*beacon_genesis_state).clone(),
+                    Arc::clone(&beacon_latest_block),
+                    (*beacon_latest_state).clone(),
                     cfg.validator_id,
                     cfg.local_shard,
                     beacon_network.clone(),

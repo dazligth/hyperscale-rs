@@ -291,11 +291,22 @@ impl SimulationRunner {
                 );
             }
 
+            // Per-host beacon storage. Warm-restart: resume from the latest
+            // committed (block, state); commit the genesis pair first on an
+            // empty store so fresh-start and restart share one load path.
+            let beacon_storage: Arc<dyn BeaconStorage> = Arc::new(SimBeaconStorage::new());
+            if beacon_storage.latest_committed_epoch().is_none() {
+                beacon_storage.commit_beacon_block(&beacon_genesis_block, &beacon_genesis_state);
+            }
+            let (beacon_latest_block, beacon_latest_state) = beacon_storage
+                .latest_committed()
+                .expect("beacon chain is non-empty after the genesis commit above");
+
             // One `Arc<BeaconProposalPool>` per host, shared across every
             // co-hosted vnode's coordinator and the inbound
             // `GetBeaconProposalRequest` handler.
             let beacon_proposal_pool = Arc::new(BeaconProposalPool::new(
-                beacon_genesis_state.current_epoch.next(),
+                beacon_latest_state.current_epoch.next(),
             ));
 
             let mut vnode_inits: Vec<VnodeInit> = Vec::with_capacity(host_vnodes.len());
@@ -310,8 +321,8 @@ impl SimulationRunner {
                     );
 
                     let beacon_coordinator = BeaconCoordinator::new(
-                        Arc::clone(&beacon_genesis_block),
-                        (*beacon_genesis_state).clone(),
+                        Arc::clone(&beacon_latest_block),
+                        (*beacon_latest_state).clone(),
                         validator_id,
                         *shard,
                         beacon_network.clone(),
@@ -355,7 +366,6 @@ impl SimulationRunner {
             // shards through `event_rx` deterministically.
             let shard_event_senders: HashMap<ShardGroupId, Sender<ShardEvent>> =
                 by_shard.keys().map(|s| (*s, event_tx.clone())).collect();
-            let beacon_storage: Arc<dyn BeaconStorage> = Arc::new(SimBeaconStorage::new());
             let host = NodeHost::new(
                 vnode_inits,
                 storages,

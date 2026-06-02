@@ -2257,6 +2257,26 @@ mod tests {
     }
 
     #[test]
+    fn new_resumes_at_loaded_state_epoch() {
+        // Warm-restart: the runner loads a committed `(block, state)` from
+        // storage past genesis and hands it to `new()`. The coordinator must
+        // resume at the loaded state's epoch, not fall back to genesis.
+        let (block, mut state, config_hash) = genesis_trio();
+        state.current_epoch = Epoch::new(7);
+        let pool = Arc::new(BeaconProposalPool::new(state.current_epoch.next()));
+        let coord = BeaconCoordinator::new(
+            block,
+            state,
+            ValidatorId::new(0),
+            ShardGroupId::new(0),
+            NetworkDefinition::simulator(),
+            config_hash,
+            pool,
+        );
+        assert_eq!(coord.current_epoch(), Epoch::new(7));
+    }
+
+    #[test]
     fn off_committee_validator_reports_not_on_committee() {
         let coord = new_coord(ValidatorId::new(99));
         assert!(!coord.is_on_committee());
