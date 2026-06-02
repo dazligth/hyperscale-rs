@@ -151,8 +151,10 @@ enum DecodeOutcome {
     /// pooled `Verified<BeaconProposal>` is carried through so the block
     /// assembles from verified proposals.
     Complete(Vec<(ValidatorId, Verified<BeaconProposal>)>),
-    /// At least one element points to a `(validator, epoch)` not in
-    /// the local pool; the listed validators need fetching before
+    /// At least one non-`ZERO` element can't be reproduced from the
+    /// local pool — the validator's proposal is unpooled, or the pooled
+    /// proposal diverges from the committed digest. The listed validators
+    /// need fetching (or the canonical block via peer gossip) before
     /// assembly can complete.
     Pending { missing: Vec<ValidatorId> },
 }
@@ -1819,13 +1821,18 @@ impl BeaconCoordinator {
     /// element against the corresponding validator's
     /// [`BeaconProposal::pc_element_hash`].
     ///
-    /// Pool misses surface as
-    /// [`DecodeOutcome::Pending`](DecodeOutcome::Pending) so the
-    /// caller can fetch the missing proposals before assembly. Hash
-    /// mismatches (we have a proposal but the digest disagrees with
-    /// what SPC committed) are excluded silently after a warn — the
-    /// pooled entry came from a byzantine peer and a re-fetch would
-    /// likely return the same bad bytes.
+    /// A non-`ZERO` element the local pool can't reproduce surfaces as
+    /// [`DecodeOutcome::Pending`](DecodeOutcome::Pending), whether the
+    /// pool holds no proposal for that validator or holds one whose
+    /// digest diverges from the committed element. A divergent pooled
+    /// entry is the fingerprint of a proposer that equivocated its
+    /// proposal across the committee, leaving this node latched on the
+    /// variant that lost the commit. Either way the position must
+    /// resolve — via fetch, or by adopting the peer-gossiped block —
+    /// before assembly proceeds: a block that omits a committed position
+    /// fails the committed-proposal binding every verifier runs, so
+    /// adopting one built locally would chain past a block no peer
+    /// accepts and fork this node off the canonical chain.
     fn decode_committed_proposals(&self, epoch: Epoch, output: &PcVector) -> DecodeOutcome {
         let mut committed = Vec::new();
         let mut missing = Vec::new();
@@ -1848,8 +1855,10 @@ impl BeaconCoordinator {
                     warn!(
                         ?validator,
                         epoch = epoch.inner(),
-                        "OutputHigh hash mismatches pooled proposal — excluding",
+                        "OutputHigh diverges from pooled proposal — proposer equivocated; \
+                         deferring assembly to fetch or peer block",
                     );
+                    missing.push(validator);
                 }
                 None => missing.push(validator),
             }
@@ -3083,6 +3092,87 @@ mod tests {
             assert_eq!(observer.latest_block().block_hash(), block_hash);
         }
         assert!(observer.spc.is_none());
+    }
+
+    /// A committed element whose digest diverges from the locally-pooled
+    /// proposal — the fingerprint of a proposer that equivocated its
+    /// proposal across the committee — must not assemble and adopt a
+    /// block locally. Such a block omits the committed position, fails
+    /// the committed-proposal binding every verifier runs, and would fork
+    /// this node off the canonical chain. The decode defers to a fetch
+    /// instead, leaving the tip unmoved until the canonical block arrives
+    /// via gossip.
+    #[test]
+    fn output_high_defers_when_committed_proposal_diverges_from_pool() {
+        let mut coord = fresh_coord();
+        coord.bootstrap_spc_for_next_epoch();
+        let in_flight = Epoch::GENESIS.next();
+        let committee = coord.state.committee.clone();
+        let n = committee.len();
+
+        // Pool a proposal for every committee member, then commit a value
+        // whose element at position 1 carries a different variant's digest
+        // — what a peer that admitted the proposer's other equivocated
+        // proposal would have committed.
+        let divergent_pos = 1;
+        let mut elements = Vec::with_capacity(n);
+        for (pos, id) in committee.iter().enumerate() {
+            let p = sample_proposal(u8::try_from(id.inner()).unwrap_or(0));
+            let committed_hash = if pos == divergent_pos {
+                sample_proposal(0xFF).pc_element_hash(in_flight)
+            } else {
+                p.pc_element_hash(in_flight)
+            };
+            elements.push(committed_hash);
+            coord.proposal_pool.admit(*id, in_flight, p);
+        }
+        let output = PcVector::new(elements);
+
+        let keys: Vec<_> = (0..n as u64).map(keypair).collect();
+        let cert_committee: Vec<_> = committee
+            .iter()
+            .copied()
+            .zip(keys.iter().map(Bls12381G1PrivateKey::public_key))
+            .collect();
+        let f = n.saturating_sub(1) / 3;
+        let q = n - f;
+        let signer_positions: Vec<usize> = (0..q).collect();
+        let cert = build_direct_cert(
+            SpcView::new(1),
+            in_flight,
+            &keys,
+            &cert_committee,
+            &signer_positions,
+        );
+
+        let recipients = coord.spc_recipients();
+        let actions = coord.on_spc_output_high(
+            in_flight,
+            &output,
+            Verified::new_unchecked_for_test(cert),
+            &recipients,
+        );
+
+        // The divergent position can't be reconstructed locally, so the
+        // node fetches it rather than adopting a fork: no commit, tip
+        // unmoved, and a BeaconProposal fetch for the divergent proposer.
+        let kinds: Vec<&str> = actions.iter().map(Action::type_name).collect();
+        assert!(
+            !kinds.contains(&"CommitBeaconBlock"),
+            "must not adopt a block omitting a committed position, got {kinds:?}",
+        );
+        assert_eq!(coord.state.current_epoch, Epoch::GENESIS);
+        let fetches_divergent = actions.iter().any(|a| {
+            matches!(
+                a,
+                Action::Fetch(FetchRequest::BeaconProposal { validator, .. })
+                    if *validator == committee[divergent_pos]
+            )
+        });
+        assert!(
+            fetches_divergent,
+            "expected a BeaconProposal fetch for the divergent proposer, got {kinds:?}",
+        );
     }
 
     /// `on_spc_output_high` emits `CommitBeaconBlock` immediately
