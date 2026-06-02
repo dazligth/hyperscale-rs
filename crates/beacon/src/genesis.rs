@@ -182,32 +182,7 @@ fn validate_config(config: &BeaconGenesisConfig) -> BTreeMap<ValidatorId, ShardG
         );
     }
 
-    // Beacon committee members are declared, and the configured size is
-    // BFT-viable and fits the SPC vote vector.
-    for id in &config.initial_beacon_committee {
-        assert!(
-            validator_ids.contains(id),
-            "initial_beacon_committee references unknown validator {id}",
-        );
-    }
-    let beacon_committee_cap = config.chain_config.beacon_committee_size as usize;
-    assert!(
-        beacon_committee_cap >= MIN_BEACON_COMMITTEE_SIZE,
-        "chain_config.beacon_committee_size ({beacon_committee_cap}) is below \
-         MIN_BEACON_COMMITTEE_SIZE ({MIN_BEACON_COMMITTEE_SIZE}); PC needs n >= 3f + 1 \
-         with f >= 1 to tolerate a fault",
-    );
-    assert!(
-        beacon_committee_cap <= MAX_VOTE_VECTOR_LEN,
-        "chain_config.beacon_committee_size ({beacon_committee_cap}) exceeds \
-         MAX_VOTE_VECTOR_LEN ({MAX_VOTE_VECTOR_LEN}); SPC view-input vectors can't hold it",
-    );
-    assert!(
-        config.initial_beacon_committee.len() <= beacon_committee_cap,
-        "initial_beacon_committee ({} members) exceeds chain_config.beacon_committee_size ({})",
-        config.initial_beacon_committee.len(),
-        beacon_committee_cap,
-    );
+    validate_beacon_committee(config, &validator_ids);
 
     // Shard topology is non-degenerate: a zero shard count divides by
     // zero in `shard_for_node` tx routing, and a zero shard size leaves
@@ -243,6 +218,45 @@ fn validate_config(config: &BeaconGenesisConfig) -> BTreeMap<ValidatorId, ShardG
     }
 
     placed
+}
+
+/// Beacon committee members are declared and distinct, and the
+/// configured size is BFT-viable and fits the SPC vote vector.
+///
+/// A duplicate member would inflate the committee size `n` that drives
+/// the BFT quorum (`n - f`) while the vote pools — keyed by
+/// `ValidatorId` — hold only distinct voters, so a pathological config
+/// could leave quorum permanently unreachable.
+fn validate_beacon_committee(config: &BeaconGenesisConfig, validator_ids: &BTreeSet<ValidatorId>) {
+    let mut beacon_committee_ids: BTreeSet<ValidatorId> = BTreeSet::new();
+    for id in &config.initial_beacon_committee {
+        assert!(
+            validator_ids.contains(id),
+            "initial_beacon_committee references unknown validator {id}",
+        );
+        assert!(
+            beacon_committee_ids.insert(*id),
+            "initial_beacon_committee lists validator {id} twice",
+        );
+    }
+    let beacon_committee_cap = config.chain_config.beacon_committee_size as usize;
+    assert!(
+        beacon_committee_cap >= MIN_BEACON_COMMITTEE_SIZE,
+        "chain_config.beacon_committee_size ({beacon_committee_cap}) is below \
+         MIN_BEACON_COMMITTEE_SIZE ({MIN_BEACON_COMMITTEE_SIZE}); PC needs n >= 3f + 1 \
+         with f >= 1 to tolerate a fault",
+    );
+    assert!(
+        beacon_committee_cap <= MAX_VOTE_VECTOR_LEN,
+        "chain_config.beacon_committee_size ({beacon_committee_cap}) exceeds \
+         MAX_VOTE_VECTOR_LEN ({MAX_VOTE_VECTOR_LEN}); SPC view-input vectors can't hold it",
+    );
+    assert!(
+        config.initial_beacon_committee.len() <= beacon_committee_cap,
+        "initial_beacon_committee ({} members) exceeds chain_config.beacon_committee_size ({})",
+        config.initial_beacon_committee.len(),
+        beacon_committee_cap,
+    );
 }
 
 #[cfg(test)]
@@ -487,6 +501,23 @@ mod tests {
             .collect(),
             initial_randomness: Randomness::ZERO,
         };
+        let _ = build_genesis_beacon_state(&cfg);
+    }
+
+    #[test]
+    #[should_panic(expected = "lists validator Validator(0) twice")]
+    fn rejects_duplicate_beacon_committee_member() {
+        // A validator listed twice in the beacon committee inflates the
+        // nominal committee size used for the BFT quorum while the vote
+        // pools hold only distinct voters. Length stays at the cap (4),
+        // so the size gate passes and the dedup gate is what fires.
+        let mut cfg = sample_config(4, 4, 4);
+        cfg.initial_beacon_committee = vec![
+            ValidatorId::new(0),
+            ValidatorId::new(0),
+            ValidatorId::new(1),
+            ValidatorId::new(2),
+        ];
         let _ = build_genesis_beacon_state(&cfg);
     }
 
