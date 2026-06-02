@@ -927,11 +927,31 @@ where
             );
 
         // ── beacon.spc.empty_view → Unverified/VerifiedSpcEmptyViewReceived ──
+        //
+        // EmptyView is content-signed, so — like new_view/new_commit — we
+        // authenticate the signer at the relay edge before the coordinator
+        // keys a per-`(epoch, view, signer)` verification slot, blocking a
+        // peer from squatting another validator's slot with a forged-signer
+        // message. Locally-dispatched sends arrive with the `Verified`
+        // marker and skip the check; the expensive embedded-QC3 verify
+        // still runs async in the coordinator.
         let senders = self.process.shard_event_senders.clone();
+        let topology = self.process.topology_snapshot.clone();
         self.process
             .network
             .register_notification_handler::<SpcEmptyViewMsgNotification>(
                 move |gossip: SpcEmptyViewMsgNotification| {
+                    if !gossip.msg.is_verified() {
+                        let topo = topology.load();
+                        if !verify_signed_by_proposer(
+                            &topo,
+                            &gossip,
+                            "spc_empty_view",
+                            "SPC empty view",
+                        ) {
+                            return;
+                        }
+                    }
                     let event = match Arc::unwrap_or_clone(gossip.msg).into_verified() {
                         Ok(verified) => ProtocolEvent::VerifiedSpcEmptyViewReceived {
                             msg: Box::new(verified),

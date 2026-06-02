@@ -108,7 +108,10 @@ where
             );
             ctx.network.notify(
                 &recipients,
-                &SpcEmptyViewMsgNotification::new(Arc::new(Verifiable::from(verified.clone()))),
+                &SpcEmptyViewMsgNotification::new(
+                    epoch,
+                    Arc::new(Verifiable::from(verified.clone())),
+                ),
             );
             ctx.notify_protocol(ProtocolEvent::VerifiedSpcEmptyViewReceived {
                 msg: Box::new(verified),
