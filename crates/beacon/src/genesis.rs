@@ -165,7 +165,13 @@ fn validate_config(config: &BeaconGenesisConfig) -> BTreeMap<ValidatorId, ShardG
     }
     for pool in &config.initial_pools {
         let n = per_pool_count.get(&pool.id).copied().unwrap_or(0);
-        let required = Stake::from_attos(u128::from(n) * MIN_STAKE_FLOOR.attos());
+        let Some(required_attos) = u128::from(n).checked_mul(MIN_STAKE_FLOOR.attos()) else {
+            panic!(
+                "genesis pool {} declares {n} validators, overflowing the stake floor",
+                pool.id
+            );
+        };
+        let required = Stake::from_attos(required_attos);
         assert!(
             pool.total_stake >= required,
             "genesis pool {} declares {n} validators but holds only {} stake; \

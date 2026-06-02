@@ -101,7 +101,7 @@ pub(super) fn ingest_witnesses(
             .get(&sw.proof.shard_id)
             .copied()
             .unwrap_or(LeafIndex::new(0));
-        if sw.proof.leaf_index.inner() != watermark.inner() + 1 {
+        if sw.proof.leaf_index.inner() != watermark.inner().saturating_add(1) {
             continue;
         }
         match apply_shard_payload(state, sw.proof.shard_id, &sw.payload) {
@@ -307,7 +307,9 @@ pub(super) fn apply_shard_payload(
             if reason == JailReason::Equivocation {
                 return None;
             }
-            if state.current_epoch.inner() < since_epoch.inner() + JAIL_COOLDOWN_EPOCHS {
+            if state.current_epoch.inner()
+                < since_epoch.inner().saturating_add(JAIL_COOLDOWN_EPOCHS)
+            {
                 return None;
             }
             let pool_id = rec.pool;
