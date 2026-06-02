@@ -15,8 +15,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use hyperscale_types::{
-    BeaconGenesisConfig, BeaconState, Epoch, MAX_VOTE_VECTOR_LEN, MIN_STAKE_FLOOR, ShardCommittee,
-    ShardGroupId, Stake, StakePool, StakePoolId, ValidatorId, ValidatorRecord, ValidatorStatus,
+    BeaconGenesisConfig, BeaconState, Epoch, MAX_VOTE_VECTOR_LEN, MIN_BEACON_COMMITTEE_SIZE,
+    MIN_STAKE_FLOOR, ShardCommittee, ShardGroupId, Stake, StakePool, StakePoolId, ValidatorId,
+    ValidatorRecord, ValidatorStatus,
 };
 
 // ─── builder ───────────────────────────────────────────────────────────────
@@ -175,7 +176,8 @@ fn validate_config(config: &BeaconGenesisConfig) -> BTreeMap<ValidatorId, ShardG
         );
     }
 
-    // Beacon committee members are declared and the committee fits.
+    // Beacon committee members are declared, and the configured size is
+    // BFT-viable and fits the SPC vote vector.
     for id in &config.initial_beacon_committee {
         assert!(
             validator_ids.contains(id),
@@ -183,6 +185,12 @@ fn validate_config(config: &BeaconGenesisConfig) -> BTreeMap<ValidatorId, ShardG
         );
     }
     let beacon_committee_cap = config.chain_config.beacon_committee_size as usize;
+    assert!(
+        beacon_committee_cap >= MIN_BEACON_COMMITTEE_SIZE,
+        "chain_config.beacon_committee_size ({beacon_committee_cap}) is below \
+         MIN_BEACON_COMMITTEE_SIZE ({MIN_BEACON_COMMITTEE_SIZE}); PC needs n >= 3f + 1 \
+         with f >= 1 to tolerate a fault",
+    );
     assert!(
         beacon_committee_cap <= MAX_VOTE_VECTOR_LEN,
         "chain_config.beacon_committee_size ({beacon_committee_cap}) exceeds \
@@ -193,6 +201,18 @@ fn validate_config(config: &BeaconGenesisConfig) -> BTreeMap<ValidatorId, ShardG
         "initial_beacon_committee ({} members) exceeds chain_config.beacon_committee_size ({})",
         config.initial_beacon_committee.len(),
         beacon_committee_cap,
+    );
+
+    // Shard topology is non-degenerate: a zero shard count divides by
+    // zero in `shard_for_node` tx routing, and a zero shard size leaves
+    // no room to place a validator on any shard.
+    assert!(
+        config.chain_config.num_shards > 0,
+        "chain_config.num_shards is zero; shard routing divides by the shard count",
+    );
+    assert!(
+        config.chain_config.shard_size > 0,
+        "chain_config.shard_size is zero; no validator can be placed on a shard",
     );
 
     // Shard committee members exist, each shard fits, no validator
@@ -515,6 +535,35 @@ mod tests {
             initial_shard_committees: BTreeMap::new(),
             initial_randomness: Randomness::ZERO,
         };
+        let _ = build_genesis_beacon_state(&cfg);
+    }
+
+    #[test]
+    #[should_panic(expected = "below MIN_BEACON_COMMITTEE_SIZE")]
+    fn rejects_beacon_committee_size_below_bft_floor() {
+        // A committee that can't tolerate a single fault (n < 4) would
+        // never form a normal-block quorum — reject the config typo
+        // rather than ship a chain stuck on the skip path.
+        let mut cfg = sample_config(4, 4, 4);
+        cfg.chain_config.beacon_committee_size = 3;
+        let _ = build_genesis_beacon_state(&cfg);
+    }
+
+    #[test]
+    #[should_panic(expected = "num_shards is zero")]
+    fn rejects_zero_shard_count() {
+        // `shard_for_node` routes by `hash % num_shards`; a zero count
+        // divides by zero the moment topology is derived.
+        let mut cfg = sample_config(4, 4, 4);
+        cfg.chain_config.num_shards = 0;
+        let _ = build_genesis_beacon_state(&cfg);
+    }
+
+    #[test]
+    #[should_panic(expected = "shard_size is zero")]
+    fn rejects_zero_shard_size() {
+        let mut cfg = sample_config(4, 4, 4);
+        cfg.chain_config.shard_size = 0;
         let _ = build_genesis_beacon_state(&cfg);
     }
 }
