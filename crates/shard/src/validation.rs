@@ -50,6 +50,27 @@ pub fn qc_has_local_quorum_power(
     VotePower::has_quorum(qc_power, topology.voting_power_for_shard(local_shard))
 }
 
+/// True if `qc`'s `weighted_timestamp` is implausibly far ahead of `now`.
+///
+/// The weighted timestamp rides outside the QC's signed message
+/// (`block_vote_message` covers only shard/height/round/hashes), so a Byzantine
+/// proposer or forwarder can rewrite it on an otherwise-genuine QC and still
+/// pass `VerifyQcSignature`. A far-future value poisons the BFT clock that
+/// anchors transaction-validity windows — honest transactions fall outside the
+/// window (blocks go empty) and the aggregation floor propagates the skew
+/// irreversibly. An honestly-aggregated weighted timestamp is a mean of voters'
+/// clocks from an earlier round, so it leads ours by at most the honest skew
+/// envelope; anything beyond is rejected. Checked wherever an untrusted QC
+/// enters chain state: header validation, synced-block admission, and
+/// timeout-quorum `high_qc` adoption.
+#[must_use]
+pub fn qc_weighted_timestamp_too_far_ahead(qc: &QuorumCertificate, now: LocalTimestamp) -> bool {
+    let weighted_ms = qc.weighted_timestamp().as_millis();
+    let max_ahead_ms =
+        u64::try_from((MAX_TIMESTAMP_DELAY + MAX_TIMESTAMP_RUSH).as_millis()).unwrap_or(u64::MAX);
+    weighted_ms > now.as_millis().saturating_add(max_ahead_ms)
+}
+
 /// Validate block header structure, proposer, and parent QC quorum. Returns
 /// `Err(..)` with a human-readable reason on any check failure.
 pub fn validate_header(
@@ -128,23 +149,15 @@ pub fn validate_header(
         ));
     }
 
-    // The parent QC's `weighted_timestamp` is the BFT clock that anchors this
-    // block's transaction-validity window, yet it rides outside the QC's signed
-    // message (`block_vote_message` covers only shard/height/round/hashes). A
-    // Byzantine proposer or forwarder can rewrite it on an otherwise-genuine QC
-    // and still pass the downstream `VerifyQcSignature`. A far-future value
-    // pushes every honest transaction's validity range into the past (forcing
-    // empty blocks) and, because aggregation floors each new QC's timestamp at
-    // its parent's, propagates irreversibly. An honestly-aggregated weighted
-    // timestamp is a mean of voters' clocks from an earlier round, so it leads
-    // ours by at most the honest skew envelope; reject anything beyond it.
-    let parent_weighted_ms = header.parent_qc().weighted_timestamp().as_millis();
-    let max_ahead_ms =
-        u64::try_from((MAX_TIMESTAMP_DELAY + MAX_TIMESTAMP_RUSH).as_millis()).unwrap_or(u64::MAX);
-    let ceiling_ms = now.as_millis().saturating_add(max_ahead_ms);
-    if parent_weighted_ms > ceiling_ms {
+    // The parent QC's `weighted_timestamp` anchors this block's
+    // transaction-validity window but rides outside the QC's signed message, so
+    // a Byzantine proposer or forwarder can forge it; a far-future value forces
+    // empty blocks and propagates irreversibly through the aggregation floor.
+    // See [`qc_weighted_timestamp_too_far_ahead`].
+    if qc_weighted_timestamp_too_far_ahead(header.parent_qc(), now) {
         return Err(format!(
-            "parent QC weighted timestamp {parent_weighted_ms} is too far ahead (now: {}, max ahead: {max_ahead_ms}ms)",
+            "parent QC weighted timestamp {} is too far ahead (now: {})",
+            header.parent_qc().weighted_timestamp().as_millis(),
             now.as_millis()
         ));
     }
@@ -709,6 +722,29 @@ mod tests {
             validate_header(&topo, local_shard(), &header, BlockHeight::new(0), now).is_ok(),
             "honest recent parent QC timestamp must pass"
         );
+    }
+
+    #[test]
+    fn qc_weighted_timestamp_bound_is_the_honest_skew_envelope() {
+        let now = LocalTimestamp::from_millis(1_000_000);
+        let envelope_ms =
+            u64::try_from((MAX_TIMESTAMP_DELAY + MAX_TIMESTAMP_RUSH).as_millis()).unwrap();
+
+        // Behind our clock (the honest case) and exactly at the envelope: kept.
+        assert!(!qc_weighted_timestamp_too_far_ahead(
+            &quorum_parent_qc(now.as_millis() - 100_000),
+            now
+        ));
+        assert!(!qc_weighted_timestamp_too_far_ahead(
+            &quorum_parent_qc(now.as_millis() + envelope_ms),
+            now
+        ));
+
+        // One millisecond past the envelope: rejected.
+        assert!(qc_weighted_timestamp_too_far_ahead(
+            &quorum_parent_qc(now.as_millis() + envelope_ms + 1),
+            now
+        ));
     }
 
     // ═══════════════════════════════════════════════════════════════════════

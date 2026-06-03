@@ -107,7 +107,10 @@ use crate::proposal::{
 };
 use crate::ready_signal_pool::{MIN_READY_SIGNAL_DWELL, ReadySignalPool};
 use crate::timeout_keeper::TimeoutKeeper;
-use crate::validation::{qc_has_local_quorum_power, validate_block_for_vote, validate_header};
+use crate::validation::{
+    qc_has_local_quorum_power, qc_weighted_timestamp_too_far_ahead, validate_block_for_vote,
+    validate_header,
+};
 use crate::verification::{
     InFlightCheck, ReadyStateRootVerification, VerificationKind, VerificationPipeline,
 };
@@ -2864,6 +2867,18 @@ impl ShardCoordinator {
             return vec![];
         }
 
+        // Timestamp gate: the QC's `weighted_timestamp` rides outside the signed
+        // message, so a Byzantine sync peer can forge a far-future value on an
+        // otherwise-valid QC and poison `committed_ts` past recovery. Mirrors
+        // the consensus-path gate in `validate_header`.
+        if qc_weighted_timestamp_too_far_ahead(certified.qc(), self.now) {
+            warn!(
+                height = certified.block().height().inner(),
+                "Synced block QC weighted timestamp too far ahead — rejecting"
+            );
+            return vec![];
+        }
+
         let Some(public_keys) = committee_public_keys(topology_snapshot, self.local_shard) else {
             warn!("Failed to collect public keys for synced block QC verification");
             return vec![];
@@ -3334,6 +3349,18 @@ impl ShardCoordinator {
             // nothing below it can either.
             if candidate.is_genesis() || candidate.round() <= cur_high {
                 break;
+            }
+            // The carried `high_qc`'s `weighted_timestamp` is forgeable (rides
+            // outside the signed message), so skip a far-future one before
+            // spending a pairing on it — like a verification failure, a
+            // lower-round candidate may still be sound.
+            if qc_weighted_timestamp_too_far_ahead(&candidate, self.now) {
+                warn!(
+                    validator = ?self.me,
+                    qc_round = candidate.round().inner(),
+                    "Timeout high_qc weighted timestamp too far ahead — trying next-highest"
+                );
+                continue;
             }
             let Some(verified) = self.verify_qc_sync(topology_snapshot, &candidate) else {
                 warn!(
