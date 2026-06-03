@@ -159,6 +159,9 @@ impl<'a> ChainView<'a> {
                 for tx_hash in manifest.tx_hashes().iter() {
                     tx_hashes.insert(*tx_hash);
                 }
+                for cert_id in manifest.cert_ids().iter() {
+                    cert_ids.insert(cert_id.clone());
+                }
             }
             for batch_hash in manifest.provision_hashes().iter() {
                 provision_hashes.insert(*batch_hash);
@@ -299,6 +302,44 @@ mod tests {
                 assert!(view.get_block(block_hash).is_none());
                 let h = view.get_header(block_hash).expect("header available");
                 assert_eq!(h.height(), BlockHeight::new(3));
+            },
+        );
+    }
+
+    #[test]
+    fn collect_ancestor_hashes_includes_manifest_only_cert_ids() {
+        // A manifest-only ancestor (header known, body not yet assembled) still
+        // contributes its certificate wave-ids to dedup, matching the
+        // assembled-block walk; otherwise a descendant could re-include a
+        // finalized wave already present above the committed tip.
+        let header = make_header(3, BlockHash::ZERO);
+        let block_hash = header.hash();
+        let wave = WaveId::new(
+            ShardGroupId::new(0),
+            BlockHeight::new(2),
+            std::collections::BTreeSet::new(),
+        );
+        let manifest = BlockManifest::new(vec![], vec![wave.clone()], vec![], vec![]);
+        let pending_block = PendingBlock::from_manifest(header, manifest, LocalTimestamp::ZERO);
+        let mut pending = PendingBlocks::new();
+        pending.insert(pending_block);
+
+        run_view(
+            0,
+            BlockHash::ZERO,
+            StateRoot::ZERO,
+            &pending,
+            None,
+            |view| {
+                assert!(
+                    view.get_block(block_hash).is_none(),
+                    "ancestor must stay manifest-only for this case",
+                );
+                let (cert_ids, _txs, _provisions) = view.collect_ancestor_hashes(block_hash);
+                assert!(
+                    cert_ids.contains(&wave),
+                    "manifest-only ancestor cert wave-id missing from dedup set",
+                );
             },
         );
     }
