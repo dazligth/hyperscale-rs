@@ -178,14 +178,16 @@ impl ViewChangeController {
     /// Synchronize the local round to a higher round observed on a single
     /// validator's header or vote. Unlike [`Self::sync_to_qc_round`], the
     /// source is one validator's unverified round claim, so the advance is
-    /// capped at `MAX_ROUND_GAP` beyond the current view. This lets a lagging
-    /// node converge a bounded amount per observation while denying a
-    /// Byzantine validator the ability to fling the view toward `Round`'s
-    /// overflow boundary, where the next [`Self::advance`] would panic. A node
-    /// further behind than the cap catches up through verified QC sync as it
-    /// applies blocks. Returns `true` if the view was advanced.
-    pub fn sync_to_observed_round(&mut self, observed_round: Round) -> bool {
-        let ceiling = Round::new(self.view.inner().saturating_add(MAX_ROUND_GAP));
+    /// capped at `MAX_ROUND_GAP` beyond `verified_round` — the round of the
+    /// highest QC the node has actually verified (`high_qc`). Anchoring the cap
+    /// to verified progress, not the current view, bounds the view absolutely:
+    /// a Byzantine validator can't escalate it across repeated observations
+    /// (each capping relative to the last), only nudge it a bounded gap past
+    /// what a quorum has certified. A node further behind than the cap catches
+    /// up through verified QC sync as it applies blocks. Returns `true` if the
+    /// view was advanced.
+    pub fn sync_to_observed_round(&mut self, observed_round: Round, verified_round: Round) -> bool {
+        let ceiling = Round::new(verified_round.inner().saturating_add(MAX_ROUND_GAP));
         self.sync_to_qc_round(observed_round.min(ceiling))
     }
 }
@@ -268,16 +270,26 @@ mod tests {
     }
 
     #[test]
-    fn sync_to_observed_round_caps_advance_at_max_gap() {
+    fn sync_to_observed_round_caps_advance_at_gap_beyond_verified() {
         let mut vc = ViewChangeController::new(Round::INITIAL);
+        let verified = Round::INITIAL;
 
-        // A far-ahead claim advances the view by at most MAX_ROUND_GAP.
-        assert!(vc.sync_to_observed_round(Round::new(u64::MAX)));
+        // A far-ahead claim advances the view by at most MAX_ROUND_GAP beyond
+        // verified progress.
+        assert!(vc.sync_to_observed_round(Round::new(u64::MAX), verified));
         assert_eq!(vc.view, Round::new(MAX_ROUND_GAP));
 
-        // A second far-ahead claim advances by another bounded step, so the
-        // view can never be flung to Round's overflow boundary in one message.
-        assert!(vc.sync_to_observed_round(Round::new(u64::MAX)));
+        // With verified progress unchanged, repeated far-ahead claims can't
+        // escalate the view further — the cap is anchored to `verified`, not the
+        // already-inflated current view. This denies the cross-observation
+        // griefing that a per-view cap allowed.
+        assert!(!vc.sync_to_observed_round(Round::new(u64::MAX), verified));
+        assert_eq!(vc.view, Round::new(MAX_ROUND_GAP));
+
+        // Once verified progress advances, the ceiling rises and the view may
+        // follow another bounded step.
+        let verified = Round::new(MAX_ROUND_GAP);
+        assert!(vc.sync_to_observed_round(Round::new(u64::MAX), verified));
         assert_eq!(vc.view, Round::new(2 * MAX_ROUND_GAP));
     }
 
@@ -286,12 +298,12 @@ mod tests {
         let mut vc = ViewChangeController::new(Round::INITIAL);
         vc.view = Round::new(10);
 
-        // Within the cap: adopted verbatim.
-        assert!(vc.sync_to_observed_round(Round::new(20)));
+        // Within the cap (verified + MAX_ROUND_GAP): adopted verbatim.
+        assert!(vc.sync_to_observed_round(Round::new(20), Round::INITIAL));
         assert_eq!(vc.view, Round::new(20));
 
         // Not ahead: no advance.
-        assert!(!vc.sync_to_observed_round(Round::new(15)));
+        assert!(!vc.sync_to_observed_round(Round::new(15), Round::INITIAL));
         assert_eq!(vc.view, Round::new(20));
     }
 

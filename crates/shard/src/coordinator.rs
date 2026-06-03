@@ -1150,7 +1150,10 @@ impl ShardCoordinator {
     /// is capped per [`ViewChangeController::sync_to_observed_round`].
     fn sync_view_to_header_round(&mut self, header: &BlockHeader) {
         let old_view = self.view_change.view;
-        if self.view_change.sync_to_observed_round(header.round()) {
+        if self
+            .view_change
+            .sync_to_observed_round(header.round(), self.high_qc_round())
+        {
             info!(
                 validator = ?self.me,
                 old_view = old_view.inner(),
@@ -1678,9 +1681,13 @@ impl ShardCoordinator {
         // Per-vote: view sync + equivocation tracking. Tracking runs only on
         // verified votes so a forged vote can't pre-empt a legitimate one.
         let validator_id = self.me;
+        let high_qc_round = self.high_qc_round();
         for (_, vote, _) in &verified_votes {
             let old_view = self.view_change.view;
-            if self.view_change.sync_to_observed_round(vote.round()) {
+            if self
+                .view_change
+                .sync_to_observed_round(vote.round(), high_qc_round)
+            {
                 info!(
                     validator = ?validator_id,
                     old_view = old_view.inner(),
@@ -3056,6 +3063,14 @@ impl ShardCoordinator {
             .as_deref()
             .cloned()
             .unwrap_or_else(|| QuorumCertificate::genesis(self.local_shard))
+    }
+
+    /// Round of our `high_qc` (genesis round if we hold none). The anchor for
+    /// bounding unverified observed-round view sync to verified progress.
+    fn high_qc_round(&self) -> Round {
+        self.latest_qc
+            .as_ref()
+            .map_or(Round::INITIAL, |qc| qc.round())
     }
 
     /// Broadcast our timeout for `round` (carrying our `high_qc`) to the
