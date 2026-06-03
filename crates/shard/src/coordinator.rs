@@ -12,7 +12,7 @@
 //! This provides a strong DA guarantee: if a QC forms, at least 2f+1 validators have
 //! the complete block data, making it recoverable from any honest validator in that set.
 
-use hyperscale_core::{Action, CommitSource, FetchAbandon, ProtocolEvent, TimerId};
+use hyperscale_core::{Action, CommitSource, ProtocolEvent, TimerId};
 use hyperscale_types::{
     BlockHash, LocalTimestamp, MAX_FINALIZED_TX_PER_BLOCK, MAX_PROGRESS_WAIT,
     MAX_READY_SIGNALS_PER_BLOCK, MAX_TXS_PER_BLOCK, ProposerTimestamp, ProvisionHash, ReadySignal,
@@ -100,7 +100,7 @@ use crate::commit_pipeline::CommitPipeline;
 use crate::config::ShardConsensusConfig;
 use crate::deferred_qc::DeferredQc;
 use crate::lookups::{committee_public_keys, committee_voting_powers, vote_recipients};
-use crate::pending::{PendingBlock, PendingBlocks};
+use crate::pending::{OrphanedFetches, PendingBlock, PendingBlocks};
 use crate::proposal::{
     ProposalKind, ProposalTracker, TakeResult, assemble_build_action, dispatch_or_defer,
     select_finalized_waves, select_provisions, select_transactions,
@@ -1759,10 +1759,10 @@ impl ShardCoordinator {
                     reason = %e,
                     "QC signature verification FAILED - potential Byzantine attack! Rejecting block."
                 );
-                // Remove the pending block since we can't trust it; surface any
-                // orphaned local-DA fetches so the FSM releases their slots.
+                // Remove the pending block since we can't trust it; cancel any
+                // fetches it orphans so the FSM releases their slots.
                 let _ = is_valid; // tracked by `verification.on_qc_verified` for diagnostics
-                return self.remove_pending_block(block_hash).into_iter().collect();
+                return self.remove_pending_block(block_hash);
             }
         };
 
@@ -1977,7 +1977,7 @@ impl ShardCoordinator {
                 ?kind,
                 "Block root verification FAILED"
             );
-            return self.remove_pending_block(block_hash).into_iter().collect();
+            return self.remove_pending_block(block_hash);
         }
 
         let mut actions = Vec::new();
@@ -2546,7 +2546,7 @@ impl ShardCoordinator {
         block: &Block,
         block_hash: BlockHash,
         commit_ts: WeightedTimestamp,
-    ) -> (Option<Action>, BeaconWitnessCommit) {
+    ) -> (Vec<Action>, BeaconWitnessCommit) {
         let height = block.height();
 
         // The committed chain is linear: every block extends the prior
@@ -2722,9 +2722,7 @@ impl ShardCoordinator {
             block_hash,
             weighted_ts,
         );
-        if let Some(action) = abandon {
-            actions.push(action);
-        }
+        actions.extend(abandon);
         // The just-committed block's leaves are now folded into the
         // committed accumulator and `committed_hash` advanced to it,
         // so any beacon-witness verifications previously parked on
@@ -3447,10 +3445,11 @@ impl ShardCoordinator {
     // ═══════════════════════════════════════════════════════════════════════════
 
     /// Clean up old state after commit. Drops pending-block, vote, and
-    /// commit-tracking entries at or below `committed_height`. Returns an
-    /// optional `AbandonFetch` carrying the orphaned local-provision fetch
-    /// ids from the dropped pending blocks so the FSM releases their slots.
-    fn cleanup_old_state(&mut self, committed_height: BlockHeight) -> Option<Action> {
+    /// commit-tracking entries at or below `committed_height`. Returns
+    /// `AbandonFetch` actions for the dropped blocks' orphaned transaction,
+    /// finalized-wave, and provision fetches — those no surviving block still
+    /// needs — so the FSM releases their slots.
+    fn cleanup_old_state(&mut self, committed_height: BlockHeight) -> Vec<Action> {
         let orphaned = self.pending_blocks.prune_committed(committed_height);
 
         self.votes.cleanup_committed(committed_height);
@@ -3469,8 +3468,7 @@ impl ShardCoordinator {
         self.verification
             .cleanup(&self.pending_blocks, committed_height);
 
-        (!orphaned.is_empty())
-            .then(|| Action::AbandonFetch(FetchAbandon::LocalProvisions { hashes: orphaned }))
+        orphaned.into_abandon_actions()
     }
 
     /// Check pending blocks and emit fetch requests for those that have been
@@ -3574,14 +3572,16 @@ impl ShardCoordinator {
     /// hook. Bulk pruning at commit time uses `cleanup_old_state` which
     /// retains in-place.
     ///
-    /// Returns an `AbandonFetch` for the dropped block's outstanding
-    /// missing-provision fetches when there were any — without this the
-    /// FSM's `in_flight` entries pinned for this block would linger past
-    /// the block's lifetime, eating slots in the `max_in_flight` cap.
-    fn remove_pending_block(&mut self, block_hash: BlockHash) -> Option<Action> {
-        let pending = self.pending_blocks.remove(block_hash)?;
-        let hashes = pending.missing_provisions();
-        (!hashes.is_empty()).then(|| Action::AbandonFetch(FetchAbandon::LocalProvisions { hashes }))
+    /// Returns `AbandonFetch` actions for the dropped block's outstanding
+    /// transaction, finalized-wave, and provision fetches that no surviving
+    /// block still needs — without this the FSM's `in_flight` entries pinned
+    /// for this block would linger past its lifetime, eating slots in the
+    /// `max_in_flight` cap.
+    fn remove_pending_block(&mut self, block_hash: BlockHash) -> Vec<Action> {
+        self.pending_blocks
+            .remove_orphaning(block_hash)
+            .map(OrphanedFetches::into_abandon_actions)
+            .unwrap_or_default()
     }
 
     /// Get the committed block hash.

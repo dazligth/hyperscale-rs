@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use hyperscale_core::{Action, FetchRequest};
+use hyperscale_core::{Action, FetchAbandon, FetchRequest};
 #[cfg(test)]
 use hyperscale_types::{BeaconWitnessLeafCount, BeaconWitnessRoot};
 use hyperscale_types::{
@@ -15,6 +15,44 @@ use hyperscale_types::{
     Verifiable, WaveId,
 };
 use tracing::{debug, warn};
+
+/// Outstanding fetch ids orphaned by dropping pending blocks — already
+/// filtered to ids no surviving block still needs, so cancelling them can't
+/// starve another block's fetch. Produced by [`PendingBlocks::remove_orphaning`]
+/// and [`PendingBlocks::prune_committed`].
+#[derive(Debug, Default)]
+pub struct OrphanedFetches {
+    txs: Vec<TxHash>,
+    waves: Vec<WaveId>,
+    provisions: Vec<ProvisionHash>,
+}
+
+impl OrphanedFetches {
+    /// One [`Action::AbandonFetch`] per non-empty payload type, so the fetch
+    /// FSM releases the in-flight slots these ids were pinning. Symmetric
+    /// across transactions, finalized waves, and local provisions — a dropped
+    /// block can leave any of the three in flight.
+    #[must_use]
+    pub fn into_abandon_actions(self) -> Vec<Action> {
+        let mut actions = Vec::new();
+        if !self.txs.is_empty() {
+            actions.push(Action::AbandonFetch(FetchAbandon::Transactions {
+                ids: self.txs,
+            }));
+        }
+        if !self.waves.is_empty() {
+            actions.push(Action::AbandonFetch(FetchAbandon::FinalizedWaves {
+                ids: self.waves,
+            }));
+        }
+        if !self.provisions.is_empty() {
+            actions.push(Action::AbandonFetch(FetchAbandon::LocalProvisions {
+                hashes: self.provisions,
+            }));
+        }
+        actions
+    }
+}
 
 /// Map of block hash → [`PendingBlock`] for blocks currently being assembled.
 ///
@@ -42,8 +80,17 @@ impl PendingBlocks {
         self.0.insert(block.header().hash(), block);
     }
 
-    pub fn remove(&mut self, block_hash: BlockHash) -> Option<PendingBlock> {
-        self.0.remove(&block_hash)
+    /// Remove the block at `block_hash`, returning the outstanding fetch ids it
+    /// was waiting on that **no surviving pending block still needs** — so the
+    /// caller can cancel exactly those in-flight fetches without starving a
+    /// fetch a sibling block shares. Returns `None` if the hash isn't present.
+    pub fn remove_orphaning(&mut self, block_hash: BlockHash) -> Option<OrphanedFetches> {
+        let pending = self.0.remove(&block_hash)?;
+        Some(self.orphaned_among(
+            pending.missing_transaction_hashes,
+            pending.missing_wave_ids,
+            pending.missing_provision_hashes,
+        ))
     }
 
     pub fn contains_key(&self, block_hash: BlockHash) -> bool {
@@ -59,20 +106,48 @@ impl PendingBlocks {
     }
 
     /// Drop pending blocks whose header height is at or below
-    /// `committed_height`. Returns the union of their outstanding
-    /// missing-provision hashes — any in-flight local-DA fetch on those
-    /// hashes is now orphaned and the caller is responsible for emitting
-    /// `AbandonFetch::LocalProvisions` so the FSM releases its slots.
-    pub fn prune_committed(&mut self, committed_height: BlockHeight) -> Vec<ProvisionHash> {
-        let mut orphaned = Vec::new();
+    /// `committed_height`. Returns the outstanding fetch ids the dropped blocks
+    /// were waiting on that no surviving block still needs, so the caller can
+    /// cancel the orphaned in-flight fetches and free the FSM's slots.
+    pub fn prune_committed(&mut self, committed_height: BlockHeight) -> OrphanedFetches {
+        let mut txs: HashSet<TxHash> = HashSet::new();
+        let mut waves: HashSet<WaveId> = HashSet::new();
+        let mut provisions: HashSet<ProvisionHash> = HashSet::new();
         self.0.retain(|_, pending| {
             if pending.header().height() > committed_height {
                 return true;
             }
-            orphaned.extend(pending.missing_provision_hashes.iter().copied());
+            txs.extend(pending.missing_transaction_hashes.iter().copied());
+            waves.extend(pending.missing_wave_ids.iter().cloned());
+            provisions.extend(pending.missing_provision_hashes.iter().copied());
             false
         });
-        orphaned
+        self.orphaned_among(txs, waves, provisions)
+    }
+
+    /// Narrow a set of missing ids to those no remaining pending block needs.
+    /// Shared by single-block drop and commit-time pruning so neither cancels a
+    /// fetch another block is still waiting on.
+    fn orphaned_among(
+        &self,
+        txs: HashSet<TxHash>,
+        waves: HashSet<WaveId>,
+        provisions: HashSet<ProvisionHash>,
+    ) -> OrphanedFetches {
+        OrphanedFetches {
+            txs: txs
+                .into_iter()
+                .filter(|h| !self.0.values().any(|p| p.needs_transaction(h)))
+                .collect(),
+            waves: waves
+                .into_iter()
+                .filter(|w| !self.0.values().any(|p| p.needs_wave(w)))
+                .collect(),
+            provisions: provisions
+                .into_iter()
+                .filter(|h| !self.0.values().any(|p| p.needs_provision(h)))
+                .collect(),
+        }
     }
 
     /// Header for the pending block at `block_hash`, if present.
@@ -873,8 +948,9 @@ mod tests {
         pending_blocks.insert(live);
 
         let orphaned = pending_blocks.prune_committed(BlockHeight::new(5));
-        let orphaned_set: HashSet<_> = orphaned.into_iter().collect();
-        assert_eq!(orphaned_set, HashSet::from([prov_a, prov_b]));
+        let orphaned_provisions: HashSet<_> = orphaned.provisions.into_iter().collect();
+        assert_eq!(orphaned_provisions, HashSet::from([prov_a, prov_b]));
+        assert!(orphaned.txs.is_empty() && orphaned.waves.is_empty());
         assert_eq!(pending_blocks.len(), 1, "live block must remain");
     }
 
@@ -889,7 +965,66 @@ mod tests {
         pending_blocks.insert(complete);
 
         let orphaned = pending_blocks.prune_committed(BlockHeight::new(5));
-        assert!(orphaned.is_empty());
+        assert!(orphaned.into_abandon_actions().is_empty());
         assert_eq!(pending_blocks.len(), 0);
+    }
+
+    #[test]
+    fn prune_committed_keeps_fetches_a_surviving_block_still_needs() {
+        // A provision shared between a pruned block and a surviving one must
+        // NOT be cancelled — the surviving block is still waiting on it.
+        let mut pending_blocks = PendingBlocks::new();
+        let shared = ProvisionHash::from_raw(Hash::from_bytes(b"shared"));
+        let only_stale = ProvisionHash::from_raw(Hash::from_bytes(b"only_stale"));
+
+        let stale = PendingBlock::from_manifest(
+            make_header(BlockHeight::new(5)),
+            BlockManifest::new(vec![], vec![], vec![shared, only_stale], vec![]),
+            LocalTimestamp::ZERO,
+        );
+        let live = PendingBlock::from_manifest(
+            make_header(BlockHeight::new(10)),
+            BlockManifest::new(vec![], vec![], vec![shared], vec![]),
+            LocalTimestamp::ZERO,
+        );
+        pending_blocks.insert(stale);
+        pending_blocks.insert(live);
+
+        let orphaned = pending_blocks.prune_committed(BlockHeight::new(5));
+        assert_eq!(
+            orphaned.provisions,
+            vec![only_stale],
+            "only the id no surviving block needs may be orphaned",
+        );
+    }
+
+    #[test]
+    fn remove_orphaning_keeps_fetches_another_block_still_needs() {
+        let mut pending_blocks = PendingBlocks::new();
+        let shared = TxHash::from_raw(Hash::from_bytes(b"shared_tx"));
+        let only_dropped = TxHash::from_raw(Hash::from_bytes(b"dropped_tx"));
+
+        let dropped = PendingBlock::from_manifest(
+            make_header(BlockHeight::new(7)),
+            BlockManifest::new(vec![shared, only_dropped], vec![], vec![], vec![]),
+            LocalTimestamp::ZERO,
+        );
+        let dropped_hash = dropped.header().hash();
+        let other = PendingBlock::from_manifest(
+            make_header(BlockHeight::new(8)),
+            BlockManifest::new(vec![shared], vec![], vec![], vec![]),
+            LocalTimestamp::ZERO,
+        );
+        pending_blocks.insert(dropped);
+        pending_blocks.insert(other);
+
+        let orphaned = pending_blocks
+            .remove_orphaning(dropped_hash)
+            .expect("block present");
+        assert_eq!(
+            orphaned.txs,
+            vec![only_dropped],
+            "a tx another pending block still needs must not be orphaned",
+        );
     }
 }
