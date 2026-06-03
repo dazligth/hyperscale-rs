@@ -128,6 +128,27 @@ pub fn validate_header(
         ));
     }
 
+    // The parent QC's `weighted_timestamp` is the BFT clock that anchors this
+    // block's transaction-validity window, yet it rides outside the QC's signed
+    // message (`block_vote_message` covers only shard/height/round/hashes). A
+    // Byzantine proposer or forwarder can rewrite it on an otherwise-genuine QC
+    // and still pass the downstream `VerifyQcSignature`. A far-future value
+    // pushes every honest transaction's validity range into the past (forcing
+    // empty blocks) and, because aggregation floors each new QC's timestamp at
+    // its parent's, propagates irreversibly. An honestly-aggregated weighted
+    // timestamp is a mean of voters' clocks from an earlier round, so it leads
+    // ours by at most the honest skew envelope; reject anything beyond it.
+    let parent_weighted_ms = header.parent_qc().weighted_timestamp().as_millis();
+    let max_ahead_ms =
+        u64::try_from((MAX_TIMESTAMP_DELAY + MAX_TIMESTAMP_RUSH).as_millis()).unwrap_or(u64::MAX);
+    let ceiling_ms = now.as_millis().saturating_add(max_ahead_ms);
+    if parent_weighted_ms > ceiling_ms {
+        return Err(format!(
+            "parent QC weighted timestamp {parent_weighted_ms} is too far ahead (now: {}, max ahead: {max_ahead_ms}ms)",
+            now.as_millis()
+        ));
+    }
+
     validate_timestamp(header, now)?;
 
     Ok(())
@@ -368,8 +389,9 @@ mod tests {
         BlockHash, BlockHeader, BoundedVec, CertificateRoot, FinalizedWave, Hash, InFlightCount,
         LocalReceiptRoot, MerkleInclusionProof, NetworkDefinition, ProposerTimestamp,
         ProvisionEntry, Provisions, ProvisionsRoot, QuorumCertificate, Round, RoutableTransaction,
-        ShardGroupId, StateRoot, TransactionDecision, TransactionRoot, ValidatorId, ValidatorInfo,
-        ValidatorSet, Verifiable, WeightedTimestamp, compute_waves, test_utils,
+        ShardGroupId, SignerBitfield, StateRoot, TransactionDecision, TransactionRoot, ValidatorId,
+        ValidatorInfo, ValidatorSet, Verifiable, WeightedTimestamp, compute_waves, test_utils,
+        zero_bls_signature,
     };
 
     use super::*;
@@ -603,6 +625,90 @@ mod tests {
         let header = header_at_round(height, Round::new(MAX_ROUND_GAP), &topo);
 
         assert!(validate_header(&topo, local_shard(), &header, BlockHeight::new(0), now).is_ok());
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // validate_header parent-QC weighted-timestamp bound
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// A non-genesis parent QC for height 1 with quorum signers (3 of the
+    /// 4-member committee) and a chosen `weighted_timestamp`.
+    fn quorum_parent_qc(weighted_ms: u64) -> QuorumCertificate {
+        let mut signers = SignerBitfield::new(4);
+        signers.set(0);
+        signers.set(1);
+        signers.set(2);
+        QuorumCertificate::new(
+            BlockHash::from_raw(Hash::from_bytes(b"parent_block")),
+            ShardGroupId::new(0),
+            BlockHeight::new(1),
+            BlockHash::from_raw(Hash::from_bytes(b"grandparent")),
+            Round::new(0),
+            signers,
+            zero_bls_signature(),
+            WeightedTimestamp::from_millis(weighted_ms),
+        )
+    }
+
+    /// A height-2, round-1 header that extends `parent_qc`, with the correct
+    /// proposer and a valid proposer timestamp, so the parent-QC timestamp
+    /// bound is the only check under test.
+    fn header_extending(parent_qc: QuorumCertificate, now: LocalTimestamp) -> BlockHeader {
+        let round = Round::new(1);
+        let proposer = topology().proposer_for(local_shard(), round);
+        BlockHeader::new(
+            ShardGroupId::new(0),
+            BlockHeight::new(2),
+            parent_qc.block_hash(),
+            parent_qc,
+            proposer,
+            ProposerTimestamp::from_millis(now.as_millis()),
+            round,
+            false,
+            StateRoot::ZERO,
+            TransactionRoot::ZERO,
+            CertificateRoot::ZERO,
+            LocalReceiptRoot::ZERO,
+            ProvisionsRoot::ZERO,
+            Vec::new(),
+            std::collections::BTreeMap::new(),
+            InFlightCount::ZERO,
+            BeaconWitnessRoot::ZERO,
+            BeaconWitnessLeafCount::ZERO,
+        )
+    }
+
+    #[test]
+    fn validate_header_rejects_far_future_parent_qc_timestamp() {
+        let topo = topology();
+        let now = LocalTimestamp::from_millis(1_000_000);
+
+        // Parent QC an hour ahead of our clock — far beyond the honest skew
+        // envelope. The unsigned `weighted_timestamp` lets a Byzantine peer
+        // forge this on an otherwise-genuine QC.
+        let header = header_extending(quorum_parent_qc(now.as_millis() + 3_600_000), now);
+
+        let err =
+            validate_header(&topo, local_shard(), &header, BlockHeight::new(0), now).unwrap_err();
+        assert!(
+            err.contains("parent QC weighted timestamp"),
+            "expected far-future parent QC rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_header_accepts_recent_parent_qc_timestamp() {
+        let topo = topology();
+        let now = LocalTimestamp::from_millis(1_000_000);
+
+        // Honest case: the parent QC was aggregated a few seconds ago, so its
+        // weighted timestamp sits just behind our clock.
+        let header = header_extending(quorum_parent_qc(now.as_millis() - 5_000), now);
+
+        assert!(
+            validate_header(&topo, local_shard(), &header, BlockHeight::new(0), now).is_ok(),
+            "honest recent parent QC timestamp must pass"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════

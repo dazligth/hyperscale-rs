@@ -5151,7 +5151,9 @@ mod tests {
         // (so `validate_header`'s quorum-power and structural checks still pass)
         // but mutates fields outside the cache key, e.g. the weighted timestamp —
         // the cache must bind every signed field, otherwise a hit would skip
-        // re-verifying a forged signature.
+        // re-verifying a forged signature. The forged timestamp stays within the
+        // clock envelope so this isolates the cache-binding check rather than the
+        // far-future parent-QC timestamp bound.
         let forged_qc = {
             let __qc = honest_qc;
             QuorumCertificate::new(
@@ -5162,7 +5164,7 @@ mod tests {
                 __qc.round(),
                 __qc.signers().clone(),
                 __qc.aggregated_signature(),
-                WeightedTimestamp::from_millis(123_456_789),
+                WeightedTimestamp::from_millis(101_000),
             )
         };
         let forged_header = {
