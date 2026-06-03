@@ -2549,6 +2549,21 @@ impl ShardCoordinator {
     ) -> (Option<Action>, BeaconWitnessCommit) {
         let height = block.height();
 
+        // The committed chain is linear: every block extends the prior
+        // committed tip. The safe-vote + round-contiguous commit rules
+        // guarantee it, and reaching here needs both a 2f+1 QC and a
+        // round-contiguous two-chain, neither of which a Byzantine peer can
+        // forge for a sibling — so a mismatch is a genuine fork (a safety-rule
+        // regression or local-state corruption). Fail fast rather than splice a
+        // divergent chain onto the tip.
+        assert!(
+            block.header().parent_block_hash() == self.committed_hash,
+            "commit linkage broken at height {}: block {block_hash:?} extends {:?}, not committed tip {:?}",
+            height.inner(),
+            block.header().parent_block_hash(),
+            self.committed_hash,
+        );
+
         self.committed_height = height;
         self.committed_hash = block_hash;
         self.committed_ts = commit_ts;
@@ -5310,6 +5325,54 @@ mod tests {
                 .iter()
                 .any(|a| matches!(a, Action::VerifyQcSignature { .. })),
             "must not reach BLS verification with sub-quorum signers"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "commit linkage broken")]
+    fn commit_panics_when_block_does_not_extend_committed_tip() {
+        // Defense-in-depth: a block whose parent isn't the committed tip means
+        // a fork slipped past the safe-vote / round-contiguous rules, so the
+        // commit path fails fast rather than splicing a divergent chain on.
+        let (mut state, topology) = make_test_state();
+        state.committed_height = BlockHeight::new(0);
+        state.committed_hash = BlockHash::from_raw(Hash::from_bytes(b"real-tip"));
+
+        // A height-1 block that extends some other block, not the committed tip.
+        let block = Block::Live {
+            header: {
+                let __h = make_header_at_height(BlockHeight::new(1), 1000);
+                BlockHeader::new(
+                    __h.shard_group_id(),
+                    __h.height(),
+                    BlockHash::from_raw(Hash::from_bytes(b"wrong-parent")),
+                    __h.parent_qc().clone(),
+                    __h.proposer(),
+                    ProposerTimestamp::from_millis(1000),
+                    __h.round(),
+                    __h.is_fallback(),
+                    __h.state_root(),
+                    __h.transaction_root(),
+                    __h.certificate_root(),
+                    __h.local_receipt_root(),
+                    __h.provision_root(),
+                    __h.waves().clone().into_inner(),
+                    __h.provision_tx_roots().clone().into_inner(),
+                    __h.in_flight(),
+                    BeaconWitnessRoot::ZERO,
+                    BeaconWitnessLeafCount::ZERO,
+                )
+            },
+            transactions: Arc::new(BoundedVec::new()),
+            certificates: Arc::new(BoundedVec::new()),
+            provisions: Arc::new(BoundedVec::new()),
+        };
+        let block_hash = block.hash();
+        let _ = state.record_block_committed(
+            &topology,
+            &block,
+            block_hash,
+            WeightedTimestamp::from_millis(1000),
         );
     }
 
