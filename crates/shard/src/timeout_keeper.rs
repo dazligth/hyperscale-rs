@@ -67,16 +67,25 @@ impl TimeoutKeeper {
             .map_or(VotePower::ZERO, |r| r.total_power)
     }
 
-    /// The highest-round `high_qc` carried by any timeout for `round` — the
-    /// quorum-max QC the next leader must extend. `None` if no timeouts seen.
+    /// Every `high_qc` carried by a timeout for `round`, sorted by QC round
+    /// descending. The pacemaker walks these and adopts the highest that
+    /// *verifies*: a Byzantine timeout's `high_qc` is unverified here (only its
+    /// BLS share was checked at intake), so a forged high-round QC would sort
+    /// first — returning the whole list, rather than just the max, lets the
+    /// caller skip it and still reach the genuine quorum-max an honest timeout
+    /// carries. Empty if no timeouts seen.
     #[must_use]
-    pub fn max_high_qc(&self, round: Round) -> Option<&QuorumCertificate> {
-        self.rounds
-            .get(&round)?
+    pub fn high_qcs_by_round_desc(&self, round: Round) -> Vec<QuorumCertificate> {
+        let Some(entry) = self.rounds.get(&round) else {
+            return Vec::new();
+        };
+        let mut qcs: Vec<QuorumCertificate> = entry
             .by_voter
             .values()
-            .map(|(timeout, _)| timeout.high_qc())
-            .max_by_key(|qc| qc.round())
+            .map(|(timeout, _)| timeout.high_qc().clone())
+            .collect();
+        qcs.sort_by_key(|qc| std::cmp::Reverse(qc.round()));
+        qcs
     }
 
     /// Drop every round strictly below `round` (GC once the chain advances).
@@ -149,19 +158,21 @@ mod tests {
     }
 
     #[test]
-    fn max_high_qc_picks_highest_round() {
+    fn high_qcs_sorted_by_round_desc() {
         let mut keeper = TimeoutKeeper::new();
         keeper.record(timeout(9, 3, 0), VotePower::new(1));
         keeper.record(timeout(9, 7, 1), VotePower::new(1));
         keeper.record(timeout(9, 4, 2), VotePower::new(1));
 
-        assert_eq!(
-            keeper
-                .max_high_qc(Round::new(9))
-                .map(QuorumCertificate::round),
-            Some(Round::new(7)),
-        );
-        assert!(keeper.max_high_qc(Round::new(10)).is_none());
+        // Highest first, so the pacemaker tries the quorum-max before falling
+        // back to lower candidates when one fails verification.
+        let rounds: Vec<u64> = keeper
+            .high_qcs_by_round_desc(Round::new(9))
+            .iter()
+            .map(|qc| qc.round().inner())
+            .collect();
+        assert_eq!(rounds, vec![7, 4, 3]);
+        assert!(keeper.high_qcs_by_round_desc(Round::new(10)).is_empty());
     }
 
     #[test]

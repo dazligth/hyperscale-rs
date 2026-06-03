@@ -3198,9 +3198,15 @@ impl ShardCoordinator {
         actions
     }
 
-    /// Verify and adopt the highest `high_qc` reported by the round's timeouts
-    /// if it exceeds our current `high_qc`. This is what makes the next leader
-    /// extend a QC at least as high as any committed block.
+    /// Verify and adopt the highest valid `high_qc` reported by the round's
+    /// timeouts if it exceeds our current `high_qc`. This is what makes the next
+    /// leader extend a QC at least as high as any committed block.
+    ///
+    /// The carried `high_qc`s are unverified at intake, so we walk them from the
+    /// highest round down and adopt the first that *verifies*. A Byzantine
+    /// timeout can carry a forged high-round `high_qc`, but its only effect is
+    /// one failed verification — it cannot suppress the genuine quorum-max an
+    /// honest timeout carries.
     fn adopt_timeout_quorum_high_qc(
         &mut self,
         topology_snapshot: &TopologySnapshot,
@@ -3210,18 +3216,23 @@ impl ShardCoordinator {
             .latest_qc
             .as_deref()
             .map_or(Round::INITIAL, QuorumCertificate::round);
-        let Some(candidate) = self.timeouts.max_high_qc(round) else {
-            return Vec::new();
-        };
-        if candidate.is_genesis() || candidate.round() <= cur_high {
-            return Vec::new();
+        for candidate in self.timeouts.high_qcs_by_round_desc(round) {
+            // Candidates are sorted descending, so once one can't advance us
+            // nothing below it can either.
+            if candidate.is_genesis() || candidate.round() <= cur_high {
+                break;
+            }
+            let Some(verified) = self.verify_qc_sync(topology_snapshot, &candidate) else {
+                warn!(
+                    validator = ?self.me,
+                    qc_round = candidate.round().inner(),
+                    "Timeout high_qc failed verification — trying next-highest"
+                );
+                continue;
+            };
+            return self.try_adopt_verified_qc(&verified);
         }
-        let candidate = candidate.clone();
-        let Some(verified) = self.verify_qc_sync(topology_snapshot, &candidate) else {
-            warn!(validator = ?self.me, "Quorum-max high_qc from timeouts failed verification");
-            return Vec::new();
-        };
-        self.try_adopt_verified_qc(&verified)
+        Vec::new()
     }
 
     /// Synchronously verify a QC against the local committee. Used on the
