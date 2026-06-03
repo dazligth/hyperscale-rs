@@ -3,31 +3,81 @@
 mod common;
 
 use common::{HoldFilter, ShardCoordinatorSim};
-use hyperscale_types::{BlockHeight, ValidatorId};
+use hyperscale_types::{BlockHeight, CertifiedBlock, ValidatorId};
 
 const MAX_STEPS: usize = 10_000;
 
-/// A replica that misses h=1's header but receives everything
-/// else hits the missing-parent path on h=2's arrival, emits
-/// `StartBlockSync`, then catches up when the missed block is
-/// delivered manually via sync apply.
-///
-/// `drop_for` silences ALL inbound, which would make the lagging
-/// replica's leader rotations no-op and wedge the chain (idx 3 is
-/// the h=3 leader, so a silenced idx 3 can't propose h=3 and
-/// nobody else can either). Holding only h=1's header keeps every
-/// other envelope flowing; h=2's `parent_qc` then references the
-/// missing h=1 and `absorb_parent_qc_from_header` emits
-/// `StartBlockSync(h=1)`.
-///
-/// Under this fault only the aggregators that collect quorum on
-/// h=2 commit h=1: `vote_recipients` for h=2 voters routes mostly
-/// to idx 2 and the next-height leaders, so idx 0 and idx 2 hit
-/// quorum locally and commit; idx 1's `vote_set` comes up one
-/// short. Targeting `[0, 2]` is what's reachable.
+/// A fully honest run's committed chain: heights 1..=N, round-contiguous
+/// (no view change), reusable as sync-apply input for a lagging replica.
+/// Same `(n, seed)` ⇒ same committee and genesis, so the certified blocks
+/// verify against any sim built with the same parameters.
+fn reference_chain(n: usize, seed: u64, heights: usize) -> Vec<CertifiedBlock> {
+    let mut sim = ShardCoordinatorSim::new(n, seed);
+    sim.kick_off();
+    sim.run_until_committed(heights, MAX_STEPS);
+    sim.commits[0]
+        .iter()
+        .map(|c| (**c.certified).clone())
+        .collect()
+}
+
+/// The round-contiguous two-chain rule applies on the sync path: a synced
+/// block does not finalize on its own QC — only when a child certified at
+/// exactly `round + 1` is admitted. A single QC is not a commit certificate;
+/// an orphan sibling at the same height carries one too, so committing on the
+/// bare QC would let a peer-served orphan fork a lagging node.
+#[test]
+fn synced_block_needs_round_contiguous_child_to_commit() {
+    let seed = 0x5A_FE;
+    let reference = reference_chain(4, seed, 3);
+    assert!(
+        reference.len() >= 2,
+        "need at least two committed heights to feed a parent and its child",
+    );
+
+    // A fresh replica at committed height 0 catches up purely via sync apply.
+    let mut sim = ShardCoordinatorSim::new(4, seed);
+    let lagging = ValidatorId::new(3);
+
+    // Feed only the first block. Without its round-contiguous child it must
+    // not commit — this is the orphan-sibling case (the child never exists, so
+    // a Byzantine peer cannot forge the 2f+1 QC that would certify it).
+    sim.deliver_synced_block(lagging, &reference[0]);
+    sim.run_for_at_most(2_000);
+    assert_eq!(
+        sim.coordinators[3].committed_height(),
+        BlockHeight::new(0),
+        "synced block committed on its bare QC without a round-contiguous child",
+    );
+    assert!(
+        sim.commits[3].is_empty(),
+        "lagging replica recorded a commit it should have deferred",
+    );
+
+    // Feed the round-contiguous child. Now the parent finalizes.
+    sim.deliver_synced_block(lagging, &reference[1]);
+    sim.run_for_at_most(2_000);
+    assert_eq!(
+        sim.coordinators[3].committed_height(),
+        reference[0].block().height(),
+        "round-contiguous child did not finalize its parent on the sync path",
+    );
+}
+
+/// A replica that misses h=1's header but receives everything else hits the
+/// missing-parent path on h=2's arrival and emits `StartBlockSync`. It then
+/// catches up when the chain is delivered via sync apply, finalizing every
+/// block whose round-contiguous child is also delivered — all but the
+/// frontier, which finalizes through live consensus.
 #[test]
 fn silenced_replica_triggers_sync_and_catches_up_via_apply() {
-    let mut sim = ShardCoordinatorSim::new(4, 0x5C_DC);
+    let seed = 0x5C_DC;
+    // Several round-contiguous heights so the catch-up commits more than the
+    // single deferred frontier block.
+    let reference = reference_chain(4, seed, 4);
+    assert!(reference.len() >= 3, "need a multi-height reference chain");
+
+    let mut sim = ShardCoordinatorSim::new(4, seed);
     let lagging = ValidatorId::new(3);
 
     sim.hold_matching(
@@ -56,51 +106,51 @@ fn silenced_replica_triggers_sync_and_catches_up_via_apply() {
         sim.coordinators[3].is_block_syncing(),
         "replica 3 should be in sync mode after emitting StartBlockSync",
     );
-    assert!(
-        sync_target.inner() >= 1,
-        "sync target {sync_target:?} must reference at least h=1",
-    );
 
-    // Feed each honest commit's `CertifiedBlock` into the lagging
-    // replica's sync apply path. Each runs through the normal
-    // verification + commit machinery — the sync entry attests QC
-    // trust via `from_qc_attestation` instead of re-running
-    // per-root verifications.
-    let honest_chain: Vec<_> = sim.commits[0]
-        .iter()
-        .map(|c| (**c.certified).clone())
-        .collect();
-    for certified in &honest_chain {
+    // Feed the reference chain into the lagging replica's sync apply path. Each
+    // block runs through QC verification + the round-contiguous two-chain rule;
+    // the sync entry attests QC trust via `from_qc_attestation` instead of
+    // re-running per-root verifications.
+    for certified in &reference {
         sim.deliver_synced_block(lagging, certified);
         sim.run_for_at_most(500);
     }
 
-    // `BlockPersisted` at the sync target triggers
-    // `on_block_sync_complete` and flips the lagging replica out
-    // of sync mode.
-    sim.deliver_block_persisted(lagging, sync_target);
-
+    // The processed frontier reaches the target, so sync completes and the
+    // replica resumes consensus — completion tracks admission, not the commit
+    // that lags it by a block.
     assert!(
         !sim.coordinators[3].is_block_syncing(),
-        "replica 3 still in sync mode after BlockPersisted at target",
+        "replica 3 still in sync mode after the processed frontier reached the target",
+    );
+
+    // The round-contiguous rule finalizes every fed block except the last; the
+    // frontier finalizes through live consensus, absent in this isolated feed.
+    let frontier = reference.last().unwrap().block().height();
+    let expected_committed = BlockHeight::new(frontier.inner() - 1);
+    assert_eq!(
+        sim.coordinators[3].committed_height(),
+        expected_committed,
+        "replica 3 didn't catch up to one below the delivered frontier",
     );
     assert!(
         sim.coordinators[3].committed_height() >= sync_target,
-        "replica 3 didn't catch up: committed={:?} target={:?}",
+        "replica 3 stayed below the sync target: committed={:?} target={:?}",
         sim.coordinators[3].committed_height(),
         sync_target,
     );
 
-    // Every sync-applied height matches the honest reference
-    // chain byte-for-byte.
-    for h in 0..sim.commits[3].len().min(sim.commits[0].len()) {
+    // Every committed height matches the honest reference chain byte-for-byte.
+    for (h, committed) in sim.commits[3].iter().enumerate() {
         assert_eq!(
-            sim.commits[3][h].block_hash, sim.commits[0][h].block_hash,
-            "replica 3 diverged from replica 0 at sync-applied height {h}",
+            committed.block_hash,
+            reference[h].block().hash(),
+            "replica 3 diverged from the reference chain at height index {h}",
         );
         assert_eq!(
-            sim.commits[3][h].state_root, sim.commits[0][h].state_root,
-            "replica 3 diverged on state root at sync-applied height {h}",
+            committed.state_root,
+            reference[h].block().header().state_root(),
+            "replica 3 diverged on state root at height index {h}",
         );
     }
 }

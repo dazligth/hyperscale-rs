@@ -162,6 +162,13 @@ impl BlockSyncManager {
         self.sync_applied_height = self.sync_applied_height.max(height);
     }
 
+    /// Highest synced height admitted to the chain state. Its round-contiguous
+    /// commit may still be pending, so this can sit a block above
+    /// `committed_height`; sync completion tracks it rather than the commit.
+    pub const fn sync_applied_height(&self) -> BlockHeight {
+        self.sync_applied_height
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // Synced block receiving and buffering
     // ═══════════════════════════════════════════════════════════════════════
@@ -234,8 +241,14 @@ impl BlockSyncManager {
 
     /// Plan the next batch of buffered synced blocks to dispatch for QC
     /// verification. Respects `max_parallel_sync_verifications` and starts
-    /// from one above the highest currently-pending or committed height so
-    /// we don't resubmit work already in flight.
+    /// from one above the highest already-handled height so we don't resubmit
+    /// work already in flight.
+    ///
+    /// "Already-handled" is the max of the highest pending verification, the
+    /// committed tip, and `sync_applied_height` — the last covers blocks
+    /// admitted to the chain state but not yet finalized, since the
+    /// round-contiguous commit lags admission by a block and `committed_height`
+    /// alone would re-drain the gap.
     ///
     /// Returns empty when the pending set is already saturated or no
     /// sequentially-eligible buffered block is available.
@@ -251,7 +264,10 @@ impl BlockSyncManager {
         let slots_available = max_parallel - pending_count;
 
         let highest_pending_height = self.highest_pending_height(committed_height);
-        let start_height = highest_pending_height.max(committed_height) + 1u64;
+        let start_height = highest_pending_height
+            .max(committed_height)
+            .max(self.sync_applied_height)
+            + 1u64;
 
         self.drain_buffered(start_height, slots_available)
     }

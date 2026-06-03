@@ -1706,11 +1706,13 @@ impl VerificationPipeline {
         self.pending_assemblies
             .retain(|hash, _| pending_blocks.contains_key(*hash));
 
-        // Drop completed-assembly handles whose blocks are no longer in
-        // `pending_blocks` (block evicted, or commit drained the
-        // handle). Lifecycle mirrors `pending_assemblies`.
-        self.verified_certified_blocks
-            .retain(|hash, _| pending_blocks.contains_key(*hash));
+        // Retain a completed-assembly handle while its block is still pending
+        // (consensus path) or still above the committed tip (sync path, which
+        // caches the handle without a `pending_blocks` entry and needs it kept
+        // until the round-contiguous two-chain commit drains it).
+        self.verified_certified_blocks.retain(|hash, certified| {
+            pending_blocks.contains_key(*hash) || certified.block().height() > committed_height
+        });
     }
 
     /// Number of pending QC verifications.

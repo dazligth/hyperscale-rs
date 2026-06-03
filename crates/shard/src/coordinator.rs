@@ -2780,7 +2780,7 @@ impl ShardCoordinator {
             let shard = certified.qc().shard_group_id();
             let (block, _) = certified.into_parts();
             let verified_qc = Verified::<QuorumCertificate>::genesis(shard);
-            return self.apply_synced_block(topology_snapshot, block, verified_qc);
+            return self.apply_synced_block(block, verified_qc);
         }
 
         // Quorum-power gate: `VerifyQcSignature` only checks the BLS
@@ -2835,17 +2835,22 @@ impl ShardCoordinator {
         actions
     }
 
-    /// Apply a synced block after QC verification (or for genesis QC).
+    /// Admit a QC-verified synced block into the chain state and drive the
+    /// round-contiguous two-chain commit.
     ///
-    /// Commits the block immediately: advances `committed_height` and emits
-    /// `CommitBlockByQcOnly` which the `io_loop` handles synchronously (inline
-    /// JMT computation + persist + fsync). The synchronous path guarantees
-    /// the parent's JMT snapshot is on disk before any child's state-root
-    /// verification starts, so there's no async `VerifyStateRoot` dispatch or
-    /// `PreparedCommit` rendezvous to coordinate.
+    /// The block does not commit on its own QC. It caches its
+    /// `Verified<CertifiedBlock>` and adopts its QC, then lets
+    /// `try_two_chain_commit` finalize it once a child certified at exactly
+    /// `round + 1` is admitted — the same rule the consensus path uses, and
+    /// the only one that distinguishes a committed block from a
+    /// certified-but-orphaned sibling at one height (both carry a valid QC). A
+    /// single QC is not a commit certificate; committing on it would let a
+    /// peer-served orphan sibling fork a lagging node. The eventual commit
+    /// flows through `commit_one_buffered_block`, which selects the
+    /// synchronous inline-JMT `CommitBlockByQcOnly` path for blocks whose
+    /// state root was not locally verified.
     fn apply_synced_block(
         &mut self,
-        topology_snapshot: &TopologySnapshot,
         block: Block,
         verified_qc: Verified<QuorumCertificate>,
     ) -> Vec<Action> {
@@ -2858,26 +2863,8 @@ impl ShardCoordinator {
             block_hash = ?block_hash,
             transactions = block.transactions().len(),
             certificates = block.certificates().len(),
-            "Applying synced block"
+            "Admitting synced block"
         );
-
-        // Capture parent state BEFORE record_block_committed advances heights.
-        let parent_state_root = self
-            .chain_view()
-            .parent_state_root(block.header().parent_block_hash());
-        let parent_block_height = self.committed_height;
-
-        // Advance committed_height. The QC is the proof of commit — same
-        // timing as the consensus path.
-        let (_, witness) = self.record_block_committed(
-            topology_snapshot,
-            &block,
-            block_hash,
-            verified_qc.weighted_timestamp(),
-        );
-
-        // Track sync progress for the loop iterator.
-        self.block_sync.set_sync_applied_height(height);
 
         // Update latest QC if this one is newer (by round).
         if self
@@ -2889,10 +2876,10 @@ impl ShardCoordinator {
             self.latest_qc = Some(verified_qc.clone());
         }
 
-        // Adopt the parent_qc from the block header if it's newer still.
-        // The synced block's QC BFT-transitively attests every embedded
-        // wave's per-EC signature predicate via the source committee's
-        // signature over `certificate_root` + `local_receipt_root`.
+        // The synced block's QC BFT-transitively attests every embedded wave's
+        // per-EC signature predicate via the source committee's signature over
+        // `certificate_root` + `local_receipt_root`, so the waves can be
+        // admitted to the canonical store on receipt.
         let synced_waves: Vec<Arc<Verifiable<FinalizedWave>>> = block
             .certificates()
             .iter()
@@ -2908,9 +2895,9 @@ impl ShardCoordinator {
         let parent_qc_round = block.header().parent_qc().round();
         let parent_qc_not_genesis = !block.header().parent_qc().is_genesis();
 
-        // Assemble the synced block into a `Verified<CertifiedBlock>` via
-        // the BFT-transitive trust gate: the source committee's QC
-        // attests to the block's per-root verifications.
+        // Assemble the synced block into a `Verified<CertifiedBlock>` via the
+        // BFT-transitive trust gate: the source committee's QC attests to the
+        // block's per-root verifications.
         let certified_raw = CertifiedBlock::new_unchecked(block, verified_qc.clone());
         let certified =
             match Verified::<CertifiedBlock>::from_qc_attestation(certified_raw, verified_qc) {
@@ -2921,6 +2908,7 @@ impl ShardCoordinator {
                 }
             };
 
+        // Adopt the parent_qc from the block header if it's newer still.
         if parent_qc_not_genesis
             && self
                 .latest_qc
@@ -2932,13 +2920,15 @@ impl ShardCoordinator {
             self.latest_qc = Some(verified_parent);
         }
 
-        let mut actions = vec![Action::CommitBlockByQcOnly {
-            certified,
-            parent_state_root,
-            parent_block_height,
-            source: CommitSource::Sync,
-            witness,
-        }];
+        // Cache the certified handle so the round-contiguous two-chain rule can
+        // find this block as a committable parent — and as a
+        // `collect_commit_prefix` ancestor — once its child is admitted.
+        self.verification
+            .insert_verified_certified_block(block_hash, Arc::clone(&certified));
+        self.block_sync.set_sync_applied_height(height);
+
+        let mut actions =
+            self.try_two_chain_commit(certified.qc_verified().as_ref(), CommitSource::Sync);
 
         if !synced_waves.is_empty() {
             actions.push(Action::Continuation(
@@ -2963,9 +2953,20 @@ impl ShardCoordinator {
         while let Some((block, verified_qc)) =
             self.block_sync.take_next_verified(self.committed_height)
         {
-            actions.extend(self.apply_synced_block(topology_snapshot, block, verified_qc));
+            actions.extend(self.apply_synced_block(block, verified_qc));
         }
         actions.extend(self.try_drain_buffered_synced_blocks(topology_snapshot));
+
+        // Sync completes when the verified frontier reaches the target. Under
+        // the round-contiguous commit rule the trailing block finalizes
+        // through live consensus, so completion tracks the processed frontier
+        // rather than the committed height, which lags it by a block.
+        if self.block_sync.is_syncing()
+            && let Some(target) = self.block_sync.sync_target_height()
+            && self.block_sync.sync_applied_height() >= target
+        {
+            actions.extend(self.on_block_sync_complete());
+        }
         actions
     }
 
@@ -3683,6 +3684,13 @@ impl ShardCoordinator {
     /// - Block is in `buffered_synced_blocks` (synced blocks are always complete)
     fn has_complete_block_at_height(&self, height: BlockHeight) -> bool {
         if height <= self.committed_height {
+            return true;
+        }
+
+        // A synced block admitted by `apply_synced_block` sits above the
+        // committed tip awaiting its round-contiguous child; it is complete
+        // even though it is not in `pending_blocks`.
+        if height <= self.block_sync.sync_applied_height() {
             return true;
         }
 
