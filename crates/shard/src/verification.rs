@@ -114,7 +114,7 @@ pub struct ReadyStateRootVerification {
 pub enum InFlightCheck {
     /// In-flight count passes — proceed with voting.
     Proceed,
-    /// Run verifications but do not vote (vote-locked, or parent pruned).
+    /// Run verifications but do not vote (safe-vote rule declined, or parent pruned).
     SkipVote,
     /// In-flight count exceeds the allowed tolerance — abort entirely.
     Abort,
@@ -1374,9 +1374,9 @@ impl VerificationPipeline {
         chain: &ChainView<'_>,
         block_hash: BlockHash,
         block: &Block,
-        vote_locked: bool,
+        safe_vote_declined: bool,
     ) -> InFlightCheck {
-        if vote_locked {
+        if safe_vote_declined {
             return InFlightCheck::SkipVote;
         }
 

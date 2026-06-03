@@ -162,8 +162,9 @@ pub struct ShardCoordinator {
     /// Pending blocks being assembled (hash -> pending block).
     pending_blocks: PendingBlocks,
 
-    /// Vote accounting: per-block vote sets, own-vote locks, and
-    /// received-vote equivocation tracking.
+    /// Vote accounting: per-block vote sets and received-vote equivocation
+    /// tracking. The safe-vote lock itself lives on the coordinator
+    /// (`locked_round` / `last_voted_round`).
     votes: VoteKeeper,
 
     /// Timeout accounting for the pacemaker: per-round verified timeout shares,
@@ -3093,6 +3094,20 @@ impl ShardCoordinator {
         self.broadcast_timeout(topology_snapshot, round)
     }
 
+    /// Voting power of `voter` iff it belongs to the local shard committee —
+    /// the bound the pacemaker tallies against, mirroring the vote path
+    /// (`VoteKeeper`). `None` for any validator outside the committee, so a
+    /// globally-registered validator from another shard never counts toward the
+    /// timeout thresholds (whose total is committee-scoped).
+    fn committee_timeout_power(
+        &self,
+        topology_snapshot: &TopologySnapshot,
+        voter: ValidatorId,
+    ) -> Option<VotePower> {
+        topology_snapshot.committee_index_for_shard(self.local_shard, voter)?;
+        topology_snapshot.voting_power(voter)
+    }
+
     /// Verify a wire timeout's BLS share, then tally it.
     pub fn on_unverified_timeout(
         &mut self,
@@ -3100,6 +3115,16 @@ impl ShardCoordinator {
         timeout: &Timeout,
     ) -> Vec<Action> {
         if timeout.shard_group_id() != self.local_shard {
+            return Vec::new();
+        }
+        // Only this shard's committee drives its pacemaker. Reject outsiders
+        // before spending a BLS verify on them; `on_verified_timeout` enforces
+        // the same bound for locally echoed timeouts.
+        if self
+            .committee_timeout_power(topology_snapshot, timeout.voter())
+            .is_none()
+        {
+            warn!(validator = ?self.me, voter = ?timeout.voter(), "Dropping timeout from non-committee validator");
             return Vec::new();
         }
         let Some(pubkey) = topology_snapshot.public_key(timeout.voter()) else {
@@ -3126,9 +3151,15 @@ impl ShardCoordinator {
         if round < self.view_change.view {
             return Vec::new();
         }
-        let power = topology_snapshot
-            .voting_power(timeout.voter())
-            .unwrap_or(VotePower::MIN);
+        // A verified BLS share proves who signed, not that the signer sits in
+        // the committee whose 2f+1 the pacemaker measures against. Restrict the
+        // tally to the local committee: the quorum total is committee-scoped, so
+        // a globally-registered validator from another shard must not count
+        // toward the f+1 / 2f+1 thresholds.
+        let Some(power) = self.committee_timeout_power(topology_snapshot, timeout.voter()) else {
+            warn!(validator = ?self.me, voter = ?timeout.voter(), "Dropping timeout from non-committee validator");
+            return Vec::new();
+        };
         if !self.timeouts.record(timeout, power) {
             return Vec::new();
         }
@@ -4278,6 +4309,46 @@ mod tests {
         // refused even with an otherwise-safe parent QC.
         state.last_voted_round = Round::new(5);
         assert!(!state.can_safe_vote(Round::new(5), Round::new(3)));
+    }
+
+    #[test]
+    fn non_committee_timeout_is_not_tallied() {
+        // The pacemaker's f+1 / 2f+1 thresholds are measured against the local
+        // committee's power, so only committee members may contribute timeouts.
+        // A globally-signed timeout from outside the committee must be dropped,
+        // exactly as the vote path drops non-committee votes.
+        let (mut state, topology) = make_test_state();
+        let shard = ShardGroupId::new(0);
+        let round = state.view();
+        let net = NetworkDefinition::simulator();
+        let mk = |voter: u64| {
+            Verified::<Timeout>::sign_local(
+                &net,
+                shard,
+                round,
+                QuorumCertificate::genesis(shard),
+                ValidatorId::new(voter),
+                &generate_bls_keypair(),
+            )
+        };
+
+        // Outsider (not in the 4-member committee): dropped, nothing recorded.
+        assert!(state.on_verified_timeout(&topology, mk(9)).is_empty());
+        assert_eq!(state.timeouts.power(round), VotePower::ZERO);
+
+        // Committee member: recorded, power accrues.
+        assert!(state.on_verified_timeout(&topology, mk(1)).is_empty());
+        assert_eq!(state.timeouts.power(round), VotePower::new(1));
+
+        // A second committee member reaches f+1 and amplifies. Had the outsider
+        // counted, this threshold would have tripped one timeout earlier.
+        let actions = state.on_verified_timeout(&topology, mk(2));
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::SignAndBroadcastTimeout { .. })),
+            "f+1 committee timeouts should amplify",
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
