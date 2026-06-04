@@ -62,9 +62,17 @@ pub struct VoteSet {
     /// Total voting power of unverified votes.
     unverified_power: VotePower,
 
-    /// Bitfield tracking which validators we've seen votes from (verified or unverified).
-    /// Used for deduplication.
-    seen_validators: Vec<bool>,
+    /// Voters counted into the verified set. Permanent for the life of the
+    /// vote set: a verified voter is never tallied twice, across its own vote
+    /// and any number of batch results.
+    verified_voters: Vec<bool>,
+
+    /// Voters with an unverified vote currently buffered for the next batch.
+    /// Transient — cleared when `take_unverified_votes` drains the buffer — so
+    /// a forged vote occupies a voter's slot only until verification runs and
+    /// can't censor the genuine vote that follows. Only a verified signature
+    /// sets `verified_voters`.
+    buffered_voters: Vec<bool>,
 
     /// Whether a verification batch is currently in flight.
     pending_verification: bool,
@@ -98,7 +106,8 @@ impl VoteSet {
             verified_timestamp_weight_sum: 0,
             unverified_votes: Vec::new(),
             unverified_power: VotePower::ZERO,
-            seen_validators: vec![false; num_validators],
+            verified_voters: vec![false; num_validators],
+            buffered_voters: vec![false; num_validators],
             pending_verification: false,
             qc_built: false,
         }
@@ -119,9 +128,11 @@ impl VoteSet {
         self.unverified_power
     }
 
-    /// Check if we've already seen a vote from this validator.
+    /// Whether this validator's vote has already been verified and counted.
+    /// Buffered-but-unverified votes are deliberately excluded, so a forged
+    /// vote cannot suppress the genuine one behind it.
     pub fn has_seen_validator(&self, committee_index: usize) -> bool {
-        committee_index < self.seen_validators.len() && self.seen_validators[committee_index]
+        committee_index < self.verified_voters.len() && self.verified_voters[committee_index]
     }
 
     /// Update the vote set with header information.
@@ -164,11 +175,15 @@ impl VoteSet {
     ) -> bool {
         // Reject malformed index: with no dedup slot we couldn't track the
         // vote, so a Byzantine sender could buffer arbitrarily many copies.
-        if committee_index >= self.seen_validators.len() {
+        if committee_index >= self.buffered_voters.len() {
             return false;
         }
 
-        if self.has_seen_validator(committee_index) {
+        // Dedup against verified voters (permanent) and voters already buffered
+        // for the in-flight batch (transient). An unverified vote only marks
+        // `buffered_voters`, so a forged vote holds the slot just until the
+        // buffer drains, never permanently.
+        if self.verified_voters[committee_index] || self.buffered_voters[committee_index] {
             return false;
         }
 
@@ -179,7 +194,7 @@ impl VoteSet {
             self.round = Some(vote.round());
         }
 
-        self.seen_validators[committee_index] = true;
+        self.buffered_voters[committee_index] = true;
         self.unverified_power += voting_power;
         self.unverified_votes
             .push((committee_index, vote, public_key, voting_power));
@@ -214,6 +229,10 @@ impl VoteSet {
     ) -> Vec<(usize, BlockVote, Bls12381G1PublicKey, VotePower)> {
         self.pending_verification = true;
         self.unverified_power = VotePower::ZERO;
+        // Reopen the buffered slots: these votes are now in the batch, and only
+        // the ones whose signatures verify will mark `verified_voters`. A voter
+        // whose buffered vote fails can then be re-buffered rather than censored.
+        self.buffered_voters.iter_mut().for_each(|v| *v = false);
         std::mem::take(&mut self.unverified_votes)
     }
 
@@ -268,6 +287,16 @@ impl VoteSet {
             .parent_weighted_timestamp
             .map_or(0, WeightedTimestamp::as_millis);
         for (committee_index, vote, voting_power) in verified_votes {
+            // Mark the voter counted only now that its signature verified, and
+            // skip any already tallied (its own vote, or an overlapping batch)
+            // so power is never double-counted.
+            if committee_index >= self.verified_voters.len()
+                || self.verified_voters[committee_index]
+            {
+                continue;
+            }
+            self.verified_voters[committee_index] = true;
+
             // Per-vote monotonicity clamp against parent's weighted timestamp
             // — keeps the aggregated `weighted_timestamp` monotonic regardless
             // of slow-clocked or Byzantine voters.
@@ -296,11 +325,14 @@ impl VoteSet {
         voting_power: VotePower,
     ) -> bool {
         // Reject malformed index: see `buffer_unverified_vote` for rationale.
-        if committee_index >= self.seen_validators.len() {
+        if committee_index >= self.verified_voters.len() {
             return false;
         }
 
-        if self.has_seen_validator(committee_index) {
+        // A verified vote is authoritative; admit it even when a forged
+        // unverified vote sits buffered under the same index. The buffered copy
+        // is skipped at `on_votes_verified` once `verified_voters` is set here.
+        if self.verified_voters[committee_index] {
             return false;
         }
 
@@ -311,7 +343,7 @@ impl VoteSet {
             self.round = Some(vote.round());
         }
 
-        self.seen_validators[committee_index] = true;
+        self.verified_voters[committee_index] = true;
 
         // Per-vote monotonicity clamp; see `on_votes_verified` for rationale.
         let floor_ms = self
@@ -556,5 +588,66 @@ mod tests {
 
         // Can't build again
         assert!(vote_set.build_qc(block_hash, test_shard_group()).is_err());
+    }
+
+    #[test]
+    fn forged_unverified_vote_does_not_censor_genuine_vote() {
+        // A vote buffered with a bad signature must not permanently occupy its
+        // voter's slot: once the batch drains and the signature fails, the
+        // genuine vote from the same validator is still admissible.
+        let keys: Vec<Bls12381G1PrivateKey> = (0..4).map(|_| generate_bls_keypair()).collect();
+        let header = make_header(BlockHeight::new(1));
+        let block_hash = header.hash();
+        let mut vote_set = VoteSet::new(Some(&header), 4);
+
+        // Attacker buffers a (would-be-forged) vote attributed to validator 0.
+        let forged = make_vote(&keys, 0, block_hash, BlockHeight::new(1));
+        assert!(vote_set.buffer_unverified_vote(
+            0,
+            forged,
+            keys[0].public_key(),
+            VotePower::new(1)
+        ));
+        // Buffering alone does not count the voter as verified.
+        assert!(!vote_set.has_seen_validator(0));
+
+        // The batch drains and every signature fails verification.
+        let _ = vote_set.take_unverified_votes();
+        vote_set.on_votes_verified(vec![]);
+
+        // Validator 0's genuine vote is not blocked by the failed forgery.
+        let genuine = make_vote(&keys, 0, block_hash, BlockHeight::new(1));
+        assert!(vote_set.buffer_unverified_vote(
+            0,
+            genuine,
+            keys[0].public_key(),
+            VotePower::new(1)
+        ));
+    }
+
+    #[test]
+    fn on_votes_verified_skips_already_counted_voter() {
+        // A voter counted via its own verified vote must not be tallied a
+        // second time when an overlapping batch result reports it again.
+        let keys: Vec<Bls12381G1PrivateKey> = (0..4).map(|_| generate_bls_keypair()).collect();
+        let header = make_header(BlockHeight::new(1));
+        let block_hash = header.hash();
+        let mut vote_set = VoteSet::new(Some(&header), 4);
+
+        let own = make_vote(&keys, 0, block_hash, BlockHeight::new(1));
+        assert!(vote_set.add_verified_vote(
+            0,
+            Verified::<BlockVote>::new_unchecked_for_test(own),
+            VotePower::new(1)
+        ));
+        assert_eq!(vote_set.verified_power(), VotePower::new(1));
+
+        let echo = make_vote(&keys, 0, block_hash, BlockHeight::new(1));
+        vote_set.on_votes_verified(vec![(
+            0,
+            Verified::<BlockVote>::new_unchecked_for_test(echo),
+            VotePower::new(1),
+        )]);
+        assert_eq!(vote_set.verified_power(), VotePower::new(1));
     }
 }
