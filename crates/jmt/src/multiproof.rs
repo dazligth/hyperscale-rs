@@ -67,7 +67,7 @@
 //! decoded proof against a root or key set. Use [`Tree::verify`] for that.
 
 use crate::hasher::{EMPTY_HASH, Hash, Hasher};
-use crate::node::{Key, Node, NodeKey, ValueHash};
+use crate::node::{Key, MAX_DEPTH_BITS, Node, NodeKey, ValueHash};
 use crate::storage::TreeReader;
 use crate::tree::Tree;
 
@@ -254,6 +254,19 @@ impl<H: Hasher, const ARITY_BITS: u8> Tree<H, ARITY_BITS> {
             } else {
                 Err(ProofError::Malformed("empty proof with non-empty claims"))
             };
+        }
+
+        // Every claim must terminate on a reachable depth: within the
+        // 256-bit key space and on the per-level `ARITY_BITS` grid the
+        // walk steps through. A claim off the grid never matches the
+        // recursion depth, so the bucket split keeps descending and
+        // `bits_at` indexes a key byte past its end. Bounding the whole
+        // claim set here keeps `verify_rec` and `siblings_needed` from
+        // ever descending past the tree height on a peer-supplied proof.
+        for claim in &proof.claims {
+            if claim.depth_bits > MAX_DEPTH_BITS || claim.depth_bits % u16::from(ARITY_BITS) != 0 {
+                return Err(ProofError::Malformed("claim depth off the arity grid"));
+            }
         }
 
         // Reconstruct root by walking the claim topology.
@@ -595,6 +608,15 @@ pub enum DecodeError {
         /// The length the wire claimed.
         actual: usize,
     },
+
+    /// A claim names a termination depth past the tree's bit height.
+    #[error("claim depth {depth_bits} exceeds maximum {max}")]
+    DepthOutOfRange {
+        /// The tree's maximum depth in bits.
+        max: u16,
+        /// The depth the wire claimed.
+        depth_bits: u16,
+    },
 }
 
 impl MultiProof {
@@ -717,6 +739,12 @@ fn encode_claim(claim: &ProofClaim, buf: &mut Vec<u8>) {
 fn decode_claim(r: &mut ByteReader) -> Result<ProofClaim, DecodeError> {
     let key = r.bytes32()?;
     let depth_bits = r.u16_be()?;
+    if depth_bits > MAX_DEPTH_BITS {
+        return Err(DecodeError::DepthOutOfRange {
+            max: MAX_DEPTH_BITS,
+            depth_bits,
+        });
+    }
     let disc = r.u8()?;
     let (termination, value_hash) = match disc {
         TERM_LEAF => {
@@ -1116,6 +1144,45 @@ mod tests {
                 actual,
             } if actual == u32::MAX as usize
         ));
+    }
+
+    #[test]
+    fn decode_rejects_oversized_depth() {
+        // A claim depth past the 256-bit key space. Left unbounded, this
+        // drives `verify_rec` to index a key byte past its end and panic.
+        let mut bytes = vec![WIRE_VERSION];
+        bytes.extend_from_slice(&1u32.to_be_bytes());
+        bytes.extend_from_slice(&[0u8; 32]); // key
+        bytes.extend_from_slice(&300u16.to_be_bytes()); // depth past 256
+        bytes.push(TERM_EMPTY);
+        let err = MultiProof::decode(&bytes).unwrap_err();
+        assert!(matches!(
+            err,
+            DecodeError::DepthOutOfRange {
+                max: MAX_DEPTH_BITS,
+                depth_bits: 300,
+            }
+        ));
+    }
+
+    #[test]
+    fn verify_rejects_depth_off_arity_grid() {
+        // Radix-4 walk steps two bits per level, so a claim terminating
+        // on an odd depth never lands on the recursion grid. The verifier
+        // must reject it rather than descend past the key on the bucket
+        // split below.
+        type Jmt4 = Tree<Blake3Hasher, 2>;
+        let proof = MultiProof {
+            claims: vec![ProofClaim {
+                key: k(1),
+                value_hash: Some(v(10)),
+                depth_bits: 255,
+                termination: ClaimTermination::Leaf,
+            }],
+            siblings: vec![EMPTY_HASH; MAX_DEPTH_BITS as usize],
+        };
+        let err = Jmt4::verify(&proof, [0u8; 32], &[]).unwrap_err();
+        assert!(matches!(err, ProofError::Malformed(_)));
     }
 
     #[test]
