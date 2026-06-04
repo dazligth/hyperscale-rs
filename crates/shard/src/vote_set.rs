@@ -9,8 +9,6 @@
 //! Own votes are recorded as already-verified via
 //! [`VoteSet::add_verified_vote`] since we just signed them.
 
-#[cfg(test)]
-use hyperscale_types::{BeaconWitnessLeafCount, BeaconWitnessRoot};
 use hyperscale_types::{
     BlockHash, BlockHeader, BlockHeight, BlockVote, Bls12381G1PublicKey, Round, Verified,
     VotePower, WeightedTimestamp,
@@ -424,9 +422,10 @@ mod tests {
     use std::collections::BTreeMap;
 
     use hyperscale_types::{
-        Bls12381G1PrivateKey, CertificateRoot, Hash, InFlightCount, LocalReceiptRoot,
-        NetworkDefinition, ProposerTimestamp, ProvisionsRoot, QuorumCertificate, ShardGroupId,
-        StateRoot, TransactionRoot, ValidatorId, generate_bls_keypair,
+        BeaconWitnessLeafCount, BeaconWitnessRoot, Bls12381G1PrivateKey, CertificateRoot, Hash,
+        InFlightCount, LocalReceiptRoot, NetworkDefinition, ProposerTimestamp, ProvisionsRoot,
+        QuorumCertificate, ShardGroupId, StateRoot, TransactionRoot, ValidatorId,
+        generate_bls_keypair,
     };
 
     use super::*;

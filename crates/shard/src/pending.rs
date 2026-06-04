@@ -7,8 +7,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hyperscale_core::{Action, FetchAbandon, FetchRequest};
-#[cfg(test)]
-use hyperscale_types::{BeaconWitnessLeafCount, BeaconWitnessRoot};
 use hyperscale_types::{
     Block, BlockHash, BlockHeader, BlockHeight, BlockManifest, FinalizedWave, LocalTimestamp,
     ProvisionHash, Provisions, ReadySignal, Round, RoutableTransaction, ShardGroupId, TxHash,
@@ -769,9 +767,10 @@ mod tests {
 
     use hyperscale_types::test_utils::test_transaction;
     use hyperscale_types::{
-        Block, BlockHeight, BoundedVec, CertificateRoot, Hash, InFlightCount, LocalReceiptRoot,
-        ProposerTimestamp, ProvisionsRoot, QuorumCertificate, Round, ShardGroupId, StateRoot,
-        TransactionRoot, ValidatorId, Verified, WaveCertificate, WaveId,
+        BeaconWitnessLeafCount, BeaconWitnessRoot, Block, BlockHeight, BoundedVec, CertificateRoot,
+        Hash, InFlightCount, LocalReceiptRoot, ProposerTimestamp, ProvisionsRoot,
+        QuorumCertificate, Round, ShardGroupId, StateRoot, TransactionRoot, ValidatorId, Verified,
+        WaveCertificate, WaveId,
     };
 
     use super::*;

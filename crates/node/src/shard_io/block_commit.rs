@@ -24,8 +24,6 @@ use hyperscale_core::{CommitSource, PreparedBlock, ProtocolEvent};
 use hyperscale_dispatch::{Dispatch, DispatchPool};
 use hyperscale_metrics::{record_block_committed, set_block_height};
 use hyperscale_storage::{ChainEntry, PendingChain, ShardChainWriter, ShardStorage};
-#[cfg(test)]
-use hyperscale_types::BeaconWitnessLeafCount;
 use hyperscale_types::{
     BeaconWitnessCommit, BlockHash, BlockHeight, CertifiedBlock, ConsensusReceipt, FinalizedWave,
     LocalTimestamp, PreparedCommit, ShardGroupId, StateRoot, SyncHint, Verifiable, Verified,
@@ -735,7 +733,9 @@ mod tests {
     use crossbeam::channel::{Receiver, unbounded};
     use hyperscale_dispatch_sync::SyncDispatch;
     use hyperscale_test_helpers::{TestCommittee, make_live_block};
-    use hyperscale_types::{BlockHeight, QuorumCertificate, ShardGroupId, ValidatorId};
+    use hyperscale_types::{
+        BeaconWitnessLeafCount, BlockHeight, QuorumCertificate, ShardGroupId, ValidatorId,
+    };
 
     use super::*;
     use crate::shard_loop::ShardScopedInput;

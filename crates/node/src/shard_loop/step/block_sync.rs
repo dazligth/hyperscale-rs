@@ -45,8 +45,6 @@ use hyperscale_metrics::{
 use hyperscale_network::{Network, ResponseVerdict};
 use hyperscale_storage::ShardStorage;
 use hyperscale_types::network::response::GetBlockResponse;
-#[cfg(test)]
-use hyperscale_types::{BeaconWitnessLeafCount, BeaconWitnessRoot};
 use hyperscale_types::{
     BlockHeight, CertificateRoot, CertifiedBlock, ElidedCertifiedBlock, Hash, Inventory,
     LocalReceiptRoot, ProvisionsRoot, RehydrateError, StoredReceipt, TransactionRoot, Verifiable,
@@ -438,12 +436,12 @@ mod tests {
 
     use hyperscale_types::test_utils::test_transaction;
     use hyperscale_types::{
-        Block, BlockHash, BlockHeader, Bls12381G2Signature, BoundedVec, CertificateRoot,
-        ConsensusReceipt, ExecutionCertificate, ExecutionOutcome, FinalizedWave, GlobalReceiptHash,
-        GlobalReceiptRoot, InFlightCount, LocalReceiptRoot, ProposerTimestamp, ProvisionsRoot,
-        QuorumCertificate, Round, ShardGroupId, SignerBitfield, StateRoot, TransactionRoot, TxHash,
-        TxOutcome, ValidatorId, Verifiable, WaveCertificate, WaveId, WeightedTimestamp,
-        zero_bls_signature,
+        BeaconWitnessLeafCount, BeaconWitnessRoot, Block, BlockHash, BlockHeader,
+        Bls12381G2Signature, BoundedVec, CertificateRoot, ConsensusReceipt, ExecutionCertificate,
+        ExecutionOutcome, FinalizedWave, GlobalReceiptHash, GlobalReceiptRoot, InFlightCount,
+        LocalReceiptRoot, ProposerTimestamp, ProvisionsRoot, QuorumCertificate, Round,
+        ShardGroupId, SignerBitfield, StateRoot, TransactionRoot, TxHash, TxOutcome, ValidatorId,
+        Verifiable, WaveCertificate, WaveId, WeightedTimestamp, zero_bls_signature,
     };
 
     use super::*;

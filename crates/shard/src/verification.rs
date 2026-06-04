@@ -12,8 +12,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use hyperscale_core::Action;
-#[cfg(test)]
-use hyperscale_types::BeaconWitnessLeafCount;
 use hyperscale_types::{
     BeaconWitnessRoot, Block, BlockHash, BlockHeader, BlockHeight, BlockManifest, CertificateRoot,
     CertifiedBlock, FinalizedWave, InFlightCount, LinkageError, LocalReceiptRoot,
@@ -1736,11 +1734,11 @@ impl VerificationPipeline {
 
 #[cfg(test)]
 mod tests {
-
     use hyperscale_types::{
-        BoundedVec, CertificateRoot, Hash, LocalReceiptRoot, LocalTimestamp, ProposerTimestamp,
-        QuorumCertificate, Round, RoutableTransaction, ShardGroupId, SignerBitfield,
-        TransactionRoot, ValidatorId, WeightedTimestamp, zero_bls_signature,
+        BeaconWitnessLeafCount, BoundedVec, CertificateRoot, Hash, LocalReceiptRoot,
+        LocalTimestamp, ProposerTimestamp, QuorumCertificate, Round, RoutableTransaction,
+        ShardGroupId, SignerBitfield, TransactionRoot, ValidatorId, WeightedTimestamp,
+        zero_bls_signature,
     };
 
     use super::*;

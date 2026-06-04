@@ -14,8 +14,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hyperscale_core::{Action, FetchAbandon, ProtocolEvent};
-#[cfg(test)]
-use hyperscale_types::{BeaconWitnessLeafCount, BeaconWitnessRoot};
 use hyperscale_types::{
     BlockHeight, BlockManifest, CertifiedBlock, CertifiedBlockHeader, LocalTimestamp,
     ProvisionHash, Provisions, ProvisionsVerifyError, RETENTION_HORIZON, ShardGroupId, Verified,
@@ -758,11 +756,11 @@ impl ProvisionCoordinator {
 mod tests {
     use hyperscale_core::FetchRequest;
     use hyperscale_types::{
-        Block, BlockHash, BlockHeader, BoundedVec, CertificateRoot, Hash, InFlightCount,
-        LocalReceiptRoot, MerkleInclusionProof, ProposerTimestamp, ProvisionEntry, ProvisionTxRoot,
-        ProvisionsRoot, QuorumCertificate, Round, ShardGroupId, SignerBitfield, StateRoot,
-        TransactionRoot, TxHash, ValidatorId, Verifiable, WaveId, WeightedTimestamp,
-        compute_merkle_root, zero_bls_signature,
+        BeaconWitnessLeafCount, BeaconWitnessRoot, Block, BlockHash, BlockHeader, BoundedVec,
+        CertificateRoot, Hash, InFlightCount, LocalReceiptRoot, MerkleInclusionProof,
+        ProposerTimestamp, ProvisionEntry, ProvisionTxRoot, ProvisionsRoot, QuorumCertificate,
+        Round, ShardGroupId, SignerBitfield, StateRoot, TransactionRoot, TxHash, ValidatorId,
+        Verifiable, WaveId, WeightedTimestamp, compute_merkle_root, zero_bls_signature,
     };
     use proptest::bool::ANY as ANY_BOOL;
     use proptest::collection::vec as prop_vec;

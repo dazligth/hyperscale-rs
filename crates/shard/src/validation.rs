@@ -16,8 +16,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-#[cfg(test)]
-use hyperscale_types::{BeaconWitnessLeafCount, BeaconWitnessRoot};
 use hyperscale_types::{
     Block, BlockHeader, BlockHeight, LocalTimestamp, MAX_ROUND_GAP, MAX_TIMESTAMP_DELAY,
     MAX_TIMESTAMP_RUSH, ProvisionHash, QuorumCertificate, RoutableTransaction, ShardGroupId,
@@ -399,10 +397,11 @@ mod tests {
 
     use hyperscale_test_helpers::{TestCommittee, make_finalized_wave};
     use hyperscale_types::{
-        BlockHash, BlockHeader, BoundedVec, CertificateRoot, FinalizedWave, Hash, InFlightCount,
-        LocalReceiptRoot, MerkleInclusionProof, NetworkDefinition, ProposerTimestamp,
-        ProvisionEntry, Provisions, ProvisionsRoot, QuorumCertificate, Round, RoutableTransaction,
-        ShardGroupId, SignerBitfield, StateRoot, TransactionDecision, TransactionRoot, ValidatorId,
+        BeaconWitnessLeafCount, BeaconWitnessRoot, BlockHash, BlockHeader, BoundedVec,
+        CertificateRoot, FinalizedWave, Hash, InFlightCount, LocalReceiptRoot,
+        MerkleInclusionProof, NetworkDefinition, ProposerTimestamp, ProvisionEntry, Provisions,
+        ProvisionsRoot, QuorumCertificate, Round, RoutableTransaction, ShardGroupId,
+        SignerBitfield, StateRoot, TransactionDecision, TransactionRoot, ValidatorId,
         ValidatorInfo, ValidatorSet, Verifiable, WeightedTimestamp, compute_waves, test_utils,
         zero_bls_signature,
     };

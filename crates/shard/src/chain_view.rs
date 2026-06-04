@@ -12,8 +12,6 @@
 
 use std::collections::HashSet;
 
-#[cfg(test)]
-use hyperscale_types::{BeaconWitnessLeafCount, BeaconWitnessRoot};
 use hyperscale_types::{
     Block, BlockHash, BlockHeader, BlockHeight, InFlightCount, ProvisionHash, QuorumCertificate,
     ShardGroupId, StateRoot, TxHash, Verified, WaveId,
@@ -178,9 +176,10 @@ mod tests {
     use std::sync::Arc;
 
     use hyperscale_types::{
-        BlockManifest, BoundedVec, CertificateRoot, Hash, LocalReceiptRoot, LocalTimestamp,
-        ProposerTimestamp, ProvisionsRoot, QuorumCertificate, Round, ShardGroupId, SignerBitfield,
-        TransactionRoot, ValidatorId, WeightedTimestamp, zero_bls_signature,
+        BeaconWitnessLeafCount, BeaconWitnessRoot, BlockManifest, BoundedVec, CertificateRoot,
+        Hash, LocalReceiptRoot, LocalTimestamp, ProposerTimestamp, ProvisionsRoot,
+        QuorumCertificate, Round, ShardGroupId, SignerBitfield, TransactionRoot, ValidatorId,
+        WeightedTimestamp, zero_bls_signature,
     };
 
     use super::*;

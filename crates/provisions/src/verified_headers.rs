@@ -22,8 +22,6 @@
 
 use std::sync::Arc;
 
-#[cfg(test)]
-use hyperscale_types::{BeaconWitnessLeafCount, BeaconWitnessRoot};
 use hyperscale_types::{BlockHeight, CertifiedBlockHeader, ShardGroupId, Verified};
 use papaya::HashMap;
 
@@ -78,9 +76,10 @@ impl VerifiedHeaderBuffer {
 #[cfg(test)]
 mod tests {
     use hyperscale_types::{
-        BlockHash, BlockHeader, CertificateRoot, InFlightCount, LocalReceiptRoot,
-        ProposerTimestamp, ProvisionsRoot, QuorumCertificate, Round, SignerBitfield, StateRoot,
-        TransactionRoot, ValidatorId, WeightedTimestamp, zero_bls_signature,
+        BeaconWitnessLeafCount, BeaconWitnessRoot, BlockHash, BlockHeader, CertificateRoot,
+        InFlightCount, LocalReceiptRoot, ProposerTimestamp, ProvisionsRoot, QuorumCertificate,
+        Round, SignerBitfield, StateRoot, TransactionRoot, ValidatorId, WeightedTimestamp,
+        zero_bls_signature,
     };
 
     use super::*;

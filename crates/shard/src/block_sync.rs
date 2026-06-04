@@ -7,8 +7,6 @@
 use std::collections::{BTreeMap, HashMap};
 
 use hyperscale_core::Action;
-#[cfg(test)]
-use hyperscale_types::{BeaconWitnessLeafCount, BeaconWitnessRoot};
 use hyperscale_types::{
     Block, BlockHash, BlockHeight, Bls12381G1PublicKey, CertifiedBlock, QuorumCertificate,
     ValidatorId, Verified, VotePower,
@@ -806,9 +804,10 @@ mod tests {
     use std::sync::Arc;
 
     use hyperscale_types::{
-        Block, BlockHeader, BoundedVec, CertificateRoot, Hash, InFlightCount, LocalReceiptRoot,
-        ProposerTimestamp, ProvisionsRoot, Round, ShardGroupId, SignerBitfield, StateRoot,
-        TransactionRoot, ValidatorId, WeightedTimestamp, zero_bls_signature,
+        BeaconWitnessLeafCount, BeaconWitnessRoot, Block, BlockHeader, BoundedVec, CertificateRoot,
+        Hash, InFlightCount, LocalReceiptRoot, ProposerTimestamp, ProvisionsRoot, Round,
+        ShardGroupId, SignerBitfield, StateRoot, TransactionRoot, ValidatorId, WeightedTimestamp,
+        zero_bls_signature,
     };
 
     use super::*;

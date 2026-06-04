@@ -15,8 +15,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hyperscale_core::{Action, ProtocolEvent};
-#[cfg(test)]
-use hyperscale_types::{BeaconWitnessLeafCount, BeaconWitnessRoot};
 use hyperscale_types::{
     BlockHeight, Bls12381G1PublicKey, CertifiedBlock, CertifiedBlockHeader,
     CertifiedHeaderVerifyError, InFlightCount, REMOTE_HEADER_RETENTION, ShardGroupId,
@@ -643,9 +641,10 @@ impl RemoteHeaderCoordinator {
 #[cfg(test)]
 mod tests {
     use hyperscale_types::{
-        BlockHash, BlockHeader, CertificateRoot, Hash, InFlightCount, LocalReceiptRoot,
-        ProposerTimestamp, ProvisionsRoot, QuorumCertificate, Round, ShardGroupId, SignerBitfield,
-        StateRoot, TransactionRoot, ValidatorId, zero_bls_signature,
+        BeaconWitnessLeafCount, BeaconWitnessRoot, BlockHash, BlockHeader, CertificateRoot, Hash,
+        InFlightCount, LocalReceiptRoot, ProposerTimestamp, ProvisionsRoot, QuorumCertificate,
+        Round, ShardGroupId, SignerBitfield, StateRoot, TransactionRoot, ValidatorId,
+        zero_bls_signature,
     };
 
     use super::*;

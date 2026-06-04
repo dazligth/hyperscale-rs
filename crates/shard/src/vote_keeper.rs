@@ -22,8 +22,6 @@
 use std::collections::HashMap;
 
 use hyperscale_core::Action;
-#[cfg(test)]
-use hyperscale_types::{BeaconWitnessLeafCount, BeaconWitnessRoot};
 use hyperscale_types::{
     BlockHash, BlockHeader, BlockHeight, BlockVote, Bls12381G1PublicKey, Round, ShardGroupId,
     TopologySnapshot, ValidatorId, Verified, VotePower,
@@ -418,8 +416,9 @@ pub enum RecordResult {
 #[cfg(test)]
 mod tests {
     use hyperscale_types::{
-        CertificateRoot, Hash, InFlightCount, LocalReceiptRoot, ProposerTimestamp, ProvisionsRoot,
-        QuorumCertificate, ShardGroupId, StateRoot, TransactionRoot, ValidatorId,
+        BeaconWitnessLeafCount, BeaconWitnessRoot, CertificateRoot, Hash, InFlightCount,
+        LocalReceiptRoot, ProposerTimestamp, ProvisionsRoot, QuorumCertificate, ShardGroupId,
+        StateRoot, TransactionRoot, ValidatorId,
     };
 
     use super::*;

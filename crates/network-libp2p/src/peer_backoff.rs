@@ -13,8 +13,6 @@ use std::hash::Hash;
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
-#[cfg(test)]
-use libp2p::PeerId;
 
 /// Initial reconnection backoff after the first stream failure.
 pub const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
@@ -56,6 +54,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use libp2p::PeerId;
+
     use super::*;
 
     /// Snapshot the backoff entry's `(current_backoff, scheduled_delay)`
