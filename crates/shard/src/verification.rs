@@ -453,10 +453,12 @@ impl VerificationPipeline {
     /// [`Verified<CertifiedBlock>`] assembly. The QC slot starts empty.
     /// Per-root slots reflect the current pipeline state:
     ///
-    /// - if the block carries no relevant content for a kind, the slot
-    ///   is prefilled with `VerifiedXRoot::new_unchecked(header.x_root())`
-    ///   — for empty inputs the header's claimed root must equal the
-    ///   empty-input compute, so the predicate is trivially satisfied;
+    /// - if the block carries no relevant content for a kind and the
+    ///   header's claimed root is the canonical empty value (`ZERO`, the
+    ///   empty-input compute), the slot is prefilled with
+    ///   `VerifiedXRoot::new_unchecked(header.x_root())`; a forged non-empty
+    ///   root over empty content fails the equality and leaves the slot
+    ///   outstanding, so it can't pass on the proposer's say-so;
     /// - if the verification has already completed (its `(block_hash,
     ///   kind)` entry in [`Self::roots`] is `RootStage::Verified`) the
     ///   slot is prefilled with the same `new_unchecked` wrap of the
@@ -468,11 +470,14 @@ impl VerificationPipeline {
         let block_hash = block.hash();
         let h = block.header();
 
-        let tx_done = block.transaction_count() == 0
+        let tx_done = (block.transaction_count() == 0
+            && h.transaction_root() == TransactionRoot::ZERO)
             || self.is_root_verified(block_hash, VerificationKind::TransactionRoot);
-        let cert_done = block.certificates().is_empty()
+        let cert_done = (block.certificates().is_empty()
+            && h.certificate_root() == CertificateRoot::ZERO)
             || self.is_root_verified(block_hash, VerificationKind::CertificateRoot);
-        let receipt_done = block.certificates().is_empty()
+        let receipt_done = (block.certificates().is_empty()
+            && h.local_receipt_root() == LocalReceiptRoot::ZERO)
             || self.is_root_verified(block_hash, VerificationKind::LocalReceiptRoot);
         let provision_done = h.provision_root() == ProvisionsRoot::ZERO
             || self.is_root_verified(block_hash, VerificationKind::ProvisionRoot);
@@ -2186,6 +2191,53 @@ mod tests {
             .expect("linkage check passes for the matching qc.block_hash");
         assert_eq!(linked.qc().block_hash(), block_hash);
         assert_eq!(vp.pending_assembly_count(), 0);
+    }
+
+    /// A block with empty content but a forged non-`ZERO` root must not have
+    /// its per-root slot prefilled: the empty-content shortcut trusts the
+    /// claim only when it equals the canonical empty (`ZERO`) root, so a
+    /// forged root leaves the slot outstanding and can't pass assembly on the
+    /// proposer's say-so. A genuinely-empty sibling root is still prefilled.
+    #[test]
+    fn track_pending_assembly_rejects_nonzero_root_on_empty_content() {
+        let mut vp = VerificationPipeline::new(BlockHeight::GENESIS);
+        let forged_header = BlockHeader::new(
+            ShardGroupId::new(0),
+            BlockHeight::new(1),
+            BlockHash::ZERO,
+            QuorumCertificate::genesis(ShardGroupId::new(0)),
+            ValidatorId::new(0),
+            ProposerTimestamp::from_millis(0),
+            Round::INITIAL,
+            false,
+            StateRoot::ZERO,
+            TransactionRoot::from_raw(Hash::from_bytes(b"forged-tx-root")),
+            CertificateRoot::ZERO,
+            LocalReceiptRoot::ZERO,
+            ProvisionsRoot::ZERO,
+            Vec::new(),
+            std::collections::BTreeMap::new(),
+            InFlightCount::ZERO,
+            BeaconWitnessRoot::ZERO,
+            BeaconWitnessLeafCount::ZERO,
+        );
+        let block = Block::Live {
+            header: forged_header,
+            transactions: Arc::new(BoundedVec::new()),
+            certificates: Arc::new(BoundedVec::new()),
+            provisions: Arc::new(BoundedVec::new()),
+        };
+        let block_hash = block.hash();
+        vp.track_pending_assembly(Arc::new(block));
+
+        let entry = vp
+            .pending_assemblies
+            .get(&block_hash)
+            .expect("assembly tracked");
+        // The forged tx root is not trusted; its slot stays outstanding.
+        assert!(entry.tx_root_result.is_none());
+        // The genuinely-empty cert root (ZERO) is still prefilled.
+        assert!(entry.certificate_root_result.is_some());
     }
 
     /// `record_qc_assembly` against a block hash with no tracked assembly
