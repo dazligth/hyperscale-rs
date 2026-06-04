@@ -30,6 +30,23 @@ use tracing::{info, trace, warn};
 
 pub use crate::vote_set::VoteSet;
 
+/// Hard ceiling on concurrently tracked vote sets. Each [`VoteSet`] is keyed
+/// by the block hash an (unauthenticated) wire vote names, so without a bound a
+/// single committee member could mint a fresh set per fabricated hash.
+/// Legitimate consensus tracks only a handful of in-flight blocks at once, so
+/// the count stays far below this. The cap gates only speculative
+/// (header-less) sets — a block whose header is known is always tracked — so a
+/// genuine block is never blocked. See [`VoteKeeper::admit_vote_set`].
+const MAX_VOTE_SETS: usize = 8_192;
+
+/// Reject votes whose height sits more than this far above the committed
+/// height. Honest votes target the consensus tip, at or just above committed;
+/// a far-future height is fabricated, and its set would never be reaped by
+/// `cleanup_committed` (which drops only heights at or below committed).
+/// Bounding the height keeps every tracked set within reach of a commit, so
+/// the speculative budget recovers as the chain advances.
+const MAX_VOTE_HEIGHT_LOOKAHEAD: u64 = 256;
+
 /// Shared per-vote lookup result from [`VoteKeeper::preflight`].
 struct VotePreflight {
     voter_index: usize,
@@ -108,6 +125,10 @@ impl VoteKeeper {
     /// quorum. `header_for_vote` is the header from the caller's
     /// pending-block map; `None` is acceptable when the header hasn't
     /// been received yet — a later [`VoteSet::set_header`] fills it in.
+    ///
+    /// These are our own votes — one per block we vote on — so they are
+    /// inherently bounded and bypass the [`MAX_VOTE_SETS`] flood cap that gates
+    /// the untrusted wire path.
     pub fn accept_verified_vote(
         &mut self,
         topology: &TopologySnapshot,
@@ -164,6 +185,15 @@ impl VoteKeeper {
             return vec![];
         };
 
+        if !self.admit_vote_set(block_hash, header_for_vote.is_some()) {
+            trace!(
+                block_hash = ?block_hash,
+                vote_sets = self.vote_sets.len(),
+                "Vote-set capacity reached — dropping speculative wire vote"
+            );
+            return vec![];
+        }
+
         let committee_size = topology.committee_for_shard(local_shard).len();
         let vote_set = self
             .vote_sets
@@ -211,6 +241,23 @@ impl VoteKeeper {
             return None;
         }
 
+        // Reject far-future heights up front: such a vote's set would sit above
+        // every reachable commit and never be reaped, so a fabricated height is
+        // a memory-growth vector with no honest counterpart.
+        if height.inner()
+            > committed_height
+                .inner()
+                .saturating_add(MAX_VOTE_HEIGHT_LOOKAHEAD)
+        {
+            trace!(
+                vote_height = height.inner(),
+                committed_height = committed_height.inner(),
+                voter = ?voter,
+                "Skipping vote beyond height lookahead"
+            );
+            return None;
+        }
+
         let Some(voter_index) = topology.committee_index_for_shard(local_shard, voter) else {
             warn!("Vote from validator {:?} not in committee", voter);
             return None;
@@ -233,6 +280,17 @@ impl VoteKeeper {
             voting_power,
             public_key,
         })
+    }
+
+    /// Gate wire-vote set creation so a fabricated-block-hash flood can't grow
+    /// `vote_sets` without bound. Adding to an existing set, or creating one for
+    /// a block whose header is already known (`anchored` — its count is bounded
+    /// by the header caps in `pending_blocks`), is always allowed. A speculative
+    /// set (votes ahead of the header) is admitted only below [`MAX_VOTE_SETS`];
+    /// the genuine block's header later creates the anchored set, so it is never
+    /// censored by this bound.
+    fn admit_vote_set(&self, block_hash: BlockHash, anchored: bool) -> bool {
+        self.vote_sets.contains_key(&block_hash) || anchored || self.vote_sets.len() < MAX_VOTE_SETS
     }
 
     /// Trigger batch vote verification for `block_hash` once the combined
@@ -416,9 +474,10 @@ pub enum RecordResult {
 #[cfg(test)]
 mod tests {
     use hyperscale_types::{
-        BeaconWitnessLeafCount, BeaconWitnessRoot, CertificateRoot, Hash, InFlightCount,
-        LocalReceiptRoot, ProposerTimestamp, ProvisionsRoot, QuorumCertificate, ShardGroupId,
-        StateRoot, TransactionRoot, ValidatorId,
+        BeaconWitnessLeafCount, BeaconWitnessRoot, Bls12381G1PrivateKey, CertificateRoot, Hash,
+        InFlightCount, LocalReceiptRoot, NetworkDefinition, ProposerTimestamp, ProvisionsRoot,
+        QuorumCertificate, ShardGroupId, StateRoot, TransactionRoot, ValidatorId, ValidatorInfo,
+        ValidatorSet, generate_bls_keypair,
     };
 
     use super::*;
@@ -585,6 +644,83 @@ mod tests {
             vk.received_votes_by_height.get(&(h, v)).copied().unwrap();
         assert_eq!(stored_block, block_a);
         assert_eq!(stored_round, Round::new(3));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Vote-set growth bounds
+    // ═══════════════════════════════════════════════════════════════════════
+
+    fn keys_and_topology(n: u64) -> (Vec<Bls12381G1PrivateKey>, TopologySnapshot) {
+        let keys: Vec<Bls12381G1PrivateKey> = (0..n).map(|_| generate_bls_keypair()).collect();
+        let validators: Vec<ValidatorInfo> = keys
+            .iter()
+            .enumerate()
+            .map(|(i, k)| ValidatorInfo {
+                validator_id: ValidatorId::new(u64::try_from(i).unwrap_or(u64::MAX)),
+                public_key: k.public_key(),
+                voting_power: VotePower::new(1),
+            })
+            .collect();
+        let topo = TopologySnapshot::new(
+            NetworkDefinition::simulator(),
+            1,
+            ValidatorSet::new(validators),
+        );
+        (keys, topo)
+    }
+
+    fn wire_vote(keys: &[Bls12381G1PrivateKey], voter: usize, height: BlockHeight) -> BlockVote {
+        BlockVote::new(
+            &NetworkDefinition::simulator(),
+            BlockHash::from_raw(Hash::from_bytes(&height.inner().to_le_bytes())),
+            BlockHash::ZERO,
+            ShardGroupId::new(0),
+            height,
+            Round::INITIAL,
+            ValidatorId::new(u64::try_from(voter).unwrap_or(u64::MAX)),
+            &keys[voter],
+            ProposerTimestamp::from_millis(1_000),
+        )
+    }
+
+    #[test]
+    fn admit_vote_set_caps_speculative_but_never_anchored_or_existing() {
+        let mut vk = VoteKeeper::new();
+        for i in 0..MAX_VOTE_SETS {
+            let hash = BlockHash::from_raw(Hash::from_bytes(
+                &u64::try_from(i).unwrap_or(u64::MAX).to_le_bytes(),
+            ));
+            vk.vote_sets.insert(hash, VoteSet::new(None, 4));
+        }
+        assert_eq!(vk.vote_sets_len(), MAX_VOTE_SETS);
+
+        let fresh = BlockHash::from_raw(Hash::from_bytes(b"fresh"));
+        // At capacity a brand-new speculative (header-less) set is refused...
+        assert!(!vk.admit_vote_set(fresh, false));
+        // ...but an anchored set (header known) is always admitted...
+        assert!(vk.admit_vote_set(fresh, true));
+        // ...and adding to an already-tracked set is always admitted.
+        let existing = BlockHash::from_raw(Hash::from_bytes(&0u64.to_le_bytes()));
+        assert!(vk.admit_vote_set(existing, false));
+    }
+
+    #[test]
+    fn far_future_vote_height_creates_no_vote_set() {
+        let (keys, topo) = keys_and_topology(4);
+        let shard = ShardGroupId::new(0);
+        let me = ValidatorId::new(0);
+        let committed = BlockHeight::new(10);
+        let mut vk = VoteKeeper::new();
+
+        // A vote far above committed is dropped before any set is created.
+        let far = BlockHeight::new(10 + MAX_VOTE_HEIGHT_LOOKAHEAD + 1);
+        vk.accept_unverified_vote(&topo, me, shard, wire_vote(&keys, 0, far), committed, None);
+        assert_eq!(vk.vote_sets_len(), 0);
+
+        // A vote at the lookahead edge is tracked.
+        let edge = BlockHeight::new(10 + MAX_VOTE_HEIGHT_LOOKAHEAD);
+        vk.accept_unverified_vote(&topo, me, shard, wire_vote(&keys, 0, edge), committed, None);
+        assert_eq!(vk.vote_sets_len(), 1);
     }
 }
 
