@@ -8,7 +8,6 @@
 use hyperscale_types::{
     Bls12381G1PublicKey, Round, ShardGroupId, TopologySnapshot, ValidatorId, VotePower,
 };
-use tracing::warn;
 
 /// Recipients for a vote cast in `round`.
 ///
@@ -56,48 +55,51 @@ pub fn vote_recipients(
 /// keys and filters by the QC's `signers` bitfield. Passing the full list
 /// in canonical order ensures consistent aggregation across validators.
 ///
-/// Returns `None` if any committee index fails to resolve to a public key
-/// — a topology corruption indicating the snapshot is unsafe to use.
+/// # Panics
+///
+/// Panics if a committee member is absent from the snapshot's validator set.
+/// Committees are drawn from registered validators and validator records are
+/// never removed, so every member resolves — a miss is a `BeaconState`
+/// invariant violation, not a recoverable condition, and failing loud beats
+/// silently wedging the shard under a corrupt snapshot.
 pub fn committee_public_keys(
     topology: &TopologySnapshot,
     shard: ShardGroupId,
-) -> Option<Vec<Bls12381G1PublicKey>> {
-    let committee = topology.committee_for_shard(shard);
-    let mut pubkeys = Vec::with_capacity(committee.len());
-
-    for &validator_id in committee {
-        if let Some(pk) = topology.public_key(validator_id) {
-            pubkeys.push(pk);
-        } else {
-            warn!(validator_id = ?validator_id, "Missing public key for committee member");
-            return None;
-        }
-    }
-
-    Some(pubkeys)
+) -> Vec<Bls12381G1PublicKey> {
+    topology
+        .committee_for_shard(shard)
+        .iter()
+        .map(|&validator_id| {
+            topology.public_key(validator_id).unwrap_or_else(|| {
+                panic!(
+                    "committee member {validator_id:?} absent from validator set — \
+                     BeaconState invariant (committees subset of validators) violated"
+                )
+            })
+        })
+        .collect()
 }
 
 /// Resolve voting power for every member of the local shard's committee,
 /// indexed parallel to [`committee_public_keys`].
 ///
-/// Returns `None` if any committee index fails to resolve — same failure
-/// semantics as the public-key lookup.
-pub fn committee_voting_powers(
-    topology: &TopologySnapshot,
-    shard: ShardGroupId,
-) -> Option<Vec<VotePower>> {
-    let committee = topology.committee_for_shard(shard);
-    let mut powers = Vec::with_capacity(committee.len());
-
-    for &validator_id in committee {
-        let Some(power) = topology.voting_power(validator_id) else {
-            warn!(validator_id = ?validator_id, "Missing voting power for committee member");
-            return None;
-        };
-        powers.push(power);
-    }
-
-    Some(powers)
+/// # Panics
+///
+/// Panics if a committee member is absent from the snapshot's validator set —
+/// same invariant as [`committee_public_keys`].
+pub fn committee_voting_powers(topology: &TopologySnapshot, shard: ShardGroupId) -> Vec<VotePower> {
+    topology
+        .committee_for_shard(shard)
+        .iter()
+        .map(|&validator_id| {
+            topology.voting_power(validator_id).unwrap_or_else(|| {
+                panic!(
+                    "committee member {validator_id:?} absent from validator set — \
+                     BeaconState invariant (committees subset of validators) violated"
+                )
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -205,7 +207,7 @@ mod tests {
         let topology = topology_for(&committee);
         let shard = ShardGroupId::new(0);
 
-        let keys = committee_public_keys(&topology, shard).expect("topology is well-formed");
+        let keys = committee_public_keys(&topology, shard);
         assert_eq!(keys.len(), 4);
 
         // Canonical order: committee[i] corresponds to validator i.

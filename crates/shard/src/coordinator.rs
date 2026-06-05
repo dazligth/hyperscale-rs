@@ -1594,16 +1594,8 @@ impl ShardCoordinator {
             // Collect public keys and voting powers for verification —
             // both halves of the QC's predicate (signature + quorum
             // power) need them.
-            let Some(public_keys) = committee_public_keys(parent_committee, self.local_shard)
-            else {
-                warn!("Failed to collect public keys for QC verification");
-                return vec![];
-            };
-            let Some(voting_powers) = committee_voting_powers(parent_committee, self.local_shard)
-            else {
-                warn!("Failed to collect voting powers for QC verification");
-                return vec![];
-            };
+            let public_keys = committee_public_keys(parent_committee, self.local_shard);
+            let voting_powers = committee_voting_powers(parent_committee, self.local_shard);
             let quorum_threshold = VotePower::quorum_threshold(
                 parent_committee.voting_power_for_shard(self.local_shard),
             );
@@ -3178,14 +3170,8 @@ impl ShardCoordinator {
             return vec![];
         }
 
-        let Some(public_keys) = committee_public_keys(committee, self.local_shard) else {
-            warn!("Failed to collect public keys for synced block QC verification");
-            return vec![];
-        };
-        let Some(voting_powers) = committee_voting_powers(committee, self.local_shard) else {
-            warn!("Failed to collect voting powers for synced block QC verification");
-            return vec![];
-        };
+        let public_keys = committee_public_keys(committee, self.local_shard);
+        let voting_powers = committee_voting_powers(committee, self.local_shard);
         let quorum_threshold =
             VotePower::quorum_threshold(committee.voting_power_for_shard(self.local_shard));
 
@@ -3507,13 +3493,24 @@ impl ShardCoordinator {
     /// (`VoteKeeper`). `None` for any validator outside the committee, so a
     /// globally-registered validator from another shard never counts toward the
     /// timeout thresholds (whose total is committee-scoped).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `voter` is in the committee but has no voting power — a
+    /// `BeaconState` invariant violation, as in [`committee_voting_powers`].
     fn committee_timeout_power(
         &self,
         committee: &TopologySnapshot,
         voter: ValidatorId,
     ) -> Option<VotePower> {
         committee.committee_index_for_shard(self.local_shard, voter)?;
-        committee.voting_power(voter)
+        // Membership is confirmed above, so the power resolves; a miss is the
+        // same invariant violation the committee-key lookups assert on.
+        Some(
+            committee
+                .voting_power(voter)
+                .expect("committee member has voting power (BeaconState invariant)"),
+        )
     }
 
     /// Screen a wire timeout, then delegate its BLS share verification to the
@@ -3521,6 +3518,11 @@ impl ShardCoordinator {
     /// `ProtocolEvent::VerifiedTimeoutReceived` and is tallied by
     /// [`Self::on_verified_timeout`] — keeping per-timeout pairing checks off
     /// the shard loop thread during a view change, as the vote path does.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a committee member has no public key — a `BeaconState`
+    /// invariant violation, as in [`committee_public_keys`].
     pub fn on_unverified_timeout(
         &mut self,
         topology: &TopologySchedule,
@@ -3555,9 +3557,12 @@ impl ShardCoordinator {
         {
             return Vec::new();
         }
-        let Some(voter_public_key) = committee.public_key(timeout.voter()) else {
-            return Vec::new();
-        };
+        // `committee_timeout_power` above confirmed committee membership, so the
+        // public key resolves; a miss is the same BeaconState invariant
+        // violation the committee-key lookups assert on.
+        let voter_public_key = committee
+            .public_key(timeout.voter())
+            .expect("committee member has public key (BeaconState invariant)");
         vec![Action::VerifyTimeout {
             timeout: timeout.clone(),
             voter_public_key,
@@ -3689,8 +3694,8 @@ impl ShardCoordinator {
         // means we can't verify this candidate — skip it, as a failed pairing
         // would.
         let committee = self.committee_of_block(topology, qc.block_hash())?;
-        let public_keys = committee_public_keys(committee, self.local_shard)?;
-        let voting_powers = committee_voting_powers(committee, self.local_shard)?;
+        let public_keys = committee_public_keys(committee, self.local_shard);
+        let voting_powers = committee_voting_powers(committee, self.local_shard);
         let ctx = QcContext {
             network: committee.network(),
             public_keys: &public_keys,
