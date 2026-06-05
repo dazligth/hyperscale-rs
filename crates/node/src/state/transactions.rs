@@ -29,10 +29,9 @@ impl NodeStateMachine {
                 self.on_transactions_fetched(transactions)
             }
             ProtocolEvent::TransactionsAdmitted { txs } => {
-                let actions = self.shard_coordinator.on_transactions_admitted(
-                    self.beacon_coordinator.current_topology_snapshot(),
-                    &txs,
-                );
+                let actions = self
+                    .shard_coordinator
+                    .on_transactions_admitted(self.beacon_coordinator.topology_schedule(), &txs);
                 self.shard_coordinator.queue_ready_proposal();
                 actions
             }

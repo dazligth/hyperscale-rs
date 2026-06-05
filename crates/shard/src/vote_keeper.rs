@@ -39,6 +39,21 @@ pub use crate::vote_set::VoteSet;
 /// genuine block is never blocked. See [`VoteKeeper::admit_vote_set`].
 const MAX_VOTE_SETS: usize = 8_192;
 
+/// Distinct blocks for which we hold votes that arrived before the block's
+/// header — pre-header votes whose exact committee we can't resolve yet.
+/// Tight because such votes matter only briefly: the header arrives and drains
+/// them, or the block is bogus. Far below [`MAX_VOTE_SETS`] since only the live
+/// tip's neighbours are ever genuinely pre-header.
+const MAX_UNANCHORED_VOTE_BLOCKS: usize = 64;
+
+/// Per-block cap on buffered pre-header votes. Bounds a flood on a single
+/// fabricated block hash (we can't run the committee-membership filter without
+/// the header); honest pre-header votes per block never exceed the committee
+/// size. With per-voter dedup and the distinct-block cap, the buffer is
+/// hard-bounded, and fabricated votes are dropped at QC-build time when
+/// verified against the exact committee.
+const MAX_UNANCHORED_VOTES_PER_BLOCK: usize = 256;
+
 /// Reject votes whose height sits more than this far above the committed
 /// height. Honest votes target the consensus tip, at or just above committed;
 /// a far-future height is fabricated, and its set would never be reaped by
@@ -67,6 +82,13 @@ pub struct VoteKeeper {
     /// A different-block vote at the same (height, round) is equivocation;
     /// at a later round it's a legitimate revote.
     received_votes_by_height: HashMap<(BlockHeight, ValidatorId), (BlockHash, Round)>,
+
+    /// Votes that arrived before their block's header. Without the header we
+    /// can't resolve the block's exact committee to index/admit them, so they
+    /// are held raw here, keyed by the block they target, and admitted against
+    /// the exact committee once the header arrives (see
+    /// [`take_unanchored_votes`](Self::take_unanchored_votes)). Tightly capped.
+    unanchored_votes: HashMap<BlockHash, Vec<BlockVote>>,
 }
 
 impl VoteKeeper {
@@ -74,6 +96,7 @@ impl VoteKeeper {
         Self {
             vote_sets: HashMap::new(),
             received_votes_by_height: HashMap::new(),
+            unanchored_votes: HashMap::new(),
         }
     }
 
@@ -83,6 +106,41 @@ impl VoteKeeper {
             .retain(|_hash, vote_set| vote_set.height().is_none_or(|h| h > committed_height));
         self.received_votes_by_height
             .retain(|(height, _), _| *height > committed_height);
+        // Pre-header votes carry their own height, so committed ones can be
+        // dropped even though we never resolved their block.
+        self.unanchored_votes.retain(|_, votes| {
+            votes.retain(|v| v.height() > committed_height);
+            !votes.is_empty()
+        });
+    }
+
+    /// Buffer a wire vote whose block header hasn't arrived yet. Deduped per
+    /// voter and capped both per block and in distinct blocks; returns `false`
+    /// when a cap rejects it. The exact committee filters fabricated votes at
+    /// QC-build time, so the cap is the only admission gate here.
+    pub fn buffer_unanchored_vote(&mut self, vote: BlockVote) -> bool {
+        let block_hash = vote.block_hash();
+        if !self.unanchored_votes.contains_key(&block_hash)
+            && self.unanchored_votes.len() >= MAX_UNANCHORED_VOTE_BLOCKS
+        {
+            return false;
+        }
+        let bucket = self.unanchored_votes.entry(block_hash).or_default();
+        if bucket.len() >= MAX_UNANCHORED_VOTES_PER_BLOCK
+            || bucket.iter().any(|v| v.voter() == vote.voter())
+        {
+            return false;
+        }
+        bucket.push(vote);
+        true
+    }
+
+    /// Remove and return the pre-header votes buffered for `block_hash` —
+    /// called once its header arrives and the exact committee resolves.
+    pub fn take_unanchored_votes(&mut self, block_hash: BlockHash) -> Vec<BlockVote> {
+        self.unanchored_votes
+            .remove(&block_hash)
+            .unwrap_or_default()
     }
 
     pub fn vote_sets_len(&self) -> usize {
@@ -102,17 +160,6 @@ impl VoteKeeper {
         voter: ValidatorId,
     ) -> Option<(BlockHash, Round)> {
         self.received_votes_by_height.get(&(height, voter)).copied()
-    }
-
-    /// Stamp a late-arriving header into a buffered vote set so QC aggregation
-    /// has the `parent_block_hash` it needs. Returns `true` if a matching
-    /// vote set was present and updated.
-    pub fn link_header(&mut self, block_hash: BlockHash, header: &BlockHeader) -> bool {
-        let Some(vote_set) = self.vote_sets.get_mut(&block_hash) else {
-            return false;
-        };
-        vote_set.set_header(header);
-        true
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -721,6 +768,69 @@ mod tests {
         let edge = BlockHeight::new(10 + MAX_VOTE_HEIGHT_LOOKAHEAD);
         vk.accept_unverified_vote(&topo, me, shard, wire_vote(&keys, 0, edge), committed, None);
         assert_eq!(vk.vote_sets_len(), 1);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Pre-header (unanchored) vote buffer
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn unanchored_votes_dedup_per_voter_and_drain() {
+        let (keys, _topo) = keys_and_topology(4);
+        let mut vk = VoteKeeper::new();
+        let height = BlockHeight::new(5);
+        let vote0 = wire_vote(&keys, 0, height);
+        let block = vote0.block_hash();
+
+        assert!(vk.buffer_unanchored_vote(vote0.clone()));
+        // Same voter on the same block is deduped.
+        assert!(!vk.buffer_unanchored_vote(vote0));
+        // A different voter on the same block is kept.
+        assert!(vk.buffer_unanchored_vote(wire_vote(&keys, 1, height)));
+
+        // Draining returns both and clears the buffer.
+        let drained = vk.take_unanchored_votes(block);
+        assert_eq!(drained.len(), 2);
+        assert!(vk.take_unanchored_votes(block).is_empty());
+    }
+
+    #[test]
+    fn unanchored_votes_cap_distinct_blocks() {
+        let (keys, _topo) = keys_and_topology(1);
+        let mut vk = VoteKeeper::new();
+        // Each height yields a distinct block hash (see `wire_vote`); fill the
+        // distinct-block cap.
+        for i in 0..MAX_UNANCHORED_VOTE_BLOCKS {
+            let h = BlockHeight::new(u64::try_from(i).unwrap_or(u64::MAX));
+            assert!(vk.buffer_unanchored_vote(wire_vote(&keys, 0, h)));
+        }
+        // A brand-new block hash is refused at capacity.
+        let overflow_height = BlockHeight::new(u64::try_from(MAX_UNANCHORED_VOTE_BLOCKS).unwrap());
+        assert!(!vk.buffer_unanchored_vote(wire_vote(&keys, 0, overflow_height)));
+    }
+
+    #[test]
+    fn unanchored_votes_pruned_at_or_below_committed() {
+        let (keys, _topo) = keys_and_topology(2);
+        let mut vk = VoteKeeper::new();
+        let stale = wire_vote(&keys, 0, BlockHeight::new(3));
+        let stale_block = stale.block_hash();
+        let live = wire_vote(&keys, 1, BlockHeight::new(7));
+        let live_block = live.block_hash();
+        assert!(vk.buffer_unanchored_vote(stale));
+        assert!(vk.buffer_unanchored_vote(live));
+
+        vk.cleanup_committed(BlockHeight::new(5));
+
+        assert!(
+            vk.take_unanchored_votes(stale_block).is_empty(),
+            "votes at or below committed height must be pruned",
+        );
+        assert_eq!(
+            vk.take_unanchored_votes(live_block).len(),
+            1,
+            "votes above committed height survive",
+        );
     }
 }
 

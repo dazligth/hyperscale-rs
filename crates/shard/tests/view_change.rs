@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use common::{HoldFilter, ShardCoordinatorSim};
 use hyperscale_types::{
-    MAX_PROGRESS_WAIT, Round, VIEW_CHANGE_TIMEOUT, VIEW_CHANGE_TIMEOUT_INCREMENT, ValidatorId,
+    BlockHeight, MAX_PROGRESS_WAIT, Round, VIEW_CHANGE_TIMEOUT, VIEW_CHANGE_TIMEOUT_INCREMENT,
+    ValidatorId,
 };
 
 const MAX_STEPS: usize = 5_000;
@@ -285,4 +286,43 @@ fn lone_timeout_does_not_advance() {
             "replica {idx} counted a view change without a 2f+1 quorum",
         );
     }
+}
+
+/// A block received before its parent's header must not wedge: the receiver
+/// defers the child's parent-QC verification (it can't resolve the parent's
+/// committee without the parent header), and re-engages it once the parent
+/// arrives. Rounds equal heights here, so leaders rotate idx1, idx2, idx3 for
+/// heights 1..3 — idx 0 leads none of them, so the healthy three drive the
+/// chain queue-only (no view change). Holding idx 0's height-2 header makes it
+/// receive height 3 (parent QC over height 2) first; releasing height 2 must
+/// un-defer height 3 so idx 0 finally votes it.
+#[test]
+fn child_before_parent_header_defers_then_votes_on_arrival() {
+    let mut sim = ShardCoordinatorSim::new(4, 0xDEFE);
+    let lagging = ValidatorId::new(0);
+    sim.kick_off();
+    sim.hold_matching(
+        lagging,
+        HoldFilter::BlockHeaderAtHeight(BlockHeight::new(2)),
+    );
+    sim.run_for_at_most(MAX_STEPS);
+
+    // idx 0 votes height 1 (round 1) but cannot vote height 3 (round 3): its
+    // parent-QC verification is deferred for lack of the held height-2 header.
+    assert!(
+        sim.held_count_for(lagging) >= 1,
+        "the height-2 header must have been diverted to the held buffer",
+    );
+    assert!(
+        sim.coordinators[0].last_voted_round() < Round::new(3),
+        "child height 3 must stay deferred while its parent header is withheld",
+    );
+
+    // Releasing the parent header re-triggers the deferred child.
+    sim.release_held(lagging);
+    sim.run_for_at_most(MAX_STEPS);
+    assert!(
+        sim.coordinators[0].last_voted_round() >= Round::new(3),
+        "arrival of the parent header must un-defer the child so idx 0 votes it",
+    );
 }

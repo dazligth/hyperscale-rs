@@ -83,9 +83,9 @@ use hyperscale_types::{
     CertifiedBlockHeader, FinalizedWave, LocalReceiptRoot, LocalReceiptRootVerifyError,
     MAX_ROUND_GAP, ProvisionRootVerifyError, ProvisionTxRootsMap, ProvisionTxRootsVerifyError,
     Provisions, ProvisionsRoot, QcContext, QcVerifyError, QuorumCertificate, Round,
-    RoutableTransaction, StateRoot, StateRootVerifyError, Timeout, TopologySnapshot,
-    TransactionRoot, TxHash, TxRootVerifyError, ValidatorId, Verifiable, Verified, Verify,
-    VotePower, derive_leaves, missed_proposals_since_prev_commit,
+    RoutableTransaction, StateRoot, StateRootVerifyError, Timeout, TopologySchedule,
+    TopologySnapshot, TransactionRoot, TxHash, TxRootVerifyError, ValidatorId, Verifiable,
+    Verified, Verify, VotePower, derive_leaves, missed_proposals_since_prev_commit,
 };
 use tracing::field::Empty;
 use tracing::{debug, info, instrument, trace, warn};
@@ -179,6 +179,14 @@ pub struct ShardCoordinator {
     /// BFT-authenticated weighted timestamp of the latest committed block.
     /// "Now" reference for time-based retention in proposal dedup.
     committed_ts: WeightedTimestamp,
+
+    /// Committee anchor of the latest committed block: its parent QC's
+    /// weighted timestamp, the value that selects the committee the block
+    /// belongs to (`committee(tip) == at(committed_anchor_ts)`). Held as a
+    /// scalar because the committed tip is pruned from `pending_blocks`, so
+    /// [`Self::committee_anchor`] can still resolve its committee when
+    /// verifying the QC of the first block extending it.
+    committed_anchor_ts: WeightedTimestamp,
 
     /// State root from the latest committed block header.
     /// Updated synchronously at commit time (not dependent on async JMT).
@@ -315,6 +323,15 @@ impl ShardCoordinator {
                 WeightedTimestamp::ZERO,
                 QuorumCertificate::weighted_timestamp,
             ),
+            // The committed tip's parent QC weighted timestamp isn't recovered
+            // from storage, so seed the anchor with the tip's own weighted
+            // timestamp — identical except when the recovered tip is itself an
+            // epoch's first block, and exact again after the next commit sets
+            // it from the committing block's `parent_qc`.
+            committed_anchor_ts: recovered.latest_qc.as_deref().map_or(
+                WeightedTimestamp::ZERO,
+                QuorumCertificate::weighted_timestamp,
+            ),
             committed_state_root: recovered.jmt_root.unwrap_or(StateRoot::ZERO),
             latest_qc: recovered.latest_qc,
             deferred_qc: DeferredQc::new(),
@@ -363,6 +380,60 @@ impl ShardCoordinator {
             self.latest_qc.as_ref(),
             &self.pending_blocks,
         )
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Committee resolution
+    // ═══════════════════════════════════════════════════════════════════════════
+    //
+    // A block's committee is keyed on its parent's weighted timestamp: every
+    // honest node resolves `committee(block) == at(committee_anchor(block))`,
+    // where `committee_anchor(block) == block.header.parent_qc.weighted_timestamp()`.
+    // Keying on the parent (already attested) rather than the block's own
+    // not-yet-aggregated weighted timestamp lets proposer, voters, and
+    // verifiers agree before the block's votes exist. The committee for the
+    // height currently in progress / our next proposal keys on `high_qc`'s
+    // weighted timestamp, since that is the tip we extend.
+
+    /// Weighted timestamp selecting `block_hash`'s committee — its parent QC's
+    /// weighted timestamp. Reads the header from `pending_blocks`; the
+    /// committed tip (pruned from pending) uses the `committed_anchor_ts`
+    /// scalar. `None` when the block is neither pending nor the committed tip,
+    /// so its committee can't be resolved (caller stalls).
+    fn committee_anchor(&self, block_hash: BlockHash) -> Option<WeightedTimestamp> {
+        if block_hash == self.committed_hash {
+            return Some(self.committed_anchor_ts);
+        }
+        self.pending_blocks
+            .get_header(block_hash)
+            .map(|h| h.parent_qc().weighted_timestamp())
+    }
+
+    /// Weighted timestamp selecting the committee for the height in progress /
+    /// our next proposal: we extend `high_qc`, so the committee is
+    /// `at(high_qc.weighted_timestamp())`. Genesis (no QC) → `ZERO` (epoch 0).
+    fn tip_anchor_ts(&self) -> WeightedTimestamp {
+        self.latest_qc
+            .as_ref()
+            .map_or(WeightedTimestamp::ZERO, |qc| qc.weighted_timestamp())
+    }
+
+    /// Committee that signed/produced `block_hash`. `None` to stall: the block
+    /// is unknown, or this node's beacon hasn't synced the block's epoch.
+    fn committee_of_block<'t>(
+        &self,
+        topology: &'t TopologySchedule,
+        block_hash: BlockHash,
+    ) -> Option<&'t TopologySnapshot> {
+        topology
+            .at(self.committee_anchor(block_hash)?)
+            .map(AsRef::as_ref)
+    }
+
+    /// Committee for the height in progress / our next proposal (extends
+    /// `high_qc`). `None` to stall when the beacon lacks that epoch.
+    fn tip_committee<'t>(&self, topology: &'t TopologySchedule) -> Option<&'t TopologySnapshot> {
+        topology.at(self.tip_anchor_ts()).map(AsRef::as_ref)
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -453,15 +524,15 @@ impl ShardCoordinator {
     /// a submit dispatch or a buffer drain.
     pub fn on_sync_block_ready_to_apply(
         &mut self,
-        topology_snapshot: &TopologySnapshot,
+        topology: &TopologySchedule,
         certified: CertifiedBlock,
     ) -> Vec<Action> {
         match self.block_sync.ingest(certified, self.committed_height) {
             IngestOutcome::Drop => vec![],
             IngestOutcome::Submit(certified) => {
-                self.submit_synced_block_for_verification(topology_snapshot, *certified)
+                self.submit_synced_block_for_verification(topology, *certified)
             }
-            IngestOutcome::Buffered => self.try_drain_buffered_synced_blocks(topology_snapshot),
+            IngestOutcome::Buffered => self.try_drain_buffered_synced_blocks(topology),
         }
     }
 
@@ -581,10 +652,7 @@ impl ShardCoordinator {
     ///
     /// If a view change occurs, the caller should NOT proceed to call
     /// `try_propose` in the same event handling cycle.
-    pub fn check_round_timeout(
-        &mut self,
-        topology_snapshot: &TopologySnapshot,
-    ) -> Option<Vec<Action>> {
+    pub fn check_round_timeout(&mut self, topology: &TopologySchedule) -> Option<Vec<Action>> {
         if !self.should_advance_round() {
             return None;
         }
@@ -605,7 +673,7 @@ impl ShardCoordinator {
 
         // Broadcast our timeout (deduped per round) and keep the timer running
         // so we re-check until the 2f+1 quorum forms.
-        let mut actions = self.broadcast_timeout(topology_snapshot, round);
+        let mut actions = self.broadcast_timeout(topology, round);
         actions.push(Action::SetTimer {
             id: TimerId::ViewChange,
             duration: self.current_view_change_timeout(),
@@ -650,7 +718,6 @@ impl ShardCoordinator {
     #[instrument(skip(self, qc), fields(height = height.inner(), has_hash = hash.is_some(), has_qc = qc.is_some()))]
     pub fn on_committed_state_restored(
         &mut self,
-        topology_snapshot: &TopologySnapshot,
         height: BlockHeight,
         hash: Option<BlockHash>,
         qc: Option<Verified<QuorumCertificate>>,
@@ -727,13 +794,13 @@ impl ShardCoordinator {
     /// Returns empty if preconditions aren't met (not proposer, build in-flight,
     /// already voted at this height, etc.). No periodic rescheduling — callers
     /// are responsible for triggering the next attempt via events.
-    #[instrument(skip(self, ready_txs, finalized_waves), fields(
+    #[instrument(skip(self, topology, ready_txs, finalized_waves), fields(
         tx_count = ready_txs.len(),
         cert_count = finalized_waves.len(),
     ))]
     pub fn try_propose(
         &mut self,
-        topology_snapshot: &TopologySnapshot,
+        topology: &TopologySchedule,
         ready_txs: &[Arc<Verified<RoutableTransaction>>],
         finalized_waves: Vec<Arc<Verifiable<FinalizedWave>>>,
         provisions: Vec<Arc<Verifiable<Provisions>>>,
@@ -747,7 +814,7 @@ impl ShardCoordinator {
             .map_or_else(|| self.committed_height.next(), |qc| qc.height().next());
         let round = self.view_change.view;
 
-        if !self.can_propose(topology_snapshot, next_height, round) {
+        if !self.can_propose(topology, next_height, round) {
             return vec![];
         }
 
@@ -755,7 +822,7 @@ impl ShardCoordinator {
         // advancing while catching up on execution state.
         if self.block_sync.is_syncing() {
             return self.build_and_dispatch_proposal(
-                topology_snapshot,
+                topology,
                 next_height,
                 round,
                 ProposalKind::Sync,
@@ -782,7 +849,7 @@ impl ShardCoordinator {
             .is_some_and(BlockHeader::is_fallback);
         if parent_is_fallback {
             return self.build_and_dispatch_proposal(
-                topology_snapshot,
+                topology,
                 next_height,
                 round,
                 ProposalKind::Normal {
@@ -827,7 +894,7 @@ impl ShardCoordinator {
         );
 
         self.build_and_dispatch_proposal(
-            topology_snapshot,
+            topology,
             next_height,
             round,
             ProposalKind::Normal {
@@ -844,11 +911,17 @@ impl ShardCoordinator {
     /// height/round.
     fn can_propose(
         &self,
-        topology_snapshot: &TopologySnapshot,
+        topology: &TopologySchedule,
         next_height: BlockHeight,
         round: Round,
     ) -> bool {
-        if topology_snapshot.proposer_for(self.local_shard, round) != self.me {
+        // We extend `high_qc`, so the proposer is drawn from that committee.
+        // Without it (beacon behind) we can't know whether we're the proposer
+        // — stall rather than guess.
+        let Some(committee) = self.tip_committee(topology) else {
+            return false;
+        };
+        if committee.proposer_for(self.local_shard, round) != self.me {
             return false;
         }
 
@@ -894,11 +967,11 @@ impl ShardCoordinator {
     /// consensus time across extended view changes. `is_fallback = true`.
     fn build_and_broadcast_fallback_block(
         &mut self,
-        topology_snapshot: &TopologySnapshot,
+        topology: &TopologySchedule,
         height: BlockHeight,
         round: Round,
     ) -> Vec<Action> {
-        self.build_and_dispatch_proposal(topology_snapshot, height, round, ProposalKind::Fallback)
+        self.build_and_dispatch_proposal(topology, height, round, ProposalKind::Fallback)
     }
 
     /// Unified proposal build + dispatch.
@@ -909,13 +982,19 @@ impl ShardCoordinator {
     /// verification pipeline when the parent JMT isn't ready yet).
     fn build_and_dispatch_proposal(
         &mut self,
-        topology_snapshot: &TopologySnapshot,
+        topology: &TopologySchedule,
         height: BlockHeight,
         round: Round,
         kind: ProposalKind,
     ) -> Vec<Action> {
         let (parent_block_hash, parent_qc) = self.chain_view().proposal_parent();
         let parent_round = parent_qc.round();
+        // The block we build belongs to `at(parent_qc weighted ts)`; its
+        // proposer schedule (missed-proposal leaves) and beacon-witness preview
+        // resolve against that committee. Stall if the beacon lacks it.
+        let Some(committee) = topology.at(parent_qc.weighted_timestamp()) else {
+            return vec![];
+        };
         let receipts: Vec<StoredReceipt> = match &kind {
             ProposalKind::Normal {
                 finalized_waves, ..
@@ -930,7 +1009,7 @@ impl ShardCoordinator {
             height,
             parent_round,
             round,
-            topology_snapshot,
+            committee,
         );
         let ready_signals = self.ready_signal_pool.drain_eligible(
             height,
@@ -954,7 +1033,7 @@ impl ShardCoordinator {
             parent_block_hash,
             &self.pending_blocks,
             self.local_shard,
-            topology_snapshot,
+            committee,
         )
         .unwrap_or_else(|blocking| {
             warn!(
@@ -1009,7 +1088,7 @@ impl ShardCoordinator {
     /// Handle a received block header. Sender identity is taken from the
     /// header's signed `proposer` field — there's no separate peer-id
     /// parameter because sync detection doesn't need it.
-    #[instrument(skip(self, header, manifest, lookup_tx, lookup_finalized_wave, lookup_provision), fields(
+    #[instrument(skip(self, topology, header, manifest, lookup_tx, lookup_finalized_wave, lookup_provision), fields(
         height = header.height().inner(),
         round = header.round().inner(),
         proposer = ?header.proposer(),
@@ -1018,7 +1097,7 @@ impl ShardCoordinator {
     #[allow(clippy::too_many_arguments)]
     pub fn on_block_header(
         &mut self,
-        topology_snapshot: &TopologySnapshot,
+        topology: &TopologySchedule,
         header: &BlockHeader,
         manifest: BlockManifest,
         lookup_tx: impl Fn(&TxHash) -> Option<Arc<Verifiable<RoutableTransaction>>>,
@@ -1040,7 +1119,7 @@ impl ShardCoordinator {
 
         let sync_actions = self.absorb_parent_qc_from_header(header);
 
-        if self.reject_invalid_header(topology_snapshot, header) {
+        if self.reject_invalid_header(topology, header) {
             return vec![];
         }
 
@@ -1111,30 +1190,41 @@ impl ShardCoordinator {
             lookup_provision,
         );
         self.adopt_deferred_qc_if_matches(block_hash);
-        self.link_buffered_votes_to_header(block_hash, header);
 
-        let mut actions =
-            self.votes
-                .maybe_trigger_verification(topology_snapshot, self.local_shard, block_hash);
+        // Admit any pre-header votes for this block (held raw until now), then
+        // re-check the tally — both against the exact committee the
+        // just-assembled header anchors. The header passed
+        // `reject_invalid_header` (which resolved the same committee), so
+        // `None` here would mean the beacon evicted the epoch out from under a
+        // long-stalled block — tally nothing rather than guess.
+        let mut actions = self.link_buffered_votes_to_header(topology, block_hash, header);
+        if let Some(committee) = self.committee_of_block(topology, block_hash) {
+            actions.extend(self.votes.maybe_trigger_verification(
+                committee,
+                self.local_shard,
+                block_hash,
+            ));
+        }
         actions.extend(sync_actions);
         // Cancel fetches orphaned by any eviction the cap performed.
         actions.extend(cap_actions);
 
-        // If vote verification was triggered, return those actions. Still want
-        // to fall through for sync-only extensions, so only short-circuit on
-        // the verification-scheduling case.
-        if actions
+        // Process this block's own completion — unless vote verification was
+        // already scheduled (we only short-circuit on that case, still falling
+        // through for sync-only extensions).
+        let scheduled_vote_verification = actions
             .iter()
-            .any(|a| matches!(a, Action::VerifyQcSignature { .. }))
+            .any(|a| matches!(a, Action::VerifyQcSignature { .. }));
+        if !scheduled_vote_verification
+            && !self.finalize_complete_block(topology, block_hash, &mut actions)
         {
-            return actions;
+            self.log_incomplete_block(block_hash);
         }
 
-        if self.finalize_complete_block(topology_snapshot, block_hash, &mut actions) {
-            return actions;
-        }
-
-        self.log_incomplete_block(block_hash);
+        // A header for `block_hash` just landed, so `committee(block_hash)` now
+        // resolves for any child that deferred its parent-QC verification
+        // awaiting this parent. Re-trigger them.
+        actions.extend(self.retry_pending_children(topology, block_hash));
         actions
     }
 
@@ -1251,14 +1341,34 @@ impl ShardCoordinator {
     }
 
     /// Validate the header; logs and returns `true` if the caller should
-    /// reject (short-circuit with empty actions).
-    fn reject_invalid_header(
-        &self,
-        topology_snapshot: &TopologySnapshot,
-        header: &BlockHeader,
-    ) -> bool {
+    /// reject (short-circuit with empty actions). Beacon-behind (`None`
+    /// committee) is treated as a drop here — sync recovers the chain.
+    fn reject_invalid_header(&self, topology: &TopologySchedule, header: &BlockHeader) -> bool {
+        // Proposer of `h` is drawn from `committee(h) == at(parent_qc weighted
+        // ts)`. Absent it, the beacon hasn't reached this epoch — drop.
+        let Some(proposer_committee) = topology
+            .at(header.parent_qc().weighted_timestamp())
+            .map(AsRef::as_ref)
+        else {
+            warn!(
+                validator = ?self.me,
+                "No committee for header's epoch — beacon behind, dropping header"
+            );
+            return true;
+        };
+        // The parent QC over `h-1` was signed by `committee(h-1)`. Skip the
+        // quorum pre-check (`None`) when the parent QC is genesis (no quorum to
+        // check) or when `h-1`'s header hasn't arrived, so its committee can't
+        // be resolved. The pre-check is a cheap DoS filter; the parent QC is
+        // fully BLS-verified against the exact committee before this node votes,
+        // once `h-1` lands. Substituting `committee(h)` here would run the
+        // pre-check against the wrong committee at an epoch boundary.
+        let parent_committee = (!header.parent_qc().is_genesis())
+            .then(|| self.committee_of_block(topology, header.parent_qc().block_hash()))
+            .flatten();
         if let Err(e) = validate_header(
-            topology_snapshot,
+            proposer_committee,
+            parent_committee,
             self.local_shard,
             header,
             self.committed_height,
@@ -1295,16 +1405,71 @@ impl ShardCoordinator {
         }
     }
 
-    /// Late-arriving header: votes may have already landed in the vote set.
-    /// Stamp the header info into the set so QC aggregation has the
-    /// `parent_block_hash` it needs.
-    fn link_buffered_votes_to_header(&mut self, block_hash: BlockHash, header: &BlockHeader) {
-        if self.votes.link_header(block_hash, header) {
-            info!(
-                block_hash = ?block_hash,
-                "Updated VoteSet with header info via on_block_header"
-            );
+    /// The header for `block_hash` just arrived, so its exact committee now
+    /// resolves: admit any votes that were held raw because they arrived first
+    /// (see [`Self::on_unverified_block_vote`]). Each is run through the normal
+    /// committee-membership filter against the exact committee, so fabricated
+    /// pre-header votes are dropped here. Returns the admissions' trigger
+    /// actions.
+    fn link_buffered_votes_to_header(
+        &mut self,
+        topology: &TopologySchedule,
+        block_hash: BlockHash,
+        header: &BlockHeader,
+    ) -> Vec<Action> {
+        let buffered = self.votes.take_unanchored_votes(block_hash);
+        if buffered.is_empty() {
+            return vec![];
         }
+        // The header is now in `pending_blocks`, so this resolves the exact
+        // committee; `None` (beacon behind) can't occur after the header
+        // passed `reject_invalid_header`, but drop rather than guess if it did.
+        let Some(committee) = self.committee_of_block(topology, block_hash) else {
+            return vec![];
+        };
+        info!(
+            block_hash = ?block_hash,
+            count = buffered.len(),
+            "Admitting pre-header votes now that the header anchors their committee"
+        );
+        let mut actions = Vec::new();
+        for vote in buffered {
+            actions.extend(self.votes.accept_unverified_vote(
+                committee,
+                self.me,
+                self.local_shard,
+                vote,
+                self.committed_height,
+                Some(header),
+            ));
+        }
+        actions
+    }
+
+    /// A block `parent_hash` just became locally available (its header arrived,
+    /// or it committed), so `committee(parent_hash)` now resolves. Re-trigger
+    /// any complete pending child that extends it — these are the blocks whose
+    /// parent-QC verification [`trigger_qc_verification_or_vote`] deferred for
+    /// lack of the parent. This is the stateless retry that pairs with that
+    /// deferral; `trigger_qc_verification_or_vote` is idempotent (cache hits /
+    /// the safe-vote rule short-circuit a child already handled), so
+    /// re-triggering unconditionally is safe.
+    fn retry_pending_children(
+        &mut self,
+        topology: &TopologySchedule,
+        parent_hash: BlockHash,
+    ) -> Vec<Action> {
+        let children: Vec<BlockHash> = self
+            .pending_blocks
+            .values()
+            .filter(|p| p.header().parent_block_hash() == parent_hash && p.block().is_some())
+            .map(|p| p.header().hash())
+            .collect();
+        let mut actions = Vec::new();
+        for child in children {
+            actions.extend(self.trigger_qc_verification_or_vote(topology, child));
+        }
+        actions
     }
 
     /// If the pending block is complete, construct it and trigger QC
@@ -1312,7 +1477,7 @@ impl ShardCoordinator {
     /// caller should return the accumulated actions).
     fn finalize_complete_block(
         &mut self,
-        topology_snapshot: &TopologySnapshot,
+        topology: &TopologySchedule,
         block_hash: BlockHash,
         actions: &mut Vec<Action>,
     ) -> bool {
@@ -1329,7 +1494,7 @@ impl ShardCoordinator {
             return true;
         }
 
-        actions.extend(self.trigger_qc_verification_or_vote(topology_snapshot, block_hash));
+        actions.extend(self.trigger_qc_verification_or_vote(topology, block_hash));
         true
     }
 
@@ -1361,7 +1526,7 @@ impl ShardCoordinator {
     /// QC signatures are always verified before voting.
     fn trigger_qc_verification_or_vote(
         &mut self,
-        topology_snapshot: &TopologySnapshot,
+        topology: &TopologySchedule,
         block_hash: BlockHash,
     ) -> Vec<Action> {
         let Some(pending) = self.pending_blocks.get(block_hash) else {
@@ -1396,7 +1561,7 @@ impl ShardCoordinator {
                     block_hash = ?block_hash,
                     "QC already verified, skipping re-verification"
                 );
-                return self.try_vote_on_block(topology_snapshot, block_hash, height, round);
+                return self.try_vote_on_block(topology, block_hash, height, round);
             }
 
             // Check if we already have pending verification for this block
@@ -1405,21 +1570,42 @@ impl ShardCoordinator {
                 return vec![];
             }
 
+            // The parent QC was signed by `committee(h-1)`, resolved from
+            // `h-1`'s header. If we don't hold `h-1` yet, defer: we can't
+            // verify the parent QC — and so can't safely vote on `h` — until it
+            // arrives. `on_block_header` re-triggers `h` when a header for
+            // `h-1` lands (see `retry_pending_children`); a node genuinely
+            // behind recovers the chain via block-sync regardless. `None` here
+            // is "parent not held", not beacon-behind: `committee(h-1)` is an
+            // epoch at or below `committee(h)`, which `reject_invalid_header`
+            // already resolved.
+            let Some(parent_committee) =
+                self.committee_of_block(topology, header.parent_qc().block_hash())
+            else {
+                trace!(
+                    validator = ?self.me,
+                    block_hash = ?block_hash,
+                    parent = ?header.parent_qc().block_hash(),
+                    "Parent block not held — deferring parent-QC verification until it arrives"
+                );
+                return vec![];
+            };
+
             // Collect public keys and voting powers for verification —
             // both halves of the QC's predicate (signature + quorum
             // power) need them.
-            let Some(public_keys) = committee_public_keys(topology_snapshot, self.local_shard)
+            let Some(public_keys) = committee_public_keys(parent_committee, self.local_shard)
             else {
                 warn!("Failed to collect public keys for QC verification");
                 return vec![];
             };
-            let Some(voting_powers) = committee_voting_powers(topology_snapshot, self.local_shard)
+            let Some(voting_powers) = committee_voting_powers(parent_committee, self.local_shard)
             else {
                 warn!("Failed to collect voting powers for QC verification");
                 return vec![];
             };
             let quorum_threshold = VotePower::quorum_threshold(
-                topology_snapshot.voting_power_for_shard(self.local_shard),
+                parent_committee.voting_power_for_shard(self.local_shard),
             );
 
             // Store pending verification info
@@ -1440,7 +1626,7 @@ impl ShardCoordinator {
         }
 
         // Genesis QC - vote directly (no signature to verify)
-        self.try_vote_on_block(topology_snapshot, block_hash, height, round)
+        self.try_vote_on_block(topology, block_hash, height, round)
     }
 
     /// HotStuff-2 safe-vote predicate (Rule 1): may vote for a block at
@@ -1461,7 +1647,7 @@ impl ShardCoordinator {
     /// `trigger_qc_verification_or_vote` as the main entry point.
     fn try_vote_on_block(
         &mut self,
-        topology_snapshot: &TopologySnapshot,
+        topology: &TopologySchedule,
         block_hash: BlockHash,
         height: BlockHeight,
         round: Round,
@@ -1514,7 +1700,13 @@ impl ShardCoordinator {
         // from test fixtures; production always assembles before reaching
         // here.
         if let Some(block) = self.pending_blocks.get_block(block_hash) {
-            if self.reject_invalid_block_contents(topology_snapshot, block_hash, block) {
+            // Content validation (`waves` recomputation) and the beacon-witness
+            // verification key on this block's own committee — the header is in
+            // hand, so `None` is a beacon-behind stall, not a missing anchor.
+            let Some(committee) = self.committee_of_block(topology, block_hash) else {
+                return vec![];
+            };
+            if self.reject_invalid_block_contents(committee, block_hash, block) {
                 return vec![];
             }
 
@@ -1539,7 +1731,7 @@ impl ShardCoordinator {
             };
 
             let verification_actions = self.verification.initiate_block_verifications(
-                topology_snapshot,
+                committee,
                 self.local_shard,
                 &self.pending_blocks,
                 &self.beacon_witness_accumulator,
@@ -1563,7 +1755,7 @@ impl ShardCoordinator {
             return vec![];
         }
 
-        self.create_vote(topology_snapshot, block_hash, height, round)
+        self.create_vote(topology, block_hash, height, round)
     }
 
     /// Validate transaction ordering, waves, and cross-ancestor tx uniqueness
@@ -1571,14 +1763,14 @@ impl ShardCoordinator {
     /// should reject the block (logs the reason).
     fn reject_invalid_block_contents(
         &self,
-        topology_snapshot: &TopologySnapshot,
+        committee: &TopologySnapshot,
         block_hash: BlockHash,
         block: &Block,
     ) -> bool {
         let (qc_chain_cert_ids, qc_chain_tx_hashes, qc_chain_provision_hashes) =
             self.collect_qc_chain_hashes(block.header().parent_block_hash());
         if let Err(e) = validate_block_for_vote(
-            topology_snapshot,
+            committee,
             self.local_shard,
             block,
             &qc_chain_tx_hashes,
@@ -1598,14 +1790,14 @@ impl ShardCoordinator {
     }
 
     /// Create a vote for a block.
-    #[tracing::instrument(level = "debug", skip(self), fields(
+    #[tracing::instrument(level = "debug", skip(self, topology), fields(
         height = height.inner(),
         round = round.inner(),
         sign_us = Empty,
     ))]
     fn create_vote(
         &mut self,
-        topology_snapshot: &TopologySnapshot,
+        topology: &TopologySchedule,
         block_hash: BlockHash,
         height: BlockHeight,
         round: Round,
@@ -1638,7 +1830,9 @@ impl ShardCoordinator {
             "Emitting vote (signing delegated to crypto pool)"
         );
 
-        let next_proposers = vote_recipients(topology_snapshot, self.local_shard, self.me, round);
+        // Vote recipients are a routing hint (next-round proposers for
+        // pipelining), self-healing via gossip — resolved on the head.
+        let next_proposers = vote_recipients(topology.head(), self.local_shard, self.me, round);
 
         // Emit SignAndBroadcastBlockVote — the io_loop signs on the consensus
         // crypto pool, broadcasts, and feeds the signed vote back for local
@@ -1661,14 +1855,14 @@ impl ShardCoordinator {
     /// BLS batch path — the vote is admitted directly to the verified
     /// tally. Wire-arrived votes route through
     /// [`Self::on_unverified_block_vote`].
-    #[instrument(skip(self, vote), fields(
+    #[instrument(skip(self, topology, vote), fields(
         height = vote.height().inner(),
         voter = ?vote.voter(),
         block_hash = ?vote.block_hash()
     ))]
     pub fn on_verified_block_vote(
         &mut self,
-        topology_snapshot: &TopologySnapshot,
+        topology: &TopologySchedule,
         vote: Verified<BlockVote>,
     ) -> Vec<Action> {
         trace!(
@@ -1678,9 +1872,14 @@ impl ShardCoordinator {
             "Received pre-verified block vote"
         );
 
+        // Our own verified votes are only produced after we hold the block, so
+        // its committee resolves exactly; `None` is a beacon-behind stall.
+        let Some(committee) = self.committee_of_block(topology, vote.block_hash()) else {
+            return vec![];
+        };
         let header_for_vote = self.pending_blocks.get_header(vote.block_hash());
         self.votes.accept_verified_vote(
-            topology_snapshot,
+            committee,
             self.me,
             self.local_shard,
             vote,
@@ -1696,14 +1895,14 @@ impl ShardCoordinator {
     /// batch-verify all buffered signatures and build the QC in a
     /// single operation. The sender identity comes from `vote.voter`
     /// (`ValidatorId`), which is itself part of the signed payload.
-    #[instrument(skip(self, vote), fields(
+    #[instrument(skip(self, topology, vote), fields(
         height = vote.height().inner(),
         voter = ?vote.voter(),
         block_hash = ?vote.block_hash()
     ))]
     pub fn on_unverified_block_vote(
         &mut self,
-        topology_snapshot: &TopologySnapshot,
+        topology: &TopologySchedule,
         vote: BlockVote,
     ) -> Vec<Action> {
         trace!(
@@ -1713,9 +1912,21 @@ impl ShardCoordinator {
             "Received block vote"
         );
 
+        // A vote tallies against its block's committee, resolved from the
+        // block's header. If the header hasn't arrived, the exact committee is
+        // unknowable — hold the vote raw and admit it against the exact
+        // committee in `link_buffered_votes_to_header` once the header lands.
+        // (Header present but `None` ⇒ beacon-behind stall.)
+        if self.pending_blocks.get_header(vote.block_hash()).is_none() {
+            self.votes.buffer_unanchored_vote(vote);
+            return vec![];
+        }
+        let Some(committee) = self.committee_of_block(topology, vote.block_hash()) else {
+            return vec![];
+        };
         let header_for_vote = self.pending_blocks.get_header(vote.block_hash());
         self.votes.accept_unverified_vote(
-            topology_snapshot,
+            committee,
             self.me,
             self.local_shard,
             vote,
@@ -1733,12 +1944,11 @@ impl ShardCoordinator {
     /// being in the future — past-window signals are stale on arrival.
     /// Re-emissions from the same validator overwrite the prior pool
     /// entry and reset the dwell clock.
-    pub fn on_ready_signal_received(
-        &mut self,
-        topology_snapshot: &TopologySnapshot,
-        signal: ReadySignal,
-    ) {
-        if topology_snapshot
+    pub fn on_ready_signal_received(&mut self, topology: &TopologySchedule, signal: ReadySignal) {
+        // Membership admission gate — "is this validator on our committee
+        // now?" — answered on the routing head.
+        if topology
+            .head()
             .committee_index_for_shard(self.local_shard, signal.validator_id())
             .is_none()
         {
@@ -1757,14 +1967,14 @@ impl ShardCoordinator {
     /// If QC was built successfully, enqueues `QuorumCertificateFormed` event.
     /// If quorum wasn't reached (some sigs invalid), adds verified votes back
     /// to `VoteSet` and checks if more buffered votes can now reach quorum.
-    #[instrument(skip(self, qc, verified_votes), fields(
+    #[instrument(skip(self, topology, qc, verified_votes), fields(
         block_hash = ?block_hash,
         has_qc = qc.is_some(),
         verified_count = verified_votes.len()
     ))]
     pub fn on_qc_result(
         &mut self,
-        topology_snapshot: &TopologySnapshot,
+        topology: &TopologySchedule,
         block_hash: BlockHash,
         qc: Option<Verified<QuorumCertificate>>,
         verified_votes: Vec<(usize, Verified<BlockVote>, VotePower)>,
@@ -1809,8 +2019,15 @@ impl ShardCoordinator {
 
         self.votes
             .finalize_pending_batch(block_hash, verified_votes);
-        self.votes
-            .maybe_trigger_verification(topology_snapshot, self.local_shard, block_hash)
+        // The QC build we're resulting from was dispatched off this block's
+        // header, so its committee resolves; `None` is a beacon-behind stall.
+        match self.committee_of_block(topology, block_hash) {
+            Some(committee) => {
+                self.votes
+                    .maybe_trigger_verification(committee, self.local_shard, block_hash)
+            }
+            None => vec![],
+        }
     }
 
     /// Handle QC signature verification result.
@@ -1818,10 +2035,10 @@ impl ShardCoordinator {
     /// Called when the runner completes `Action::VerifyQcSignature`.
     /// On success, the verified QC rides in the event payload — no
     /// separate cache lookup needed.
-    #[instrument(skip(self, result), fields(block_hash = ?block_hash, valid = result.is_ok()))]
+    #[instrument(skip(self, topology, result), fields(block_hash = ?block_hash, valid = result.is_ok()))]
     pub fn on_qc_signature_verified(
         &mut self,
-        topology_snapshot: &TopologySnapshot,
+        topology: &TopologySchedule,
         block_hash: BlockHash,
         result: Result<Verified<QuorumCertificate>, QcVerifyError>,
     ) -> Vec<Action> {
@@ -1843,7 +2060,7 @@ impl ShardCoordinator {
                 // The failed block creates a gap that blocks further progress,
                 // but blocks already verified at lower heights can still apply.
                 BlockSyncVerificationResult::Failed | BlockSyncVerificationResult::Verified => {
-                    self.try_apply_verified_synced_blocks(topology_snapshot)
+                    self.try_apply_verified_synced_blocks(topology)
                 }
             };
         }
@@ -1909,7 +2126,7 @@ impl ShardCoordinator {
         // QC is valid - proceed to vote on the block
         let height = header.height();
         let round = header.round();
-        actions.extend(self.try_vote_on_block(topology_snapshot, block_hash, height, round));
+        actions.extend(self.try_vote_on_block(topology, block_hash, height, round));
         actions
     }
 
@@ -1921,7 +2138,7 @@ impl ShardCoordinator {
     /// Handle a completed transaction-root verification.
     pub fn on_transaction_root_verified(
         &mut self,
-        topology_snapshot: &TopologySnapshot,
+        topology: &TopologySchedule,
         block_hash: BlockHash,
         result: Result<Verified<TransactionRoot>, TxRootVerifyError>,
     ) -> Vec<Action> {
@@ -1931,7 +2148,7 @@ impl ShardCoordinator {
                 .record_transaction_root_result(block_hash, verified);
         }
         self.on_root_verified_impl(
-            topology_snapshot,
+            topology,
             VerificationKind::TransactionRoot,
             block_hash,
             valid,
@@ -1941,7 +2158,7 @@ impl ShardCoordinator {
     /// Handle a completed certificate-root verification.
     pub fn on_certificate_root_verified(
         &mut self,
-        topology_snapshot: &TopologySnapshot,
+        topology: &TopologySchedule,
         block_hash: BlockHash,
         result: Result<Verified<CertificateRoot>, CertRootVerifyError>,
     ) -> Vec<Action> {
@@ -1951,7 +2168,7 @@ impl ShardCoordinator {
                 .record_certificate_root_result(block_hash, verified);
         }
         self.on_root_verified_impl(
-            topology_snapshot,
+            topology,
             VerificationKind::CertificateRoot,
             block_hash,
             valid,
@@ -1961,7 +2178,7 @@ impl ShardCoordinator {
     /// Handle a completed local-receipt-root verification.
     pub fn on_local_receipt_root_verified(
         &mut self,
-        topology_snapshot: &TopologySnapshot,
+        topology: &TopologySchedule,
         block_hash: BlockHash,
         result: Result<Verified<LocalReceiptRoot>, LocalReceiptRootVerifyError>,
     ) -> Vec<Action> {
@@ -1971,7 +2188,7 @@ impl ShardCoordinator {
                 .record_local_receipt_root_result(block_hash, verified);
         }
         self.on_root_verified_impl(
-            topology_snapshot,
+            topology,
             VerificationKind::LocalReceiptRoot,
             block_hash,
             valid,
@@ -1981,7 +2198,7 @@ impl ShardCoordinator {
     /// Handle a completed provisions-root verification.
     pub fn on_provisions_root_verified(
         &mut self,
-        topology_snapshot: &TopologySnapshot,
+        topology: &TopologySchedule,
         block_hash: BlockHash,
         result: Result<Verified<ProvisionsRoot>, ProvisionRootVerifyError>,
     ) -> Vec<Action> {
@@ -1990,18 +2207,13 @@ impl ShardCoordinator {
             self.verification
                 .record_provisions_root_result(block_hash, verified);
         }
-        self.on_root_verified_impl(
-            topology_snapshot,
-            VerificationKind::ProvisionRoot,
-            block_hash,
-            valid,
-        )
+        self.on_root_verified_impl(topology, VerificationKind::ProvisionRoot, block_hash, valid)
     }
 
     /// Handle a completed provision-tx-roots verification.
     pub fn on_provision_tx_roots_verified(
         &mut self,
-        topology_snapshot: &TopologySnapshot,
+        topology: &TopologySchedule,
         block_hash: BlockHash,
         result: Result<Verified<ProvisionTxRootsMap>, ProvisionTxRootsVerifyError>,
     ) -> Vec<Action> {
@@ -2011,7 +2223,7 @@ impl ShardCoordinator {
                 .record_provision_tx_roots_result(block_hash, verified);
         }
         self.on_root_verified_impl(
-            topology_snapshot,
+            topology,
             VerificationKind::ProvisionTxRoots,
             block_hash,
             valid,
@@ -2021,7 +2233,7 @@ impl ShardCoordinator {
     /// Handle a completed beacon-witness-root verification.
     pub fn on_beacon_witness_root_verified(
         &mut self,
-        topology_snapshot: &TopologySnapshot,
+        topology: &TopologySchedule,
         block_hash: BlockHash,
         result: Result<Verified<BeaconWitnessRoot>, BeaconWitnessRootVerifyError>,
     ) -> Vec<Action> {
@@ -2031,7 +2243,7 @@ impl ShardCoordinator {
                 .record_beacon_witness_root_result(block_hash, verified);
         }
         self.on_root_verified_impl(
-            topology_snapshot,
+            topology,
             VerificationKind::BeaconWitnessRoot,
             block_hash,
             valid,
@@ -2043,7 +2255,7 @@ impl ShardCoordinator {
     /// the verified handle here signals success or failure of the JMT replay.
     pub fn on_state_root_verified(
         &mut self,
-        topology_snapshot: &TopologySnapshot,
+        topology: &TopologySchedule,
         block_hash: BlockHash,
         result: Result<Verified<StateRoot>, StateRootVerifyError>,
     ) -> Vec<Action> {
@@ -2052,21 +2264,16 @@ impl ShardCoordinator {
             self.verification
                 .record_state_root_result(block_hash, verified);
         }
-        self.on_root_verified_impl(
-            topology_snapshot,
-            VerificationKind::StateRoot,
-            block_hash,
-            valid,
-        )
+        self.on_root_verified_impl(topology, VerificationKind::StateRoot, block_hash, valid)
     }
 
     /// Shared completion logic for the per-kind root-verified handlers above.
     /// If invalid, the block is rejected. If valid and every other root for
     /// the block has been verified, proceeds to vote.
-    #[instrument(skip(self), fields(block_hash = ?block_hash, ?kind, valid = valid))]
+    #[instrument(skip(self, topology), fields(block_hash = ?block_hash, ?kind, valid = valid))]
     fn on_root_verified_impl(
         &mut self,
-        topology_snapshot: &TopologySnapshot,
+        topology: &TopologySchedule,
         kind: VerificationKind,
         block_hash: BlockHash,
         valid: bool,
@@ -2089,7 +2296,7 @@ impl ShardCoordinator {
 
         let mut actions = Vec::new();
         if kind == VerificationKind::BeaconWitnessRoot {
-            actions.extend(self.retry_deferred_beacon_witness(topology_snapshot, block_hash));
+            actions.extend(self.retry_deferred_beacon_witness(topology, block_hash));
         }
 
         let Some(pending_block) = self.pending_blocks.get(block_hash) else {
@@ -2123,7 +2330,7 @@ impl ShardCoordinator {
         // which case this block is now stale and we must not vote for it (it
         // can still commit via a quorum formed elsewhere).
         if self.can_safe_vote(round, parent_qc_round) {
-            actions.extend(self.create_vote(topology_snapshot, block_hash, height, round));
+            actions.extend(self.create_vote(topology, block_hash, height, round));
         }
         // If this completion finished assembly for a block that
         // `latest_qc` already chose as its 2-chain committable, the
@@ -2195,7 +2402,7 @@ impl ShardCoordinator {
     /// progress past `parent_hash`.
     fn retry_deferred_beacon_witness(
         &mut self,
-        topology_snapshot: &TopologySnapshot,
+        topology: &TopologySchedule,
         parent_hash: BlockHash,
     ) -> Vec<Action> {
         let children = self
@@ -2207,6 +2414,12 @@ impl ShardCoordinator {
             else {
                 continue;
             };
+            // The child's missed-proposal leaves resolve against its own
+            // committee; the child's header is in hand, so `None` is a
+            // beacon-behind stall — skip it rather than derive under head.
+            let Some(committee) = self.committee_of_block(topology, child_hash) else {
+                continue;
+            };
             actions.extend(self.verification.initiate_beacon_witness_root_verification(
                 child_hash,
                 &child_block,
@@ -2214,7 +2427,7 @@ impl ShardCoordinator {
                 &self.beacon_witness_accumulator,
                 self.committed_hash,
                 self.local_shard,
-                topology_snapshot,
+                committee,
             ));
         }
         actions
@@ -2225,11 +2438,11 @@ impl ShardCoordinator {
     /// Called when the runner completes `Action::BuildProposal`. The runner has
     /// computed the state root, built the complete block, and cached the `WriteBatch`
     /// for efficient commit later.
-    #[instrument(skip(self, block, manifest, finalized_waves), fields(height = %height.inner(), round = round.inner()))]
+    #[instrument(skip(self, topology, block, manifest, finalized_waves), fields(height = %height.inner(), round = round.inner()))]
     #[allow(clippy::too_many_arguments)]
     pub fn on_proposal_built(
         &mut self,
-        topology_snapshot: &TopologySnapshot,
+        topology: &TopologySchedule,
         height: BlockHeight,
         round: Round,
         block: &Block,
@@ -2310,7 +2523,7 @@ impl ShardCoordinator {
         }];
 
         // Vote for our own block
-        actions.extend(self.create_vote(topology_snapshot, block_hash, height, round));
+        actions.extend(self.create_vote(topology, block_hash, height, round));
 
         actions
     }
@@ -2425,14 +2638,14 @@ impl ShardCoordinator {
     ///
     /// `state_root` is the computed JMT root after applying writes from the certificates.
     /// If certificates is empty, parent state is inherited.
-    #[instrument(skip(self, qc, ready_txs, finalized_waves), fields(
+    #[instrument(skip(self, topology, qc, ready_txs, finalized_waves), fields(
         height = qc.height().inner(),
         block_hash = ?block_hash
     ))]
     #[allow(clippy::too_many_arguments)]
     pub fn on_qc_formed(
         &mut self,
-        topology_snapshot: &TopologySnapshot,
+        topology: &TopologySchedule,
         block_hash: BlockHash,
         qc: &Verified<QuorumCertificate>,
         ready_txs: &[Arc<Verified<RoutableTransaction>>],
@@ -2490,7 +2703,7 @@ impl ShardCoordinator {
         // block N+1 is what certifies block N, so any gap in proposing N+1
         // stalls the finalization of N and everything pending behind it.
         // `try_propose` handles the proposer-rotation / backpressure checks.
-        actions.extend(self.try_propose(topology_snapshot, ready_txs, finalized_waves, provisions));
+        actions.extend(self.try_propose(topology, ready_txs, finalized_waves, provisions));
 
         actions
     }
@@ -2602,13 +2815,13 @@ impl ShardCoordinator {
     }
 
     /// Handle block ready to commit.
-    #[instrument(skip(self, certified), fields(
+    #[instrument(skip(self, topology, certified), fields(
         height = certified.block().height().inner(),
         block_hash = ?certified.block().hash()
     ))]
     pub fn on_block_ready_to_commit(
         &mut self,
-        topology_snapshot: &TopologySnapshot,
+        topology: &TopologySchedule,
         certified: Arc<Verified<CertifiedBlock>>,
         source: CommitSource,
     ) -> Vec<Action> {
@@ -2639,7 +2852,7 @@ impl ShardCoordinator {
         }
 
         // Commit this block and any buffered subsequent blocks
-        self.commit_block_and_buffered(topology_snapshot, certified, source)
+        self.commit_block_and_buffered(topology, certified, source)
     }
 
     /// Common bookkeeping for committing a block (shared between consensus and
@@ -2649,7 +2862,7 @@ impl ShardCoordinator {
     /// sweep when there are orphaned pending-block fetches to cancel.
     fn record_block_committed(
         &mut self,
-        topology_snapshot: &TopologySnapshot,
+        topology: &TopologySchedule,
         block: &Block,
         block_hash: BlockHash,
         commit_ts: WeightedTimestamp,
@@ -2674,6 +2887,10 @@ impl ShardCoordinator {
         self.committed_height = height;
         self.committed_hash = block_hash;
         self.committed_ts = commit_ts;
+        // The committee that signed this block is `at(parent_qc weighted ts)`;
+        // retain it so [`Self::committee_anchor`] can resolve the tip's
+        // committee after it is pruned from `pending_blocks`.
+        self.committed_anchor_ts = block.header().parent_qc().weighted_timestamp();
         self.committed_state_root = block.header().state_root();
 
         // Register committed artifacts synchronously. The retention maps
@@ -2708,12 +2925,25 @@ impl ShardCoordinator {
             .iter()
             .flat_map(|fw| fw.receipts().iter().cloned())
             .collect();
+        // The committed block's missed-proposal leaves resolve against its own
+        // committee. Unlike the verification paths, this is *deterministic
+        // recomputation* on an already-committed block — it can't stall — so it
+        // falls back to the routing head when the block's weighted-time epoch
+        // sits outside the beacon's in-memory schedule (the shard's weighted
+        // clock has run ahead of the beacon's committed epochs). Every node
+        // resolves the same schedule, so the fallback is identical across the
+        // committee; it equals the verifying committee whenever committees are
+        // stable across that gap, which production's wall-clock-paced beacon
+        // keeps true (`at` resolves there, so the fallback never fires).
+        let committee = self
+            .committee_of_block(topology, block_hash)
+            .unwrap_or_else(|| topology.head().as_ref());
         let missed = missed_proposals_since_prev_commit(
             self.local_shard,
             height,
             parent_round,
             block.header().round(),
-            topology_snapshot,
+            committee,
         );
         let new_leaves = derive_leaves(&receipts, &missed, manifest.ready_signals().as_slice());
         let starting_leaf_index = self.beacon_witness_accumulator.leaf_count();
@@ -2742,7 +2972,7 @@ impl ShardCoordinator {
     /// exists.
     fn commit_block_and_buffered(
         &mut self,
-        topology_snapshot: &TopologySnapshot,
+        topology: &TopologySchedule,
         certified: Arc<Verified<CertifiedBlock>>,
         source: CommitSource,
     ) -> Vec<Action> {
@@ -2751,7 +2981,7 @@ impl ShardCoordinator {
 
         while let Some((certified, source)) = next.take() {
             let Some(committed_height) =
-                self.commit_one_buffered_block(topology_snapshot, &certified, source, &mut actions)
+                self.commit_one_buffered_block(topology, &certified, source, &mut actions)
             else {
                 break;
             };
@@ -2768,7 +2998,7 @@ impl ShardCoordinator {
 
         // Consensus may have unblocked synced blocks that were waiting for a
         // predecessor — try to drain them now.
-        actions.extend(self.try_drain_buffered_synced_blocks(topology_snapshot));
+        actions.extend(self.try_drain_buffered_synced_blocks(topology));
 
         actions
     }
@@ -2783,7 +3013,7 @@ impl ShardCoordinator {
     /// the chain.
     fn commit_one_buffered_block(
         &mut self,
-        topology_snapshot: &TopologySnapshot,
+        topology: &TopologySchedule,
         certified: &Arc<Verified<CertifiedBlock>>,
         source: CommitSource,
         actions: &mut Vec<Action>,
@@ -2823,18 +3053,18 @@ impl ShardCoordinator {
             .weighted_timestamp()
             .max(self.committed_ts);
 
-        let (abandon, witness) = self.record_block_committed(
-            topology_snapshot,
-            certified.block(),
-            block_hash,
-            weighted_ts,
-        );
+        let (abandon, witness) =
+            self.record_block_committed(topology, certified.block(), block_hash, weighted_ts);
         actions.extend(abandon);
         // The just-committed block's leaves are now folded into the
         // committed accumulator and `committed_hash` advanced to it,
         // so any beacon-witness verifications previously parked on
         // this hash can re-walk past it.
-        actions.extend(self.retry_deferred_beacon_witness(topology_snapshot, block_hash));
+        actions.extend(self.retry_deferred_beacon_witness(topology, block_hash));
+        // The committed block is now the resolvable tip, so a child that
+        // deferred its parent-QC verification awaiting it (e.g. delivered via
+        // sync rather than gossip) can proceed.
+        actions.extend(self.retry_pending_children(topology, block_hash));
         self.record_leader_activity();
 
         let proposer = certified.block().header().proposer();
@@ -2877,7 +3107,7 @@ impl ShardCoordinator {
     /// via a `VerifyQcSignature` action.
     fn submit_synced_block_for_verification(
         &mut self,
-        topology_snapshot: &TopologySnapshot,
+        topology: &TopologySchedule,
         certified: CertifiedBlock,
     ) -> Vec<Action> {
         if certified.qc().is_genesis() {
@@ -2903,12 +3133,25 @@ impl ShardCoordinator {
             return self.apply_synced_block(block, verified_qc);
         }
 
+        // The synced block's QC was signed by its own committee,
+        // `at(parent_qc weighted ts)`. Stall (drop; sync retries) if the
+        // beacon hasn't reached that epoch.
+        let Some(committee) =
+            topology.at(certified.block().header().parent_qc().weighted_timestamp())
+        else {
+            warn!(
+                height = certified.block().height().inner(),
+                "No committee for synced block's epoch — beacon behind, deferring"
+            );
+            return vec![];
+        };
+
         // Quorum-power gate: `VerifyQcSignature` only checks the BLS
         // aggregation, not whether the signers represent ≥ 2f+1 of voting
         // power. Without this check a single Byzantine signer suffices to
         // pass and fork the local chain. Mirrors the consensus-path gate
         // in `validate_header`.
-        if !qc_has_local_quorum_power(topology_snapshot, self.local_shard, certified.qc()) {
+        if !qc_has_local_quorum_power(committee, self.local_shard, certified.qc()) {
             warn!(
                 height = certified.block().height().inner(),
                 signers = certified.qc().signers().count(),
@@ -2929,17 +3172,16 @@ impl ShardCoordinator {
             return vec![];
         }
 
-        let Some(public_keys) = committee_public_keys(topology_snapshot, self.local_shard) else {
+        let Some(public_keys) = committee_public_keys(committee, self.local_shard) else {
             warn!("Failed to collect public keys for synced block QC verification");
             return vec![];
         };
-        let Some(voting_powers) = committee_voting_powers(topology_snapshot, self.local_shard)
-        else {
+        let Some(voting_powers) = committee_voting_powers(committee, self.local_shard) else {
             warn!("Failed to collect voting powers for synced block QC verification");
             return vec![];
         };
         let quorum_threshold =
-            VotePower::quorum_threshold(topology_snapshot.voting_power_for_shard(self.local_shard));
+            VotePower::quorum_threshold(committee.voting_power_for_shard(self.local_shard));
 
         vec![self.block_sync.register_for_verification(
             certified,
@@ -2952,17 +3194,14 @@ impl ShardCoordinator {
     /// Try to drain buffered synced blocks in sequential order. Asks
     /// [`BlockSyncManager::next_submitable`] which blocks are eligible — the
     /// coordinator just dispatches each for QC verification.
-    fn try_drain_buffered_synced_blocks(
-        &mut self,
-        topology_snapshot: &TopologySnapshot,
-    ) -> Vec<Action> {
+    fn try_drain_buffered_synced_blocks(&mut self, topology: &TopologySchedule) -> Vec<Action> {
         let mut actions = Vec::new();
         let blocks = self.block_sync.next_submitable(
             self.committed_height,
             self.config.max_parallel_sync_verifications,
         );
         for certified in blocks {
-            actions.extend(self.submit_synced_block_for_verification(topology_snapshot, certified));
+            actions.extend(self.submit_synced_block_for_verification(topology, certified));
         }
         actions
     }
@@ -3077,17 +3316,14 @@ impl ShardCoordinator {
     /// for further parallel QC verifications. The sync manager computes the
     /// next expected height from its own applied-height marker so we don't
     /// double-apply blocks already handed off.
-    fn try_apply_verified_synced_blocks(
-        &mut self,
-        topology_snapshot: &TopologySnapshot,
-    ) -> Vec<Action> {
+    fn try_apply_verified_synced_blocks(&mut self, topology: &TopologySchedule) -> Vec<Action> {
         let mut actions = Vec::new();
         while let Some((block, verified_qc)) =
             self.block_sync.take_next_verified(self.committed_height)
         {
             actions.extend(self.apply_synced_block(block, verified_qc));
         }
-        actions.extend(self.try_drain_buffered_synced_blocks(topology_snapshot));
+        actions.extend(self.try_drain_buffered_synced_blocks(topology));
 
         // Sync completes when the verified frontier reaches the target. Under
         // the round-contiguous commit rule the trailing block finalizes
@@ -3113,7 +3349,7 @@ impl ShardCoordinator {
     /// round's leader — propose a fresh block extending `high_qc` (the
     /// quorum-max the timeout quorum just adopted). Reached via the
     /// timeout-quorum advance ([`Self::advance_on_timeout_quorum`]).
-    fn enter_round(&mut self, topology_snapshot: &TopologySnapshot) -> Vec<Action> {
+    fn enter_round(&mut self, topology: &TopologySchedule) -> Vec<Action> {
         // The next height to propose is one above the highest certified block,
         // NOT one above the committed block. This matches try_propose behavior.
         let height = self
@@ -3168,7 +3404,12 @@ impl ShardCoordinator {
         // `high_qc`. There is no lock to re-propose: HotStuff-2 carries safety
         // in the local `locked_round`, not on the block, so a new round always
         // builds anew rather than re-broadcasting a prior height's proposal.
-        if topology_snapshot.proposer_for(self.local_shard, self.view_change.view) == self.me {
+        // Without the in-progress committee we can't know the leader — only the
+        // timer goes out.
+        let is_new_proposer = self
+            .tip_committee(topology)
+            .is_some_and(|c| c.proposer_for(self.local_shard, self.view_change.view) == self.me);
+        if is_new_proposer {
             info!(
                 validator = ?self.me,
                 height = height.inner(),
@@ -3176,11 +3417,8 @@ impl ShardCoordinator {
                 "We are the new proposer after round advance - building block"
             );
 
-            let mut actions = self.build_and_broadcast_fallback_block(
-                topology_snapshot,
-                height,
-                self.view_change.view,
-            );
+            let mut actions =
+                self.build_and_broadcast_fallback_block(topology, height, self.view_change.view);
             actions.push(timer);
             return actions;
         }
@@ -3221,17 +3459,19 @@ impl ShardCoordinator {
     /// so a timeout lost to a partition is retransmitted until a 2f+1 quorum
     /// forms — without retransmission a healed partition never re-collects the
     /// shares it dropped and the chain wedges.
-    fn broadcast_timeout(
-        &mut self,
-        topology_snapshot: &TopologySnapshot,
-        round: Round,
-    ) -> Vec<Action> {
+    fn broadcast_timeout(&mut self, topology: &TopologySchedule, round: Round) -> Vec<Action> {
+        // The timeout is tallied by the in-progress committee (the one that
+        // would form the next QC). Without it (beacon behind) we can't drive a
+        // view change — stall.
+        let Some(committee) = self.tip_committee(topology) else {
+            return vec![];
+        };
         self.last_timed_out_round = Some(round);
         // A timed-out round is never voted: bump `last_voted_round` so the
         // safe-vote rule refuses any block that arrives at this round after we
         // gave up on it (Rule 1).
         self.last_voted_round = self.last_voted_round.max(round);
-        let recipients: Vec<ValidatorId> = topology_snapshot
+        let recipients: Vec<ValidatorId> = committee
             .committee_for_shard(self.local_shard)
             .iter()
             .copied()
@@ -3249,15 +3489,11 @@ impl ShardCoordinator {
     /// the timer-driven retransmit, this fires at most once per round — a
     /// replica that already broadcast (via its timer or an earlier amplify)
     /// stays quiet.
-    fn amplify_timeout(
-        &mut self,
-        topology_snapshot: &TopologySnapshot,
-        round: Round,
-    ) -> Vec<Action> {
+    fn amplify_timeout(&mut self, topology: &TopologySchedule, round: Round) -> Vec<Action> {
         if self.last_timed_out_round == Some(round) {
             return Vec::new();
         }
-        self.broadcast_timeout(topology_snapshot, round)
+        self.broadcast_timeout(topology, round)
     }
 
     /// Voting power of `voter` iff it belongs to the local shard committee —
@@ -3267,11 +3503,11 @@ impl ShardCoordinator {
     /// timeout thresholds (whose total is committee-scoped).
     fn committee_timeout_power(
         &self,
-        topology_snapshot: &TopologySnapshot,
+        committee: &TopologySnapshot,
         voter: ValidatorId,
     ) -> Option<VotePower> {
-        topology_snapshot.committee_index_for_shard(self.local_shard, voter)?;
-        topology_snapshot.voting_power(voter)
+        committee.committee_index_for_shard(self.local_shard, voter)?;
+        committee.voting_power(voter)
     }
 
     /// Screen a wire timeout, then delegate its BLS share verification to the
@@ -3281,17 +3517,22 @@ impl ShardCoordinator {
     /// the shard loop thread during a view change, as the vote path does.
     pub fn on_unverified_timeout(
         &mut self,
-        topology_snapshot: &TopologySnapshot,
+        topology: &TopologySchedule,
         timeout: &Timeout,
     ) -> Vec<Action> {
         if timeout.shard_group_id() != self.local_shard {
             return Vec::new();
         }
+        // The pacemaker is driven by the in-progress committee. Absent it
+        // (beacon behind) we can't safely tally — drop.
+        let Some(committee) = self.tip_committee(topology) else {
+            return Vec::new();
+        };
         // Only this shard's committee drives its pacemaker. Reject outsiders
         // before spending a BLS verify on them; `on_verified_timeout` re-checks
         // the same bound for locally echoed timeouts.
         if self
-            .committee_timeout_power(topology_snapshot, timeout.voter())
+            .committee_timeout_power(committee, timeout.voter())
             .is_none()
         {
             warn!(validator = ?self.me, voter = ?timeout.voter(), "Dropping timeout from non-committee validator");
@@ -3308,7 +3549,7 @@ impl ShardCoordinator {
         {
             return Vec::new();
         }
-        let Some(voter_public_key) = topology_snapshot.public_key(timeout.voter()) else {
+        let Some(voter_public_key) = committee.public_key(timeout.voter()) else {
             return Vec::new();
         };
         vec![Action::VerifyTimeout {
@@ -3320,7 +3561,7 @@ impl ShardCoordinator {
     /// Tally a verified timeout: amplify at f+1 (Bracha), advance at 2f+1.
     pub fn on_verified_timeout(
         &mut self,
-        topology_snapshot: &TopologySnapshot,
+        topology: &TopologySchedule,
         timeout: Verified<Timeout>,
     ) -> Vec<Action> {
         let round = timeout.round();
@@ -3329,12 +3570,16 @@ impl ShardCoordinator {
         if round < self.view_change.view || round > self.max_pacemaker_round() {
             return Vec::new();
         }
+        // The pacemaker's quorum is measured against the in-progress committee.
+        let Some(committee) = self.tip_committee(topology) else {
+            return Vec::new();
+        };
         // A verified BLS share proves who signed, not that the signer sits in
         // the committee whose 2f+1 the pacemaker measures against. Restrict the
         // tally to the local committee: the quorum total is committee-scoped, so
         // a globally-registered validator from another shard must not count
         // toward the f+1 / 2f+1 thresholds.
-        let Some(power) = self.committee_timeout_power(topology_snapshot, timeout.voter()) else {
+        let Some(power) = self.committee_timeout_power(committee, timeout.voter()) else {
             warn!(validator = ?self.me, voter = ?timeout.voter(), "Dropping timeout from non-committee validator");
             return Vec::new();
         };
@@ -3342,18 +3587,18 @@ impl ShardCoordinator {
             return Vec::new();
         }
 
-        let total = topology_snapshot.voting_power_for_shard(self.local_shard);
+        let total = committee.voting_power_for_shard(self.local_shard);
         let seen = self.timeouts.power(round);
         let mut actions = Vec::new();
 
         // Bracha amplification: f+1 timeouts seen → broadcast our own.
         if VotePower::has_one_third(seen, total) {
-            actions.extend(self.amplify_timeout(topology_snapshot, round));
+            actions.extend(self.amplify_timeout(topology, round));
         }
 
         // 2f+1 timeouts → adopt the quorum-max high_qc and advance together.
         if VotePower::has_quorum(seen, total) {
-            actions.extend(self.advance_on_timeout_quorum(topology_snapshot, round));
+            actions.extend(self.advance_on_timeout_quorum(topology, round));
         }
 
         actions
@@ -3363,15 +3608,15 @@ impl ShardCoordinator {
     /// (verified) so the next leader extends it, then advance to `round + 1`.
     fn advance_on_timeout_quorum(
         &mut self,
-        topology_snapshot: &TopologySnapshot,
+        topology: &TopologySchedule,
         round: Round,
     ) -> Vec<Action> {
-        let mut actions = self.adopt_timeout_quorum_high_qc(topology_snapshot, round);
+        let mut actions = self.adopt_timeout_quorum_high_qc(topology, round);
         if self.view_change.advance_to(round.next()) {
             // Reset the timeout baseline so the new leader gets a full window.
             self.view_change.record_leader_activity(self.now);
             self.timeouts.prune_below(self.view_change.view);
-            actions.extend(self.enter_round(topology_snapshot));
+            actions.extend(self.enter_round(topology));
         }
         actions
     }
@@ -3387,7 +3632,7 @@ impl ShardCoordinator {
     /// honest timeout carries.
     fn adopt_timeout_quorum_high_qc(
         &mut self,
-        topology_snapshot: &TopologySnapshot,
+        topology: &TopologySchedule,
         round: Round,
     ) -> Vec<Action> {
         let cur_high = self
@@ -3412,7 +3657,7 @@ impl ShardCoordinator {
                 );
                 continue;
             }
-            let Some(verified) = self.verify_qc_sync(topology_snapshot, &candidate) else {
+            let Some(verified) = self.verify_qc_sync(topology, &candidate) else {
                 warn!(
                     validator = ?self.me,
                     qc_round = candidate.round().inner(),
@@ -3430,16 +3675,21 @@ impl ShardCoordinator {
     /// delegated to the consensus pool.
     fn verify_qc_sync(
         &self,
-        topology_snapshot: &TopologySnapshot,
+        topology: &TopologySchedule,
         qc: &QuorumCertificate,
     ) -> Option<Verified<QuorumCertificate>> {
-        let public_keys = committee_public_keys(topology_snapshot, self.local_shard)?;
-        let voting_powers = committee_voting_powers(topology_snapshot, self.local_shard)?;
+        // The QC was signed by the committee of the block it certifies; resolve
+        // it from that block's anchor. `None` (block unknown, or beacon behind)
+        // means we can't verify this candidate — skip it, as a failed pairing
+        // would.
+        let committee = self.committee_of_block(topology, qc.block_hash())?;
+        let public_keys = committee_public_keys(committee, self.local_shard)?;
+        let voting_powers = committee_voting_powers(committee, self.local_shard)?;
         let ctx = QcContext {
-            network: topology_snapshot.network(),
+            network: committee.network(),
             public_keys: &public_keys,
             voting_powers: &voting_powers,
-            quorum_threshold: topology_snapshot.quorum_threshold_for_shard(self.local_shard),
+            quorum_threshold: committee.quorum_threshold_for_shard(self.local_shard),
         };
         qc.verify(&ctx).ok()
     }
@@ -3481,10 +3731,10 @@ impl ShardCoordinator {
     /// `received_transactions` cache for hashes it was waiting on, and
     /// emits any unblocked vote / commit-resume actions via the shared
     /// machinery on [`PendingBlocks`].
-    #[instrument(skip(self, topology_snapshot, txs), fields(count = txs.len()))]
+    #[instrument(skip(self, topology, txs), fields(count = txs.len()))]
     pub fn on_transactions_admitted(
         &mut self,
-        topology_snapshot: &TopologySnapshot,
+        topology: &TopologySchedule,
         txs: &[Arc<Verified<RoutableTransaction>>],
     ) -> Vec<Action> {
         let mut actions = Vec::new();
@@ -3492,7 +3742,7 @@ impl ShardCoordinator {
             let wrapped: Arc<Verifiable<RoutableTransaction>> =
                 Arc::new(Verifiable::from((**tx).clone()));
             for block_hash in self.pending_blocks.receive_transaction(&wrapped) {
-                actions.extend(self.dispatch_block_complete(topology_snapshot, block_hash));
+                actions.extend(self.dispatch_block_complete(topology, block_hash));
             }
         }
         actions
@@ -3513,7 +3763,7 @@ impl ShardCoordinator {
     /// peer.
     pub fn on_finalized_waves_admitted(
         &mut self,
-        topology_snapshot: &TopologySnapshot,
+        topology: &TopologySchedule,
         waves: &[Arc<Verifiable<FinalizedWave>>],
     ) -> Vec<Action> {
         let mut actions = Vec::new();
@@ -3527,7 +3777,7 @@ impl ShardCoordinator {
                 continue;
             }
             for block_hash in self.pending_blocks.receive_finalized_wave(fw) {
-                actions.extend(self.dispatch_block_complete(topology_snapshot, block_hash));
+                actions.extend(self.dispatch_block_complete(topology, block_hash));
             }
         }
         actions
@@ -3542,13 +3792,13 @@ impl ShardCoordinator {
     /// actions.
     pub fn on_provisions_admitted(
         &mut self,
-        topology_snapshot: &TopologySnapshot,
+        topology: &TopologySchedule,
         provisions: &[Arc<Verifiable<Provisions>>],
     ) -> Vec<Action> {
         let mut actions = Vec::new();
         for batch in provisions {
             for block_hash in self.pending_blocks.receive_provision(batch) {
-                actions.extend(self.dispatch_block_complete(topology_snapshot, block_hash));
+                actions.extend(self.dispatch_block_complete(topology, block_hash));
             }
         }
         actions
@@ -3560,7 +3810,7 @@ impl ShardCoordinator {
     /// signatures must be verified before voting even when data arrives late.
     fn dispatch_block_complete(
         &mut self,
-        topology_snapshot: &TopologySnapshot,
+        topology: &TopologySchedule,
         block_hash: BlockHash,
     ) -> Vec<Action> {
         debug!(
@@ -3568,7 +3818,7 @@ impl ShardCoordinator {
             block_hash = ?block_hash,
             "Pending block completed"
         );
-        self.trigger_qc_verification_or_vote(topology_snapshot, block_hash)
+        self.trigger_qc_verification_or_vote(topology, block_hash)
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -3796,10 +4046,12 @@ impl ShardCoordinator {
         }
     }
 
-    /// Check if we are the proposer for the current round.
+    /// Check if we are the proposer for the current round. `false` when the
+    /// in-progress committee isn't yet known (beacon behind).
     #[must_use]
-    pub fn is_current_proposer(&self, topology_snapshot: &TopologySnapshot) -> bool {
-        topology_snapshot.proposer_for(self.local_shard, self.view_change.view) == self.me
+    pub fn is_current_proposer(&self, topology: &TopologySchedule) -> bool {
+        self.tip_committee(topology)
+            .is_some_and(|c| c.proposer_for(self.local_shard, self.view_change.view) == self.me)
     }
 
     /// Compute the parent hash for the next proposal.
@@ -3903,10 +4155,12 @@ impl ShardCoordinator {
     /// (or timed out) in it. Used to avoid destructively taking certificates
     /// from execution state when we won't actually be proposing a block.
     #[must_use]
-    pub fn will_propose_next(&self, topology_snapshot: &TopologySnapshot) -> bool {
+    pub fn will_propose_next(&self, topology: &TopologySchedule) -> bool {
         let round = self.view_change.view;
-        topology_snapshot.proposer_for(self.local_shard, round) == self.me
-            && self.last_voted_round < round
+        self.last_voted_round < round
+            && self
+                .tip_committee(topology)
+                .is_some_and(|c| c.proposer_for(self.local_shard, round) == self.me)
     }
 }
 
@@ -3916,10 +4170,10 @@ mod tests {
     use hyperscale_core::Action;
     use hyperscale_types::{
         BeaconWitnessLeafCount, BeaconWitnessRoot, Bls12381G1PrivateKey, BoundedVec,
-        CertificateRoot, Hash, InFlightCount, LocalReceiptRoot, NetworkDefinition, ProvisionsRoot,
-        RoutableTransaction, ShardGroupId, SignerBitfield, TopologySnapshot, TransactionRoot,
-        ValidatorId, ValidatorInfo, ValidatorSet, VotePower, WeightedTimestamp,
-        generate_bls_keypair, test_utils, zero_bls_signature,
+        CertificateRoot, Epoch, Hash, InFlightCount, LocalReceiptRoot, NetworkDefinition,
+        ProvisionsRoot, RoutableTransaction, ShardGroupId, SignerBitfield, TopologySchedule,
+        TopologySnapshot, TransactionRoot, ValidatorId, ValidatorInfo, ValidatorSet, VotePower,
+        WeightedTimestamp, generate_bls_keypair, test_utils, zero_bls_signature,
     };
 
     use super::*;
@@ -3934,18 +4188,18 @@ mod tests {
         state.pending_blocks.insert(pending);
     }
 
-    fn make_test_state() -> (ShardCoordinator, TopologySnapshot) {
+    fn make_test_state() -> (ShardCoordinator, TopologySchedule) {
         make_test_state_with_validators(4)
     }
 
-    fn make_test_state_with_validators(n: usize) -> (ShardCoordinator, TopologySnapshot) {
+    fn make_test_state_with_validators(n: usize) -> (ShardCoordinator, TopologySchedule) {
         make_test_state_with_config(n, ShardConsensusConfig::default())
     }
 
     fn make_test_state_with_config(
         n: usize,
         config: ShardConsensusConfig,
-    ) -> (ShardCoordinator, TopologySnapshot) {
+    ) -> (ShardCoordinator, TopologySchedule) {
         let keys: Vec<Bls12381G1PrivateKey> = (0..n).map(|_| generate_bls_keypair()).collect();
 
         let validators: Vec<ValidatorInfo> = keys
@@ -3966,7 +4220,7 @@ mod tests {
             config,
             RecoveredState::default(),
         );
-        (state, topology)
+        (state, TopologySchedule::single(Arc::new(topology)))
     }
 
     #[test]
@@ -3975,19 +4229,19 @@ mod tests {
         let (_state, topology) = make_test_state();
         let shard = ShardGroupId::new(0);
         assert_eq!(
-            topology.proposer_for(shard, Round::new(0)),
+            topology.head().proposer_for(shard, Round::new(0)),
             ValidatorId::new(0)
         );
         assert_eq!(
-            topology.proposer_for(shard, Round::new(1)),
+            topology.head().proposer_for(shard, Round::new(1)),
             ValidatorId::new(1)
         );
         assert_eq!(
-            topology.proposer_for(shard, Round::new(2)),
+            topology.head().proposer_for(shard, Round::new(2)),
             ValidatorId::new(2)
         );
         assert_eq!(
-            topology.proposer_for(shard, Round::new(3)),
+            topology.head().proposer_for(shard, Round::new(3)),
             ValidatorId::new(3)
         );
     }
@@ -3998,9 +4252,147 @@ mod tests {
         let (state, topology) = make_test_state();
         let shard = state.local_shard;
         let me = state.me;
-        assert_eq!(topology.proposer_for(shard, Round::new(0)), me);
-        assert_ne!(topology.proposer_for(shard, Round::new(1)), me);
-        assert_ne!(topology.proposer_for(shard, Round::new(2)), me);
+        assert_eq!(topology.head().proposer_for(shard, Round::new(0)), me);
+        assert_ne!(topology.head().proposer_for(shard, Round::new(1)), me);
+        assert_ne!(topology.head().proposer_for(shard, Round::new(2)), me);
+    }
+
+    /// Committee resolution stalls — it never silently falls back to the head
+    /// — when the schedule lacks the committee for the height in progress. A
+    /// fresh coordinator extends genesis (weighted timestamp 0, epoch 0); a
+    /// schedule holding only a later epoch must make the proposer gate answer
+    /// `false` rather than acting under whatever committee happens to be head.
+    #[test]
+    fn proposer_gate_stalls_when_committee_for_epoch_absent() {
+        // me = V1, the round-1 proposer in a fresh 4-member committee.
+        let (state, full) = make_multi_validator_state_at(1);
+        assert!(state.is_current_proposer(&full));
+        assert!(state.will_propose_next(&full));
+
+        // A schedule whose only entry is epoch 5 has no committee for the
+        // tip's epoch 0, so resolution returns `None` and the gate stalls.
+        let snapshot = Arc::clone(full.head());
+        let stalled = TopologySchedule::new(300_000, 8, Epoch::new(5), snapshot);
+        assert!(
+            !state.is_current_proposer(&stalled),
+            "absent committee must stall the proposer gate, not fall back to head",
+        );
+        assert!(!state.will_propose_next(&stalled));
+    }
+
+    /// A uniform-power committee over `ids`, one shard.
+    fn committee_snapshot_with_ids(ids: &[u64]) -> TopologySnapshot {
+        let validators: Vec<ValidatorInfo> = ids
+            .iter()
+            .map(|&id| ValidatorInfo {
+                validator_id: ValidatorId::new(id),
+                public_key: generate_bls_keypair().public_key(),
+                voting_power: VotePower::new(1),
+            })
+            .collect();
+        TopologySnapshot::new(
+            NetworkDefinition::simulator(),
+            1,
+            ValidatorSet::new(validators),
+        )
+    }
+
+    /// A complete empty block at `height` whose parent QC carries
+    /// `parent_weighted_ms` — the committee anchor `committee_of_block` keys on.
+    fn block_with_parent_qc_ts(height: BlockHeight, parent_weighted_ms: u64) -> Block {
+        let mut signers = SignerBitfield::new(4);
+        signers.set(0);
+        signers.set(1);
+        signers.set(2);
+        let parent_qc = QuorumCertificate::new(
+            BlockHash::from_raw(Hash::from_bytes(b"anchor_parent")),
+            ShardGroupId::new(0),
+            BlockHeight::new(height.inner() - 1),
+            BlockHash::ZERO,
+            Round::new(0),
+            signers,
+            zero_bls_signature(),
+            WeightedTimestamp::from_millis(parent_weighted_ms),
+        );
+        let header = BlockHeader::new(
+            ShardGroupId::new(0),
+            height,
+            parent_qc.block_hash(),
+            parent_qc,
+            ValidatorId::new(0),
+            ProposerTimestamp::from_millis(parent_weighted_ms),
+            Round::new(height.inner()),
+            false,
+            StateRoot::from_raw(Hash::from_bytes(
+                &[u8::try_from(height.inner() % 251).unwrap(); 32],
+            )),
+            TransactionRoot::ZERO,
+            CertificateRoot::ZERO,
+            LocalReceiptRoot::ZERO,
+            ProvisionsRoot::ZERO,
+            Vec::new(),
+            std::collections::BTreeMap::new(),
+            InFlightCount::ZERO,
+            BeaconWitnessRoot::ZERO,
+            BeaconWitnessLeafCount::ZERO,
+        );
+        Block::Live {
+            header,
+            transactions: Arc::new(BoundedVec::new()),
+            certificates: Arc::new(BoundedVec::new()),
+            provisions: Arc::new(BoundedVec::new()),
+        }
+    }
+
+    #[test]
+    fn committee_of_block_keys_on_parent_qc_weighted_timestamp() {
+        // committee(block) == at(parent_qc.weighted_timestamp()). A block whose
+        // parent QC weighted timestamp sits just below an epoch boundary resolves
+        // to the prior epoch's committee — the keying that lets every honest node
+        // verify a boundary-straddling block under committee_(N-1), and its
+        // successor (parent QC at the boundary) under committee_N.
+        const ED: u64 = 1_000;
+        let shard = ShardGroupId::new(0);
+
+        let epoch0 = Arc::new(committee_snapshot_with_ids(&[0, 1, 2, 3]));
+        let epoch1 = Arc::new(committee_snapshot_with_ids(&[10, 11, 12, 13]));
+        let mut schedule = TopologySchedule::new(ED, 100, Epoch::new(0), Arc::clone(&epoch0));
+        schedule.insert(Epoch::new(1), Arc::clone(&epoch1));
+
+        let mut state = ShardCoordinator::new(
+            ValidatorId::new(0),
+            shard,
+            ShardConsensusConfig::default(),
+            RecoveredState::default(),
+        );
+
+        // Straddling block: parent QC weighted timestamp 999ms — epoch 0.
+        let straddle = block_with_parent_qc_ts(BlockHeight::new(5), ED - 1);
+        let straddle_hash = straddle.hash();
+        install_complete_block(&mut state, &straddle);
+
+        // Its successor: parent QC weighted timestamp 1000ms — epoch 1.
+        let successor = block_with_parent_qc_ts(BlockHeight::new(6), ED);
+        let successor_hash = successor.hash();
+        install_complete_block(&mut state, &successor);
+
+        let straddle_committee = state
+            .committee_of_block(&schedule, straddle_hash)
+            .expect("epoch 0 committee is in the schedule");
+        assert_eq!(
+            straddle_committee.committee_for_shard(shard),
+            epoch0.committee_for_shard(shard),
+            "a parent QC weighted timestamp below N·ED must resolve to committee_(N-1)",
+        );
+
+        let successor_committee = state
+            .committee_of_block(&schedule, successor_hash)
+            .expect("epoch 1 committee is in the schedule");
+        assert_eq!(
+            successor_committee.committee_for_shard(shard),
+            epoch1.committee_for_shard(shard),
+            "a parent QC weighted timestamp at N·ED must resolve to committee_N",
+        );
     }
 
     fn make_header_at_height(height: BlockHeight, timestamp_ms: u64) -> BlockHeader {
@@ -4762,7 +5154,7 @@ mod tests {
     /// Advance the coordinator one round the way the pacemaker does on a
     /// 2f+1 timeout quorum — bump the view, then re-enter — without standing
     /// up a full timeout quorum. Exercises the shared `enter_round` path.
-    fn advance_one_round(state: &mut ShardCoordinator, topology: &TopologySnapshot) -> Vec<Action> {
+    fn advance_one_round(state: &mut ShardCoordinator, topology: &TopologySchedule) -> Vec<Action> {
         let next = state.view_change.view.next();
         state.view_change.advance_to(next);
         state.enter_round(topology)
@@ -4954,11 +5346,11 @@ mod tests {
     /// committee index 0. For tests that need a different local index, call
     /// [`make_multi_validator_state_at`]. For tests that need to sign votes
     /// themselves, call [`make_multi_validator_state_with_keys`].
-    fn make_multi_validator_state() -> (ShardCoordinator, TopologySnapshot) {
+    fn make_multi_validator_state() -> (ShardCoordinator, TopologySchedule) {
         make_multi_validator_state_at(0)
     }
 
-    fn make_multi_validator_state_at(local_idx: u32) -> (ShardCoordinator, TopologySnapshot) {
+    fn make_multi_validator_state_at(local_idx: u32) -> (ShardCoordinator, TopologySchedule) {
         let (state, topology, _keys) = make_multi_validator_state_with_keys(local_idx);
         (state, topology)
     }
@@ -4967,7 +5359,7 @@ mod tests {
         local_idx: u32,
     ) -> (
         ShardCoordinator,
-        TopologySnapshot,
+        TopologySchedule,
         Vec<Bls12381G1PrivateKey>,
     ) {
         let keys: Vec<Bls12381G1PrivateKey> = (0..4).map(|_| generate_bls_keypair()).collect();
@@ -4988,7 +5380,7 @@ mod tests {
             ShardConsensusConfig::default(),
             RecoveredState::default(),
         );
-        (state, topology, keys)
+        (state, TopologySchedule::single(Arc::new(topology)), keys)
     }
 
     #[test]
@@ -5043,7 +5435,8 @@ mod tests {
 
         assert!(
             validate_header(
-                &topology,
+                topology.head(),
+                Some(topology.head().as_ref()),
                 state.local_shard,
                 &header,
                 state.committed_height,
@@ -5082,7 +5475,8 @@ mod tests {
         };
 
         let result = validate_header(
-            &topology,
+            topology.head(),
+            Some(topology.head().as_ref()),
             state.local_shard,
             &header,
             state.committed_height,

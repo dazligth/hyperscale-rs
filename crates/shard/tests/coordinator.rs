@@ -4,11 +4,13 @@
 //! so any regression in the documented API is caught here rather than by
 //! inline tests that can reach into private fields.
 
+use std::sync::Arc;
+
 use hyperscale_shard::{ShardConsensusConfig, ShardCoordinator, ShardMemoryStats, ShardStats};
 use hyperscale_storage::RecoveredState;
 use hyperscale_test_helpers::TestCommittee;
 use hyperscale_types::{
-    BlockHeight, LocalTimestamp, Round, ShardGroupId, TopologySnapshot, VIEW_CHANGE_TIMEOUT,
+    BlockHeight, LocalTimestamp, Round, ShardGroupId, TopologySchedule, VIEW_CHANGE_TIMEOUT,
     ValidatorId,
 };
 
@@ -23,8 +25,9 @@ fn fresh_coordinator(config: ShardConsensusConfig) -> ShardCoordinator {
 
 fn fresh_coordinator_with_topology(
     config: ShardConsensusConfig,
-) -> (ShardCoordinator, TopologySnapshot) {
-    let topology = TestCommittee::new(4, 42).topology_snapshot(1);
+) -> (ShardCoordinator, TopologySchedule) {
+    let topology =
+        TopologySchedule::single(Arc::new(TestCommittee::new(4, 42).topology_snapshot(1)));
     (fresh_coordinator(config), topology)
 }
 
@@ -110,7 +113,7 @@ fn is_current_proposer_matches_topology() {
     // Each validator's coordinator should answer `is_current_proposer` consistently
     // with `topology.proposer_for(shard, round) == me` for that validator.
     for local_idx in 0_u32..4 {
-        let topology = committee.topology_snapshot(1);
+        let topology = TopologySchedule::single(Arc::new(committee.topology_snapshot(1)));
         let me = ValidatorId::new(u64::from(local_idx));
         let local_shard = ShardGroupId::new(0);
         let coordinator = ShardCoordinator::new(
@@ -121,7 +124,7 @@ fn is_current_proposer_matches_topology() {
         );
         // Fresh coordinator: latest_qc is None → next height = committed_height + 1 = 1.
         // Rounds increase per block, so the fresh view is round 1.
-        let expected = topology.proposer_for(local_shard, Round::new(1)) == me;
+        let expected = topology.head().proposer_for(local_shard, Round::new(1)) == me;
         assert_eq!(
             coordinator.is_current_proposer(&topology),
             expected,
@@ -138,7 +141,7 @@ fn will_propose_next_is_true_for_exactly_one_validator_in_fresh_committee() {
     let committee = TestCommittee::new(4, 42);
     let mut proposers = 0usize;
     for local_idx in 0_u32..4 {
-        let topology = committee.topology_snapshot(1);
+        let topology = TopologySchedule::single(Arc::new(committee.topology_snapshot(1)));
         let coordinator = ShardCoordinator::new(
             ValidatorId::new(u64::from(local_idx)),
             ShardGroupId::new(0),

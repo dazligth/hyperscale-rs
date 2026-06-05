@@ -103,32 +103,24 @@ impl NodeStateMachine {
                 .on_verified_remote_header_received(certified_header, sender),
             ProtocolEvent::VerifiedBlockVoteReceived { vote } => self
                 .shard_coordinator
-                .on_verified_block_vote(self.beacon_coordinator.current_topology_snapshot(), vote),
-            ProtocolEvent::UnverifiedBlockVoteReceived { vote } => {
-                self.shard_coordinator.on_unverified_block_vote(
-                    self.beacon_coordinator.current_topology_snapshot(),
-                    vote,
-                )
-            }
+                .on_verified_block_vote(self.beacon_coordinator.topology_schedule(), vote),
+            ProtocolEvent::UnverifiedBlockVoteReceived { vote } => self
+                .shard_coordinator
+                .on_unverified_block_vote(self.beacon_coordinator.topology_schedule(), vote),
             ProtocolEvent::VerifiedTimeoutReceived { timeout } => self
                 .shard_coordinator
-                .on_verified_timeout(self.beacon_coordinator.current_topology_snapshot(), timeout),
-            ProtocolEvent::UnverifiedTimeoutReceived { timeout } => {
-                self.shard_coordinator.on_unverified_timeout(
-                    self.beacon_coordinator.current_topology_snapshot(),
-                    &timeout,
-                )
-            }
+                .on_verified_timeout(self.beacon_coordinator.topology_schedule(), timeout),
+            ProtocolEvent::UnverifiedTimeoutReceived { timeout } => self
+                .shard_coordinator
+                .on_unverified_timeout(self.beacon_coordinator.topology_schedule(), &timeout),
             ProtocolEvent::ReadySignalReceived { signal } => {
-                self.shard_coordinator.on_ready_signal_received(
-                    self.beacon_coordinator.current_topology_snapshot(),
-                    signal,
-                );
+                self.shard_coordinator
+                    .on_ready_signal_received(self.beacon_coordinator.topology_schedule(), signal);
                 Vec::new()
             }
             ProtocolEvent::BlockReadyToCommit { certified, source } => {
                 self.shard_coordinator.on_block_ready_to_commit(
-                    self.beacon_coordinator.current_topology_snapshot(),
+                    self.beacon_coordinator.topology_schedule(),
                     certified,
                     source,
                 )
@@ -138,14 +130,14 @@ impl NodeStateMachine {
                 qc,
                 verified_votes,
             } => self.shard_coordinator.on_qc_result(
-                self.beacon_coordinator.current_topology_snapshot(),
+                self.beacon_coordinator.topology_schedule(),
                 block_hash,
                 qc,
                 verified_votes,
             ),
             ProtocolEvent::QcSignatureVerified { block_hash, result } => {
                 self.shard_coordinator.on_qc_signature_verified(
-                    self.beacon_coordinator.current_topology_snapshot(),
+                    self.beacon_coordinator.topology_schedule(),
                     block_hash,
                     result,
                 )
@@ -187,49 +179,49 @@ impl NodeStateMachine {
             }
             ProtocolEvent::TransactionRootVerified { block_hash, result } => {
                 self.shard_coordinator.on_transaction_root_verified(
-                    self.beacon_coordinator.current_topology_snapshot(),
+                    self.beacon_coordinator.topology_schedule(),
                     block_hash,
                     result,
                 )
             }
             ProtocolEvent::CertificateRootVerified { block_hash, result } => {
                 self.shard_coordinator.on_certificate_root_verified(
-                    self.beacon_coordinator.current_topology_snapshot(),
+                    self.beacon_coordinator.topology_schedule(),
                     block_hash,
                     result,
                 )
             }
             ProtocolEvent::LocalReceiptRootVerified { block_hash, result } => {
                 self.shard_coordinator.on_local_receipt_root_verified(
-                    self.beacon_coordinator.current_topology_snapshot(),
+                    self.beacon_coordinator.topology_schedule(),
                     block_hash,
                     result,
                 )
             }
             ProtocolEvent::ProvisionsRootVerified { block_hash, result } => {
                 self.shard_coordinator.on_provisions_root_verified(
-                    self.beacon_coordinator.current_topology_snapshot(),
+                    self.beacon_coordinator.topology_schedule(),
                     block_hash,
                     result,
                 )
             }
             ProtocolEvent::ProvisionTxRootsVerified { block_hash, result } => {
                 self.shard_coordinator.on_provision_tx_roots_verified(
-                    self.beacon_coordinator.current_topology_snapshot(),
+                    self.beacon_coordinator.topology_schedule(),
                     block_hash,
                     result,
                 )
             }
             ProtocolEvent::BeaconWitnessRootVerified { block_hash, result } => {
                 self.shard_coordinator.on_beacon_witness_root_verified(
-                    self.beacon_coordinator.current_topology_snapshot(),
+                    self.beacon_coordinator.topology_schedule(),
                     block_hash,
                     result,
                 )
             }
             ProtocolEvent::StateRootVerified { block_hash, result } => {
                 self.shard_coordinator.on_state_root_verified(
-                    self.beacon_coordinator.current_topology_snapshot(),
+                    self.beacon_coordinator.topology_schedule(),
                     block_hash,
                     result,
                 )
@@ -243,7 +235,7 @@ impl NodeStateMachine {
                 finalized_waves,
                 provisions,
             } => self.shard_coordinator.on_proposal_built(
-                self.beacon_coordinator.current_topology_snapshot(),
+                self.beacon_coordinator.topology_schedule(),
                 height,
                 round,
                 &block,
@@ -270,12 +262,9 @@ impl NodeStateMachine {
                 }
                 actions
             }
-            ProtocolEvent::FinalizedWavesAdmitted { waves } => {
-                self.shard_coordinator.on_finalized_waves_admitted(
-                    self.beacon_coordinator.current_topology_snapshot(),
-                    &waves,
-                )
-            }
+            ProtocolEvent::FinalizedWavesAdmitted { waves } => self
+                .shard_coordinator
+                .on_finalized_waves_admitted(self.beacon_coordinator.topology_schedule(), &waves),
             _ => unreachable!("non-shard event routed to handle_shard"),
         }
     }
@@ -331,7 +320,7 @@ impl NodeStateMachine {
         }
 
         self.shard_coordinator.on_block_header(
-            self.beacon_coordinator.current_topology_snapshot(),
+            self.beacon_coordinator.topology_schedule(),
             header,
             manifest,
             |h| {
@@ -364,7 +353,7 @@ impl NodeStateMachine {
         let inputs = self.gather_proposal_inputs(pending_tx_count, pending_cert_count);
 
         self.shard_coordinator.on_qc_formed(
-            self.beacon_coordinator.current_topology_snapshot(),
+            self.beacon_coordinator.topology_schedule(),
             block_hash,
             qc,
             &inputs.ready_txs,

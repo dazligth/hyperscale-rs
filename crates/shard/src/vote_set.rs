@@ -135,29 +135,6 @@ impl VoteSet {
         committee_index < self.verified_voters.len() && self.verified_voters[committee_index]
     }
 
-    /// Update the vote set with header information.
-    ///
-    /// This is needed when votes arrive before the header. The vote set
-    /// can accumulate votes, but it needs the header info (particularly
-    /// `parent_block_hash`) to trigger verification.
-    pub fn set_header(&mut self, header: &BlockHeader) {
-        if self.height.is_none() {
-            self.height = Some(header.height());
-        }
-        if self.round.is_none() {
-            self.round = Some(header.round());
-        }
-        if self.parent_block_hash.is_none() {
-            self.parent_block_hash = Some(header.parent_block_hash());
-        }
-        if self.parent_weighted_timestamp.is_none() {
-            self.parent_weighted_timestamp = Some(header.parent_qc().weighted_timestamp());
-        }
-        if self.block_hash.is_none() {
-            self.block_hash = Some(header.hash());
-        }
-    }
-
     // ═══════════════════════════════════════════════════════════════════════════
     // Unverified Vote Buffering
     // ═══════════════════════════════════════════════════════════════════════════

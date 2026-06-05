@@ -159,6 +159,7 @@ pub use time::timeouts::{
     VIEW_CHANGE_TIMEOUT, VIEW_CHANGE_TIMEOUT_INCREMENT, VIEW_CHANGE_TIMEOUT_MAX, WAVE_TIMEOUT,
 };
 pub use time::timestamp::{LocalTimestamp, ProposerTimestamp, WeightedTimestamp};
+pub use topology::schedule::TopologySchedule;
 pub use topology::snapshot::{TopologySnapshot, node_id_hash_u64, shard_for_node};
 pub use topology::validator::{ValidatorInfo, ValidatorSet};
 pub use transaction::constructors::{

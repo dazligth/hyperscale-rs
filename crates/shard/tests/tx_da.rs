@@ -48,7 +48,7 @@ fn transactions_admitted_latches_proposal_on_leader() {
     // proposer_for(shard=0, r=1) = committee[1 % 4] = idx 1.
     let leader_idx = 1u64;
     assert_eq!(
-        sim.topology.proposer_for(sim.shard, Round::new(1)),
+        sim.topology.head().proposer_for(sim.shard, Round::new(1)),
         ValidatorId::new(leader_idx),
         "test assumes idx {leader_idx} is the round-1 height-1 leader",
     );

@@ -21,8 +21,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use hyperscale_beacon::state::{ApplyEpochInput, apply_epoch};
 use hyperscale_types::{
     BeaconChainConfig, BeaconState, Bls12381G1PublicKey, Epoch, MIN_STAKE_FLOOR, NetworkDefinition,
-    Randomness, ShardCommittee, ShardGroupId, Stake, StakePool, StakePoolId, ValidatorId,
-    ValidatorRecord, ValidatorStatus, bls_keypair_from_seed,
+    Randomness, SHUFFLE_INTERVAL_EPOCHS, ShardCommittee, ShardGroupId, Stake, StakePool,
+    StakePoolId, ValidatorId, ValidatorRecord, ValidatorStatus, bls_keypair_from_seed,
 };
 
 const V: usize = 3;
@@ -152,5 +152,58 @@ fn fifty_epochs_byte_identical_across_replicas() {
         replicas[0],
         initial_state(),
         "50 epochs of apply_epoch left state byte-identical to genesis",
+    );
+}
+
+/// The committee governing epoch `N` is fixed a full epoch ahead: the
+/// `next_shard_committees` written when `apply_epoch(N-1)` runs must equal the
+/// `shard_committees` promoted active when `apply_epoch(N)` runs. Activation is
+/// a pure promotion of the precomputed lookahead, never a recomputation — that
+/// is what removes the clock-versus-event committee split. Pinned across a
+/// shuffle boundary, where the lookahead genuinely diverges from the committee
+/// it supersedes, so the equality below proves promotion rather than holding
+/// vacuously over constant committees.
+#[test]
+fn lookahead_committee_promotes_unchanged_to_active() {
+    let network = NetworkDefinition::simulator();
+    let mut state = initial_state();
+
+    let last = SHUFFLE_INTERVAL_EPOCHS + 1;
+    let mut lookahead_after: BTreeMap<u64, BTreeMap<ShardGroupId, ShardCommittee>> =
+        BTreeMap::new();
+    let mut active_after: BTreeMap<u64, BTreeMap<ShardGroupId, ShardCommittee>> = BTreeMap::new();
+
+    for e in 1..=last {
+        apply_epoch(
+            &mut state,
+            &network,
+            Epoch::new(e),
+            ApplyEpochInput::Normal { committed: &[] },
+        );
+        lookahead_after.insert(e, state.next_shard_committees.clone());
+        active_after.insert(e, state.shard_committees.clone());
+    }
+
+    // Promotion invariant: active-at-N equals the lookahead fixed at N-1.
+    for e in 2..=last {
+        assert_eq!(
+            active_after[&e],
+            lookahead_after[&(e - 1)],
+            "committee active at epoch {e} must equal the lookahead fixed at epoch {}",
+            e - 1,
+        );
+    }
+
+    // Non-triviality: the shuffle rotates the lookahead so it diverges from the
+    // committee it supersedes, and that rotated set becomes active one epoch on.
+    let boundary = SHUFFLE_INTERVAL_EPOCHS;
+    assert_ne!(
+        lookahead_after[&boundary], active_after[&boundary],
+        "the shuffle at epoch {boundary} must rotate the lookahead committee",
+    );
+    assert_ne!(
+        active_after[&(boundary + 1)],
+        active_after[&boundary],
+        "the rotated committee must become active the epoch after the shuffle",
     );
 }

@@ -41,7 +41,7 @@ use hyperscale_types::{
     ProvisionTxRootsVerifyError, Provisions, ProvisionsRoot, ProvisionsRootContext, QcContext,
     QcVerifyError, QuorumCertificate, ReadySignal, Round, RoutableTransaction, ShardGroupId,
     StateRoot, StateRootContext, StateRootVerifyError, StoredReceipt, Timeout, TimeoutContext,
-    TopologySnapshot, TransactionRoot, TransactionRootContext, TxHash, TxRootVerifyError,
+    TopologySchedule, TransactionRoot, TransactionRootContext, TxHash, TxRootVerifyError,
     ValidatorId, Verifiable, Verified, Verify, VotePower, ready_signal_message,
 };
 
@@ -263,8 +263,10 @@ pub struct ShardCoordinatorSim {
     /// `ready_txs`; `on_block_header` reads it through the
     /// `lookup_tx` data-availability closure.
     tx_pools: Vec<HashMap<TxHash, Arc<Verified<RoutableTransaction>>>>,
-    /// Identity-agnostic topology shared by every replica.
-    pub topology: TopologySnapshot,
+    /// Identity-agnostic topology shared by every replica. A single-committee
+    /// schedule — the sim runs within one epoch, so every weighted timestamp
+    /// resolves to the same committee.
+    pub topology: TopologySchedule,
     /// Network definition used as the BLS signing domain.
     network: NetworkDefinition,
     /// The single shard this sim hosts.
@@ -313,7 +315,7 @@ impl ShardCoordinatorSim {
     pub fn new(n: usize, seed: u64) -> Self {
         assert!(n >= 1, "ShardCoordinatorSim n must be >= 1");
         let committee = TestCommittee::new(n, seed);
-        let topology = committee.topology_snapshot(1);
+        let topology = TopologySchedule::single(Arc::new(committee.topology_snapshot(1)));
         let network = NetworkDefinition::simulator();
         let shard = ShardGroupId::new(0);
 
@@ -811,8 +813,11 @@ impl ShardCoordinatorSim {
             Action::BroadcastBlockHeader { header, manifest } => {
                 let header = Arc::new(*header);
                 let manifest = *manifest;
-                let committee_ids: Vec<ValidatorId> =
-                    self.topology.committee_for_shard(self.shard).to_vec();
+                let committee_ids: Vec<ValidatorId> = self
+                    .topology
+                    .head()
+                    .committee_for_shard(self.shard)
+                    .to_vec();
                 for &peer in &committee_ids {
                     if peer == me {
                         continue;
@@ -995,7 +1000,7 @@ impl ShardCoordinatorSim {
                     transactions,
                     finalized_waves.clone(),
                     shard_group_id,
-                    &self.topology,
+                    self.topology.head(),
                     provisions.clone(),
                     parent_in_flight,
                     finalized_tx_count,

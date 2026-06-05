@@ -16,7 +16,7 @@ impl NodeStateMachine {
         match event {
             ProtocolEvent::BlockSyncReadyToApply { certified } => {
                 self.shard_coordinator.on_sync_block_ready_to_apply(
-                    self.beacon_coordinator.current_topology_snapshot(),
+                    self.beacon_coordinator.topology_schedule(),
                     std::sync::Arc::unwrap_or_clone(certified),
                 )
             }
@@ -30,14 +30,9 @@ impl NodeStateMachine {
                 actions.extend(self.provisions_coordinator.flush_expected_provisions());
                 actions
             }
-            ProtocolEvent::CommittedStateRestored { height, hash, qc } => {
-                self.shard_coordinator.on_committed_state_restored(
-                    self.beacon_coordinator.current_topology_snapshot(),
-                    height,
-                    hash,
-                    qc,
-                )
-            }
+            ProtocolEvent::CommittedStateRestored { height, hash, qc } => self
+                .shard_coordinator
+                .on_committed_state_restored(height, hash, qc),
             // Acknowledged but unused for now. Commit 4 wires
             // `RemoteHeaderCoordinator` to clear its per-shard "syncing"
             // flag here.

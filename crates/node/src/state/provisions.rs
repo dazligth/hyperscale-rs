@@ -28,7 +28,7 @@ impl NodeStateMachine {
             ),
             ProtocolEvent::ProvisionsAdmitted { provisions, .. } => {
                 let actions = self.shard_coordinator.on_provisions_admitted(
-                    self.beacon_coordinator.current_topology_snapshot(),
+                    self.beacon_coordinator.topology_schedule(),
                     &[provisions],
                 );
                 self.shard_coordinator.queue_ready_proposal();

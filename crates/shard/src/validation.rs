@@ -71,8 +71,16 @@ pub fn qc_weighted_timestamp_too_far_ahead(qc: &QuorumCertificate, now: LocalTim
 
 /// Validate block header structure, proposer, and parent QC quorum. Returns
 /// `Err(..)` with a human-readable reason on any check failure.
+///
+/// The header's two committee-keyed checks resolve against different
+/// committees at an epoch boundary: the proposer of block `h` belongs to
+/// `committee(h)` (`proposer_committee`), while the parent QC over `h-1` was
+/// signed by `committee(h-1)` (`parent_committee`). The caller resolves each
+/// by weighted timestamp and passes both; `parent_committee` is `None` only
+/// when the parent QC is genesis (no quorum to check).
 pub fn validate_header(
-    topology: &TopologySnapshot,
+    proposer_committee: &TopologySnapshot,
+    parent_committee: Option<&TopologySnapshot>,
     local_shard: ShardGroupId,
     header: &BlockHeader,
     committed_height: BlockHeight,
@@ -89,7 +97,7 @@ pub fn validate_header(
         ));
     }
 
-    let expected_proposer = topology.proposer_for(local_shard, round);
+    let expected_proposer = proposer_committee.proposer_for(local_shard, round);
     if header.proposer() != expected_proposer {
         return Err(format!(
             "wrong proposer: expected {:?}, got {:?}",
@@ -121,7 +129,14 @@ pub fn validate_header(
     }
 
     if !header.parent_qc().is_genesis() {
-        if !qc_has_local_quorum_power(topology, local_shard, header.parent_qc()) {
+        // The parent QC's signing committee is `committee(h-1)`. When the
+        // caller can't resolve it (we don't hold `h-1`'s header yet), skip the
+        // quorum **pre-check** — it's a cheap DoS filter, and the parent QC is
+        // fully BLS-verified against the exact committee before we ever vote,
+        // once `h-1` arrives. The structural checks below need no committee.
+        if let Some(parent_committee) = parent_committee
+            && !qc_has_local_quorum_power(parent_committee, local_shard, header.parent_qc())
+        {
             return Err("parent QC does not have quorum".to_string());
         }
 
@@ -402,8 +417,8 @@ mod tests {
         MerkleInclusionProof, NetworkDefinition, ProposerTimestamp, ProvisionEntry, Provisions,
         ProvisionsRoot, QuorumCertificate, Round, RoutableTransaction, ShardGroupId,
         SignerBitfield, StateRoot, TransactionDecision, TransactionRoot, ValidatorId,
-        ValidatorInfo, ValidatorSet, Verifiable, WeightedTimestamp, compute_waves, test_utils,
-        zero_bls_signature,
+        ValidatorInfo, ValidatorSet, Verifiable, WeightedTimestamp, bls_keypair_from_seed,
+        compute_waves, test_utils, zero_bls_signature,
     };
 
     use super::*;
@@ -624,8 +639,15 @@ mod tests {
         let height = BlockHeight::new(1);
         let header = header_at_round(height, Round::new(MAX_ROUND_GAP + 1), &topo);
 
-        let err =
-            validate_header(&topo, local_shard(), &header, BlockHeight::new(0), now).unwrap_err();
+        let err = validate_header(
+            &topo,
+            Some(&topo),
+            local_shard(),
+            &header,
+            BlockHeight::new(0),
+            now,
+        )
+        .unwrap_err();
         assert!(err.contains("round gap"), "got: {err}");
     }
 
@@ -636,7 +658,17 @@ mod tests {
         let height = BlockHeight::new(1);
         let header = header_at_round(height, Round::new(MAX_ROUND_GAP), &topo);
 
-        assert!(validate_header(&topo, local_shard(), &header, BlockHeight::new(0), now).is_ok());
+        assert!(
+            validate_header(
+                &topo,
+                Some(&topo),
+                local_shard(),
+                &header,
+                BlockHeight::new(0),
+                now
+            )
+            .is_ok()
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -700,8 +732,15 @@ mod tests {
         // forge this on an otherwise-genuine QC.
         let header = header_extending(quorum_parent_qc(now.as_millis() + 3_600_000), now);
 
-        let err =
-            validate_header(&topo, local_shard(), &header, BlockHeight::new(0), now).unwrap_err();
+        let err = validate_header(
+            &topo,
+            Some(&topo),
+            local_shard(),
+            &header,
+            BlockHeight::new(0),
+            now,
+        )
+        .unwrap_err();
         assert!(
             err.contains("parent QC weighted timestamp"),
             "expected far-future parent QC rejection, got: {err}"
@@ -718,7 +757,15 @@ mod tests {
         let header = header_extending(quorum_parent_qc(now.as_millis() - 5_000), now);
 
         assert!(
-            validate_header(&topo, local_shard(), &header, BlockHeight::new(0), now).is_ok(),
+            validate_header(
+                &topo,
+                Some(&topo),
+                local_shard(),
+                &header,
+                BlockHeight::new(0),
+                now
+            )
+            .is_ok(),
             "honest recent parent QC timestamp must pass"
         );
     }
@@ -744,6 +791,165 @@ mod tests {
             &quorum_parent_qc(now.as_millis() + envelope_ms + 1),
             now
         ));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // validate_header two-committee resolution (epoch boundary)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// A uniform-power committee over `ids`, one shard.
+    fn committee_with_ids(ids: &[u64]) -> TopologySnapshot {
+        let validators: Vec<ValidatorInfo> = ids
+            .iter()
+            .map(|&id| {
+                let mut seed = [0u8; 32];
+                seed[..8].copy_from_slice(&id.to_le_bytes());
+                ValidatorInfo {
+                    validator_id: ValidatorId::new(id),
+                    public_key: bls_keypair_from_seed(&seed).public_key(),
+                    voting_power: VotePower::new(1),
+                }
+            })
+            .collect();
+        TopologySnapshot::new(
+            NetworkDefinition::simulator(),
+            1,
+            ValidatorSet::new(validators),
+        )
+    }
+
+    /// A non-genesis parent QC over height 1 with a single signer — below
+    /// quorum in any committee of more than one member.
+    fn single_signer_parent_qc(weighted_ms: u64) -> QuorumCertificate {
+        let mut signers = SignerBitfield::new(4);
+        signers.set(0);
+        QuorumCertificate::new(
+            BlockHash::from_raw(Hash::from_bytes(b"parent_block")),
+            ShardGroupId::new(0),
+            BlockHeight::new(1),
+            BlockHash::from_raw(Hash::from_bytes(b"grandparent")),
+            Round::new(0),
+            signers,
+            zero_bls_signature(),
+            WeightedTimestamp::from_millis(weighted_ms),
+        )
+    }
+
+    /// A height-2, round-1 header extending `parent_qc`, proposed by `proposer`,
+    /// with a valid proposer timestamp — so proposer and parent-QC quorum are
+    /// the only committee-keyed checks under test.
+    fn header_with_proposer(
+        parent_qc: QuorumCertificate,
+        proposer: ValidatorId,
+        now: LocalTimestamp,
+    ) -> BlockHeader {
+        BlockHeader::new(
+            ShardGroupId::new(0),
+            BlockHeight::new(2),
+            parent_qc.block_hash(),
+            parent_qc,
+            proposer,
+            ProposerTimestamp::from_millis(now.as_millis()),
+            Round::new(1),
+            false,
+            StateRoot::ZERO,
+            TransactionRoot::ZERO,
+            CertificateRoot::ZERO,
+            LocalReceiptRoot::ZERO,
+            ProvisionsRoot::ZERO,
+            Vec::new(),
+            std::collections::BTreeMap::new(),
+            InFlightCount::ZERO,
+            BeaconWitnessRoot::ZERO,
+            BeaconWitnessLeafCount::ZERO,
+        )
+    }
+
+    #[test]
+    fn validate_header_keys_proposer_and_parent_on_distinct_committees() {
+        // At an epoch boundary the proposer of block `h` belongs to
+        // `committee(h)` while `h`'s parent QC was signed by `committee(h-1)`.
+        // `validate_header` draws the proposer from the first committee and
+        // checks the parent-QC quorum against the second; passing the committees
+        // in the wrong roles rejects the header.
+        let now = LocalTimestamp::from_millis(1_000_000);
+        let parent_committee = committee_with_ids(&[0, 1, 2, 3]); // committee(h-1)
+        let proposer_committee = committee_with_ids(&[10, 11, 12, 13]); // committee(h)
+
+        let round = Round::new(1);
+        let proposer = proposer_committee.proposer_for(local_shard(), round);
+        let header = header_with_proposer(quorum_parent_qc(now.as_millis() - 5_000), proposer, now);
+
+        assert!(
+            validate_header(
+                &proposer_committee,
+                Some(&parent_committee),
+                local_shard(),
+                &header,
+                BlockHeight::new(0),
+                now,
+            )
+            .is_ok(),
+            "header must validate under committee(h) proposer + committee(h-1) quorum",
+        );
+
+        let err = validate_header(
+            &parent_committee,
+            Some(&proposer_committee),
+            local_shard(),
+            &header,
+            BlockHeight::new(0),
+            now,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("wrong proposer"),
+            "drawing the proposer from the parent committee must reject: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_header_skips_parent_quorum_when_committee_unresolved() {
+        // When `h-1`'s header hasn't arrived its committee can't be resolved, so
+        // the caller passes `None` and the cheap quorum pre-check is skipped —
+        // the parent QC is still fully BLS-verified against the exact committee
+        // before this node votes. A resolved committee runs the pre-check and
+        // rejects a sub-quorum parent QC.
+        let topo = topology();
+        let now = LocalTimestamp::from_millis(1_000_000);
+        let proposer = topo.proposer_for(local_shard(), Round::new(1));
+        let header = header_with_proposer(
+            single_signer_parent_qc(now.as_millis() - 5_000),
+            proposer,
+            now,
+        );
+
+        let err = validate_header(
+            &topo,
+            Some(&topo),
+            local_shard(),
+            &header,
+            BlockHeight::new(0),
+            now,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("parent QC does not have quorum"),
+            "a resolved parent committee must enforce the quorum pre-check: {err}"
+        );
+
+        assert!(
+            validate_header(
+                &topo,
+                None,
+                local_shard(),
+                &header,
+                BlockHeight::new(0),
+                now
+            )
+            .is_ok(),
+            "an unresolved parent committee must skip the quorum pre-check",
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════
