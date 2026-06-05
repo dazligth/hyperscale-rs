@@ -2211,7 +2211,6 @@ mod tests {
     }
 
     fn make_live_block(
-        _topology: &TopologySchedule,
         height: BlockHeight,
         timestamp_ms: u64,
         proposer: ValidatorId,
@@ -2239,7 +2238,6 @@ mod tests {
         let tx = test_transaction(1);
         let tx_hash = tx.hash();
         let block = make_live_block(
-            &topology,
             BlockHeight::new(1),
             1000,
             ValidatorId::new(0),
@@ -2294,7 +2292,6 @@ mod tests {
             .committee_for_shard(ShardGroupId::new(0))
             .to_vec();
         let block = make_live_block(
-            &topo0,
             BlockHeight::new(1),
             1000,
             ValidatorId::new(0),
@@ -2316,7 +2313,6 @@ mod tests {
         // Leader should have a VoteTracker.
         let topo_leader = make_topology();
         let block_leader = make_live_block(
-            &topo_leader,
             BlockHeight::new(1),
             1000,
             ValidatorId::new(0),
@@ -2333,7 +2329,6 @@ mod tests {
         let non_leader_id = *committee.iter().find(|&&v| v != leader).unwrap();
         let topo_non = make_topology();
         let block_non = make_live_block(
-            &topo_non,
             BlockHeight::new(1),
             1000,
             ValidatorId::new(0),
@@ -2356,7 +2351,6 @@ mod tests {
             .committee_for_shard(ShardGroupId::new(0))
             .to_vec();
         let block = make_live_block(
-            &topo,
             BlockHeight::new(1),
             1000,
             ValidatorId::new(0),
@@ -2379,7 +2373,6 @@ mod tests {
         let non_leader_id = committee.iter().find(|&&v| v != leader).unwrap();
         let topo_non = make_topology();
         let block_non = make_live_block(
-            &topo_non,
             BlockHeight::new(1),
             1000,
             ValidatorId::new(0),
@@ -3406,7 +3399,6 @@ mod tests {
         // in epoch 1 (block weighted timestamp = ED, so vote_anchor_ts = ED).
         let mut coord = make_test_state_for(ValidatorId::new(4));
         let block = make_live_block(
-            &schedule,
             BlockHeight::new(1),
             ED,
             ValidatorId::new(4),
@@ -3840,13 +3832,7 @@ mod tests {
 
         // Commit the first block with a QC weighted_timestamp that, without
         // retro-stamping, would imply an elapsed_since of ~billions of ms.
-        let block = make_live_block(
-            &topo,
-            BlockHeight::new(1),
-            30_000,
-            ValidatorId::new(0),
-            vec![],
-        );
+        let block = make_live_block(BlockHeight::new(1), 30_000, ValidatorId::new(0), vec![]);
         let (block, qc) = certify(block).into_parts();
         let qc = QuorumCertificate::new(
             qc.block_hash(),

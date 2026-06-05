@@ -2225,24 +2225,6 @@ impl BeaconCoordinator {
         &self.topology
     }
 
-    /// Topology governing the window a weighted timestamp falls in — the
-    /// committee that signed any artifact attested at `wt`, and the one
-    /// every other validator resolves for it. The verification resolver:
-    /// callers map an artifact's BFT-attested timestamp (a shard QC's
-    /// `weighted_timestamp`, an execution cert's `vote_anchor_ts`) to its
-    /// committee here.
-    ///
-    /// `None` when `wt`'s epoch is outside the in-memory window: past
-    /// `TOPOLOGY_SCHEDULE_RETENTION_EPOCHS` (artifact older than
-    /// `RETENTION_HORIZON` — safe to drop) or beyond the lookahead (this
-    /// node's beacon hasn't committed that epoch yet — buffer until it
-    /// does). Use [`current_topology_snapshot`](Self::current_topology_snapshot)
-    /// for routing, never this.
-    #[must_use]
-    pub fn topology_for(&self, wt: WeightedTimestamp) -> Option<Arc<TopologySnapshot>> {
-        self.topology.at(wt).map(Arc::clone)
-    }
-
     /// Number of crypto verifications dispatched but not yet resulted.
     /// Test introspection — production code shouldn't gate on this.
     #[must_use]
@@ -3810,18 +3792,19 @@ mod tests {
         )
     }
 
-    /// `topology_for` resolves each loaded window plus the one-epoch
+    /// The schedule resolves each loaded window plus the one-epoch
     /// lookahead, keyed correctly to its committee, and returns `None`
     /// past the lookahead or below the loaded history. The head is the
     /// newest active window.
     #[test]
-    fn topology_for_resolves_active_lookahead_and_none_beyond() {
+    fn topology_schedule_resolves_active_lookahead_and_none_beyond() {
         let coord = coord_from_history(vec![state_at(1, 4), state_at(2, 3), state_at(3, 2)]);
         let ed = coord.current_state().chain_config.epoch_duration_ms;
         let shard = ShardGroupId::new(0);
         let len_at = |window: u64| {
             coord
-                .topology_for(WeightedTimestamp::from_millis(window * ed))
+                .topology_schedule()
+                .at(WeightedTimestamp::from_millis(window * ed))
                 .map(|t| t.committee_for_shard(shard).len())
         };
         assert_eq!(len_at(1), Some(4)); // active for epoch 1
@@ -3849,7 +3832,8 @@ mod tests {
         let ed = coord.current_state().chain_config.epoch_duration_ms;
         let resolves = |window: u64| {
             coord
-                .topology_for(WeightedTimestamp::from_millis(window * ed))
+                .topology_schedule()
+                .at(WeightedTimestamp::from_millis(window * ed))
                 .is_some()
         };
         assert!(!resolves(0), "epoch 0 should be evicted past retention");

@@ -43,7 +43,6 @@ use hyperscale_shard::{ShardConsensusConfig, ShardCoordinator};
 use hyperscale_storage::RecoveredState;
 use hyperscale_types::{
     Block, LocalTimestamp, ShardGroupId, StateRoot, TopologySnapshot, ValidatorId,
-    WeightedTimestamp,
 };
 use tracing::instrument;
 
@@ -187,17 +186,6 @@ impl NodeStateMachine {
     #[must_use]
     pub const fn topology_arc(&self) -> &Arc<TopologySnapshot> {
         self.beacon_coordinator.current_topology_snapshot()
-    }
-
-    /// Resolve the topology governing a weighted timestamp's window —
-    /// the committee that signed an artifact attested at `wt`, looked up
-    /// from the beacon coordinator's schedule. The verification resolver
-    /// for cross-shard artifacts; `None` when `wt`'s epoch is outside the
-    /// in-memory window (past retention, or beyond the lookahead). Use
-    /// [`topology`](Self::topology) for routing, never this.
-    #[must_use]
-    pub fn topology_for(&self, wt: WeightedTimestamp) -> Option<Arc<TopologySnapshot>> {
-        self.beacon_coordinator.topology_for(wt)
     }
 
     /// Get a reference to the mempool coordinator.

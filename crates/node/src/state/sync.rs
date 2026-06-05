@@ -33,9 +33,9 @@ impl NodeStateMachine {
             ProtocolEvent::CommittedStateRestored { height, hash, qc } => self
                 .shard_coordinator
                 .on_committed_state_restored(height, hash, qc),
-            // Acknowledged but unused for now. Commit 4 wires
-            // `RemoteHeaderCoordinator` to clear its per-shard "syncing"
-            // flag here.
+            // Remote-header catch-up finished. The coordinator keeps no
+            // sync-mode state to reconcile on completion, so the event is
+            // an acknowledged no-op.
             ProtocolEvent::RemoteHeaderSyncComplete { .. } => vec![],
             _ => unreachable!("non-sync event routed to handle_sync"),
         }

@@ -158,11 +158,11 @@ fn fifty_epochs_byte_identical_across_replicas() {
 /// The committee governing epoch `N` is fixed a full epoch ahead: the
 /// `next_shard_committees` written when `apply_epoch(N-1)` runs must equal the
 /// `shard_committees` promoted active when `apply_epoch(N)` runs. Activation is
-/// a pure promotion of the precomputed lookahead, never a recomputation — that
-/// is what removes the clock-versus-event committee split. Pinned across a
-/// shuffle boundary, where the lookahead genuinely diverges from the committee
-/// it supersedes, so the equality below proves promotion rather than holding
-/// vacuously over constant committees.
+/// a pure promotion of the precomputed lookahead, never a recomputation, so
+/// every node binds an epoch's committee to the same set the weighted timestamp
+/// resolves. Pinned across a shuffle boundary, where the lookahead genuinely
+/// diverges from the committee it supersedes, so the equality below proves
+/// promotion rather than holding vacuously over constant committees.
 #[test]
 fn lookahead_committee_promotes_unchanged_to_active() {
     let network = NetworkDefinition::simulator();
