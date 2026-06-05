@@ -2926,18 +2926,24 @@ impl ShardCoordinator {
             .flat_map(|fw| fw.receipts().iter().cloned())
             .collect();
         // The committed block's missed-proposal leaves resolve against its own
-        // committee. Unlike the verification paths, this is *deterministic
-        // recomputation* on an already-committed block — it can't stall — so it
-        // falls back to the routing head when the block's weighted-time epoch
-        // sits outside the beacon's in-memory schedule (the shard's weighted
-        // clock has run ahead of the beacon's committed epochs). Every node
-        // resolves the same schedule, so the fallback is identical across the
-        // committee; it equals the verifying committee whenever committees are
-        // stable across that gap, which production's wall-clock-paced beacon
-        // keeps true (`at` resolves there, so the fallback never fires).
-        let committee = self
-            .committee_of_block(topology, block_hash)
-            .unwrap_or_else(|| topology.head().as_ref());
+        // committee. Every path that reaches commit first verified the block
+        // against that committee — consensus voting resolves it in
+        // `try_vote_on_block`, and the sync path drops a block whose committee
+        // is unresolved in `submit_synced_block_for_verification` — and the
+        // beacon only advances, so it cannot evict the epoch within the
+        // verify-to-commit window. The committee therefore always resolves
+        // here. If it ever doesn't, local state is corrupt: deriving leaves
+        // under a stale committee would fork the beacon-witness accumulator
+        // across the committee, so fail fast rather than fork, mirroring the
+        // commit-linkage assert above.
+        let Some(committee) = self.committee_of_block(topology, block_hash) else {
+            panic!(
+                "commit-time committee unresolved at height {} for block {block_hash:?} \
+                 (anchor {:?}) — beacon-witness accumulator would diverge",
+                height.inner(),
+                self.committee_anchor(block_hash),
+            );
+        };
         let missed = missed_proposals_since_prev_commit(
             self.local_shard,
             height,
