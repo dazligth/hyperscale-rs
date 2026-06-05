@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use hyperscale_storage::test_helpers::{
-    make_database_update, make_mapped_database_update, make_test_block, make_test_certified,
-    make_test_execution_certificate, make_test_qc, make_test_receipt, make_test_wave_certificate,
-    test_ec_storage_batch as helpers_test_ec_storage_batch,
+    db_node_key, make_database_update, make_mapped_database_update, make_test_block,
+    make_test_certified, make_test_execution_certificate, make_test_qc, make_test_receipt,
+    make_test_wave_certificate, test_ec_storage_batch as helpers_test_ec_storage_batch,
     test_ec_storage_roundtrip as helpers_test_ec_storage_roundtrip,
 };
 use hyperscale_storage::{
@@ -371,12 +371,12 @@ fn test_block_height_increments_on_commit() {
     assert_eq!(storage.jmt_height(), BlockHeight::new(0));
 
     storage
-        .commit(&make_database_update(vec![1, 2, 3], 0, vec![10], vec![1]))
+        .commit(&make_database_update(db_node_key(1), 0, vec![10], vec![1]))
         .unwrap();
     assert_eq!(storage.jmt_height(), BlockHeight::new(1));
 
     storage
-        .commit(&make_database_update(vec![4, 5, 6], 0, vec![20], vec![2]))
+        .commit(&make_database_update(db_node_key(4), 0, vec![20], vec![2]))
         .unwrap();
     assert_eq!(storage.jmt_height(), BlockHeight::new(2));
 }
@@ -389,13 +389,13 @@ fn test_state_root_changes_on_commit() {
     let root0 = storage.state_root();
 
     storage
-        .commit(&make_database_update(vec![1, 2, 3], 0, vec![10], vec![1]))
+        .commit(&make_database_update(db_node_key(1), 0, vec![10], vec![1]))
         .unwrap();
     let root1 = storage.state_root();
     assert_ne!(root0, root1, "root should change after first commit");
 
     storage
-        .commit(&make_database_update(vec![4, 5, 6], 0, vec![20], vec![2]))
+        .commit(&make_database_update(db_node_key(4), 0, vec![20], vec![2]))
         .unwrap();
     let root2 = storage.state_root();
     assert_ne!(root1, root2, "root should change after second commit");
@@ -680,7 +680,7 @@ fn test_initial_state_root_is_zero() {
 
 #[test]
 fn test_state_root_deterministic() {
-    let updates = make_database_update(vec![1, 2, 3], 0, vec![10], vec![42]);
+    let updates = make_database_update(db_node_key(1), 0, vec![10], vec![42]);
 
     let td1 = TempDir::new().unwrap();
     let s1 = RocksDbShardStorage::open(td1.path()).unwrap();
@@ -698,12 +698,12 @@ fn test_state_root_deterministic() {
 fn test_state_root_differs_for_different_data() {
     let td1 = TempDir::new().unwrap();
     let s1 = RocksDbShardStorage::open(td1.path()).unwrap();
-    s1.commit(&make_database_update(vec![1, 2, 3], 0, vec![10], vec![1]))
+    s1.commit(&make_database_update(db_node_key(1), 0, vec![10], vec![1]))
         .unwrap();
 
     let td2 = TempDir::new().unwrap();
     let s2 = RocksDbShardStorage::open(td2.path()).unwrap();
-    s2.commit(&make_database_update(vec![1, 2, 3], 0, vec![10], vec![2]))
+    s2.commit(&make_database_update(db_node_key(1), 0, vec![10], vec![2]))
         .unwrap();
 
     assert_ne!(s1.state_root(), s2.state_root());

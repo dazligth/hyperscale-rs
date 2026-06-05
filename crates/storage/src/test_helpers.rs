@@ -59,6 +59,14 @@ pub fn make_database_update(
     updates
 }
 
+/// A realistic 50-byte `db_node_key` for the logical node `[seed; 30]`, using
+/// the same `SpreadPrefixKeyMapper` encoding the engine produces for real
+/// substates.
+#[must_use]
+pub fn db_node_key(seed: u8) -> Vec<u8> {
+    SpreadPrefixKeyMapper::to_db_node_key(&RadixNodeId(NodeId([seed; 30]).0))
+}
+
 /// Build `DatabaseUpdates` from a logical node seed, using `SpreadPrefixKeyMapper`
 /// to compute the correct `db_node_key` — matching the storage format used in production.
 ///

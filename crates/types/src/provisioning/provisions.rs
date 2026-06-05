@@ -12,7 +12,7 @@ use hyperscale_jmt::{Blake3Hasher, MultiProof, Tree};
 use sbor::prelude::*;
 use thiserror::Error;
 
-use crate::state_key::{jmt_leaf_key, jmt_value_hash};
+use crate::state_key::{DB_NODE_KEY_LEN, jmt_leaf_key, jmt_value_hash};
 use crate::{
     BlockHeight, BoundedVec, CertifiedBlockHeader, Hash, MAX_TXS_PER_BLOCK, MerkleInclusionProof,
     NodeId, ProvisionEntry, ProvisionHash, RETENTION_HORIZON, ShardGroupId, SubstateEntry, TxHash,
@@ -265,6 +265,10 @@ pub enum ProvisionsVerifyError {
     /// entries.
     #[error("merkle inclusion verification failed against committed state root")]
     BadInclusion,
+    /// A `SubstateEntry` carried a `storage_key` shorter than a `db_node_key`,
+    /// so it cannot name a committed substate.
+    #[error("provision entry storage key is malformed (no db_node_key prefix)")]
+    MalformedStorageKey,
 }
 
 /// Construction asserts: the aggregated merkle multiproof in
@@ -301,14 +305,15 @@ impl Verify<&ProvisionsContext<'_>> for Provisions {
         let multi_proof =
             MultiProof::decode(proof_bytes).map_err(|_| ProvisionsVerifyError::MalformedProof)?;
 
-        let expected: Vec<([u8; 32], Option<[u8; 32]>)> = entries
-            .iter()
-            .map(|e| {
-                let key = jmt_leaf_key(&e.storage_key);
-                let value_hash = e.value.as_ref().map(|v| jmt_value_hash(v));
-                (key, value_hash)
-            })
-            .collect();
+        let mut expected: Vec<([u8; 32], Option<[u8; 32]>)> = Vec::with_capacity(entries.len());
+        for e in &entries {
+            if e.storage_key.len() < DB_NODE_KEY_LEN {
+                return Err(ProvisionsVerifyError::MalformedStorageKey);
+            }
+            let key = jmt_leaf_key(&e.storage_key);
+            let value_hash = e.value.as_ref().map(|v| jmt_value_hash(v));
+            expected.push((key, value_hash));
+        }
 
         let root_bytes: [u8; 32] = *ctx.certified_header.state_root().as_raw().as_bytes();
         <Tree<Blake3Hasher, 1>>::verify(&multi_proof, root_bytes, &expected)
@@ -613,6 +618,22 @@ mod tests {
             assert_eq!(
                 provisions.verify(&ctx),
                 Err(ProvisionsVerifyError::EmptyProofWithEntries)
+            );
+        }
+
+        #[test]
+        fn verify_rejects_malformed_storage_key() {
+            // A storage key shorter than a db_node_key is rejected explicitly,
+            // not panicked on during leaf-key derivation.
+            let (state_root, proof) = build_jmt(&[entry(1)]);
+            let verified_header = header_with_state_root(state_root);
+            let provisions = provisions_with(proof, vec![(vec![0u8; 10], vec![1, 2])]);
+            let ctx = ProvisionsContext {
+                certified_header: &verified_header,
+            };
+            assert_eq!(
+                provisions.verify(&ctx),
+                Err(ProvisionsVerifyError::MalformedStorageKey)
             );
         }
     }

@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use hyperscale_storage::shard::keys;
 use hyperscale_storage::test_helpers::{
-    make_database_update, make_mapped_database_update, make_test_block, make_test_certified,
-    make_test_qc,
+    db_node_key, make_database_update, make_mapped_database_update, make_test_block,
+    make_test_certified, make_test_qc,
 };
 use hyperscale_storage::tree::{jmt_parent_height, put_at_version};
 use hyperscale_storage::{
@@ -192,7 +192,7 @@ fn test_basic_substate_operations() {
 
     // Create a partition key and sort key
     let partition_key = DbPartitionKey {
-        node_key: vec![1, 2, 3],
+        node_key: db_node_key(1),
         partition_num: 0,
     };
     let sort_key = DbSortKey(vec![10, 20]);
@@ -234,7 +234,7 @@ fn test_snapshot_isolation() {
     let mut storage = SimShardStorage::new();
 
     let partition_key = DbPartitionKey {
-        node_key: vec![1, 2, 3],
+        node_key: db_node_key(1),
         partition_num: 0,
     };
     let sort_key = DbSortKey(vec![10]);
@@ -303,8 +303,10 @@ fn test_snapshot_clone_performance() {
     // This test bounds the cost of a single BTreeMap-clone snapshot at
     // simulation scale, not tree commit speed.
     for i in 0..10_000u32 {
+        let mut node_id = [0u8; 30];
+        node_id[..4].copy_from_slice(&i.to_be_bytes());
         let partition_key = DbPartitionKey {
-            node_key: i.to_be_bytes().to_vec(),
+            node_key: keys::node_entity_key(&NodeId(node_id)),
             partition_num: 0,
         };
         let sort_key = DbSortKey(vec![0]);
@@ -471,10 +473,10 @@ fn test_jmt_height_increments_on_commit() {
     let storage = SimShardStorage::new();
     assert_eq!(storage.jmt_height(), BlockHeight::new(0));
 
-    storage.commit_shared(&make_database_update(vec![1, 2, 3], 0, vec![10], vec![1]));
+    storage.commit_shared(&make_database_update(db_node_key(1), 0, vec![10], vec![1]));
     assert_eq!(storage.jmt_height(), BlockHeight::new(1));
 
-    storage.commit_shared(&make_database_update(vec![4, 5, 6], 0, vec![20], vec![2]));
+    storage.commit_shared(&make_database_update(db_node_key(4), 0, vec![20], vec![2]));
     assert_eq!(storage.jmt_height(), BlockHeight::new(2));
 }
 
@@ -483,11 +485,11 @@ fn test_state_root_changes_on_commit() {
     let storage = SimShardStorage::new();
     let root0 = storage.state_root();
 
-    storage.commit_shared(&make_database_update(vec![1, 2, 3], 0, vec![10], vec![1]));
+    storage.commit_shared(&make_database_update(db_node_key(1), 0, vec![10], vec![1]));
     let root1 = storage.state_root();
     assert_ne!(root0, root1, "root should change after first commit");
 
-    storage.commit_shared(&make_database_update(vec![4, 5, 6], 0, vec![20], vec![2]));
+    storage.commit_shared(&make_database_update(db_node_key(4), 0, vec![20], vec![2]));
     let root2 = storage.state_root();
     assert_ne!(root1, root2, "root should change after second commit");
 }
@@ -498,7 +500,7 @@ fn test_state_root_deterministic() {
     let s1 = SimShardStorage::new();
     let s2 = SimShardStorage::new();
 
-    let updates = make_database_update(vec![1, 2, 3], 0, vec![10], vec![42]);
+    let updates = make_database_update(db_node_key(1), 0, vec![10], vec![42]);
     s1.commit_shared(&updates);
     s2.commit_shared(&updates);
 
@@ -511,8 +513,8 @@ fn test_state_root_differs_for_different_data() {
     let s1 = SimShardStorage::new();
     let s2 = SimShardStorage::new();
 
-    s1.commit_shared(&make_database_update(vec![1, 2, 3], 0, vec![10], vec![1]));
-    s2.commit_shared(&make_database_update(vec![1, 2, 3], 0, vec![10], vec![2]));
+    s1.commit_shared(&make_database_update(db_node_key(1), 0, vec![10], vec![1]));
+    s2.commit_shared(&make_database_update(db_node_key(1), 0, vec![10], vec![2]));
 
     assert_ne!(s1.state_root(), s2.state_root());
 }
@@ -625,7 +627,7 @@ fn test_clear() {
     let mut storage = SimShardStorage::new();
 
     // Add some data
-    storage.commit_shared(&make_database_update(vec![1, 2, 3], 0, vec![10], vec![1]));
+    storage.commit_shared(&make_database_update(db_node_key(1), 0, vec![10], vec![1]));
     assert!(storage.jmt_height() > BlockHeight::GENESIS);
     assert!(!storage.is_empty());
 
@@ -642,11 +644,11 @@ fn test_len_and_is_empty() {
     assert!(storage.is_empty());
     assert_eq!(storage.len(), 0);
 
-    storage.commit_shared(&make_database_update(vec![1, 2, 3], 0, vec![10], vec![1]));
+    storage.commit_shared(&make_database_update(db_node_key(1), 0, vec![10], vec![1]));
     assert!(!storage.is_empty());
     assert_eq!(storage.len(), 1);
 
-    storage.commit_shared(&make_database_update(vec![4, 5, 6], 0, vec![20], vec![2]));
+    storage.commit_shared(&make_database_update(db_node_key(4), 0, vec![20], vec![2]));
     assert_eq!(storage.len(), 2);
 }
 
