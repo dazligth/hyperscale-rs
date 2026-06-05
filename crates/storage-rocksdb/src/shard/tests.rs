@@ -294,6 +294,43 @@ fn test_recovery_with_qc() {
 }
 
 #[test]
+fn test_recovery_seeds_committed_anchor_from_parent_qc() {
+    let temp_dir = TempDir::new().unwrap();
+    let height = BlockHeight::new(1);
+    let block = make_test_block(height); // parent QC is the genesis QC (WT zero)
+    let tip_qc = make_test_qc(&block); // tip's own QC: WT = block timestamp (1000)
+
+    {
+        let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+        commit_empty(&storage, &block, &tip_qc);
+        storage.set_chain_metadata(
+            height,
+            Some(Hash::from_hash_bytes(&[42; 32])),
+            Some(&*tip_qc),
+        );
+    }
+
+    let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+    let recovered = storage.load_recovered_state();
+
+    // The anchor is the committed tip's *parent* QC weighted timestamp (the
+    // genesis QC's zero here), read back from the tip's stored header — not the
+    // tip's own QC timestamp (1000) that `latest_qc` carries. Seeding from the
+    // tip's own WT would resolve the wrong committee for the first post-restart
+    // child of a tip that is an epoch's first block.
+    assert_eq!(
+        recovered.committed_anchor_ts,
+        Some(WeightedTimestamp::ZERO),
+        "anchor must come from the tip's parent QC, not its own QC",
+    );
+    assert_eq!(
+        recovered.latest_qc.map(|qc| qc.weighted_timestamp()),
+        Some(WeightedTimestamp::from_millis(1000)),
+        "sanity: the tip's own QC carries the distinct, non-zero timestamp",
+    );
+}
+
+#[test]
 fn test_certificate_idempotency() {
     let temp_dir = TempDir::new().unwrap();
     let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();

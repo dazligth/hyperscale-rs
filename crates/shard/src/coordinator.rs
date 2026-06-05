@@ -323,15 +323,17 @@ impl ShardCoordinator {
                 WeightedTimestamp::ZERO,
                 QuorumCertificate::weighted_timestamp,
             ),
-            // The committed tip's parent QC weighted timestamp isn't recovered
-            // from storage, so seed the anchor with the tip's own weighted
-            // timestamp — identical except when the recovered tip is itself an
-            // epoch's first block, and exact again after the next commit sets
-            // it from the committing block's `parent_qc`.
-            committed_anchor_ts: recovered.latest_qc.as_deref().map_or(
-                WeightedTimestamp::ZERO,
-                QuorumCertificate::weighted_timestamp,
-            ),
+            // The committed tip's committee was keyed on its parent QC's
+            // weighted timestamp; storage recovers it from the tip's stored
+            // header. When it didn't (fresh start, or genesis tip), fall back
+            // to the tip's own WT — identical except when the recovered tip is
+            // an epoch's first block, and exact again after the next commit.
+            committed_anchor_ts: recovered.committed_anchor_ts.unwrap_or_else(|| {
+                recovered.latest_qc.as_deref().map_or(
+                    WeightedTimestamp::ZERO,
+                    QuorumCertificate::weighted_timestamp,
+                )
+            }),
             committed_state_root: recovered.jmt_root.unwrap_or(StateRoot::ZERO),
             latest_qc: recovered.latest_qc,
             deferred_qc: DeferredQc::new(),

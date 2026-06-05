@@ -1,7 +1,9 @@
 //! State recovered from storage on startup, used to restore the consensus
 //! state machine after a crash or restart.
 
-use hyperscale_types::{BlockHash, BlockHeight, Hash, QuorumCertificate, StateRoot, Verified};
+use hyperscale_types::{
+    BlockHash, BlockHeight, Hash, QuorumCertificate, StateRoot, Verified, WeightedTimestamp,
+};
 
 /// State recovered from storage on startup.
 ///
@@ -21,6 +23,14 @@ pub struct RecoveredState {
     /// storage adapter; the trust source is the persistence invariant
     /// that QCs only land in storage after verification at admission.
     pub latest_qc: Option<Verified<QuorumCertificate>>,
+
+    /// Weighted timestamp of the committed tip's *parent* QC — the anchor
+    /// its committee was keyed on (`committee = at(committed_anchor_ts)`).
+    /// Distinct from `latest_qc`'s timestamp (the tip's own WT) when the tip
+    /// is an epoch's first block. `None` for a fresh start or genesis tip; the
+    /// coordinator then falls back to the tip's own WT, exact except across
+    /// that one boundary case.
+    pub committed_anchor_ts: Option<WeightedTimestamp>,
 
     /// Last committed JMT root hash.
     ///

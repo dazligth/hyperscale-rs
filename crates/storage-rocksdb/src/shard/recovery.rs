@@ -2,11 +2,13 @@
 
 use hyperscale_metrics::record_storage_operation;
 use hyperscale_storage::{RecoveredState, SubstateStore};
-use hyperscale_types::{BlockHash, BlockHeight, Hash, ShardWitnessPayload};
+use hyperscale_types::{
+    BlockHash, BlockHeight, BlockMetadata, Hash, ShardWitnessPayload, WeightedTimestamp,
+};
 
-use super::column_families::BeaconWitnessesCf;
+use super::column_families::{BeaconWitnessesCf, BlocksCf};
 use super::core::RocksDbShardStorage;
-use crate::typed_cf::{TypedCf, iter_all};
+use crate::typed_cf::{TypedCf, get, iter_all};
 
 impl RocksDbShardStorage {
     /// Load recovered state from storage for crash recovery.
@@ -60,9 +62,23 @@ impl RocksDbShardStorage {
             committed_height,
             committed_hash: committed_hash.map(BlockHash::from_raw),
             latest_qc,
+            committed_anchor_ts: self.committed_anchor_ts(committed_height),
             jmt_root: jmt_root_opt,
             beacon_witness_leaf_hashes,
         }
+    }
+
+    /// Weighted timestamp of the committed tip's parent QC — the anchor its
+    /// committee was keyed on (`committee = at(committed_anchor_ts)`). Read
+    /// from the committed block's stored header. `None` when no block is
+    /// stored at `committed_height` (fresh start / genesis tip), where the
+    /// coordinator falls back to the tip's own weighted timestamp.
+    fn committed_anchor_ts(&self, committed_height: BlockHeight) -> Option<WeightedTimestamp> {
+        let cf = self.cf();
+        let blocks_cf = BlocksCf::handle(&cf);
+        let metadata: BlockMetadata =
+            get::<BlocksCf>(&*self.db, blocks_cf, &committed_height.inner())?;
+        Some(metadata.header().parent_qc().weighted_timestamp())
     }
 
     /// Read all retained beacon-witness leaves from the
