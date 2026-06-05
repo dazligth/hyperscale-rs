@@ -10,13 +10,13 @@
 //! within the staleness threshold — the I/O loop's
 //! `RemoteHeaderSync` then runs sliding-window catch-up.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use hyperscale_core::{Action, ProtocolEvent};
 use hyperscale_types::{
-    BlockHeight, Bls12381G1PublicKey, CertifiedBlock, CertifiedBlockHeader,
+    AwaitingTopologyBuffer, BlockHeight, Bls12381G1PublicKey, CertifiedBlock, CertifiedBlockHeader,
     CertifiedHeaderVerifyError, InFlightCount, REMOTE_HEADER_RETENTION, ShardGroupId,
     TopologySchedule, TopologySnapshot, ValidatorId, Verified, VotePower, WeightedTimestamp,
 };
@@ -37,12 +37,6 @@ const HEADER_LIVENESS_TIMEOUT: Duration = Duration::from_secs(5);
 /// batch size, so a single round-trip can close a long gap without
 /// requiring repeated target bumps.
 const DEFAULT_PROBE_LOOKAHEAD: u64 = 64;
-
-/// Per-shard cap on headers buffered awaiting their committee's epoch (this
-/// node's beacon hasn't reached it yet). Drop-oldest past this bound; a node
-/// this far behind recovers the dropped headers through `RemoteHeaderSync`
-/// regardless. Node-local cache bound, not consensus-critical.
-const MAX_AWAITING_TOPOLOGY_PER_SHARD: usize = 256;
 
 /// Remote header coordinator memory statistics for monitoring collection sizes.
 #[allow(missing_docs)] // flat counters; field names are the documentation
@@ -147,7 +141,7 @@ pub struct RemoteHeaderCoordinator {
     /// catch-up: under lookahead a correct sender never produces a header whose
     /// committee isn't globally fixed, so a buffered header means *we* are
     /// behind.
-    awaiting: HashMap<ShardGroupId, VecDeque<(ValidatorId, Arc<CertifiedBlockHeader>)>>,
+    awaiting: AwaitingTopologyBuffer<(ValidatorId, Arc<CertifiedBlockHeader>)>,
 }
 
 impl RemoteHeaderCoordinator {
@@ -162,7 +156,7 @@ impl RemoteHeaderCoordinator {
             local_committed_height: BlockHeight::new(0),
             local_committed_ts: WeightedTimestamp::ZERO,
             local_shard,
-            awaiting: HashMap::new(),
+            awaiting: AwaitingTopologyBuffer::new(),
         }
     }
 
@@ -283,7 +277,7 @@ impl RemoteHeaderCoordinator {
         let Some(committee) =
             topology.at(certified_header.header().parent_qc().weighted_timestamp())
         else {
-            self.buffer_awaiting(shard, sender, certified_header);
+            self.awaiting.push(shard, (sender, certified_header));
             return vec![];
         };
 
@@ -376,7 +370,7 @@ impl RemoteHeaderCoordinator {
                     if let Some(sender_map) = self.pending.get_mut(&key) {
                         sender_map.remove(&next_sender);
                     }
-                    self.buffer_awaiting(shard, next_sender, next_header);
+                    self.awaiting.push(shard, (next_sender, next_header));
                 }
             }
         };
@@ -645,30 +639,13 @@ impl RemoteHeaderCoordinator {
         }
     }
 
-    /// Buffer a header whose committee epoch this node's beacon hasn't reached.
-    /// Bounded per source shard; drop-oldest past the cap.
-    fn buffer_awaiting(
-        &mut self,
-        shard: ShardGroupId,
-        sender: ValidatorId,
-        header: Arc<CertifiedBlockHeader>,
-    ) {
-        let queue = self.awaiting.entry(shard).or_default();
-        queue.push_back((sender, header));
-        while queue.len() > MAX_AWAITING_TOPOLOGY_PER_SHARD {
-            queue.pop_front();
-        }
-    }
-
     /// Re-attempt every buffered header now that the beacon has advanced. Drains
     /// the buffer and replays each through [`Self::on_remote_header_received`],
     /// which re-resolves the committee and re-buffers any still beyond the
     /// schedule. Called on `ProtocolEvent::BeaconBlockPersisted`.
     pub fn on_beacon_block_persisted(&mut self, topology: &TopologySchedule) -> Vec<Action> {
-        let buffered: Vec<(ValidatorId, Arc<CertifiedBlockHeader>)> =
-            self.awaiting.drain().flat_map(|(_, queue)| queue).collect();
         let mut actions = Vec::new();
-        for (sender, header) in buffered {
+        for (sender, header) in self.awaiting.drain() {
             actions.extend(self.on_remote_header_received(topology, header, sender));
         }
         actions
