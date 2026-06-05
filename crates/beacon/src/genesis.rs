@@ -268,10 +268,11 @@ fn validate_beacon_committee(config: &BeaconGenesisConfig, validator_ids: &BTree
 mod tests {
     use hyperscale_types::{
         BeaconChainConfig, Bls12381G1PublicKey, GenesisPool, GenesisValidator, MAX_VOTE_VECTOR_LEN,
-        Randomness, bls_keypair_from_seed,
+        NetworkDefinition, Randomness, bls_keypair_from_seed,
     };
 
     use super::*;
+    use crate::state::{ApplyEpochInput, apply_epoch};
 
     fn pubkey(seed: u64) -> Bls12381G1PublicKey {
         let mut s = [0u8; 32];
@@ -340,6 +341,38 @@ mod tests {
                 },
             );
         }
+    }
+
+    #[test]
+    fn genesis_seeds_both_windows_then_apply_epoch_promotes_unchanged() {
+        let cfg = sample_config(4, 4, 4);
+        let shard = ShardGroupId::new(0);
+        let configured: Vec<ValidatorId> = [0u64, 1, 2, 3].map(ValidatorId::new).to_vec();
+
+        let mut state = build_genesis_beacon_state(&cfg);
+
+        // Genesis fixes both windows to the configured committee: the active
+        // set (epoch 0) and the lookahead (epoch 1) are the same set.
+        assert_eq!(state.shard_committees[&shard].members, configured);
+        assert_eq!(state.next_shard_committees[&shard].members, configured);
+        assert_eq!(state.shard_committees, state.next_shard_committees);
+
+        // The first `apply_epoch` promotes the genesis lookahead into the
+        // active committee unchanged (epoch 1 is not a shuffle boundary), so
+        // epoch 1 is governed by the same configured committee as epoch 0.
+        let genesis_lookahead = state.next_shard_committees.clone();
+        apply_epoch(
+            &mut state,
+            &NetworkDefinition::simulator(),
+            Epoch::new(1),
+            ApplyEpochInput::Normal { committed: &[] },
+        );
+        assert_eq!(state.current_epoch, Epoch::new(1));
+        assert_eq!(
+            state.shard_committees, genesis_lookahead,
+            "epoch 1's active committee is the genesis lookahead, promoted unchanged",
+        );
+        assert_eq!(state.shard_committees[&shard].members, configured);
     }
 
     #[test]
