@@ -20,6 +20,7 @@ mod primitives;
 mod provisioning;
 mod sbor_codec;
 mod signing;
+pub mod state_key;
 mod time;
 mod verifiable;
 

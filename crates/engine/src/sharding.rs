@@ -71,6 +71,7 @@ use std::hash::BuildHasher;
 use hyperscale_storage::{
     DatabaseUpdates, DbPartitionKey, PartitionDatabaseUpdates, SubstateDatabase, SubstateStore,
 };
+pub use hyperscale_types::state_key::db_node_key_to_node_id;
 use hyperscale_types::{BlockHeight, NodeId, ShardGroupId, WritesRoot, shard_for_node};
 use radix_common::prelude::basic_encode;
 use radix_common::types::NodeId as RadixNodeId;
@@ -461,22 +462,6 @@ pub(crate) fn sort_database_updates(updates: &mut DatabaseUpdates) {
 // ============================================================================
 // Utilities
 // ============================================================================
-
-/// Extract the `NodeId` from a `SpreadPrefixKeyMapper` `db_node_key`.
-///
-/// `DbNodeKey` format: 20-byte hash prefix + 30-byte `NodeId` = 50 bytes.
-/// Returns None if the key is too short.
-#[must_use]
-pub fn db_node_key_to_node_id(db_node_key: &[u8]) -> Option<NodeId> {
-    const HASH_PREFIX_LEN: usize = 20;
-    const NODE_ID_LEN: usize = 30;
-    if db_node_key.len() < HASH_PREFIX_LEN + NODE_ID_LEN {
-        return None;
-    }
-    let mut id = [0u8; NODE_ID_LEN];
-    id.copy_from_slice(&db_node_key[HASH_PREFIX_LEN..HASH_PREFIX_LEN + NODE_ID_LEN]);
-    Some(NodeId(id))
-}
 
 /// Check if an entity type byte is an internal (child) entity.
 #[must_use]

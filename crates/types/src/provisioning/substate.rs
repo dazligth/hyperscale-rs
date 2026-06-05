@@ -2,6 +2,7 @@
 
 use sbor::prelude::*;
 
+use crate::state_key::db_node_key_to_node_id;
 use crate::{BoundedBytes, Hash, MAX_STATE_ENTRY_KEY_LEN, MAX_STATE_ENTRY_VALUE_LEN, NodeId};
 
 /// A state entry with pre-computed storage key for fast engine lookup.
@@ -21,9 +22,6 @@ pub struct SubstateEntry {
     pub value: Option<BoundedBytes<MAX_STATE_ENTRY_VALUE_LEN>>,
 }
 
-/// Hash prefix length in `db_node_key` (`SpreadPrefixKeyMapper` adds 20-byte hash)
-const HASH_PREFIX_LEN: usize = 20;
-
 impl SubstateEntry {
     /// Create a new DB state entry with pre-computed storage key.
     #[must_use]
@@ -34,25 +32,11 @@ impl SubstateEntry {
         }
     }
 
-    /// Extract the `NodeId` from the storage key.
-    ///
-    /// The storage key format is:
-    /// - `db_node_key` (50 bytes: 20-byte hash prefix + 30-byte `node_id`)
-    /// - `partition_num` (1 byte)
-    /// - `sort_key` (variable)
-    ///
-    /// The `NodeId` is at bytes [20..50] (after hash prefix).
+    /// Extract the [`NodeId`] embedded in this entry's storage key, or `None`
+    /// if the key is shorter than a `db_node_key`.
     #[must_use]
     pub fn node_id(&self) -> Option<NodeId> {
-        let start = HASH_PREFIX_LEN;
-        let end = start + 30;
-        if self.storage_key.len() >= end {
-            let mut id = [0u8; 30];
-            id.copy_from_slice(&self.storage_key[start..end]);
-            Some(NodeId(id))
-        } else {
-            None
-        }
+        db_node_key_to_node_id(&self.storage_key)
     }
 
     /// Compute hash of this entry for signing/verification.

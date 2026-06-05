@@ -11,6 +11,7 @@
 //! `sort_key` are appended directly, preserving lexicographic ordering for prefix scans.
 
 use hyperscale_types::NodeId;
+use hyperscale_types::state_key::DB_NODE_KEY_LEN;
 use radix_common::types::NodeId as RadixNodeId;
 use radix_substate_store_interface::db_key_mapper::{DatabaseKeyMapper, SpreadPrefixKeyMapper};
 use radix_substate_store_interface::interface::{DbPartitionKey, DbSortKey};
@@ -77,8 +78,8 @@ pub fn node_entity_key(node_id: &NodeId) -> Vec<u8> {
     node_prefix(node_id)
 }
 
-/// Entity key length in storage keys: 20 bytes hash prefix + 30 bytes `NodeId`.
-const ENTITY_KEY_LEN: usize = 50;
+/// Length of the `db_node_key` entity prefix at the front of a storage key.
+const ENTITY_KEY_LEN: usize = DB_NODE_KEY_LEN;
 
 /// Decompose a storage key into its three components.
 ///

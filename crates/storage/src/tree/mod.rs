@@ -21,9 +21,9 @@ mod snapshot;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use blake3::hash as blake3_hash;
 pub use collected_writes::CollectedWrites;
 use hyperscale_jmt::{Blake3Hasher, Key, Node as JmtNode, NodeKey, Tree, TreeReader, ValueHash};
+use hyperscale_types::state_key::{jmt_leaf_key, jmt_value_hash};
 use hyperscale_types::{BlockHeight, Hash, StateRoot};
 use radix_common::prelude::DatabaseUpdate;
 use radix_substate_store_interface::interface::{
@@ -87,13 +87,13 @@ pub type Jmt = Tree<Blake3Hasher, 1>;
 /// BLAKE3 hashing produces a fixed 32-byte key for uniform path depth.
 #[must_use]
 pub fn hash_storage_key(storage_key: &[u8]) -> Key {
-    blake3_hash(storage_key).into()
+    jmt_leaf_key(storage_key)
 }
 
 /// Hash a raw value to a 32-byte value hash stored in leaves.
 #[must_use]
 pub fn hash_value(value: &[u8]) -> ValueHash {
-    blake3_hash(value).into()
+    jmt_value_hash(value)
 }
 
 /// Returns `None` when the JMT is truly empty (height 0 with zero root),

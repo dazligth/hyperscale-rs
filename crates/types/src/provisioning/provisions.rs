@@ -8,11 +8,11 @@ use std::collections::HashSet;
 use std::fmt::{self, Debug, Formatter};
 use std::sync::OnceLock;
 
-use blake3::hash as blake3_hash;
 use hyperscale_jmt::{Blake3Hasher, MultiProof, Tree};
 use sbor::prelude::*;
 use thiserror::Error;
 
+use crate::state_key::{jmt_leaf_key, jmt_value_hash};
 use crate::{
     BlockHeight, BoundedVec, CertifiedBlockHeader, Hash, MAX_TXS_PER_BLOCK, MerkleInclusionProof,
     NodeId, ProvisionEntry, ProvisionHash, RETENTION_HORIZON, ShardGroupId, SubstateEntry, TxHash,
@@ -304,8 +304,8 @@ impl Verify<&ProvisionsContext<'_>> for Provisions {
         let expected: Vec<([u8; 32], Option<[u8; 32]>)> = entries
             .iter()
             .map(|e| {
-                let key: [u8; 32] = *blake3_hash(&e.storage_key).as_bytes();
-                let value_hash = e.value.as_ref().map(|v| *blake3_hash(v).as_bytes());
+                let key = jmt_leaf_key(&e.storage_key);
+                let value_hash = e.value.as_ref().map(|v| jmt_value_hash(v));
                 (key, value_hash)
             })
             .collect();
@@ -466,10 +466,10 @@ mod tests {
     mod verify {
         use std::collections::BTreeMap;
 
-        use blake3::hash as blake3_hash;
         use hyperscale_jmt::{Blake3Hasher, MemoryStore, NodeKey, Tree};
 
         use super::*;
+        use crate::state_key::{jmt_leaf_key, jmt_value_hash};
         use crate::{
             BlockHeader, BlockHeight, Hash, QuorumCertificate, ShardGroupId, StateRoot, ValidatorId,
         };
@@ -490,8 +490,8 @@ mod tests {
             let updates: BTreeMap<[u8; 32], Option<[u8; 32]>> = entries
                 .iter()
                 .map(|(k, v)| {
-                    let key: [u8; 32] = *blake3_hash(k).as_bytes();
-                    let val: [u8; 32] = *blake3_hash(v).as_bytes();
+                    let key = jmt_leaf_key(k);
+                    let val = jmt_value_hash(v);
                     (key, Some(val))
                 })
                 .collect();
@@ -499,10 +499,7 @@ mod tests {
             let root_hash = result.root_hash;
             store.apply(&result);
             let root_key = NodeKey::root(1);
-            let jmt_keys: Vec<[u8; 32]> = entries
-                .iter()
-                .map(|(k, _)| *blake3_hash(k).as_bytes())
-                .collect();
+            let jmt_keys: Vec<[u8; 32]> = entries.iter().map(|(k, _)| jmt_leaf_key(k)).collect();
             let proof = Jmt::prove(&store, &root_key, &jmt_keys).unwrap();
             let state_root = StateRoot::from_raw(Hash::from_hash_bytes(&root_hash));
             (state_root, MerkleInclusionProof::new(proof.encode()))

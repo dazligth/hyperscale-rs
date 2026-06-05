@@ -7,6 +7,7 @@
 //! functions to produce compatible keys.
 
 use hyperscale_types::NodeId;
+pub use hyperscale_types::state_key::db_node_key_to_node_id;
 use radix_common::types::NodeId as RadixNodeId;
 use radix_substate_store_interface::db_key_mapper::{DatabaseKeyMapper, SpreadPrefixKeyMapper};
 use radix_substate_store_interface::interface::{DbPartitionKey, DbSortKey};
@@ -64,20 +65,4 @@ pub fn node_prefix(node_id: &NodeId) -> Vec<u8> {
 pub fn node_entity_key(node_id: &NodeId) -> Vec<u8> {
     let radix_node_id = RadixNodeId(node_id.0);
     SpreadPrefixKeyMapper::to_db_node_key(&radix_node_id)
-}
-
-/// Extract the `NodeId` from a `SpreadPrefixKeyMapper` `db_node_key`.
-///
-/// `DbNodeKey` format: 20-byte hash prefix + 30-byte `NodeId`.
-/// Returns None if the key is too short.
-#[must_use]
-pub fn db_node_key_to_node_id(db_node_key: &[u8]) -> Option<NodeId> {
-    const HASH_PREFIX_LEN: usize = 20;
-    const NODE_ID_LEN: usize = 30;
-    if db_node_key.len() < HASH_PREFIX_LEN + NODE_ID_LEN {
-        return None;
-    }
-    let mut id = [0u8; NODE_ID_LEN];
-    id.copy_from_slice(&db_node_key[HASH_PREFIX_LEN..HASH_PREFIX_LEN + NODE_ID_LEN]);
-    Some(NodeId(id))
 }
