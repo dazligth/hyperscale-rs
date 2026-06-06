@@ -1,12 +1,13 @@
 //! `ShardChainWriter` implementation for `RocksDbShardStorage`.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use hyperscale_storage::tree::{
     OverlayTreeReader, jmt_parent_height, noop_jmt_snapshot, put_at_version,
 };
 use hyperscale_storage::{
-    BaseReadCache, JmtSnapshot, ShardChainWriter, merge_database_updates,
+    BaseReadCache, JmtSnapshot, ShardChainWriter, merge_database_updates, merge_owned_nodes,
     merge_updates_from_receipts,
 };
 use hyperscale_types::{
@@ -44,7 +45,7 @@ impl ShardChainWriter for RocksDbShardStorage {
         // (e.g., proposer just exited sync and BlockPersisted hasn't fired).
         if receipts.is_empty() {
             let jmt_snapshot = Arc::new(noop_jmt_snapshot(
-                &SnapshotTreeStore::new(&self.db),
+                &SnapshotTreeStore::new(&self.db, self.root_path.clone()),
                 pending_snapshots,
                 parent_state_root,
                 parent_block_height,
@@ -58,7 +59,7 @@ impl ShardChainWriter for RocksDbShardStorage {
             return (parent_state_root, jmt_snapshot, prepared);
         }
 
-        let snapshot_store = SnapshotTreeStore::new(&self.db);
+        let snapshot_store = SnapshotTreeStore::new(&self.db, self.root_path.clone());
         let parent_version =
             jmt_parent_height(parent_block_height, parent_state_root).map(BlockHeight::inner);
 
@@ -69,6 +70,7 @@ impl ShardChainWriter for RocksDbShardStorage {
             .iter()
             .filter_map(|r| r.consensus.database_updates())
             .collect();
+        let owner_map = merge_owned_nodes(receipts.iter().copied());
 
         let (computed_root, collected) = if pending_snapshots.is_empty() {
             put_at_version(
@@ -76,7 +78,8 @@ impl ShardChainWriter for RocksDbShardStorage {
                 parent_version,
                 block_height.inner(),
                 &per_receipt_updates,
-                &std::collections::HashMap::new(),
+                &HashMap::new(),
+                &owner_map,
             )
         } else {
             let overlay = OverlayTreeReader::new(&snapshot_store, pending_snapshots);
@@ -85,7 +88,8 @@ impl ShardChainWriter for RocksDbShardStorage {
                 parent_version,
                 block_height.inner(),
                 &per_receipt_updates,
-                &std::collections::HashMap::new(),
+                &HashMap::new(),
+                &owner_map,
             )
         };
 
@@ -224,7 +228,8 @@ fn build_prepared_commit(
             // would let a concurrent sync commit open a gap and trip the
             // contiguity assert in `commit_block_inner_locked`.
             let _guard = storage.commit_lock.lock().unwrap();
-            let (current_version, _) = SnapshotTreeStore::new(&storage.db).read_jmt_metadata();
+            let (current_version, _) =
+                SnapshotTreeStore::new(&storage.db, storage.root_path.clone()).read_jmt_metadata();
             if block.height().inner() <= current_version {
                 tracing::debug!(
                     height = block.height().inner(),
@@ -267,7 +272,7 @@ impl RocksDbShardStorage {
     ) -> StateRoot {
         let block_height = block.height().inner();
 
-        let snapshot_store = SnapshotTreeStore::new(&self.db);
+        let snapshot_store = SnapshotTreeStore::new(&self.db, self.root_path.clone());
         let (base_version, base_root) = snapshot_store.read_jmt_metadata();
 
         assert!(
@@ -303,12 +308,14 @@ impl RocksDbShardStorage {
         // Compute JMT update.
         let parent_version =
             jmt_parent_height(BlockHeight::new(base_version), base_root).map(BlockHeight::inner);
+        let owner_map = merge_owned_nodes(receipts);
         let (new_root, collected) = put_at_version(
             &snapshot_store,
             parent_version,
             block_height,
             &[merged_updates],
             &reset_old_keys,
+            &owner_map,
         );
         let jmt_snapshot = JmtSnapshot::from_collected_writes(
             collected,

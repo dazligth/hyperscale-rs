@@ -9,9 +9,10 @@
 //! `CommittableSubstateDatabase`) for `Arc<RocksDbShardStorage>` directly. This
 //! newtype sidesteps that while providing zero-cost delegation.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use hyperscale_jmt::{Node as JmtNode, NodeKey as JmtNodeKey, TreeReader};
+use hyperscale_jmt::{NibblePath, Node as JmtNode, NodeKey as JmtNodeKey, TreeReader};
 use hyperscale_storage::{
     BaseReadCache, BlockForSync, DatabaseUpdates, DbPartitionKey, DbSortKey, DbSubstateValue,
     GenesisCommit, JmtSnapshot, PartitionEntry, ShardChainReader, ShardChainWriter,
@@ -81,9 +82,14 @@ impl SubstateDatabase for SharedStorage {
 }
 
 impl GenesisCommit for SharedStorage {
-    fn install_genesis(&self, merged: &DatabaseUpdates) -> StateRoot {
-        self.0.commit_substates_only(merged);
-        self.0.finalize_genesis_jmt(merged)
+    fn install_genesis(
+        &self,
+        substates: &DatabaseUpdates,
+        jmt_updates: &DatabaseUpdates,
+        owner_map: &HashMap<NodeId, NodeId>,
+    ) -> StateRoot {
+        self.0.commit_substates_only(substates);
+        self.0.finalize_genesis_jmt(jmt_updates, owner_map)
     }
 }
 
@@ -117,9 +123,11 @@ impl SubstateStore for SharedStorage {
     fn generate_merkle_proofs(
         &self,
         storage_keys: &[Vec<u8>],
+        owner_map: &HashMap<NodeId, NodeId>,
         block_height: BlockHeight,
     ) -> Option<MerkleInclusionProof> {
-        self.0.generate_merkle_proofs(storage_keys, block_height)
+        self.0
+            .generate_merkle_proofs(storage_keys, owner_map, block_height)
     }
 }
 
@@ -136,6 +144,10 @@ impl TreeReader for SharedStorage {
 
     fn get_root_key(&self, version: u64) -> Option<JmtNodeKey> {
         self.0.get_root_key(version)
+    }
+
+    fn root_path(&self) -> NibblePath {
+        self.0.root_path()
     }
 }
 

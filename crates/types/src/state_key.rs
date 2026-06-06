@@ -24,10 +24,20 @@ pub const DB_NODE_KEY_LEN: usize = DB_NODE_KEY_HASH_PREFIX_LEN + NODE_ID_LEN;
 /// Hash a flat storage key (`db_node_key || partition_num || sort_key`) to its
 /// 32-byte JMT leaf key.
 ///
-/// The key is node-major: the high 16 bytes are `blake3(node_id)` and the low
-/// 16 bytes are `blake3(partition_num || sort_key)`. Every substate of one
-/// `NodeId` shares the high half, so an account's substates form a contiguous
-/// JMT subtree and the account lands wholly under one shard prefix.
+/// The key is owner-major: the high 16 bytes are `blake3(routing_node)`, where
+/// `routing_node` is `owner` for an internal/owned node (vault, KV store) and
+/// the node itself for a globally-addressed entity (`owner == None`). The low
+/// 16 bytes are `blake3(storage_key)` over the *whole* key, which embeds the
+/// node's own id and so disambiguates sibling internal nodes that share an
+/// owner prefix. Every substate of one owner — the account and the vaults/KV
+/// stores it owns — shares the high half, so an account's full footprint forms
+/// a contiguous JMT subtree under one shard prefix.
+///
+/// Internal nodes have random `NodeId`s unrelated to their owner; without
+/// owner-prefixing they would scatter across shard prefixes and break the
+/// prefix-subtree invariant. The owner is the node's global ancestor, resolved
+/// from the ownership map the executor already computes (and ships in the
+/// receipt) — see [`crate::ConsensusReceipt`].
 ///
 /// `storage_key` must begin with a `db_node_key` — every key the engine commits
 /// and every key proof generation reads is `SpreadPrefixKeyMapper` encoded, so
@@ -38,11 +48,12 @@ pub const DB_NODE_KEY_LEN: usize = DB_NODE_KEY_HASH_PREFIX_LEN + NODE_ID_LEN;
 ///
 /// Panics if `storage_key` is shorter than a `db_node_key`.
 #[must_use]
-pub fn jmt_leaf_key(storage_key: &[u8]) -> [u8; 32] {
+pub fn jmt_leaf_key(storage_key: &[u8], owner: Option<NodeId>) -> [u8; 32] {
     let node_id = db_node_key_to_node_id(storage_key)
         .expect("jmt_leaf_key requires a db_node_key-prefixed storage key");
-    let node_hash = blake3_hash(&node_id.0);
-    let substate_hash = blake3_hash(&storage_key[DB_NODE_KEY_LEN..]);
+    let routing_node = owner.unwrap_or(node_id);
+    let node_hash = blake3_hash(&routing_node.0);
+    let substate_hash = blake3_hash(storage_key);
     let mut key = [0u8; 32];
     key[..16].copy_from_slice(&node_hash.as_bytes()[..16]);
     key[16..].copy_from_slice(&substate_hash.as_bytes()[..16]);
@@ -103,20 +114,48 @@ mod tests {
     fn jmt_leaf_key_is_node_major() {
         let a = NodeId([1u8; NODE_ID_LEN]);
         let b = NodeId([2u8; NODE_ID_LEN]);
-        let a0 = jmt_leaf_key(&storage_key(a, 0, b"x"));
-        let a1 = jmt_leaf_key(&storage_key(a, 7, b"yy"));
+        let a0 = jmt_leaf_key(&storage_key(a, 0, b"x"), None);
+        let a1 = jmt_leaf_key(&storage_key(a, 7, b"yy"), None);
         // Two substates of one node share the node-major prefix but differ in
         // the substate half.
         assert_eq!(a0[..16], a1[..16]);
         assert_ne!(a0[16..], a1[16..]);
         // A different node lands under a different prefix.
-        let b0 = jmt_leaf_key(&storage_key(b, 0, b"x"));
+        let b0 = jmt_leaf_key(&storage_key(b, 0, b"x"), None);
         assert_ne!(a0[..16], b0[..16]);
     }
 
     #[test]
     fn jmt_leaf_key_is_deterministic() {
         let key = storage_key(NodeId([9u8; NODE_ID_LEN]), 3, b"sort");
-        assert_eq!(jmt_leaf_key(&key), jmt_leaf_key(&key));
+        assert_eq!(jmt_leaf_key(&key, None), jmt_leaf_key(&key, None));
+    }
+
+    #[test]
+    fn owner_prefixing_folds_internal_node_under_owner() {
+        let owner = NodeId([1u8; NODE_ID_LEN]);
+        let vault = NodeId([200u8; NODE_ID_LEN]);
+        // The account's own substate (owner = self) and the vault keyed under
+        // its owner share the high-half owner prefix.
+        let account_key = jmt_leaf_key(&storage_key(owner, 0, b"x"), None);
+        let vault_key = jmt_leaf_key(&storage_key(vault, 0, b"x"), Some(owner));
+        assert_eq!(account_key[..16], vault_key[..16]);
+        // Unprefixed, the vault would land under its own (unrelated) prefix.
+        let vault_unprefixed = jmt_leaf_key(&storage_key(vault, 0, b"x"), None);
+        assert_ne!(account_key[..16], vault_unprefixed[..16]);
+    }
+
+    #[test]
+    fn sibling_internal_nodes_share_prefix_but_disambiguate() {
+        // Two vaults owned by the same account share the owner prefix yet must
+        // not collide even when their substate (partition + sort key) matches —
+        // the low half hashes the full key, which embeds each vault's own id.
+        let owner = NodeId([1u8; NODE_ID_LEN]);
+        let v1 = NodeId([10u8; NODE_ID_LEN]);
+        let v2 = NodeId([20u8; NODE_ID_LEN]);
+        let k1 = jmt_leaf_key(&storage_key(v1, 0, b"balance"), Some(owner));
+        let k2 = jmt_leaf_key(&storage_key(v2, 0, b"balance"), Some(owner));
+        assert_eq!(k1[..16], k2[..16]);
+        assert_ne!(k1, k2);
     }
 }

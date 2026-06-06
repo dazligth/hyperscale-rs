@@ -41,7 +41,9 @@ pub use shard::overlay::{SubstateDbLookup, SubstateLookup};
 pub use shard::pending_chain::{BaseReadCache, ChainEntry, PendingChain, SubstateView};
 pub use shard::recovered_state::RecoveredState;
 pub use shard::store::{SubstateStore, VersionedStore};
-pub use shard::writes::{merge_database_updates, merge_into, merge_updates_from_receipts};
+pub use shard::writes::{
+    merge_database_updates, merge_into, merge_owned_nodes, merge_updates_from_receipts,
+};
 pub use tree::{CollectedWrites, JmtSnapshot, LeafSubstateKeyAssociation};
 
 /// Umbrella bound for storage backends threaded as a generic `S` through

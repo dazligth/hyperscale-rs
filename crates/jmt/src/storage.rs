@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::node::{Node, NodeKey, StaleNodeIndex};
+use crate::node::{NibblePath, Node, NodeKey, StaleNodeIndex};
 use crate::tree::UpdateResult;
 
 // ============================================================
@@ -33,6 +33,14 @@ pub trait TreeReader: Sync {
     /// Look up the root key for a committed version. Returns `None` for
     /// versions that were never committed or have been pruned.
     fn get_root_key(&self, version: u64) -> Option<NodeKey>;
+
+    /// The path this store's tree is rooted at. Whole-keyspace stores root
+    /// at the empty path (the default); a per-shard store overrides this with
+    /// its shard's prefix so its root node — and thus its `state_root` — is the
+    /// subtree at that prefix.
+    fn root_path(&self) -> NibblePath {
+        NibblePath::empty()
+    }
 }
 
 /// Read-only storage interface. Proof generation, reads, and the internal
@@ -46,6 +54,14 @@ pub trait TreeReader {
     /// Look up the root key for a committed version. Returns `None` for
     /// versions that were never committed or have been pruned.
     fn get_root_key(&self, version: u64) -> Option<NodeKey>;
+
+    /// The path this store's tree is rooted at. Whole-keyspace stores root
+    /// at the empty path (the default); a per-shard store overrides this with
+    /// its shard's prefix so its root node — and thus its `state_root` — is the
+    /// subtree at that prefix.
+    fn root_path(&self) -> NibblePath {
+        NibblePath::empty()
+    }
 }
 
 /// Write storage interface. `TreeUpdateBatch` fields are applied via

@@ -22,9 +22,11 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 pub use collected_writes::CollectedWrites;
-use hyperscale_jmt::{Blake3Hasher, Key, Node as JmtNode, NodeKey, Tree, TreeReader, ValueHash};
-use hyperscale_types::state_key::{jmt_leaf_key, jmt_value_hash};
-use hyperscale_types::{BlockHeight, Hash, StateRoot};
+use hyperscale_jmt::{
+    Blake3Hasher, Key, NibblePath, Node as JmtNode, NodeKey, Tree, TreeReader, ValueHash,
+};
+use hyperscale_types::state_key::{db_node_key_to_node_id, jmt_leaf_key, jmt_value_hash};
+use hyperscale_types::{BlockHeight, Hash, NodeId, StateRoot};
 use radix_common::prelude::DatabaseUpdate;
 use radix_substate_store_interface::interface::{
     DatabaseUpdates, DbSortKey, PartitionDatabaseUpdates,
@@ -66,14 +68,18 @@ impl<S: TreeReader + Sync> TreeReader for OverlayTreeReader<'_, S> {
     }
 
     fn get_root_key(&self, version: u64) -> Option<NodeKey> {
-        // Check if any overlay snapshot wrote a root at this version.
-        // Root keys follow the convention NodeKey::root(version).
-        let root_key = NodeKey::root(version);
+        // The root for this version lives at the store's root path (empty for a
+        // whole-keyspace store, the shard prefix for a per-shard store).
+        let root_key = NodeKey::new(version, self.base.root_path());
         if self.nodes.contains_key(&root_key) {
             Some(root_key)
         } else {
             self.base.get_root_key(version)
         }
+    }
+
+    fn root_path(&self) -> NibblePath {
+        self.base.root_path()
     }
 }
 
@@ -81,13 +87,19 @@ impl<S: TreeReader + Sync> TreeReader for OverlayTreeReader<'_, S> {
 /// Centralizing as a type alias so callers don't repeat the parameters.
 pub type Jmt = Tree<Blake3Hasher, 1>;
 
-/// Hash a storage key to a 32-byte JMT key.
+/// Hash a storage key to a 32-byte JMT key, owner-prefixing internal nodes.
 ///
 /// Storage keys are variable-length (`entity_key || partition_num || sort_key`).
-/// BLAKE3 hashing produces a fixed 32-byte key for uniform path depth.
+/// `owner_map` maps an internal node (vault, KV store) to its owning global
+/// ancestor; a key whose node is present is prefixed under that owner so the
+/// owner's footprint stays a contiguous prefix subtree. Globals are absent and
+/// key under themselves. The map is the merge of every committed receipt's
+/// `owned_nodes`, so the key bytes are identical on every node.
 #[must_use]
-pub fn hash_storage_key(storage_key: &[u8]) -> Key {
-    jmt_leaf_key(storage_key)
+#[allow(clippy::implicit_hasher)] // call sites pass std `HashMap`s
+pub fn hash_storage_key(storage_key: &[u8], owner_map: &HashMap<NodeId, NodeId>) -> Key {
+    let owner = db_node_key_to_node_id(storage_key).and_then(|n| owner_map.get(&n).copied());
+    jmt_leaf_key(storage_key, owner)
 }
 
 /// Hash a raw value to a 32-byte value hash stored in leaves.
@@ -134,7 +146,7 @@ pub fn noop_jmt_snapshot<S: TreeReader>(
 
     // Try to find the parent's root node so the version chain is unbroken.
     if let Some(parent_ver) = jmt_parent_height(parent_block_height, parent_state_root) {
-        let root_key = NodeKey::root(parent_ver.inner());
+        let root_key = NodeKey::new(parent_ver.inner(), store.root_path());
 
         // Check pending snapshots first (overlay), then the base store.
         let root_node = pending_snapshots
@@ -148,7 +160,7 @@ pub fn noop_jmt_snapshot<S: TreeReader>(
             .or_else(|| store.get_node(&root_key));
 
         if let Some(node) = root_node {
-            nodes.push((NodeKey::root(block_height.inner()), node));
+            nodes.push((NodeKey::new(block_height.inner(), store.root_path()), node));
         }
     }
 
@@ -199,6 +211,7 @@ pub fn put_at_version<S: TreeReader + Sync>(
     new_version: u64,
     database_updates_list: &[&DatabaseUpdates],
     reset_old_keys: &HashMap<(Vec<u8>, u8), Vec<DbSortKey>>,
+    owner_map: &HashMap<NodeId, NodeId>,
 ) -> (StateRoot, CollectedWrites) {
     assert!(
         parent_version.is_none_or(|pv| new_version > pv),
@@ -251,13 +264,13 @@ pub fn put_at_version<S: TreeReader + Sync>(
         let mut collected = CollectedWrites::default();
         let root_hash = parent_version
             .and_then(|v| {
-                let root_key = NodeKey::root(v);
+                let root_key = NodeKey::new(v, store.root_path());
                 let root_node = store.get_node(&root_key)?;
                 let hash: [u8; 32] = root_node.hash::<Blake3Hasher>();
                 if hash == [0u8; 32] {
                     return None;
                 }
-                let new_root_key = NodeKey::root(new_version);
+                let new_root_key = NodeKey::new(new_version, store.root_path());
                 collected.nodes.push((new_root_key, root_node));
                 Some(StateRoot::from_raw(Hash::from_hash_bytes(&hash)))
             })
@@ -270,7 +283,7 @@ pub fn put_at_version<S: TreeReader + Sync>(
     let mut updates: Vec<(Key, Option<ValueHash>)> = work_items
         .par_iter()
         .map(|(storage_key, value_ref)| {
-            let jmt_key = hash_storage_key(storage_key);
+            let jmt_key = hash_storage_key(storage_key, owner_map);
             let jmt_value = value_ref.map(hash_value);
             (jmt_key, jmt_value)
         })
@@ -280,8 +293,14 @@ pub fn put_at_version<S: TreeReader + Sync>(
 
     let updates_btree: BTreeMap<Key, Option<ValueHash>> = updates.into_iter().collect();
 
-    let result = Jmt::apply_updates(store, parent_version, new_version, &updates_btree)
-        .expect("JMT apply_updates failed");
+    let result = Jmt::apply_updates_at(
+        store,
+        parent_version,
+        new_version,
+        &store.root_path(),
+        &updates_btree,
+    )
+    .expect("JMT apply_updates failed");
 
     let root_hash = if result.root_hash == [0u8; 32] {
         StateRoot::ZERO

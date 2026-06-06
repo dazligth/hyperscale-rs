@@ -232,7 +232,7 @@ mod tests {
 
     #[test]
     fn fetch_returns_proofs_that_verify_against_the_anchor_root() {
-        let storage = Arc::new(SimShardStorage::new());
+        let storage = Arc::new(SimShardStorage::default());
         let leaves: Vec<_> = (1u64..=5).map(deposit).collect();
         let (block_hash, root, _count) = commit_block_with_witnesses(
             &storage,
@@ -270,7 +270,7 @@ mod tests {
 
     #[test]
     fn fetch_against_unknown_block_height_returns_empty() {
-        let storage = Arc::new(SimShardStorage::new());
+        let storage = Arc::new(SimShardStorage::default());
         let pending_chain = PendingChain::new(storage);
         let req = GetShardWitnessesRequest::new(
             SHARD,
@@ -284,7 +284,7 @@ mod tests {
 
     #[test]
     fn fetch_against_fork_divergent_hash_returns_empty() {
-        let storage = Arc::new(SimShardStorage::new());
+        let storage = Arc::new(SimShardStorage::default());
         let leaves: Vec<_> = (1u64..=3).map(deposit).collect();
         let (_block_hash, _root, _count) = commit_block_with_witnesses(
             &storage,
@@ -309,7 +309,7 @@ mod tests {
 
     #[test]
     fn fetch_silently_drops_out_of_range_indices() {
-        let storage = Arc::new(SimShardStorage::new());
+        let storage = Arc::new(SimShardStorage::default());
         let leaves: Vec<_> = (1u64..=3).map(deposit).collect();
         let (block_hash, _root, _count) = commit_block_with_witnesses(
             &storage,
@@ -333,7 +333,7 @@ mod tests {
 
     #[test]
     fn fetch_returns_empty_when_anchor_has_zero_leaves() {
-        let storage = Arc::new(SimShardStorage::new());
+        let storage = Arc::new(SimShardStorage::default());
         let (block_hash, _root, _count) = commit_block_with_witnesses(
             &storage,
             BlockHeight::new(1),

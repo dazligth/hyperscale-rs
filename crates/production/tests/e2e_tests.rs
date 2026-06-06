@@ -22,6 +22,7 @@ use hyperscale_storage::BeaconStorage;
 use hyperscale_storage_rocksdb::{RocksDbBeaconStorage, RocksDbShardStorage};
 use hyperscale_types::{
     Bls12381G1PrivateKey, NetworkDefinition, ShardId, ValidatorId, generate_bls_keypair,
+    shard_prefix_path,
 };
 use libp2p::identity::Keypair;
 use serial_test::serial;
@@ -464,7 +465,7 @@ async fn test_production_runner_with_network() {
     // Create temp storage
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("test_db");
-    let storage = RocksDbShardStorage::open(&db_path).unwrap();
+    let storage = RocksDbShardStorage::open(&db_path, shard_prefix_path(ShardId::ROOT)).unwrap();
     let storage = Arc::new(storage);
 
     let network_config = Libp2pConfig {
@@ -531,7 +532,7 @@ async fn test_graceful_shutdown() {
     // Create temp storage
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("test_db");
-    let storage = RocksDbShardStorage::open(&db_path).unwrap();
+    let storage = RocksDbShardStorage::open(&db_path, shard_prefix_path(ShardId::ROOT)).unwrap();
     let storage = Arc::new(storage);
 
     let network_config = Libp2pConfig {
@@ -602,8 +603,20 @@ async fn test_v2_same_shard_production_runner_binds_all_vnodes() {
 
     let temp_dir0 = TempDir::new().unwrap();
     let temp_dir1 = TempDir::new().unwrap();
-    let storage0 = Arc::new(RocksDbShardStorage::open(temp_dir0.path().join("db0")).unwrap());
-    let storage1 = Arc::new(RocksDbShardStorage::open(temp_dir1.path().join("db1")).unwrap());
+    let storage0 = Arc::new(
+        RocksDbShardStorage::open(
+            temp_dir0.path().join("db0"),
+            shard_prefix_path(ShardId::ROOT),
+        )
+        .unwrap(),
+    );
+    let storage1 = Arc::new(
+        RocksDbShardStorage::open(
+            temp_dir1.path().join("db1"),
+            shard_prefix_path(ShardId::ROOT),
+        )
+        .unwrap(),
+    );
 
     let network_config0 = Libp2pConfig {
         listen_addresses: vec!["/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()],
@@ -757,10 +770,34 @@ async fn test_v2_different_shard_production_runner_binds_all_vnodes() {
     let temp_dir1 = TempDir::new().unwrap();
 
     // Two RocksDB stores per host — one per hosted shard.
-    let host0_s0 = Arc::new(RocksDbShardStorage::open(temp_dir0.path().join("db0_s0")).unwrap());
-    let host0_s1 = Arc::new(RocksDbShardStorage::open(temp_dir0.path().join("db0_s1")).unwrap());
-    let host1_s0 = Arc::new(RocksDbShardStorage::open(temp_dir1.path().join("db1_s0")).unwrap());
-    let host1_s1 = Arc::new(RocksDbShardStorage::open(temp_dir1.path().join("db1_s1")).unwrap());
+    let host0_s0 = Arc::new(
+        RocksDbShardStorage::open(
+            temp_dir0.path().join("db0_s0"),
+            shard_prefix_path(ShardId::leaf(1, 0)),
+        )
+        .unwrap(),
+    );
+    let host0_s1 = Arc::new(
+        RocksDbShardStorage::open(
+            temp_dir0.path().join("db0_s1"),
+            shard_prefix_path(ShardId::leaf(1, 1)),
+        )
+        .unwrap(),
+    );
+    let host1_s0 = Arc::new(
+        RocksDbShardStorage::open(
+            temp_dir1.path().join("db1_s0"),
+            shard_prefix_path(ShardId::leaf(1, 0)),
+        )
+        .unwrap(),
+    );
+    let host1_s1 = Arc::new(
+        RocksDbShardStorage::open(
+            temp_dir1.path().join("db1_s1"),
+            shard_prefix_path(ShardId::leaf(1, 1)),
+        )
+        .unwrap(),
+    );
 
     let network_config0 = Libp2pConfig {
         listen_addresses: vec!["/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()],

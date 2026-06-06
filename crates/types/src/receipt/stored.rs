@@ -47,7 +47,8 @@ mod tests {
     use super::*;
     use crate::test_utils::test_event_type_identifier;
     use crate::{
-        ApplicationEvent, DatabaseUpdates, EventData, FeeSummary, GlobalReceiptHash, Hash,
+        ApplicationEvent, BoundedVec, DatabaseUpdates, EventData, FeeSummary, GlobalReceiptHash,
+        Hash,
     };
 
     fn make_event(seed: u8) -> ApplicationEvent {
@@ -64,6 +65,7 @@ mod tests {
             Arc::new(ConsensusReceipt::Succeeded {
                 receipt_hash: GlobalReceiptHash::ZERO,
                 database_updates: DatabaseUpdates::default(),
+                owned_nodes: BoundedVec::new(),
                 application_events: vec![make_event(1)],
                 beacon_witness_events: Vec::new(),
             }),

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use hyperscale_jmt::NibblePath;
 use hyperscale_storage::test_helpers::{
     db_node_key, make_database_update, make_mapped_database_update, make_test_block,
     make_test_certified, make_test_execution_certificate, make_test_qc, make_test_receipt,
@@ -54,6 +55,7 @@ fn updates_to_receipts(updates: &DatabaseUpdates) -> Vec<StoredReceipt> {
         consensus: Arc::new(ConsensusReceipt::Succeeded {
             receipt_hash: GlobalReceiptHash::ZERO,
             database_updates: updates.clone(),
+            owned_nodes: BoundedVec::new(),
             application_events: vec![],
             beacon_witness_events: Vec::new(),
         }),
@@ -74,7 +76,7 @@ fn commit_empty(storage: &RocksDbShardStorage, block: &Block, qc: &Verified<Quor
 #[test]
 fn test_basic_substate_operations() {
     let temp_dir = TempDir::new().unwrap();
-    let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+    let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
 
     // 50-byte spread-prefix node_key — snapshot iteration decodes composite
     // keys so raw short keys hit the entity-key length assertion.
@@ -119,7 +121,7 @@ fn test_basic_substate_operations() {
 #[test]
 fn test_snapshot() {
     let temp_dir = TempDir::new().unwrap();
-    let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+    let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
 
     // Use a realistic 50-byte node_key (spread-prefix format). Snapshot
     // snapshots decode composite keys during iteration, so raw short keys
@@ -167,12 +169,12 @@ fn test_recovery_resumes_at_correct_height() {
     let expected_hash = Hash::from_hash_bytes(&[50; 32]);
 
     {
-        let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+        let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
         storage.set_chain_metadata(BlockHeight::new(50), Some(expected_hash), None);
     }
 
     {
-        let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+        let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
         let recovered = storage.load_recovered_state();
 
         assert_eq!(recovered.committed_height, BlockHeight::new(50));
@@ -186,7 +188,7 @@ fn test_recovery_resumes_at_correct_height() {
 #[test]
 fn test_commit_certificate_with_writes_persists_both() {
     let temp_dir = TempDir::new().unwrap();
-    let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+    let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
 
     let updates = make_mapped_database_update(1, 0, vec![10, 20], vec![99, 88, 77]);
     let cert = make_test_wave_certificate(BlockHeight::new(42), ShardId::ROOT);
@@ -219,7 +221,7 @@ fn test_commit_certificate_with_writes_persists_both() {
 #[test]
 fn test_block_storage_and_retrieval() {
     let temp_dir = TempDir::new().unwrap();
-    let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+    let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
 
     let block = make_test_block(BlockHeight::new(1));
     let qc = make_test_qc(&block);
@@ -240,7 +242,7 @@ fn test_block_storage_and_retrieval() {
 #[test]
 fn test_block_range_retrieval() {
     let temp_dir = TempDir::new().unwrap();
-    let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+    let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
 
     for h in 1..=5u64 {
         let block = make_test_block(BlockHeight::new(h));
@@ -264,7 +266,7 @@ fn test_recovery_with_qc() {
     let expected_hash = BlockHash::from_raw(expected_raw);
 
     {
-        let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+        let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
         let qc = QuorumCertificate::new(
             expected_hash,
             ShardId::ROOT,
@@ -279,7 +281,7 @@ fn test_recovery_with_qc() {
     }
 
     {
-        let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+        let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
         let recovered = storage.load_recovered_state();
 
         assert_eq!(recovered.committed_height, BlockHeight::new(100));
@@ -301,7 +303,7 @@ fn test_recovery_seeds_committed_anchor_from_parent_qc() {
     let tip_qc = make_test_qc(&block); // tip's own QC: WT = block timestamp (1000)
 
     {
-        let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+        let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
         commit_empty(&storage, &block, &tip_qc);
         storage.set_chain_metadata(
             height,
@@ -310,7 +312,7 @@ fn test_recovery_seeds_committed_anchor_from_parent_qc() {
         );
     }
 
-    let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+    let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
     let recovered = storage.load_recovered_state();
 
     // The anchor is the committed tip's *parent* QC weighted timestamp (the
@@ -333,7 +335,7 @@ fn test_recovery_seeds_committed_anchor_from_parent_qc() {
 #[test]
 fn test_certificate_idempotency() {
     let temp_dir = TempDir::new().unwrap();
-    let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+    let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
 
     let updates = make_mapped_database_update(1, 0, vec![10, 20], vec![99, 88, 77]);
     let cert = make_test_wave_certificate(BlockHeight::new(42), ShardId::ROOT);
@@ -350,7 +352,7 @@ fn test_certificate_idempotency() {
 #[test]
 fn test_empty_state_on_fresh_database() {
     let temp_dir = TempDir::new().unwrap();
-    let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+    let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
 
     let recovered = storage.load_recovered_state();
 
@@ -366,7 +368,7 @@ fn test_empty_state_on_fresh_database() {
 #[test]
 fn test_block_height_increments_on_commit() {
     let temp_dir = TempDir::new().unwrap();
-    let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+    let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
 
     assert_eq!(storage.jmt_height(), BlockHeight::new(0));
 
@@ -384,7 +386,7 @@ fn test_block_height_increments_on_commit() {
 #[test]
 fn test_state_root_changes_on_commit() {
     let temp_dir = TempDir::new().unwrap();
-    let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+    let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
 
     let root0 = storage.state_root();
 
@@ -516,7 +518,7 @@ fn attach_receipts(block: &mut Block, receipts: Vec<StoredReceipt>) {
 #[test]
 fn test_commit_block_applies_writes() {
     let temp_dir = TempDir::new().unwrap();
-    let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+    let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
 
     let updates = make_mapped_database_update(1, 0, vec![10], vec![42]);
     let mut block = make_test_block(BlockHeight::new(1));
@@ -529,7 +531,7 @@ fn test_commit_block_applies_writes() {
 #[test]
 fn test_commit_block_multiple_certs() {
     let temp_dir = TempDir::new().unwrap();
-    let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+    let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
 
     let updates1 = make_mapped_database_update(1, 0, vec![10], vec![1]);
     let updates2 = make_mapped_database_update(2, 0, vec![20], vec![2]);
@@ -544,7 +546,7 @@ fn test_commit_block_multiple_certs() {
 #[test]
 fn test_commit_block_empty_certs() {
     let temp_dir = TempDir::new().unwrap();
-    let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+    let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
 
     let block = make_test_block(BlockHeight::new(1));
     storage.commit_block(&make_test_certified(block), &no_witness());
@@ -554,7 +556,8 @@ fn test_commit_block_empty_certs() {
 #[test]
 fn test_prepare_then_commit_matches_direct() {
     let temp_dir1 = TempDir::new().unwrap();
-    let s_prepared = Arc::new(RocksDbShardStorage::open(temp_dir1.path()).unwrap());
+    let s_prepared =
+        Arc::new(RocksDbShardStorage::open(temp_dir1.path(), NibblePath::empty()).unwrap());
     let parent_root = s_prepared.state_root();
     let (spec_root, _jmt_snapshot, prepared) = s_prepared.prepare_block_commit(
         parent_root,
@@ -572,7 +575,7 @@ fn test_prepare_then_commit_matches_direct() {
     );
 
     let temp_dir2 = TempDir::new().unwrap();
-    let s_direct = RocksDbShardStorage::open(temp_dir2.path()).unwrap();
+    let s_direct = RocksDbShardStorage::open(temp_dir2.path(), NibblePath::empty()).unwrap();
     let block2 = make_test_block(BlockHeight::new(1));
     let result_direct = s_direct.commit_block(&make_test_certified(block2), &no_witness());
 
@@ -583,7 +586,7 @@ fn test_prepare_then_commit_matches_direct() {
 #[test]
 fn test_commit_block_stores_certificates() {
     let temp_dir = TempDir::new().unwrap();
-    let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+    let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
 
     let shard = ShardId::ROOT;
     let cert = Arc::new(make_test_wave_certificate(BlockHeight::new(1), shard));
@@ -628,7 +631,7 @@ fn test_commit_block_stores_certificates() {
 #[test]
 fn test_transactions_batch_missing() {
     let temp_dir = TempDir::new().unwrap();
-    let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+    let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
 
     let result = storage.get_transactions_batch(&[TxHash::from_raw(Hash::from_bytes(&[1; 32]))]);
     assert!(result.is_empty());
@@ -637,7 +640,7 @@ fn test_transactions_batch_missing() {
 #[test]
 fn test_certificates_batch() {
     let temp_dir = TempDir::new().unwrap();
-    let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+    let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
 
     let cert1 = make_test_wave_certificate(BlockHeight::new(1), ShardId::ROOT);
     let cert2 = make_test_wave_certificate(BlockHeight::new(2), ShardId::ROOT);
@@ -667,14 +670,14 @@ fn test_certificates_batch() {
 #[test]
 fn test_initial_block_height_is_zero() {
     let temp_dir = TempDir::new().unwrap();
-    let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+    let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
     assert_eq!(storage.jmt_height(), BlockHeight::new(0));
 }
 
 #[test]
 fn test_initial_state_root_is_zero() {
     let temp_dir = TempDir::new().unwrap();
-    let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+    let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
     assert_eq!(storage.state_root(), StateRoot::ZERO);
 }
 
@@ -683,11 +686,11 @@ fn test_state_root_deterministic() {
     let updates = make_database_update(db_node_key(1), 0, vec![10], vec![42]);
 
     let td1 = TempDir::new().unwrap();
-    let s1 = RocksDbShardStorage::open(td1.path()).unwrap();
+    let s1 = RocksDbShardStorage::open(td1.path(), NibblePath::empty()).unwrap();
     s1.commit(&updates).unwrap();
 
     let td2 = TempDir::new().unwrap();
-    let s2 = RocksDbShardStorage::open(td2.path()).unwrap();
+    let s2 = RocksDbShardStorage::open(td2.path(), NibblePath::empty()).unwrap();
     s2.commit(&updates).unwrap();
 
     assert_eq!(s1.state_root(), s2.state_root());
@@ -697,12 +700,12 @@ fn test_state_root_deterministic() {
 #[test]
 fn test_state_root_differs_for_different_data() {
     let td1 = TempDir::new().unwrap();
-    let s1 = RocksDbShardStorage::open(td1.path()).unwrap();
+    let s1 = RocksDbShardStorage::open(td1.path(), NibblePath::empty()).unwrap();
     s1.commit(&make_database_update(db_node_key(1), 0, vec![10], vec![1]))
         .unwrap();
 
     let td2 = TempDir::new().unwrap();
-    let s2 = RocksDbShardStorage::open(td2.path()).unwrap();
+    let s2 = RocksDbShardStorage::open(td2.path(), NibblePath::empty()).unwrap();
     s2.commit(&make_database_update(db_node_key(1), 0, vec![10], vec![2]))
         .unwrap();
 
@@ -712,7 +715,7 @@ fn test_state_root_differs_for_different_data() {
 #[test]
 fn test_certificate_store_and_retrieve() {
     let temp_dir = TempDir::new().unwrap();
-    let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+    let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
 
     let cert = make_test_wave_certificate(BlockHeight::new(1), ShardId::ROOT);
     let wave_id = cert.wave_id().clone();
@@ -726,7 +729,7 @@ fn test_certificate_store_and_retrieve() {
 #[test]
 fn test_certificate_get_missing() {
     let temp_dir = TempDir::new().unwrap();
-    let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+    let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
     let missing = WaveId::new(
         ShardId::leaf(8, 99),
         BlockHeight::new(99),
@@ -738,7 +741,7 @@ fn test_certificate_get_missing() {
 #[test]
 fn test_get_block_for_sync() {
     let temp_dir = TempDir::new().unwrap();
-    let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+    let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
 
     let block = make_test_block(BlockHeight::new(1));
     let qc = make_test_qc(&block);
@@ -754,7 +757,7 @@ fn test_get_block_for_sync() {
 #[test]
 fn test_commit_certificate_via_commit_store() {
     let temp_dir = TempDir::new().unwrap();
-    let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+    let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
 
     let updates = make_mapped_database_update(1, 0, vec![10], vec![42]);
     let cert = make_test_wave_certificate(BlockHeight::new(1), ShardId::ROOT);
@@ -769,7 +772,7 @@ fn test_commit_certificate_via_commit_store() {
 #[test]
 fn test_empty_commit_still_advances_version() {
     let temp_dir = TempDir::new().unwrap();
-    let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+    let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
 
     let updates = DatabaseUpdates::default();
     storage.commit(&updates).unwrap();
@@ -788,7 +791,7 @@ fn test_substates_survive_reopen() {
     let version_after_write;
     let cert_id;
     {
-        let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+        let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
         let updates = make_mapped_database_update(1, 0, vec![10], vec![42]);
         let cert = make_test_wave_certificate(BlockHeight::new(1), ShardId::ROOT);
         cert_id = cert.wave_id().clone();
@@ -798,7 +801,7 @@ fn test_substates_survive_reopen() {
     }
 
     {
-        let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+        let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
 
         assert_eq!(storage.jmt_height(), version_after_write);
         assert_eq!(storage.state_root(), root_after_write);
@@ -828,14 +831,14 @@ fn test_blocks_survive_reopen() {
     let temp_dir = TempDir::new().unwrap();
 
     {
-        let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+        let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
         let block = make_test_block(BlockHeight::new(1));
         let qc = make_test_qc(&block);
         commit_empty(&storage, &block, &qc);
     }
 
     {
-        let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+        let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
 
         let stored = storage
             .get_block(BlockHeight::new(1))
@@ -856,12 +859,12 @@ fn test_receipt_survives_reopen() {
     let tx_hash = receipt.tx_hash;
 
     {
-        let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+        let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
         storage.store_receipt(&receipt);
     }
 
     {
-        let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+        let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
         assert!(storage.get_consensus_receipt(&tx_hash).is_some());
         let retrieved = storage.get_consensus_receipt(&tx_hash).unwrap();
         assert_eq!(retrieved, receipt.consensus);
@@ -877,14 +880,14 @@ fn test_receipt_survives_reopen() {
 #[test]
 fn test_ec_storage_roundtrip() {
     let temp_dir = TempDir::new().unwrap();
-    let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+    let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
     helpers_test_ec_storage_roundtrip(&storage);
 }
 
 #[test]
 fn test_ec_storage_batch() {
     let temp_dir = TempDir::new().unwrap();
-    let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+    let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
     helpers_test_ec_storage_batch(&storage);
 }
 
@@ -895,7 +898,7 @@ fn test_ec_survives_reopen() {
     let wave_id = ec.wave_id().clone();
 
     {
-        let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+        let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
         let block = make_test_block(BlockHeight::new(0));
         storage.commit_block(&make_test_certified(block), &no_witness());
         let mut block = make_test_block(BlockHeight::new(1));
@@ -913,7 +916,7 @@ fn test_ec_survives_reopen() {
     }
 
     {
-        let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+        let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
         let cert = storage
             .get_execution_certificate(&wave_id)
             .expect("EC must survive reopen");
@@ -924,7 +927,7 @@ fn test_ec_survives_reopen() {
 #[test]
 fn test_ec_atomic_with_block_commit() {
     let temp_dir = TempDir::new().unwrap();
-    let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+    let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
 
     let ec = make_test_execution_certificate(1, BlockHeight::new(1));
     let wave_id = ec.wave_id().clone();
@@ -975,6 +978,7 @@ fn rocks_commit_with(
             consensus: Arc::new(ConsensusReceipt::Succeeded {
                 receipt_hash: GlobalReceiptHash::ZERO,
                 database_updates: updates.clone(),
+                owned_nodes: BoundedVec::new(),
                 application_events: vec![],
                 beacon_witness_events: Vec::new(),
             }),
@@ -1011,7 +1015,7 @@ fn rocks_commit_with(
 #[test]
 fn test_state_history_create_delete_create() {
     let temp_dir = TempDir::new().unwrap();
-    let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+    let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
 
     let node_key = vec![7u8; 50];
     let partition_num = 0u8;
@@ -1104,7 +1108,9 @@ fn test_snapshot_at_below_retention_panics() {
         jmt_history_length: 2,
         ..Default::default()
     };
-    let storage = RocksDbShardStorage::open_with_config(temp_dir.path(), &config).unwrap();
+    let storage =
+        RocksDbShardStorage::open_with_config(temp_dir.path(), &config, NibblePath::empty())
+            .unwrap();
 
     for h in 1..=10u64 {
         let block = make_test_block(BlockHeight::new(h));
@@ -1126,7 +1132,9 @@ fn test_list_substates_at_height_respects_retention() {
         jmt_history_length: 2,
         ..Default::default()
     };
-    let storage = RocksDbShardStorage::open_with_config(temp_dir.path(), &config).unwrap();
+    let storage =
+        RocksDbShardStorage::open_with_config(temp_dir.path(), &config, NibblePath::empty())
+            .unwrap();
 
     let nid = NodeId([9u8; 30]);
     let partition_num = 0u8;
@@ -1173,7 +1181,7 @@ fn test_list_substates_at_height_respects_retention() {
 #[test]
 fn test_reset_partition_captures_history_for_all_removed_keys() {
     let temp_dir = TempDir::new().unwrap();
-    let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+    let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
 
     let node_key = vec![3u8; 50];
     let partition_num = 0u8;
@@ -1269,7 +1277,7 @@ fn test_reset_partition_captures_history_for_all_removed_keys() {
 #[test]
 fn test_genesis_skips_history_entries() {
     let temp_dir = TempDir::new().unwrap();
-    let storage = RocksDbShardStorage::open(temp_dir.path()).unwrap();
+    let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
 
     let updates = make_database_update(vec![1u8; 50], 0, vec![1], vec![0xAA]);
     storage.commit_substates_only(&updates);

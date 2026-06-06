@@ -27,8 +27,8 @@ use radix_substate_store_interface::interface::{CreateDatabaseUpdates, DatabaseU
 
 use crate::output::ExecutedTx;
 use crate::sharding::{
-    compute_writes_root, filter_updates_for_global_receipt, filter_updates_for_shard,
-    sort_database_updates,
+    compute_ownership_root, compute_writes_root, filter_updates_for_global_receipt,
+    filter_updates_for_shard, owned_nodes_in_updates, sort_database_updates,
 };
 
 /// Extract `DatabaseUpdates` from a transaction receipt.
@@ -170,14 +170,26 @@ pub fn compute_vm_output(
     let raw_updates = extract_database_updates(receipt);
     let global_updates = filter_updates_for_global_receipt(&raw_updates, &declared_set, ownership);
     let writes_root = compute_writes_root(&global_updates);
+    // Commit the ownership used to owner-prefix internal nodes' JMT leaves.
+    // Derived from the shard-invariant globally-filtered updates, so every
+    // committee folds the same `ownership_root` into the EC-agreed receipt
+    // hash before the wave finalizes.
+    let ownership_root =
+        compute_ownership_root(&owned_nodes_in_updates(&global_updates, ownership));
 
     let event_hashes: Vec<Hash> = application_events
         .iter()
         .map(ApplicationEvent::hash)
         .collect();
     let event_root = EventRoot::from_raw(compute_merkle_root(&event_hashes));
-    let receipt_hash =
-        GlobalReceipt::new(true, event_root, BeaconWitnessRoot::ZERO, writes_root).receipt_hash();
+    let receipt_hash = GlobalReceipt::new(
+        true,
+        event_root,
+        BeaconWitnessRoot::ZERO,
+        writes_root,
+        ownership_root,
+    )
+    .receipt_hash();
 
     CachedVmOutput {
         metadata,
@@ -229,9 +241,14 @@ pub fn project_to_shard(
             // (which SBOR-encodes the IndexMap directly) is order-stable
             // across validators regardless of `raw_updates` insertion order.
             sort_database_updates(&mut database_updates);
+            // Ownership for the internal nodes this shard commits, so the JMT
+            // build owner-prefixes their leaves identically on executor,
+            // verifier, and syncer without rediscovering ownership.
+            let owned_nodes = owned_nodes_in_updates(&database_updates, ownership).into();
             let consensus = ConsensusReceipt::Succeeded {
                 receipt_hash: *receipt_hash,
                 database_updates,
+                owned_nodes,
                 application_events: application_events.clone(),
                 beacon_witness_events: Vec::new(),
             };

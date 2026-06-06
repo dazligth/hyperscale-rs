@@ -72,8 +72,8 @@ use hyperscale_storage::{
     DatabaseUpdates, DbPartitionKey, PartitionDatabaseUpdates, SubstateDatabase, SubstateStore,
 };
 pub use hyperscale_types::state_key::db_node_key_to_node_id;
-use hyperscale_types::{BlockHeight, NodeId, ShardId, ShardTrie, WritesRoot};
-use radix_common::prelude::basic_encode;
+use hyperscale_types::{BlockHeight, NodeId, OwnershipRoot, ShardId, ShardTrie, WritesRoot};
+use radix_common::prelude::{DatabaseUpdate, basic_encode};
 use radix_common::types::NodeId as RadixNodeId;
 
 /// System entity type bytes that should be filtered from `DatabaseUpdates`.
@@ -88,11 +88,15 @@ const SYSTEM_ENTITY_TYPES: &[u8] = &[
 ];
 
 /// Internal entity type bytes (children of a global entity).
+///
+/// Values are the `EntityType` discriminants from `radix-common`
+/// (`entity_type.rs`): vault/KV-store/component types whose `NodeId`s are
+/// random hashes unrelated to their owner.
 const INTERNAL_ENTITY_TYPES: &[u8] = &[
     0x58, // InternalFungibleVault
     0x98, // InternalNonFungibleVault
     0xb0, // InternalKeyValueStore
-    0x80, // InternalGenericComponent
+    0xf8, // InternalGenericComponent
 ];
 
 /// SBOR custom value kind tag for `Own(NodeId)` references.
@@ -137,6 +141,45 @@ pub fn resolve_owned_nodes<S: SubstateDatabase>(
         }
     }
 
+    ownership
+}
+
+/// Resolve `internal_node → owning_global_ancestor` directly from a
+/// [`DatabaseUpdates`] by scanning every node's written substate values for
+/// `Own(NodeId)` references.
+///
+/// Used at genesis, where the full initial state is written in one batch:
+/// every account's `Own(_)` refs are present in `merged`, so the JMT build can
+/// owner-prefix the vaults it owns without a separate snapshot walk. Mirrors
+/// [`resolve_owned_nodes`] but sources values from the updates rather than a
+/// store. One level deep — for the current scope accounts own their vaults
+/// directly, so the immediate owner is the global ancestor.
+#[must_use]
+pub fn resolve_owned_nodes_from_updates(merged: &DatabaseUpdates) -> HashMap<NodeId, NodeId> {
+    let mut ownership: HashMap<NodeId, NodeId> = HashMap::new();
+    for (db_node_key, node_updates) in &merged.node_updates {
+        let Some(owner) = db_node_key_to_node_id(db_node_key) else {
+            continue;
+        };
+        for partition_updates in node_updates.partition_updates.values() {
+            match partition_updates {
+                PartitionDatabaseUpdates::Delta { substate_updates } => {
+                    for update in substate_updates.values() {
+                        if let DatabaseUpdate::Set(value) = update {
+                            extract_owned_node_ids(value, owner, &mut ownership);
+                        }
+                    }
+                }
+                PartitionDatabaseUpdates::Reset {
+                    new_substate_values,
+                } => {
+                    for value in new_substate_values.values() {
+                        extract_owned_node_ids(value, owner, &mut ownership);
+                    }
+                }
+            }
+        }
+    }
     ownership
 }
 
@@ -295,6 +338,47 @@ pub fn resolve_owned_nodes_at_height<S: SubstateStore>(
     Some(ownership)
 }
 
+/// Filter genesis `DatabaseUpdates` to the nodes whose owner-prefixed key
+/// routes to `local_shard`, for building that shard's prefix-rooted JMT.
+///
+/// A node routes by its owning global ancestor (from `owner_map`) for an
+/// internal node, or by itself for a global. System entities are dropped —
+/// they are replicated to every shard's substate store but excluded from the
+/// per-shard state root, matching [`filter_updates_for_shard`].
+///
+/// Genesis installs the full Radix bootstrap (resource managers, components,
+/// packages, system entities) into every shard's substate store for read
+/// availability, but the prefix-rooted JMT must contain only this shard's
+/// subtree — so the committed `state_root` is exactly the global tree's node
+/// at the shard prefix. Single-shard deployments root at the empty prefix,
+/// where every node routes to the one shard and this is the identity filter.
+#[must_use]
+#[allow(clippy::implicit_hasher)] // call sites pass std `HashMap`s
+pub fn filter_genesis_updates_for_shard(
+    merged: &DatabaseUpdates,
+    owner_map: &HashMap<NodeId, NodeId>,
+    local_shard: ShardId,
+    shard_trie: &ShardTrie,
+) -> DatabaseUpdates {
+    let mut filtered = DatabaseUpdates::default();
+    for (db_node_key, node_updates) in &merged.node_updates {
+        let Some(node_id) = db_node_key_to_node_id(db_node_key) else {
+            continue;
+        };
+        if SYSTEM_ENTITY_TYPES.contains(&node_id.0[0]) {
+            continue;
+        }
+        let routing_node = owner_map.get(&node_id).copied().unwrap_or(node_id);
+        if shard_trie.shard_for(&routing_node) != local_shard {
+            continue;
+        }
+        filtered
+            .node_updates
+            .insert(db_node_key.clone(), node_updates.clone());
+    }
+    filtered
+}
+
 // ============================================================================
 // Stage 2: Shard Filtering
 // ============================================================================
@@ -437,6 +521,58 @@ pub fn compute_writes_root(updates: &DatabaseUpdates) -> WritesRoot {
     sort_database_updates(&mut canonical);
     let encoded = basic_encode(&canonical).expect("DatabaseUpdates encoding should not fail");
     WritesRoot::from_raw(Hash::from_bytes(&encoded))
+}
+
+/// Extract the `(internal_node, owning_global_ancestor)` pairs for every
+/// internal node appearing in `updates`, in canonical key order.
+///
+/// The per-shard / global filters keep only declared globals and owned
+/// internal nodes, so every internal node in `updates` is present in
+/// `ownership`; globals are absent (they key under themselves at JMT build).
+/// The result is what a receipt carries (per-shard `database_updates`) or
+/// what [`compute_ownership_root`] commits (global filtered updates).
+#[must_use]
+pub fn owned_nodes_in_updates<H: BuildHasher>(
+    updates: &DatabaseUpdates,
+    ownership: &HashMap<NodeId, NodeId, H>,
+) -> Vec<(NodeId, NodeId)> {
+    let mut owned: Vec<(NodeId, NodeId)> = updates
+        .node_updates
+        .keys()
+        .filter_map(|db_node_key| {
+            let node_id = db_node_key_to_node_id(db_node_key)?;
+            ownership.get(&node_id).map(|owner| (node_id, *owner))
+        })
+        .collect();
+    owned.sort_by_key(|(k, _)| *k);
+    owned.dedup_by_key(|(k, _)| *k);
+    owned
+}
+
+/// Commit a transaction's globally-filtered ownership map to an
+/// [`OwnershipRoot`].
+///
+/// Hashes the SBOR-encoded `(internal_node, owner)` pairs in canonical key
+/// order, so two validators resolving the same ownership produce a byte-equal
+/// root. Empty map → [`OwnershipRoot::ZERO`]. Folded into the
+/// [`GlobalReceipt`](hyperscale_types::GlobalReceipt) hash so the execution
+/// committee agrees on the keying before a wave finalizes.
+///
+/// # Panics
+///
+/// Panics if SBOR encoding of the ownership pairs fails — `NodeId` is a closed
+/// SBOR type and encoding is infallible in practice.
+#[must_use]
+pub fn compute_ownership_root(owned: &[(NodeId, NodeId)]) -> OwnershipRoot {
+    use hyperscale_types::Hash;
+
+    if owned.is_empty() {
+        return OwnershipRoot::ZERO;
+    }
+    let mut sorted = owned.to_vec();
+    sorted.sort_by_key(|(k, _)| *k);
+    let encoded = basic_encode(&sorted).expect("ownership pairs encoding should not fail");
+    OwnershipRoot::from_raw(Hash::from_bytes(&encoded))
 }
 
 /// Sort every `IndexMap` inside `updates` by key, in-place.
@@ -1127,6 +1263,7 @@ mod tests {
         fn generate_merkle_proofs(
             &self,
             _: &[Vec<u8>],
+            _: &HashMap<NodeId, NodeId>,
             _: BlockHeight,
         ) -> Option<MerkleInclusionProof> {
             None

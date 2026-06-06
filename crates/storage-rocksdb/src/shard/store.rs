@@ -1,5 +1,6 @@
 //! `SubstateStore` implementation for `RocksDbShardStorage`.
 
+use std::collections::HashMap;
 use std::time::Instant;
 
 use hex::encode as hex_encode;
@@ -74,12 +75,13 @@ impl SubstateStore for RocksDbShardStorage {
     fn generate_merkle_proofs(
         &self,
         storage_keys: &[Vec<u8>],
+        owner_map: &HashMap<NodeId, NodeId>,
         block_height: BlockHeight,
     ) -> Option<MerkleInclusionProof> {
         // Use a RocksDB snapshot for all reads so concurrent JMT GC cannot
         // delete nodes mid-proof-generation.
-        let snapshot_store = SnapshotTreeStore::new(&self.db);
-        generate_proof(&snapshot_store, storage_keys, block_height)
+        let snapshot_store = SnapshotTreeStore::new(&self.db, self.root_path.clone());
+        generate_proof(&snapshot_store, storage_keys, owner_map, block_height)
     }
 }
 

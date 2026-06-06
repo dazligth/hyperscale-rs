@@ -333,7 +333,7 @@ impl ShardCoordinatorSim {
             members.push((id, *committee.public_key(idx)));
             sks.push(sk);
 
-            let storage = Arc::new(SimShardStorage::new());
+            let storage = Arc::new(SimShardStorage::default());
             let pending_chain = Arc::new(PendingChain::new(Arc::clone(&storage)));
             pending_chains.push(pending_chain);
             storages.push(storage);

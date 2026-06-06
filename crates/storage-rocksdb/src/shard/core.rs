@@ -13,18 +13,19 @@
 //! On each commit, the JMT is updated and a new state root hash is
 //! computed.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use hyperscale_jmt::{Node as JmtNode, NodeKey as JmtNodeKey, TreeReader};
+use hyperscale_jmt::{NibblePath, Node as JmtNode, NodeKey as JmtNodeKey, TreeReader};
 use hyperscale_metrics::record_storage_read;
 use hyperscale_storage::{
     BaseReadCache, DatabaseUpdate, DatabaseUpdates, DbPartitionKey, DbSortKey, DbSubstateValue,
     GenesisCommit, JmtSnapshot, PartitionDatabaseUpdates, PartitionEntry, SubstateDatabase,
     SubstateStore, tree,
 };
-use hyperscale_types::{Block, BlockHeight, QuorumCertificate, StateRoot, Verified};
+use hyperscale_types::{Block, BlockHeight, NodeId, QuorumCertificate, StateRoot, Verified};
 use rocksdb::{
     BlockBasedOptions, Cache, ColumnFamilyDescriptor, DB, DBCompressionType, Options,
     SliceTransform, WriteBatch,
@@ -52,7 +53,7 @@ use crate::typed_cf::{DbEncode, TypedCf, batch_delete, batch_put, get, multi_get
 /// Sort keys deleted by partition Reset operations, keyed by `(entity_key, partition_num)`.
 /// Passed to `put_at_version` so the JMT can reconstruct full storage keys and
 /// generate deletes for the hashed keys.
-pub type ResetOldKeys = std::collections::HashMap<(Vec<u8>, u8), Vec<DbSortKey>>;
+pub type ResetOldKeys = HashMap<(Vec<u8>, u8), Vec<DbSortKey>>;
 
 /// RocksDB-based storage for production use.
 ///
@@ -79,6 +80,11 @@ pub struct RocksDbShardStorage {
 
     /// Number of block heights of JMT history to retain before garbage collection.
     pub(crate) jmt_history_length: u64,
+
+    /// Path this store's JMT is rooted at — its shard's prefix, so the root is
+    /// the global tree's subtree at that prefix. Empty for a single-shard /
+    /// whole-keyspace store. Set once at open from the shard's `ShardId`.
+    pub(crate) root_path: NibblePath,
 }
 
 impl RocksDbShardStorage {
@@ -89,11 +95,16 @@ impl RocksDbShardStorage {
     /// # Errors
     ///
     /// Returns [`StorageError`] if `RocksDB` fails to open the database.
-    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, StorageError> {
-        Self::open_with_config(path, &RocksDbConfig::default())
+    pub fn open<P: AsRef<Path>>(path: P, root_path: NibblePath) -> Result<Self, StorageError> {
+        Self::open_with_config(path, &RocksDbConfig::default(), root_path)
     }
 
     /// Open with custom configuration.
+    ///
+    /// `root_path` is the prefix of the shard this store serves (via
+    /// [`hyperscale_types::shard_prefix_path`]), so its JMT roots there and its
+    /// `state_root` is the global tree's subtree at that prefix. Pass
+    /// [`NibblePath::empty`] for a single-shard / whole-keyspace store.
     ///
     /// # Errors
     ///
@@ -101,6 +112,7 @@ impl RocksDbShardStorage {
     pub fn open_with_config<P: AsRef<Path>>(
         path: P,
         config: &RocksDbConfig,
+        root_path: NibblePath,
     ) -> Result<Self, StorageError> {
         let mut opts = Options::default();
         opts.create_if_missing(true);
@@ -214,6 +226,7 @@ impl RocksDbShardStorage {
             db: Arc::new(db),
             commit_lock: Mutex::new(()),
             jmt_history_length: config.jmt_history_length,
+            root_path,
         })
     }
 
@@ -659,7 +672,12 @@ impl RocksDbShardStorage {
     ///
     /// Panics if called after the JMT has already been initialized, or
     /// if the underlying `RocksDB` write fails.
-    pub fn finalize_genesis_jmt(&self, merged: &DatabaseUpdates) -> StateRoot {
+    #[allow(clippy::implicit_hasher)] // call sites pass std `HashMap`s
+    pub fn finalize_genesis_jmt(
+        &self,
+        merged: &DatabaseUpdates,
+        owner_map: &HashMap<NodeId, NodeId>,
+    ) -> StateRoot {
         let _commit_guard = self.commit_lock.lock().unwrap();
 
         // Guard: finalize_genesis_jmt must only be called once, on an uninitialized JMT.
@@ -669,7 +687,7 @@ impl RocksDbShardStorage {
             "finalize_genesis_jmt called but JMT already initialized (version={current_version})"
         );
 
-        let snapshot_store = SnapshotTreeStore::new(&self.db);
+        let snapshot_store = SnapshotTreeStore::new(&self.db, self.root_path.clone());
 
         // parent=None, version=0: genesis is the first JMT state.
         let (root, collected) = tree::put_at_version(
@@ -677,7 +695,8 @@ impl RocksDbShardStorage {
             None,
             0,
             &[merged],
-            &std::collections::HashMap::new(),
+            &HashMap::new(),
+            owner_map,
         );
         let jmt_snapshot = JmtSnapshot::from_collected_writes(
             collected,
@@ -699,9 +718,14 @@ impl RocksDbShardStorage {
 }
 
 impl GenesisCommit for RocksDbShardStorage {
-    fn install_genesis(&self, merged: &DatabaseUpdates) -> StateRoot {
-        Self::commit_substates_only(self, merged);
-        Self::finalize_genesis_jmt(self, merged)
+    fn install_genesis(
+        &self,
+        substates: &DatabaseUpdates,
+        jmt_updates: &DatabaseUpdates,
+        owner_map: &HashMap<NodeId, NodeId>,
+    ) -> StateRoot {
+        Self::commit_substates_only(self, substates);
+        Self::finalize_genesis_jmt(self, jmt_updates, owner_map)
     }
 }
 
@@ -757,13 +781,17 @@ impl TreeReader for RocksDbShardStorage {
     }
 
     fn get_root_key(&self, version: u64) -> Option<JmtNodeKey> {
-        let root = JmtNodeKey::root(version);
+        let root = JmtNodeKey::new(version, self.root_path.clone());
         let stored_key = StoredNodeKey::from_jmt(&root);
         if self.cf_get::<JmtNodesCf>(&stored_key).is_some() {
             Some(root)
         } else {
             None
         }
+    }
+
+    fn root_path(&self) -> NibblePath {
+        self.root_path.clone()
     }
 }
 
@@ -795,7 +823,7 @@ mod test_helpers {
             let start = Instant::now();
 
             // Compute JMT updates using a snapshot-based store for isolation
-            let snapshot_store = SnapshotTreeStore::new(&self.db);
+            let snapshot_store = SnapshotTreeStore::new(&self.db, self.root_path.clone());
             let (base_version, base_root) = snapshot_store.read_jmt_metadata();
 
             // Version 0 with a non-zero root means genesis has been computed at version 0.
@@ -817,6 +845,7 @@ mod test_helpers {
                 new_version,
                 &[updates],
                 &reset_old_keys,
+                &HashMap::new(),
             );
             let jmt_snapshot = JmtSnapshot::from_collected_writes(
                 collected,

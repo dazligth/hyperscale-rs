@@ -2136,9 +2136,10 @@ mod tests {
     };
     use hyperscale_types::test_utils::test_transaction;
     use hyperscale_types::{
-        Bls12381G1PrivateKey, Bls12381G1PublicKey, ConsensusReceipt, Epoch, ExecutionOutcome,
-        GlobalReceiptHash, Hash, NetworkDefinition, QuorumCertificate, SignerBitfield,
-        ValidatorInfo, ValidatorSet, VotePower, generate_bls_keypair, zero_bls_signature,
+        Bls12381G1PrivateKey, Bls12381G1PublicKey, BoundedVec, ConsensusReceipt, Epoch,
+        ExecutionOutcome, GlobalReceiptHash, Hash, NetworkDefinition, QuorumCertificate,
+        SignerBitfield, ValidatorInfo, ValidatorSet, VotePower, generate_bls_keypair,
+        zero_bls_signature,
     };
 
     use super::*;
@@ -3644,6 +3645,7 @@ mod tests {
                     receipt_hash: GlobalReceiptHash::ZERO,
                     #[allow(clippy::default_trait_access)]
                     database_updates: Default::default(),
+                    owned_nodes: BoundedVec::new(),
                     application_events: vec![],
                     beacon_witness_events: Vec::new(),
                 }),

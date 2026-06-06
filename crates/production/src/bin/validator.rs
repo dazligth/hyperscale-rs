@@ -75,6 +75,7 @@ use hyperscale_storage_rocksdb::{
 use hyperscale_types::{
     Bls12381G1PrivateKey, Bls12381G1PublicKey, ShardId, TopologySnapshot, ValidatorId,
     ValidatorInfo, ValidatorSet, VotePower, bls_keypair_from_seed, generate_bls_keypair,
+    shard_prefix_path,
 };
 use igd_next::aio::tokio::search_gateway;
 use igd_next::{PortMappingProtocol, SearchOptions};
@@ -1175,15 +1176,20 @@ async fn async_main(cli: Cli, config: ValidatorConfig) -> Result<()> {
     let shard_depth = config.node.num_shards.trailing_zeros();
     let mut storages: HashMap<ShardId, Arc<RocksDbShardStorage>> = HashMap::new();
     for shard in &hosted_shards {
+        let shard_id = ShardId::leaf(shard_depth, *shard);
         let db_path = config
             .node
             .data_dir
             .join(format!("shard-{shard}"))
             .join("db");
-        let storage = RocksDbShardStorage::open_with_config(&db_path, &rocksdb_config)
-            .with_context(|| format!("Failed to open database at {}", db_path.display()))?;
+        let storage = RocksDbShardStorage::open_with_config(
+            &db_path,
+            &rocksdb_config,
+            shard_prefix_path(shard_id),
+        )
+        .with_context(|| format!("Failed to open database at {}", db_path.display()))?;
         info!(shard = shard, path = %db_path.display(), "Storage opened");
-        storages.insert(ShardId::leaf(shard_depth, *shard), Arc::new(storage));
+        storages.insert(shard_id, Arc::new(storage));
     }
 
     // Process-level beacon storage, shared across every hosted vnode's

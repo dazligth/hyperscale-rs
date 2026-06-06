@@ -8,15 +8,17 @@
 //! `state_history` to find the smallest write after V; its prior value
 //! is the state at V.
 
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+use hyperscale_jmt::NibblePath;
 use hyperscale_storage::lock_recover::{read_or_recover, write_or_recover};
 use hyperscale_storage::tree::put_at_version;
 use hyperscale_storage::{
     DatabaseUpdates, DbPartitionKey, DbSortKey, DbSubstateValue, GenesisCommit, PartitionEntry,
     SubstateDatabase, SubstateStore,
 };
-use hyperscale_types::{BlockHeight, StateRoot};
+use hyperscale_types::{BlockHeight, NodeId, StateRoot};
 
 use super::state::{ConsensusState, SharedState, apply_updates};
 
@@ -55,17 +57,24 @@ pub struct SimShardStorage {
 }
 
 impl Default for SimShardStorage {
+    /// Whole-keyspace (empty-prefix) store — the single-shard / test default.
     fn default() -> Self {
-        Self::new()
+        Self::new(NibblePath::empty())
     }
 }
 
 impl SimShardStorage {
-    /// Create a new empty simulated storage.
+    /// Create a new empty simulated storage rooted at `root_path` — the prefix
+    /// of the shard it serves (via [`hyperscale_types::shard_prefix_path`]), so
+    /// its `state_root` is the global tree's subtree at that prefix. Pass
+    /// [`NibblePath::empty`] (or use [`Self::default`]) for a single-shard /
+    /// whole-keyspace store.
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(root_path: NibblePath) -> Self {
+        let mut shared = SharedState::new();
+        shared.tree_store.set_root_path(root_path);
         Self {
-            state: Arc::new(RwLock::new(SharedState::new())),
+            state: Arc::new(RwLock::new(shared)),
             consensus: RwLock::new(ConsensusState::new()),
             jmt_history_length: u64::MAX,
         }
@@ -143,7 +152,12 @@ impl SimShardStorage {
     ///
     /// Panics if the internal `RwLock` is poisoned, or if the JMT has
     /// already been initialized.
-    pub fn finalize_genesis_jmt(&self, merged: &DatabaseUpdates) -> StateRoot {
+    #[allow(clippy::implicit_hasher)] // call sites pass std `HashMap`s
+    pub fn finalize_genesis_jmt(
+        &self,
+        merged: &DatabaseUpdates,
+        owner_map: &HashMap<NodeId, NodeId>,
+    ) -> StateRoot {
         let mut s = write_or_recover(&self.state);
 
         // Guard: finalize_genesis_jmt must only be called once, on an uninitialized JMT.
@@ -159,7 +173,8 @@ impl SimShardStorage {
             None,
             0,
             &[merged],
-            &std::collections::HashMap::new(),
+            &HashMap::new(),
+            owner_map,
         );
 
         for (key, node) in &collected.nodes {
@@ -177,9 +192,14 @@ impl SimShardStorage {
 }
 
 impl GenesisCommit for SimShardStorage {
-    fn install_genesis(&self, merged: &DatabaseUpdates) -> StateRoot {
-        Self::commit_substates_only(self, merged);
-        Self::finalize_genesis_jmt(self, merged)
+    fn install_genesis(
+        &self,
+        substates: &DatabaseUpdates,
+        jmt_updates: &DatabaseUpdates,
+        owner_map: &HashMap<NodeId, NodeId>,
+    ) -> StateRoot {
+        Self::commit_substates_only(self, substates);
+        Self::finalize_genesis_jmt(self, jmt_updates, owner_map)
     }
 }
 

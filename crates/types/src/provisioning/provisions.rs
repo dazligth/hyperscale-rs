@@ -4,7 +4,7 @@
 //! `Verified<Provisions>`; predicate at
 //! [`impl Verify<&ProvisionsContext<'_>>`](Verify::verify) below.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Debug, Formatter};
 use std::sync::OnceLock;
 
@@ -12,7 +12,7 @@ use hyperscale_jmt::{Blake3Hasher, MultiProof, Tree};
 use sbor::prelude::*;
 use thiserror::Error;
 
-use crate::state_key::{DB_NODE_KEY_LEN, jmt_leaf_key, jmt_value_hash};
+use crate::state_key::{DB_NODE_KEY_LEN, db_node_key_to_node_id, jmt_leaf_key, jmt_value_hash};
 use crate::{
     BlockHeight, BoundedVec, CertifiedBlockHeader, Hash, MAX_TXS_PER_BLOCK, MerkleInclusionProof,
     NodeId, ProvisionEntry, ProvisionHash, RETENTION_HORIZON, ShardId, SubstateEntry, TxHash,
@@ -217,6 +217,20 @@ impl Provisions {
         entries
     }
 
+    /// Merged `internal_node → owning_global_ancestor` map across every
+    /// transaction in the bundle.
+    ///
+    /// Used to owner-prefix each entry's JMT leaf key on the verify path so
+    /// the recomputed keys match the owner-prefixed keys the source shard
+    /// committed. Globals are absent (they key under themselves).
+    #[must_use]
+    pub fn ownership_map(&self) -> HashMap<NodeId, NodeId> {
+        self.transactions
+            .iter()
+            .flat_map(|tx| tx.owned_nodes.iter().copied())
+            .collect()
+    }
+
     /// Get the transaction hashes in these provisions.
     #[must_use]
     pub fn tx_hashes(&self) -> Vec<TxHash> {
@@ -301,12 +315,15 @@ impl Verify<&ProvisionsContext<'_>> for Provisions {
         let multi_proof =
             MultiProof::decode(proof_bytes).map_err(|_| ProvisionsVerifyError::MalformedProof)?;
 
+        let owner_map = self.ownership_map();
         let mut expected: Vec<([u8; 32], Option<[u8; 32]>)> = Vec::with_capacity(entries.len());
         for e in &entries {
             if e.storage_key.len() < DB_NODE_KEY_LEN {
                 return Err(ProvisionsVerifyError::MalformedStorageKey);
             }
-            let key = jmt_leaf_key(&e.storage_key);
+            let owner =
+                db_node_key_to_node_id(&e.storage_key).and_then(|n| owner_map.get(&n).copied());
+            let key = jmt_leaf_key(&e.storage_key, owner);
             let value_hash = e.value.as_ref().map(|v| jmt_value_hash(v));
             expected.push((key, value_hash));
         }
@@ -491,7 +508,7 @@ mod tests {
             let updates: BTreeMap<[u8; 32], Option<[u8; 32]>> = entries
                 .iter()
                 .map(|(k, v)| {
-                    let key = jmt_leaf_key(k);
+                    let key = jmt_leaf_key(k, None);
                     let val = jmt_value_hash(v);
                     (key, Some(val))
                 })
@@ -500,7 +517,8 @@ mod tests {
             let root_hash = result.root_hash;
             store.apply(&result);
             let root_key = NodeKey::root(1);
-            let jmt_keys: Vec<[u8; 32]> = entries.iter().map(|(k, _)| jmt_leaf_key(k)).collect();
+            let jmt_keys: Vec<[u8; 32]> =
+                entries.iter().map(|(k, _)| jmt_leaf_key(k, None)).collect();
             let proof = Jmt::prove(&store, &root_key, &jmt_keys).unwrap();
             let state_root = StateRoot::from_raw(Hash::from_hash_bytes(&root_hash));
             (state_root, MerkleInclusionProof::new(proof.encode()))

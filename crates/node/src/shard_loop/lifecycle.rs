@@ -14,10 +14,13 @@
 //!   and resume paths.
 
 use hyperscale_dispatch::Dispatch;
+use hyperscale_engine::sharding::{
+    filter_genesis_updates_for_shard, resolve_owned_nodes_from_updates,
+};
 use hyperscale_engine::{GenesisConfig, prepared_genesis};
 use hyperscale_network::Network;
 use hyperscale_storage::{GenesisCommit, ShardStorage};
-use hyperscale_types::{Block, ShardId, StateRoot};
+use hyperscale_types::{Block, NodeId, ShardId, StateRoot};
 
 use crate::host::NodeHost;
 
@@ -52,12 +55,44 @@ where
     /// Independent of network-handler registration — runners call
     /// [`Self::register_inbound_handlers`] once their genesis-or-resume
     /// decision is settled.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the JMT is already initialized (genesis must run on a fresh
+    /// store) or if a shard address can't be decoded to a `NodeId`.
     pub fn install_engine_genesis(&mut self, shard: ShardId, config: &GenesisConfig) -> StateRoot
     where
         S: GenesisCommit,
     {
-        let merged = prepared_genesis(self.process.dispatch_handles.executor.network(), config);
-        self.shard_io(shard).storage.install_genesis(&merged)
+        // A per-shard store holds only its own shard's accounts: prefix-rooting
+        // (each store roots its JMT at the shard's prefix) requires it, since a
+        // foreign-prefix key would be mis-bucketed beneath this shard's root.
+        // Drop xrd balances whose address routes to another shard.
+        let topology = self.process.topology_snapshot.load();
+        let mut config = config.clone();
+        config.xrd_balances.retain(|(address, _)| {
+            let radix_node_id = address.into_node_id();
+            let det_node_id = NodeId(
+                radix_node_id.0[..30]
+                    .try_into()
+                    .expect("NodeId is 30 bytes"),
+            );
+            topology.shard_for_node_id(&det_node_id) == shard
+        });
+        let merged = prepared_genesis(self.process.dispatch_handles.executor.network(), &config);
+        // Genesis writes the full initial state in one batch, so every owned
+        // node's `Own(_)` ref is present in `merged` — resolve ownership from
+        // it directly to owner-prefix vaults under their accounts.
+        let owner_map = resolve_owned_nodes_from_updates(&merged);
+        // The full bootstrap is replicated to every shard's substate store for
+        // read availability, but the prefix-rooted JMT must hold only this
+        // shard's subtree, so the committed state root is the global tree's
+        // node at the shard prefix.
+        let jmt_updates =
+            filter_genesis_updates_for_shard(&merged, &owner_map, shard, topology.shard_trie());
+        self.shard_io(shard)
+            .storage
+            .install_genesis(&merged, &jmt_updates, &owner_map)
     }
 
     /// Register inbound network handlers (requests, gossip, notifications).

@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
-use hyperscale_jmt::{Node as JmtNode, NodeKey as JmtNodeKey, TreeReader};
+use hyperscale_jmt::{NibblePath, Node as JmtNode, NodeKey as JmtNodeKey, TreeReader};
 use hyperscale_types::{
     BeaconWitnessCommit, BeaconWitnessLeafCount, BlockHash, BlockHeight, CertifiedBlock,
     CertifiedBlockHeader, ConsensusReceipt, ExecutionCertificate, FinalizedWave,
@@ -737,10 +737,13 @@ impl<S: SubstateStore + VersionedStore> SubstateStore for SubstateView<S> {
     fn generate_merkle_proofs(
         &self,
         storage_keys: &[Vec<u8>],
+        owner_map: &HashMap<NodeId, NodeId>,
         block_height: BlockHeight,
     ) -> Option<MerkleInclusionProof> {
         // Try base first — works for heights already persisted.
-        if let Some(proof) = (*self.base).generate_merkle_proofs(storage_keys, block_height) {
+        if let Some(proof) =
+            (*self.base).generate_merkle_proofs(storage_keys, owner_map, block_height)
+        {
             return Some(proof);
         }
         // Beyond persisted — caller should use `generate_merkle_proofs_overlay`
@@ -754,17 +757,22 @@ impl<S: SubstateStore + VersionedStore> SubstateStore for SubstateView<S> {
 /// heights.
 impl<S: SubstateStore + TreeReader + Sync> SubstateView<S> {
     /// Generate merkle proofs, falling back to the JMT overlay for
-    /// unpersisted block heights.
+    /// unpersisted block heights. `owner_map` owner-prefixes internal
+    /// nodes' leaf keys to match the committed tree.
     #[must_use]
+    #[allow(clippy::implicit_hasher)] // call sites pass std `HashMap`s
     pub fn generate_merkle_proofs_overlay(
         &self,
         storage_keys: &[Vec<u8>],
+        owner_map: &HashMap<NodeId, NodeId>,
         block_height: BlockHeight,
     ) -> Option<MerkleInclusionProof> {
-        if let Some(proof) = (*self.base).generate_merkle_proofs(storage_keys, block_height) {
+        if let Some(proof) =
+            (*self.base).generate_merkle_proofs(storage_keys, owner_map, block_height)
+        {
             return Some(proof);
         }
-        generate_proof(self, storage_keys, block_height)
+        generate_proof(self, storage_keys, owner_map, block_height)
     }
 }
 
@@ -777,12 +785,16 @@ impl<S: TreeReader + Send + Sync> TreeReader for SubstateView<S> {
     }
 
     fn get_root_key(&self, version: u64) -> Option<JmtNodeKey> {
-        let root_key = JmtNodeKey::root(version);
+        let root_key = JmtNodeKey::new(version, (*self.base).root_path());
         if self.jmt_nodes.contains_key(&root_key) {
             Some(root_key)
         } else {
             (*self.base).get_root_key(version)
         }
+    }
+
+    fn root_path(&self) -> NibblePath {
+        (*self.base).root_path()
     }
 }
 
@@ -834,8 +846,8 @@ mod tests {
     use std::sync::PoisonError;
 
     use hyperscale_types::{
-        CertifiedBlock, CertifiedBlockHeader, ExecutionCertificate, GlobalReceiptHash, Hash,
-        RoutableTransaction, TxHash, WaveCertificate, WaveId,
+        BoundedVec, CertifiedBlock, CertifiedBlockHeader, ExecutionCertificate, GlobalReceiptHash,
+        Hash, RoutableTransaction, TxHash, WaveCertificate, WaveId,
     };
     use indexmap::IndexMap;
     use radix_substate_store_interface::interface::{DatabaseUpdates, PartitionDatabaseUpdates};
@@ -919,6 +931,7 @@ mod tests {
         fn generate_merkle_proofs(
             &self,
             _storage_keys: &[Vec<u8>],
+            _owner_map: &HashMap<NodeId, NodeId>,
             _block_height: BlockHeight,
         ) -> Option<MerkleInclusionProof> {
             None
@@ -1026,6 +1039,7 @@ mod tests {
         Arc::new(ConsensusReceipt::Succeeded {
             receipt_hash: GlobalReceiptHash::ZERO,
             database_updates: updates,
+            owned_nodes: BoundedVec::new(),
             application_events: vec![],
             beacon_witness_events: Vec::new(),
         })

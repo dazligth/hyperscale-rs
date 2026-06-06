@@ -2,6 +2,8 @@
 //!
 //! This module defines the storage abstraction used by runners to persist Radix state.
 
+use std::collections::HashMap;
+
 use hyperscale_types::{BlockHeight, MerkleInclusionProof, NodeId, StateRoot};
 use radix_substate_store_interface::interface::{DbSortKey, SubstateDatabase};
 
@@ -78,10 +80,15 @@ pub trait SubstateStore: SubstateDatabase + Send + Sync + 'static {
     ) -> Option<Vec<(u8, DbSortKey, Vec<u8>)>>;
 
     /// Generate a batched merkle multiproof for the given storage keys.
-    /// Returns `None` if the requested version is unavailable (GC'd or not committed).
+    ///
+    /// `owner_map` owner-prefixes internal nodes' leaf keys so the proof
+    /// matches the owner-prefixed keys committed to the tree. Returns `None`
+    /// if the requested version is unavailable (GC'd or not committed).
+    #[allow(clippy::implicit_hasher)] // call sites pass std `HashMap`s
     fn generate_merkle_proofs(
         &self,
         storage_keys: &[Vec<u8>],
+        owner_map: &HashMap<NodeId, NodeId>,
         block_height: BlockHeight,
     ) -> Option<MerkleInclusionProof>;
 }

@@ -1,8 +1,9 @@
 //! `SubstateStore` implementation for `SimShardStorage`.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use hyperscale_jmt::{Node as JmtNode, NodeKey as JmtNodeKey, TreeReader};
+use hyperscale_jmt::{NibblePath, Node as JmtNode, NodeKey as JmtNodeKey, TreeReader};
 use hyperscale_storage::lock_recover::read_or_recover;
 use hyperscale_storage::tree::proofs::generate_proof;
 use hyperscale_storage::{DbSortKey, SubstateStore, VersionedStore};
@@ -54,10 +55,11 @@ impl SubstateStore for SimShardStorage {
     fn generate_merkle_proofs(
         &self,
         storage_keys: &[Vec<u8>],
+        owner_map: &HashMap<NodeId, NodeId>,
         block_height: BlockHeight,
     ) -> Option<MerkleInclusionProof> {
         let s = read_or_recover(&self.state);
-        generate_proof(&s.tree_store, storage_keys, block_height)
+        generate_proof(&s.tree_store, storage_keys, owner_map, block_height)
     }
 }
 
@@ -97,5 +99,9 @@ impl TreeReader for SimShardStorage {
         read_or_recover(&self.state)
             .tree_store
             .get_root_key(version)
+    }
+
+    fn root_path(&self) -> NibblePath {
+        read_or_recover(&self.state).tree_store.root_path()
     }
 }

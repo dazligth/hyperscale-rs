@@ -293,6 +293,7 @@ pub fn make_test_receipt(seed: u8) -> StoredReceipt {
     let consensus = ConsensusReceipt::Succeeded {
         receipt_hash: GlobalReceiptHash::ZERO,
         database_updates: DatabaseUpdates::default(),
+        owned_nodes: BoundedVec::new(),
         application_events: vec![ApplicationEvent {
             type_id: test_event_type_identifier(seed),
             data: EventData(vec![seed, seed + 1]),

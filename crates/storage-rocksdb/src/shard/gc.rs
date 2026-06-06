@@ -230,6 +230,7 @@ impl RocksDbShardStorage {
 
 #[cfg(test)]
 mod tests {
+    use hyperscale_jmt::NibblePath;
     use hyperscale_storage::{
         DatabaseUpdate, DatabaseUpdates, DbPartitionKey, DbSortKey, NodeDatabaseUpdates,
         PartitionDatabaseUpdates, SubstateDatabase,
@@ -250,7 +251,9 @@ mod tests {
             jmt_history_length: 2, // tiny retention for test
             ..Default::default()
         };
-        let storage = RocksDbShardStorage::open_with_config(temp_dir.path(), &config).unwrap();
+        let storage =
+            RocksDbShardStorage::open_with_config(temp_dir.path(), &config, NibblePath::empty())
+                .unwrap();
 
         let mk_key = |seed: u8, sort: u8| {
             (

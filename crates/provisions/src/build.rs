@@ -9,6 +9,7 @@
 //!
 //! [`fetch_and_broadcast_provision`]: crate::action_handlers::fetch_and_broadcast_provision
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use hyperscale_core::ProvisionsRequest;
@@ -53,6 +54,9 @@ where
 {
     let mut staged: Vec<StagedEntry> = Vec::with_capacity(requests.len());
     let mut all_storage_keys: Vec<Vec<u8>> = Vec::new();
+    // Merged ownership across all txs in the bundle — owner-prefixes the proof
+    // keys to match the source shard's owner-prefixed committed leaves.
+    let mut all_ownership: HashMap<NodeId, NodeId> = HashMap::new();
 
     for req in requests {
         let Some(target_nodes) = req
@@ -94,6 +98,7 @@ where
         for e in &entries {
             all_storage_keys.push(e.storage_key.0.clone());
         }
+        all_ownership.extend(ownership.iter().map(|(k, v)| (*k, *v)));
         let owned_nodes: Vec<(NodeId, NodeId)> = ownership.into_iter().collect();
         staged.push((req.tx_hash, entries, target_nodes, owned_nodes));
     }
@@ -101,7 +106,7 @@ where
     let proof = if all_storage_keys.is_empty() {
         MerkleInclusionProof::new(Vec::new())
     } else {
-        view.generate_merkle_proofs_overlay(&all_storage_keys, source_block_height)?
+        view.generate_merkle_proofs_overlay(&all_storage_keys, &all_ownership, source_block_height)?
     };
 
     let transactions = staged

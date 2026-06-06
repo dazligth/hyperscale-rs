@@ -1,5 +1,6 @@
 //! `ShardChainWriter` implementation for `SimShardStorage`.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use hyperscale_storage::lock_recover::{read_or_recover, write_or_recover};
@@ -7,7 +8,8 @@ use hyperscale_storage::tree::{
     OverlayTreeReader, jmt_parent_height, noop_jmt_snapshot, put_at_version,
 };
 use hyperscale_storage::{
-    BaseReadCache, DatabaseUpdates, JmtSnapshot, ShardChainWriter, merge_updates_from_receipts,
+    BaseReadCache, DatabaseUpdates, JmtSnapshot, ShardChainWriter, merge_owned_nodes,
+    merge_updates_from_receipts,
 };
 use hyperscale_types::{
     BeaconWitnessCommit, Block, BlockHeight, CertifiedBlock, FinalizedWave, PreparedCommit,
@@ -67,6 +69,7 @@ impl ShardChainWriter for SimShardStorage {
             .iter()
             .filter_map(|r| r.consensus.database_updates())
             .collect();
+        let owner_map = merge_owned_nodes(&receipts);
 
         let (result_root, collected) = if pending_snapshots.is_empty() {
             put_at_version(
@@ -74,7 +77,8 @@ impl ShardChainWriter for SimShardStorage {
                 parent_version,
                 block_height.inner(),
                 &per_receipt_updates,
-                &std::collections::HashMap::new(),
+                &HashMap::new(),
+                &owner_map,
             )
         } else {
             let overlay = OverlayTreeReader::new(&s.tree_store, pending_snapshots);
@@ -83,7 +87,8 @@ impl ShardChainWriter for SimShardStorage {
                 parent_version,
                 block_height.inner(),
                 &per_receipt_updates,
-                &std::collections::HashMap::new(),
+                &HashMap::new(),
+                &owner_map,
             )
         };
 
@@ -253,12 +258,14 @@ impl SimShardStorage {
         let parent_version =
             jmt_parent_height(s.current_block_height, s.current_root_hash).map(BlockHeight::inner);
 
+        let owner_map = merge_owned_nodes(receipts);
         let (new_root, collected) = put_at_version(
             &s.tree_store,
             parent_version,
             block_height.inner(),
             &[merged_updates],
-            &std::collections::HashMap::new(),
+            &HashMap::new(),
+            &owner_map,
         );
 
         for (key, node) in &collected.nodes {

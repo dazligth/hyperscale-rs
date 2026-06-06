@@ -1,6 +1,8 @@
 //! Utilities for merging, filtering, and reconstructing `DatabaseUpdates`.
 
-use hyperscale_types::StoredReceipt;
+use std::collections::HashMap;
+
+use hyperscale_types::{NodeId, StoredReceipt};
 use indexmap::map::Entry;
 use radix_common::prelude::DatabaseUpdate;
 use radix_substate_store_interface::interface::{
@@ -21,6 +23,21 @@ pub fn merge_updates_from_receipts(receipts: &[StoredReceipt]) -> DatabaseUpdate
         }
     }
     merged
+}
+
+/// Merge every receipt's `owned_nodes` into one `internal_node → owner` map
+/// for the block's JMT build.
+///
+/// State locking guarantees no two receipts in a block resolve the same
+/// internal node to different owners, so a flat collect is unambiguous.
+/// Failed receipts contribute nothing.
+pub fn merge_owned_nodes<'a>(
+    receipts: impl IntoIterator<Item = &'a StoredReceipt>,
+) -> HashMap<NodeId, NodeId> {
+    receipts
+        .into_iter()
+        .flat_map(|r| r.consensus.owned_nodes().iter().copied())
+        .collect()
 }
 
 /// Merge a slice of per-certificate `DatabaseUpdates` into a single combined update.

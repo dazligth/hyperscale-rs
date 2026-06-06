@@ -895,7 +895,7 @@ impl WaveState {
 mod tests {
     use hyperscale_types::test_utils::{test_node, test_transaction_with_nodes};
     use hyperscale_types::{
-        Bls12381G2Signature, ConsensusReceipt, GlobalReceiptHash, Hash, SignerBitfield,
+        Bls12381G2Signature, BoundedVec, ConsensusReceipt, GlobalReceiptHash, Hash, SignerBitfield,
         SubstateEntry,
     };
 
@@ -978,6 +978,7 @@ mod tests {
                     receipt_hash: GlobalReceiptHash::ZERO,
                     #[allow(clippy::default_trait_access)]
                     database_updates: Default::default(),
+                    owned_nodes: BoundedVec::new(),
                     application_events: vec![],
                     beacon_witness_events: Vec::new(),
                 }

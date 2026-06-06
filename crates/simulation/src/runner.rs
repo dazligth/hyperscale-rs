@@ -32,7 +32,7 @@ use hyperscale_types::{
     CertifiedBeaconBlock, CertifiedBlock, GenesisPool, GenesisValidator, LocalTimestamp,
     MIN_STAKE_FLOOR, NodeId, Randomness, ShardId, Stake, StakePoolId, TopologySnapshot,
     TransactionStatus, TxHash, ValidatorId, ValidatorInfo, ValidatorSet, Verified, VotePower,
-    bls_keypair_from_seed, genesis_config_hash, uniform_shard_for_node,
+    bls_keypair_from_seed, genesis_config_hash, shard_prefix_path, uniform_shard_for_node,
 };
 use radix_common::math::Decimal;
 use radix_common::network::NetworkDefinition;
@@ -367,7 +367,7 @@ impl SimulationRunner {
             // One `SimShardStorage` per hosted shard on this host.
             let storages: HashMap<ShardId, SimShardStorage> = by_shard
                 .keys()
-                .map(|s| (*s, SimShardStorage::new()))
+                .map(|s| (*s, SimShardStorage::new(shard_prefix_path(*s))))
                 .collect();
             // Single receiver per host: every hosted shard's sender is a
             // clone of the same `event_tx`, and the harness drains all

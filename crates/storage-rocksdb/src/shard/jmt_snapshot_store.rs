@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use hyperscale_jmt::{Node as JmtNode, NodeKey as JmtNodeKey, TreeReader};
+use hyperscale_jmt::{NibblePath, Node as JmtNode, NodeKey as JmtNodeKey, TreeReader};
 use hyperscale_storage::{DbPartitionKey, DbSortKey, SubstateLookup};
 use hyperscale_types::StateRoot;
 use rocksdb::{ColumnFamily, DB, Snapshot};
@@ -32,15 +32,20 @@ pub struct SnapshotTreeStore<'a> {
     /// uncached overhead grows quickly.
     jmt_nodes_cf: &'a ColumnFamily,
     state_cf: &'a ColumnFamily,
+    /// Prefix the underlying shard store's JMT is rooted at — mirrors
+    /// `RocksDbShardStorage::root_path` so root lookups resolve to the same
+    /// subtree node.
+    root_path: NibblePath,
 }
 
 impl<'a> SnapshotTreeStore<'a> {
-    pub fn new(db: &'a DB) -> Self {
+    pub fn new(db: &'a DB, root_path: NibblePath) -> Self {
         let cf = CfHandles::resolve(db);
         Self {
             snapshot: db.snapshot(),
             jmt_nodes_cf: JmtNodesCf::handle(&cf),
             state_cf: StateCf::handle(&cf),
+            root_path,
         }
     }
 
@@ -74,13 +79,17 @@ impl TreeReader for SnapshotTreeStore<'_> {
     }
 
     fn get_root_key(&self, version: u64) -> Option<JmtNodeKey> {
-        let root = JmtNodeKey::root(version);
+        let root = JmtNodeKey::new(version, self.root_path.clone());
         let stored_key = StoredNodeKey::from_jmt(&root);
         if typed_cf::get::<JmtNodesCf>(&self.snapshot, self.jmt_nodes_cf, &stored_key).is_some() {
             Some(root)
         } else {
             None
         }
+    }
+
+    fn root_path(&self) -> NibblePath {
+        self.root_path.clone()
     }
 }
 
