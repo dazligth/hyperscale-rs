@@ -16,7 +16,7 @@ use thiserror::Error;
 
 use crate::{
     BoundedBytes, BoundedVec, Hash, MAX_DECLARED_NODES_PER_TX, MAX_TX_BYTES_LEN, NodeId,
-    TimestampRange, TxHash, Verified, Verify, shard_for_node,
+    TimestampRange, TxHash, Verified, Verify, uniform_shard_for_node,
 };
 
 /// A transaction with routing information.
@@ -282,17 +282,20 @@ impl RoutableTransaction {
         })
     }
 
-    /// Check if this transaction is cross-shard for the given number of shards.
+    /// Check if this transaction is cross-shard under a uniform `num_shards`-way
+    /// partition. For the live partition use
+    /// [`TopologySnapshot::is_cross_shard_transaction`], which routes against the
+    /// active [`ShardTrie`]; this by-count form is for genesis and offline tooling.
     pub fn is_cross_shard(&self, num_shards: u64) -> bool {
         if self.declared_writes.is_empty() {
             return false;
         }
 
-        let first_shard = shard_for_node(&self.declared_writes[0], num_shards);
+        let first_shard = uniform_shard_for_node(&self.declared_writes[0], num_shards);
         self.declared_writes
             .iter()
             .skip(1)
-            .any(|node| shard_for_node(node, num_shards) != first_shard)
+            .any(|node| uniform_shard_for_node(node, num_shards) != first_shard)
     }
 
     /// All `NodeIds` this transaction declares access to.

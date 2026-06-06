@@ -8,7 +8,7 @@ use hyperscale_provisions::build_provisions;
 use hyperscale_storage::{PendingChain, ShardStorage};
 use hyperscale_types::network::request::GetProvisionsRequest;
 use hyperscale_types::network::response::GetProvisionResponse;
-use hyperscale_types::{NodeId, ShardId, shard_for_node};
+use hyperscale_types::{NodeId, ShardId, ShardTrie};
 use tracing::warn;
 
 /// Serve an inbound provision request from a target shard needing our state.
@@ -24,12 +24,14 @@ use tracing::warn;
 /// `filter_updates_for_shard` downstream, breaking `local_receipt_root`
 /// agreement.
 ///
-/// Takes `local_shard` and `num_shards` instead of `&TopologyCoordinator`
-/// to avoid topology dependency in the I/O layer.
+/// Takes `local_shard` and the active `ShardTrie` instead of
+/// `&TopologyCoordinator` to avoid a topology dependency in the I/O layer.
+/// The caller loads the trie at serve time so routing always resolves
+/// against the current partition.
 pub fn serve_provision_request<S: ShardStorage>(
     pending_chain: &Arc<PendingChain<S>>,
     local_shard: ShardId,
-    num_shards: u64,
+    shard_trie: &ShardTrie,
     req: &GetProvisionsRequest,
 ) -> GetProvisionResponse {
     let Some(certified) = pending_chain.certified_block(req.block_height) else {
@@ -47,7 +49,7 @@ pub fn serve_provision_request<S: ShardStorage>(
             .declared_reads()
             .iter()
             .chain(tx.declared_writes().iter())
-            .filter(|&n| shard_for_node(n, num_shards) == local_shard)
+            .filter(|&n| shard_trie.shard_for(n) == local_shard)
             .copied()
             .collect();
         if local_nodes.is_empty() {
@@ -57,7 +59,7 @@ pub fn serve_provision_request<S: ShardStorage>(
             .declared_reads()
             .iter()
             .chain(tx.declared_writes().iter())
-            .filter(|&n| shard_for_node(n, num_shards) == req.target_shard)
+            .filter(|&n| shard_trie.shard_for(n) == req.target_shard)
             .copied()
             .collect();
         if target_nodes.is_empty() {

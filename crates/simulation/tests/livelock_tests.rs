@@ -16,7 +16,7 @@ use hyperscale_types::test_utils::test_validity_range;
 use hyperscale_types::{
     Ed25519PrivateKey, NodeId, RoutableTransaction, ShardId, TransactionDecision,
     TransactionStatus, TxHash, ed25519_keypair_from_seed, routable_from_notarized_v1,
-    shard_for_node, sign_and_notarize,
+    sign_and_notarize, uniform_shard_for_node,
 };
 use radix_common::constants::XRD;
 use radix_common::math::Decimal;
@@ -69,7 +69,7 @@ fn accounts_on_different_shards(
         let acc = account(&kp);
         let node_id = acc.into_node_id();
         let hs_node = NodeId(node_id.0[..30].try_into().unwrap());
-        let shard = shard_for_node(&hs_node, num_shards);
+        let shard = uniform_shard_for_node(&hs_node, num_shards);
 
         if shard == ShardId::leaf(1, 0) && shard0.is_none() {
             shard0 = Some((kp, acc));

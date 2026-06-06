@@ -52,8 +52,8 @@ use hyperscale_types::{
     BeaconChainConfig, BeaconGenesisConfig, BeaconState, Block, BlockHeight, Bls12381G1PrivateKey,
     CertifiedBeaconBlock, CertifiedBlock, GenesisPool, GenesisValidator, InFlightCount,
     LocalTimestamp, MAX_TX_IN_FLIGHT, MIN_STAKE_FLOOR, NodeId, Randomness, RoutableTransaction,
-    ShardId, Stake, StakePoolId, TopologySnapshot, TransactionStatus, TxHash, ValidatorId,
-    Verified, genesis_config_hash, shard_for_node,
+    ShardId, ShardTrie, Stake, StakePoolId, TopologySnapshot, TransactionStatus, TxHash,
+    ValidatorId, Verified, genesis_config_hash,
 };
 use libp2p::identity::Keypair;
 use quick_cache::sync::Cache as QuickCache;
@@ -828,7 +828,6 @@ impl ProductionRunner {
         // shards' state into the wrong store. Single-shard hosts (the
         // historical default) end up running an identity filter.
         let shared_genesis_config = self.genesis_config.take();
-        let num_shards = self.topology_snapshot.load().num_shards();
         for shard in local_shards {
             let height = host.shard_io(shard).storage.committed_height();
             if height > BlockHeight::GENESIS {
@@ -843,7 +842,7 @@ impl ProductionRunner {
             let genesis_config = shared_genesis_config
                 .clone()
                 .map_or_else(GenesisConfig::production, |cfg| {
-                    filter_genesis_for_shard(cfg, shard, num_shards)
+                    filter_genesis_for_shard(cfg, shard, topology.load().shard_trie())
                 });
             info!(
                 shard = ?shard,
@@ -1243,24 +1242,24 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(1);
 fn filter_genesis_for_shard(
     mut config: GenesisConfig,
     shard: ShardId,
-    num_shards: u64,
+    shard_trie: &ShardTrie,
 ) -> GenesisConfig {
     config
         .xrd_balances
-        .retain(|(address, _)| shard_for_address(address, num_shards) == shard);
+        .retain(|(address, _)| shard_for_address(address, shard_trie) == shard);
     config
 }
 
-/// Compute the shard a [`ComponentAddress`] belongs to. Mirrors the helper
-/// the spammer uses for the same purpose (`crates/spammer/src/accounts.rs`).
-fn shard_for_address(address: &ComponentAddress, num_shards: u64) -> ShardId {
+/// Compute the shard a [`ComponentAddress`] belongs to, by longest-prefix
+/// match against the active partition.
+fn shard_for_address(address: &ComponentAddress, shard_trie: &ShardTrie) -> ShardId {
     let radix_node_id = address.into_node_id();
     let det_node_id = NodeId(
         radix_node_id.0[..30]
             .try_into()
             .expect("NodeId is 30 bytes"),
     );
-    shard_for_node(&det_node_id, num_shards)
+    shard_trie.shard_for(&det_node_id)
 }
 
 /// Mint the `host`'s monotonic local clock as a `LocalTimestamp` (ms since

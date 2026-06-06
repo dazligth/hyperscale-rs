@@ -18,7 +18,8 @@ use hyperscale_simulation::SimulationRunner;
 use hyperscale_types::test_utils::test_validity_range;
 use hyperscale_types::{
     BlockHeight, Ed25519PrivateKey, NodeId, RoutableTransaction, ShardId, TxHash,
-    ed25519_keypair_from_seed, routable_from_notarized_v1, shard_for_node, sign_and_notarize,
+    ed25519_keypair_from_seed, routable_from_notarized_v1, sign_and_notarize,
+    uniform_shard_for_node,
 };
 use radix_common::constants::XRD;
 use radix_common::crypto::Ed25519PublicKey;
@@ -78,7 +79,7 @@ fn find_accounts_on_each_shard(
         let acc = account_from_keypair(&kp);
         let radix_node_id = acc.into_node_id();
         let hs_node_id = NodeId(radix_node_id.0[..30].try_into().unwrap());
-        let shard = shard_for_node(&hs_node_id, num_shards);
+        let shard = uniform_shard_for_node(&hs_node_id, num_shards);
         if shard == ShardId::leaf(1, 0) && shard0.is_none() {
             shard0 = Some((kp, acc));
         } else if shard == ShardId::leaf(1, 1) && shard1.is_none() {
@@ -264,7 +265,7 @@ fn run_cross_shard_fault_scenario_with_seed<F>(
             .declared_reads()
             .iter()
             .chain(tx.declared_writes().iter())
-            .map(|nid| shard_for_node(nid, num_shards))
+            .map(|nid| uniform_shard_for_node(nid, num_shards))
             .collect();
         assert!(
             touched_shards.len() >= 2,

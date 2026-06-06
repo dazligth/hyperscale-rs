@@ -36,28 +36,18 @@ pub fn node_id_hash_u64(node_id: &NodeId) -> u64 {
 ///
 /// The shard is the leaf at depth `log2(num_shards)` whose path is the top
 /// `depth` bits of `blake3(node_id)` (most-significant first) — a prefix of the
-/// node's JMT leaf key, so the shard owns a contiguous state subtree. For a
-/// non-uniform partition, route through [`ShardTrie::shard_for`] instead.
+/// node's JMT leaf key, so the shard owns a contiguous state subtree.
+///
+/// This assumes a uniform power-of-two partition and exists only for genesis
+/// and offline tooling that constructs such a partition by count. Live routing
+/// must resolve against the active partition via [`TopologySnapshot::shard_for_node_id`]
+/// or [`ShardTrie::shard_for`], which handle non-uniform tries.
 ///
 /// # Panics
 /// Panics if `num_shards` is not a power of two.
 #[must_use]
-pub fn shard_for_node(node_id: &NodeId, num_shards: u64) -> ShardId {
-    assert!(
-        num_shards.is_power_of_two(),
-        "num_shards must be a power of two, got {num_shards}"
-    );
-    let depth = num_shards.trailing_zeros();
-    if depth == 0 {
-        return ShardId::ROOT;
-    }
-    let hash = blake3_hash(&node_id.0);
-    let bits = u64::from_be_bytes(
-        hash.as_bytes()[..8]
-            .try_into()
-            .expect("blake3 output is 32 bytes"),
-    );
-    ShardId::leaf(depth, bits >> (64 - depth))
+pub fn uniform_shard_for_node(node_id: &NodeId, num_shards: u64) -> ShardId {
+    ShardTrie::uniform_from_count(num_shards).shard_for(node_id)
 }
 
 /// Per-validator info (voting power + public key).
@@ -383,7 +373,8 @@ impl TopologySnapshot {
 
     // ── Node / transaction routing ───────────────────────────────────────
 
-    /// Determine which shard a `NodeId` belongs to (hash-modulo).
+    /// Determine which shard a `NodeId` belongs to, by longest-prefix match
+    /// against the active [`ShardTrie`].
     #[must_use]
     pub fn shard_for_node_id(&self, node_id: &NodeId) -> ShardId {
         self.shard_trie.shard_for(node_id)

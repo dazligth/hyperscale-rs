@@ -189,8 +189,8 @@ fn validate_config(config: &BeaconGenesisConfig) -> BTreeMap<ValidatorId, ShardI
 
     validate_beacon_committee(config, &validator_ids);
 
-    // Shard topology is non-degenerate: a zero shard count divides by
-    // zero in `shard_for_node` tx routing, and a zero shard size leaves
+    // Shard topology is non-degenerate: `ShardTrie::uniform_from_count`
+    // requires a positive shard count, and a zero shard size leaves
     // no room to place a validator on any shard.
     assert!(
         config.chain_config.num_shards > 0,
@@ -627,8 +627,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "num_shards is zero")]
     fn rejects_zero_shard_count() {
-        // `shard_for_node` routes by `hash % num_shards`; a zero count
-        // divides by zero the moment topology is derived.
+        // The genesis `ShardTrie` is built from `num_shards`; a zero count
+        // has no valid partition and is rejected when topology is derived.
         let mut cfg = sample_config(4, 4, 4);
         cfg.chain_config.num_shards = 0;
         let _ = build_genesis_beacon_state(&cfg);

@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use hyperscale_types::{
     ApplicationEvent, BeaconWitnessRoot, ConsensusReceipt, EventData, EventRoot, ExecutionMetadata,
     FeeSummary, GlobalReceipt, GlobalReceiptHash, Hash, LogLevel, NodeId, RoutableTransaction,
-    ShardId, TxHash, compute_merkle_root,
+    ShardId, ShardTrie, TxHash, compute_merkle_root,
 };
 use radix_engine::transaction::{
     CommitResult, TransactionOutcome, TransactionReceipt, TransactionResult,
@@ -205,7 +205,7 @@ pub fn project_to_shard(
     cached: &CachedVmOutput,
     tx_hash: TxHash,
     local_shard: ShardId,
-    num_shards: u64,
+    shard_trie: &ShardTrie,
     ownership: &HashMap<NodeId, NodeId>,
 ) -> ExecutedTx {
     match &cached.body {
@@ -221,7 +221,7 @@ pub fn project_to_shard(
             let mut database_updates = filter_updates_for_shard(
                 raw_updates,
                 local_shard,
-                num_shards,
+                shard_trie,
                 declared_set,
                 ownership,
             );
@@ -251,10 +251,10 @@ pub fn build_executed_tx(
     receipt: &TransactionReceipt,
     ownership: &HashMap<NodeId, NodeId>,
     local_shard: ShardId,
-    num_shards: u64,
+    shard_trie: &ShardTrie,
 ) -> ExecutedTx {
     let cached = compute_vm_output(tx, receipt, ownership);
-    project_to_shard(&cached, tx.hash(), local_shard, num_shards, ownership)
+    project_to_shard(&cached, tx.hash(), local_shard, shard_trie, ownership)
 }
 
 /// Build `ExecutionMetadata` from a Radix Engine receipt.

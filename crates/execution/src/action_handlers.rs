@@ -24,8 +24,8 @@ use hyperscale_types::network::notification::{
 };
 use hyperscale_types::{
     ExecutionCertificate, ExecutionCertificateContext, ExecutionVote, FinalizedWaveContext, NodeId,
-    RoutableTransaction, ShardId, StoredReceipt, Verifiable, Verified, exec_cert_batch_message,
-    exec_vote_batch_message, shard_for_node,
+    RoutableTransaction, ShardId, ShardTrie, StoredReceipt, Verifiable, Verified,
+    exec_cert_batch_message, exec_vote_batch_message,
 };
 
 // ============================================================================
@@ -34,19 +34,19 @@ use hyperscale_types::{
 
 /// Handle the execution-owned delegated [`Action`] variants.
 ///
-/// Shards this transaction reads or writes, routed via `shard_for_node`.
+/// Shards this transaction reads or writes, routed via the active `ShardTrie`.
 ///
 /// Drives the execution cache's per-entry pending-shards set: the cache
 /// narrows this to the host's hosted shards and decrements per-shard as
 /// finalised waves arrive.
-fn participating_shards(
-    tx: &RoutableTransaction,
-    num_shards: u64,
-) -> impl Iterator<Item = ShardId> + '_ {
+fn participating_shards<'a>(
+    tx: &'a RoutableTransaction,
+    shard_trie: &'a ShardTrie,
+) -> impl Iterator<Item = ShardId> + 'a {
     tx.declared_reads()
         .iter()
         .chain(tx.declared_writes().iter())
-        .map(move |n| shard_for_node(n, num_shards))
+        .map(move |n| shard_trie.shard_for(n))
 }
 
 /// Plan derived for each position in a batch by classifying its
@@ -73,14 +73,14 @@ fn batch_compute_cached(
     par: Parallelism,
     cache: &ProcessExecutionCache,
     txs: &[Arc<Verified<RoutableTransaction>>],
-    num_shards: u64,
+    shard_trie: &ShardTrie,
     compute: impl Fn(usize) -> CachedVmOutput + Send + Sync,
 ) -> Vec<Arc<CachedVmOutput>> {
     let plans: Vec<(usize, Plan)> = txs
         .iter()
         .enumerate()
         .map(
-            |(i, tx)| match cache.try_acquire(tx.hash(), participating_shards(tx, num_shards)) {
+            |(i, tx)| match cache.try_acquire(tx.hash(), participating_shards(tx, shard_trie)) {
                 SlotStatus::Completed(v) => (i, Plan::Done(v)),
                 SlotStatus::Claimed(slot) => (i, Plan::Claimed(slot)),
                 SlotStatus::Pending(slot) => (i, Plan::Pending(slot)),
@@ -181,14 +181,14 @@ where
         } => {
             let start = std::time::Instant::now();
             let local_shard = ctx.shard;
-            let num_shards = ctx.topology_snapshot.num_shards();
+            let shard_trie = ctx.topology_snapshot.shard_trie();
             let view = ctx.pending_chain.view_at(block_hash, block_height);
             let view_snap = <SubstateView<_> as SubstateStore>::snapshot(&*view);
             let cached = batch_compute_cached(
                 ctx.par,
                 ctx.execution_cache.as_ref(),
                 transactions.as_slice(),
-                num_shards,
+                shard_trie,
                 |i| {
                     ctx.executor
                         .compute_vm_output_single_shard(&view_snap, &transactions[i])
@@ -210,7 +210,7 @@ where
                         .collect();
                     let ownership = resolve_owned_nodes(&view_snap, &declared);
                     let executed =
-                        project_to_shard(&cached, tx.hash(), local_shard, num_shards, &ownership);
+                        project_to_shard(&cached, tx.hash(), local_shard, shard_trie, &ownership);
                     (executed.outcome(), StoredReceipt::from(executed))
                 })
                 .unzip();
@@ -229,7 +229,7 @@ where
         } => {
             let start = std::time::Instant::now();
             let local_shard = ctx.shard;
-            let num_shards = ctx.topology_snapshot.num_shards();
+            let shard_trie = ctx.topology_snapshot.shard_trie();
             let view = ctx.pending_chain.view_at(block_hash, block_height);
             let view_snap = <SubstateView<_> as SubstateStore>::snapshot(&*view);
             let txs: Vec<Arc<Verified<RoutableTransaction>>> = requests
@@ -261,7 +261,7 @@ where
                         &declared,
                         &req.ownership,
                         local_shard,
-                        num_shards,
+                        shard_trie,
                     )
                 })
                 .collect();
@@ -270,7 +270,7 @@ where
                 ctx.par,
                 ctx.execution_cache.as_ref(),
                 &txs,
-                num_shards,
+                shard_trie,
                 |i| {
                     let req = &requests[i];
                     ownerships[i].as_ref().map_or_else(
@@ -295,7 +295,7 @@ where
                     let tx_hash = req.transaction.hash();
                     let ownership = ownership.as_ref().unwrap_or(&empty_ownership);
                     let executed =
-                        project_to_shard(&cached, tx_hash, local_shard, num_shards, ownership);
+                        project_to_shard(&cached, tx_hash, local_shard, shard_trie, ownership);
                     (executed.outcome(), StoredReceipt::from(executed))
                 })
                 .unzip();

@@ -19,7 +19,7 @@ use hyperscale_spammer::{
 };
 use hyperscale_types::{
     RoutableTransaction, ShardId, TransactionDecision, TransactionStatus, TxHash,
-    WeightedTimestamp, shard_for_node,
+    WeightedTimestamp, uniform_shard_for_node,
 };
 use radix_common::math::Decimal;
 use radix_common::network::NetworkDefinition;
@@ -447,7 +447,7 @@ impl Simulator {
     fn get_target_shard(&self, tx: &RoutableTransaction) -> ShardId {
         tx.declared_writes().first().map_or_else(
             || ShardId::leaf(self.config.num_shards.trailing_zeros(), 0),
-            |node_id| shard_for_node(node_id, u64::from(self.config.num_shards)),
+            |node_id| uniform_shard_for_node(node_id, u64::from(self.config.num_shards)),
         )
     }
 

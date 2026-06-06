@@ -282,7 +282,7 @@ impl WorkloadGenerator for TransferWorkload {
 
 #[cfg(test)]
 mod tests {
-    use hyperscale_types::shard_for_node;
+    use hyperscale_types::uniform_shard_for_node;
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
 
@@ -339,7 +339,7 @@ mod tests {
 
             // All writes should be on the target shard
             for write in tx.declared_writes().iter() {
-                let write_shard = shard_for_node(write, num_shards);
+                let write_shard = uniform_shard_for_node(write, num_shards);
                 assert_eq!(
                     write_shard, target_shard,
                     "Same-shard transaction should only write to target shard"
@@ -373,7 +373,7 @@ mod tests {
             let shards_written: std::collections::HashSet<_> = tx
                 .declared_writes()
                 .iter()
-                .map(|w| shard_for_node(w, num_shards))
+                .map(|w| uniform_shard_for_node(w, num_shards))
                 .collect();
             assert!(
                 shards_written.contains(&target_shard),
@@ -402,7 +402,7 @@ mod tests {
                 .declared_writes()
                 .iter()
                 .chain(tx.declared_reads().iter())
-                .map(|n| shard_for_node(n, num_shards))
+                .map(|n| uniform_shard_for_node(n, num_shards))
                 .collect();
 
             assert!(

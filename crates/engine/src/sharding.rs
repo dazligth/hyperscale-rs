@@ -72,7 +72,7 @@ use hyperscale_storage::{
     DatabaseUpdates, DbPartitionKey, PartitionDatabaseUpdates, SubstateDatabase, SubstateStore,
 };
 pub use hyperscale_types::state_key::db_node_key_to_node_id;
-use hyperscale_types::{BlockHeight, NodeId, ShardId, WritesRoot, shard_for_node};
+use hyperscale_types::{BlockHeight, NodeId, ShardId, ShardTrie, WritesRoot};
 use radix_common::prelude::basic_encode;
 use radix_common::types::NodeId as RadixNodeId;
 
@@ -180,17 +180,17 @@ pub fn build_cross_shard_ownership<S: SubstateDatabase>(
     declared: &[NodeId],
     provisions_ownership: &HashMap<NodeId, NodeId>,
     local_shard: ShardId,
-    num_shards: u64,
+    shard_trie: &ShardTrie,
 ) -> Result<HashMap<NodeId, NodeId>, Vec<NodeId>> {
     let mut merged: HashMap<NodeId, NodeId> = HashMap::new();
     for (vault, owner) in provisions_ownership {
-        if shard_for_node(owner, num_shards) != local_shard {
+        if shard_trie.shard_for(owner) != local_shard {
             merged.insert(*vault, *owner);
         }
     }
     let local_declared: Vec<NodeId> = declared
         .iter()
-        .filter(|n| shard_for_node(n, num_shards) == local_shard)
+        .filter(|n| shard_trie.shard_for(n) == local_shard)
         .copied()
         .collect();
     if local_declared.is_empty() {
@@ -199,7 +199,7 @@ pub fn build_cross_shard_ownership<S: SubstateDatabase>(
     let local_ownership = resolve_owned_nodes(snapshot, &local_declared);
     let mut conflicts: Vec<NodeId> = Vec::new();
     for (vault, local_owner) in local_ownership {
-        if shard_for_node(&local_owner, num_shards) != local_shard {
+        if shard_trie.shard_for(&local_owner) != local_shard {
             continue;
         }
         match merged.entry(vault) {
@@ -314,7 +314,7 @@ pub fn resolve_owned_nodes_at_height<S: SubstateStore>(
 pub fn filter_updates_for_shard<H1: BuildHasher, H2: BuildHasher>(
     updates: &DatabaseUpdates,
     local_shard: ShardId,
-    num_shards: u64,
+    shard_trie: &ShardTrie,
     declared_set: &HashSet<NodeId, H1>,
     ownership: &HashMap<NodeId, NodeId, H2>,
 ) -> DatabaseUpdates {
@@ -347,7 +347,7 @@ pub fn filter_updates_for_shard<H1: BuildHasher, H2: BuildHasher>(
         };
 
         // Shard assignment based on the owning account.
-        let node_shard = shard_for_node(&shard_node_id, num_shards);
+        let node_shard = shard_trie.shard_for(&shard_node_id);
         if node_shard != local_shard {
             continue;
         }
@@ -486,7 +486,8 @@ mod tests {
         PartitionDatabaseUpdates, SubstateDatabase, SubstateStore,
     };
     use hyperscale_types::{
-        BlockHeight, MerkleInclusionProof, NodeId, StateRoot, WritesRoot, shard_for_node,
+        BlockHeight, MerkleInclusionProof, NodeId, ShardTrie, StateRoot, WritesRoot,
+        uniform_shard_for_node,
     };
     use radix_substate_store_interface::db_key_mapper::{DatabaseKeyMapper, SpreadPrefixKeyMapper};
 
@@ -525,10 +526,10 @@ mod tests {
 
     /// Pick a second seed whose account hashes to a different shard than `a`.
     fn pick_other_shard_seed(a: NodeId, num_shards: u64) -> NodeId {
-        let target = shard_for_node(&a, num_shards);
+        let target = uniform_shard_for_node(&a, num_shards);
         for seed in 2u8..=255 {
             let candidate = account_id(seed);
-            if candidate != a && shard_for_node(&candidate, num_shards) != target {
+            if candidate != a && uniform_shard_for_node(&candidate, num_shards) != target {
                 return candidate;
             }
         }
@@ -807,7 +808,7 @@ mod tests {
         let remote = pick_other_shard_seed(local, 2);
         let local_vault = fungible_vault_id(10);
         let remote_vault = fungible_vault_id(20);
-        let local_shard = shard_for_node(&local, 2);
+        let local_shard = uniform_shard_for_node(&local, 2);
 
         let mut db = MockDb::default();
         db.insert(&local, 64, vec![0], own_bytes(&local_vault));
@@ -815,9 +816,14 @@ mod tests {
         let mut provisions = HashMap::new();
         provisions.insert(remote_vault, remote);
 
-        let merged =
-            build_cross_shard_ownership(&db, &[local, remote], &provisions, local_shard, 2)
-                .expect("disjoint inputs should not conflict");
+        let merged = build_cross_shard_ownership(
+            &db,
+            &[local, remote],
+            &provisions,
+            local_shard,
+            &ShardTrie::uniform_from_count(2),
+        )
+        .expect("disjoint inputs should not conflict");
 
         assert_eq!(merged.get(&local_vault), Some(&local));
         assert_eq!(merged.get(&remote_vault), Some(&remote));
@@ -836,22 +842,34 @@ mod tests {
         let shared_vault = fungible_vault_id(99);
 
         // Run on shard(a): local owner is a, provisions claim b.
-        let shard_a = shard_for_node(&a, 2);
+        let shard_a = uniform_shard_for_node(&a, 2);
         let mut db_a = MockDb::default();
         db_a.insert(&a, 64, vec![0], own_bytes(&shared_vault));
         let mut prov_a = HashMap::new();
         prov_a.insert(shared_vault, b);
-        let err_a = build_cross_shard_ownership(&db_a, &[a, b], &prov_a, shard_a, 2)
-            .expect_err("collision should produce Err");
+        let err_a = build_cross_shard_ownership(
+            &db_a,
+            &[a, b],
+            &prov_a,
+            shard_a,
+            &ShardTrie::uniform_from_count(2),
+        )
+        .expect_err("collision should produce Err");
 
         // Run on shard(b): local owner is b, provisions claim a.
-        let shard_b = shard_for_node(&b, 2);
+        let shard_b = uniform_shard_for_node(&b, 2);
         let mut db_b = MockDb::default();
         db_b.insert(&b, 64, vec![0], own_bytes(&shared_vault));
         let mut prov_b = HashMap::new();
         prov_b.insert(shared_vault, a);
-        let err_b = build_cross_shard_ownership(&db_b, &[a, b], &prov_b, shard_b, 2)
-            .expect_err("collision should produce Err");
+        let err_b = build_cross_shard_ownership(
+            &db_b,
+            &[a, b],
+            &prov_b,
+            shard_b,
+            &ShardTrie::uniform_from_count(2),
+        )
+        .expect_err("collision should produce Err");
 
         assert_eq!(err_a, vec![shared_vault]);
         assert_eq!(err_b, vec![shared_vault]);
@@ -862,15 +880,20 @@ mod tests {
         // A provision entry pointing at a local-shard owner is dropped — the
         // local walk is authoritative for local-shard vaults.
         let local = account_id(1);
-        let local_shard = shard_for_node(&local, 2);
+        let local_shard = uniform_shard_for_node(&local, 2);
         let vault = fungible_vault_id(5);
 
         let mut provisions = HashMap::new();
         provisions.insert(vault, local);
 
-        let merged =
-            build_cross_shard_ownership(&MockDb::default(), &[local], &provisions, local_shard, 2)
-                .expect("provision entries for local owners are dropped, not conflicts");
+        let merged = build_cross_shard_ownership(
+            &MockDb::default(),
+            &[local],
+            &provisions,
+            local_shard,
+            &ShardTrie::uniform_from_count(2),
+        )
+        .expect("provision entries for local owners are dropped, not conflicts");
         assert!(merged.is_empty());
     }
 
@@ -884,9 +907,15 @@ mod tests {
             make_set_update(account, 64, vec![0], vec![1]),
             make_set_update(consensus, 64, vec![0], vec![1]),
         );
-        let local = shard_for_node(&account, 4);
+        let local = uniform_shard_for_node(&account, 4);
         let (set, own) = filter_inputs(&MockDb::default(), &[account]);
-        let filtered = filter_updates_for_shard(&updates, local, 4, &set, &own);
+        let filtered = filter_updates_for_shard(
+            &updates,
+            local,
+            &ShardTrie::uniform_from_count(4),
+            &set,
+            &own,
+        );
         assert_eq!(filtered.node_updates.len(), 1);
         let only = filtered.node_updates.keys().next().unwrap();
         assert_eq!(db_node_key_to_node_id(only), Some(account));
@@ -901,9 +930,15 @@ mod tests {
             make_set_update(account, 64, vec![0], vec![1]),
             make_set_update(stranger, 64, vec![0], vec![1]),
         );
-        let local = shard_for_node(&account, 1);
+        let local = uniform_shard_for_node(&account, 1);
         let (set, own) = filter_inputs(&MockDb::default(), &[account]);
-        let filtered = filter_updates_for_shard(&updates, local, 1, &set, &own);
+        let filtered = filter_updates_for_shard(
+            &updates,
+            local,
+            &ShardTrie::uniform_from_count(1),
+            &set,
+            &own,
+        );
         assert_eq!(filtered.node_updates.len(), 1);
     }
 
@@ -911,13 +946,19 @@ mod tests {
     fn filter_for_shard_drops_other_shard_writes() {
         let a = account_id(1);
         let b = pick_other_shard_seed(a, 4);
-        let local = shard_for_node(&a, 4);
+        let local = uniform_shard_for_node(&a, 4);
         let updates = merge(
             make_set_update(a, 64, vec![0], vec![1]),
             make_set_update(b, 64, vec![0], vec![1]),
         );
         let (set, own) = filter_inputs(&MockDb::default(), &[a, b]);
-        let filtered = filter_updates_for_shard(&updates, local, 4, &set, &own);
+        let filtered = filter_updates_for_shard(
+            &updates,
+            local,
+            &ShardTrie::uniform_from_count(4),
+            &set,
+            &own,
+        );
         assert_eq!(filtered.node_updates.len(), 1);
         let only = filtered.node_updates.keys().next().unwrap();
         assert_eq!(db_node_key_to_node_id(only), Some(a));
@@ -933,9 +974,15 @@ mod tests {
             make_set_update(account, 64, vec![0], vec![1]),
             make_set_update(vault, 0, vec![0], vec![1]),
         );
-        let local = shard_for_node(&account, 1);
+        let local = uniform_shard_for_node(&account, 1);
         let (set, own) = filter_inputs(&db, &[account]);
-        let filtered = filter_updates_for_shard(&updates, local, 1, &set, &own);
+        let filtered = filter_updates_for_shard(
+            &updates,
+            local,
+            &ShardTrie::uniform_from_count(1),
+            &set,
+            &own,
+        );
         assert_eq!(filtered.node_updates.len(), 2);
     }
 
@@ -946,10 +993,10 @@ mod tests {
         // whose own hash differs from its owner's shard, then verify the
         // vault is kept iff we filter for the owner's shard.
         let account = account_id(1);
-        let owner_shard = shard_for_node(&account, 4);
+        let owner_shard = uniform_shard_for_node(&account, 4);
         let mut vault_seed = 2u8;
         let mut vault = fungible_vault_id(vault_seed);
-        while shard_for_node(&vault, 4) == owner_shard {
+        while uniform_shard_for_node(&vault, 4) == owner_shard {
             vault_seed = vault_seed.wrapping_add(1);
             vault = fungible_vault_id(vault_seed);
             assert_ne!(vault_seed, 1, "no diverging vault seed found");
@@ -959,10 +1006,22 @@ mod tests {
         let updates = make_set_update(vault, 0, vec![0], vec![1]);
         let (set, own) = filter_inputs(&db, &[account]);
         // Filter at owner's shard — vault must be kept.
-        let kept = filter_updates_for_shard(&updates, owner_shard, 4, &set, &own);
+        let kept = filter_updates_for_shard(
+            &updates,
+            owner_shard,
+            &ShardTrie::uniform_from_count(4),
+            &set,
+            &own,
+        );
         assert_eq!(kept.node_updates.len(), 1);
         // Filter at the vault's "natural" shard — must drop.
-        let dropped = filter_updates_for_shard(&updates, shard_for_node(&vault, 4), 4, &set, &own);
+        let dropped = filter_updates_for_shard(
+            &updates,
+            uniform_shard_for_node(&vault, 4),
+            &ShardTrie::uniform_from_count(4),
+            &set,
+            &own,
+        );
         assert!(dropped.node_updates.is_empty());
     }
 

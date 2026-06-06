@@ -32,7 +32,7 @@ use hyperscale_types::{
     CertifiedBeaconBlock, CertifiedBlock, GenesisPool, GenesisValidator, LocalTimestamp,
     MIN_STAKE_FLOOR, NodeId, Randomness, ShardId, Stake, StakePoolId, TopologySnapshot,
     TransactionStatus, TxHash, ValidatorId, ValidatorInfo, ValidatorSet, Verified, VotePower,
-    bls_keypair_from_seed, genesis_config_hash, shard_for_node,
+    bls_keypair_from_seed, genesis_config_hash, uniform_shard_for_node,
 };
 use radix_common::math::Decimal;
 use radix_common::network::NetworkDefinition;
@@ -604,7 +604,7 @@ impl SimulationRunner {
         for (address, balance) in balances {
             let radix_node_id = address.into_node_id();
             let det_node_id = NodeId(radix_node_id.0[..30].try_into().unwrap());
-            let shard = shard_for_node(&det_node_id, num_shards);
+            let shard = uniform_shard_for_node(&det_node_id, num_shards);
             balances_by_shard
                 .entry(shard)
                 .or_default()

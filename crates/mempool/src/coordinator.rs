@@ -320,7 +320,7 @@ impl MempoolCoordinator {
             return None;
         }
 
-        let cross_shard = tx.is_cross_shard(topology.num_shards());
+        let cross_shard = topology.is_cross_shard_transaction(tx);
         self.add_to_ready_tracking(hash, tx, now);
         self.tx_store.insert(Arc::clone(tx));
         self.pool.insert(
@@ -534,7 +534,6 @@ impl MempoolCoordinator {
         let mut abandoned_tx_fetches: Vec<TxHash> = Vec::new();
         for tx in block.transactions().iter() {
             let hash = tx.hash();
-            let num_shards = topology.num_shards();
             // Prefer the marker the wrapper already carries; fall back to
             // the BFT-transitive `from_persisted` gate for sync-loaded
             // blocks whose `Verifiable` entries decoded as Unverified.
@@ -553,7 +552,7 @@ impl MempoolCoordinator {
                 PoolEntry {
                     tx: verified,
                     status: TransactionStatus::Pending, // Will be updated by execution
-                    cross_shard: tx.is_cross_shard(num_shards),
+                    cross_shard: topology.is_cross_shard_transaction(tx),
                     submitted_locally: false, // Fetched for block processing
                     // Block-committed entries skip the dwell path entirely
                     // (next loop transitions them straight to Committed +
@@ -1824,19 +1823,19 @@ mod tests {
 
     /// Create a cross-shard transaction (writes to nodes in different shards)
     fn test_cross_shard_transaction(seed: u8) -> RoutableTransaction {
-        use hyperscale_types::shard_for_node;
         use hyperscale_types::test_utils::test_node;
+        use hyperscale_types::uniform_shard_for_node;
 
         // Find two seeds that map to different shards with 2 shards
         // We'll search for a pair starting from the given seed
         let node1 = test_node(seed);
-        let shard1 = shard_for_node(&node1, 2);
+        let shard1 = uniform_shard_for_node(&node1, 2);
 
         // Find a different shard
         let mut node2_seed = seed.wrapping_add(1);
         loop {
             let node2 = test_node(node2_seed);
-            let shard2 = shard_for_node(&node2, 2);
+            let shard2 = uniform_shard_for_node(&node2, 2);
             if shard1 != shard2 {
                 break;
             }

@@ -6,7 +6,8 @@
 //! funded via runtime transactions before the main workload starts.
 
 use hyperscale_types::{
-    Ed25519PrivateKey, NodeId, ShardId, ShardTrie, ed25519_keypair_from_seed, shard_for_node,
+    Ed25519PrivateKey, NodeId, ShardId, ShardTrie, ed25519_keypair_from_seed,
+    uniform_shard_for_node,
 };
 
 /// Maximum number of accounts that can be created per shard at genesis.
@@ -119,7 +120,7 @@ impl FundedAccount {
     fn shard_for_address(address: &ComponentAddress, num_shards: u64) -> ShardId {
         let node_id = address.into_node_id();
         let det_node_id = NodeId(node_id.0[..30].try_into().unwrap());
-        shard_for_node(&det_node_id, num_shards)
+        uniform_shard_for_node(&det_node_id, num_shards)
     }
 }
 

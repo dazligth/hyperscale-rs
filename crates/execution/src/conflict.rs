@@ -287,7 +287,7 @@ mod tests {
     use hyperscale_types::{
         BlockHeight, Hash, MerkleInclusionProof, NetworkDefinition, NodeId, ProvisionEntry,
         ShardId, SubstateEntry, TopologySnapshot, ValidatorId, ValidatorInfo, ValidatorSet,
-        VotePower, bls_keypair_from_seed, shard_for_node,
+        VotePower, bls_keypair_from_seed, uniform_shard_for_node,
     };
 
     use super::*;
@@ -298,7 +298,7 @@ mod tests {
             let mut bytes = [0u8; 30];
             bytes[..8].copy_from_slice(&i.to_le_bytes());
             let node = NodeId(bytes);
-            if shard_for_node(&node, num_shards) == target_shard {
+            if uniform_shard_for_node(&node, num_shards) == target_shard {
                 return node;
             }
         }
@@ -312,7 +312,7 @@ mod tests {
             let mut bytes = [0u8; 30];
             bytes[..8].copy_from_slice(&i.to_le_bytes());
             let node = NodeId(bytes);
-            if shard_for_node(&node, num_shards) == target_shard {
+            if uniform_shard_for_node(&node, num_shards) == target_shard {
                 found.push(node);
                 if found.len() == 2 {
                     return (found[0], found[1]);

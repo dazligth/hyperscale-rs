@@ -30,7 +30,8 @@ use std::collections::{HashMap, HashSet};
 
 use hyperscale_simulation::SimulationRunner;
 use hyperscale_types::{
-    NodeId, RoutableTransaction, ShardId, TransactionStatus, TxHash, Verified, shard_for_node,
+    NodeId, RoutableTransaction, ShardId, TransactionStatus, TxHash, Verified,
+    uniform_shard_for_node,
 };
 
 /// Information about a stuck transaction.
@@ -201,7 +202,7 @@ impl LivelockAnalyzer {
                         let write_shards: Vec<_> = tx
                             .declared_writes()
                             .iter()
-                            .map(|node_id| shard_for_node(node_id, num_shards))
+                            .map(|node_id| uniform_shard_for_node(node_id, num_shards))
                             .collect::<HashSet<_>>()
                             .into_iter()
                             .collect();
@@ -209,7 +210,7 @@ impl LivelockAnalyzer {
                         let read_shards: Vec<_> = tx
                             .declared_reads()
                             .iter()
-                            .map(|node_id| shard_for_node(node_id, num_shards))
+                            .map(|node_id| uniform_shard_for_node(node_id, num_shards))
                             .collect::<HashSet<_>>()
                             .into_iter()
                             .filter(|s| !write_shards.contains(s))

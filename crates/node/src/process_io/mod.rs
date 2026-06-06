@@ -20,7 +20,7 @@ use hyperscale_beacon::proposal_pool::BeaconProposalPool;
 use hyperscale_dispatch::Dispatch;
 use hyperscale_engine::TransactionValidation;
 use hyperscale_storage::{BeaconStorage, ShardStorage};
-use hyperscale_types::{RoutableTransaction, ShardId, shard_for_node};
+use hyperscale_types::{RoutableTransaction, ShardId};
 
 use crate::event::{ShardEvent, ShardScopedInput};
 use crate::shard_loop::{DispatchHandles, SharedTopologySnapshot};
@@ -146,12 +146,12 @@ where
     /// [`SubmitFanout::GossipOnly`] — gossip still goes out via some
     /// hosted shard, but no shard admits or takes ownership.
     pub(crate) fn compute_submit_fanout(&self, tx: &RoutableTransaction) -> SubmitFanout {
-        let num_shards = self.topology_snapshot.load().num_shards();
+        let topology = self.topology_snapshot.load();
         let touched_shards: Vec<ShardId> = tx
             .declared_reads()
             .iter()
             .chain(tx.declared_writes().iter())
-            .map(|node_id| shard_for_node(node_id, num_shards))
+            .map(|node_id| topology.shard_for_node_id(node_id))
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
