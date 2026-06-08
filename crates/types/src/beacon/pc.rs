@@ -17,7 +17,7 @@ use sbor::prelude::*;
 use thiserror::Error;
 
 use crate::beacon::prefix_ops::{mce, mcp, qc1_certify};
-use crate::primitives::signer_bitfield::MAX_VALIDATORS;
+use crate::primitives::signer_bitfield::MAX_SIGNERS;
 use crate::{
     Bls12381G1PrivateKey, Bls12381G1PublicKey, Bls12381G2Signature, BoundedVec, DOMAIN_PC_VOTE1,
     DOMAIN_PC_VOTE2, DOMAIN_PC_VOTE2_LENGTH, DOMAIN_PC_VOTE3, Epoch, MAX_PREFIX_SIGS,
@@ -593,7 +593,7 @@ pub enum PcSignerLengths {
     Uniform(u32),
     /// One `|x_p_i|` per signer, in the parent bundle's set-bit order.
     /// Length must equal the bitfield's `count_ones()`.
-    PerSigner(BoundedVec<u32, MAX_VALIDATORS>),
+    PerSigner(BoundedVec<u32, MAX_SIGNERS>),
 }
 
 impl PcSignerLengths {

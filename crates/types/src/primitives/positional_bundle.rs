@@ -6,7 +6,7 @@ use sbor::{
     NoCustomTypeKind, NoCustomValueKind, RustTypeId, TypeData, TypeKind, ValueKind,
 };
 
-use crate::primitives::signer_bitfield::MAX_VALIDATORS;
+use crate::primitives::signer_bitfield::MAX_SIGNERS;
 use crate::{BoundedVec, SignerBitfield};
 
 /// A signer bitfield paired with one item per set bit, in set-bit order.
@@ -26,7 +26,7 @@ use crate::{BoundedVec, SignerBitfield};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PositionalBundle<T> {
     signers: SignerBitfield,
-    items: BoundedVec<T, MAX_VALIDATORS>,
+    items: BoundedVec<T, MAX_SIGNERS>,
 }
 
 impl<T> PositionalBundle<T> {
@@ -34,7 +34,7 @@ impl<T> PositionalBundle<T> {
     ///
     /// # Panics
     ///
-    /// Panics if `items.len() != signers.count_ones()` or if `items.len() > MAX_VALIDATORS`.
+    /// Panics if `items.len() != signers.count_ones()` or if `items.len() > MAX_SIGNERS`.
     #[must_use]
     pub fn new(signers: SignerBitfield, items: Vec<T>) -> Self {
         assert_eq!(
@@ -125,7 +125,7 @@ where
             });
         }
         let signers: SignerBitfield = decoder.decode()?;
-        let items: BoundedVec<T, MAX_VALIDATORS> = decoder.decode()?;
+        let items: BoundedVec<T, MAX_SIGNERS> = decoder.decode()?;
         if items.len() != signers.count_ones() {
             return Err(DecodeError::InvalidCustomValue);
         }
@@ -198,7 +198,7 @@ mod tests {
     fn decode_rejects_length_mismatch() {
         // Forge a tuple with bitfield count_ones=3 but items.len()=2.
         let bf = bitfield(10, &[0, 1, 2]);
-        let items: BoundedVec<u32, MAX_VALIDATORS> = vec![1u32, 2].into();
+        let items: BoundedVec<u32, MAX_SIGNERS> = vec![1u32, 2].into();
         let attacker = ManualBundle { signers: bf, items };
         let bytes = basic_encode(&attacker).unwrap();
         let err = basic_decode::<PositionalBundle<u32>>(&bytes).unwrap_err();
@@ -208,7 +208,7 @@ mod tests {
     #[test]
     fn decode_accepts_canonical_match() {
         let bf = bitfield(10, &[0, 1, 2]);
-        let items: BoundedVec<u32, MAX_VALIDATORS> = vec![1u32, 2, 3].into();
+        let items: BoundedVec<u32, MAX_SIGNERS> = vec![1u32, 2, 3].into();
         let canonical = ManualBundle { signers: bf, items };
         let bytes = basic_encode(&canonical).unwrap();
         let decoded: PositionalBundle<u32> = basic_decode(&bytes).unwrap();
@@ -220,6 +220,6 @@ mod tests {
     #[derive(BasicSbor)]
     struct ManualBundle {
         signers: SignerBitfield,
-        items: BoundedVec<u32, MAX_VALIDATORS>,
+        items: BoundedVec<u32, MAX_SIGNERS>,
     }
 }

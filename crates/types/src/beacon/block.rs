@@ -12,7 +12,7 @@
 
 use sbor::prelude::*;
 
-use crate::primitives::signer_bitfield::MAX_VALIDATORS;
+use crate::primitives::signer_bitfield::MAX_SIGNERS;
 use crate::{BeaconBlockHash, BeaconProposal, BoundedVec, Epoch, Hash, ValidatorId};
 
 /// One epoch's committed-proposal record.
@@ -29,7 +29,7 @@ use crate::{BeaconBlockHash, BeaconProposal, BoundedVec, Epoch, Hash, ValidatorI
 pub struct BeaconBlock {
     epoch: Epoch,
     prev_block_hash: BeaconBlockHash,
-    committed_proposals: BoundedVec<(ValidatorId, BeaconProposal), MAX_VALIDATORS>,
+    committed_proposals: BoundedVec<(ValidatorId, BeaconProposal), MAX_SIGNERS>,
 }
 
 impl BeaconBlock {
@@ -37,7 +37,7 @@ impl BeaconBlock {
     ///
     /// # Panics
     ///
-    /// Panics if `committed_proposals.len() > MAX_VALIDATORS`.
+    /// Panics if `committed_proposals.len() > MAX_SIGNERS`.
     #[must_use]
     pub fn new(
         epoch: Epoch,

@@ -8,17 +8,17 @@ use sbor::{
 
 use crate::BoundedBytes;
 
-/// Hard cap on validators a single bitfield may describe.
+/// Hard cap on signers a single bitfield may describe.
 ///
 /// Bounds attacker-controlled `num_validators` decoded from the wire so
 /// `set_indices()` and `set(_)` cannot iterate or index past sane committee
 /// sizes. Sized ~40× the current production committee (100); covers any
 /// realistic scaling without permitting OOM/DoS via crafted headers.
-pub const MAX_VALIDATORS: usize = 4096;
+pub const MAX_SIGNERS: usize = 4096;
 
 /// Cap on the byte-vector length that backs a `SignerBitfield`. Tied to
-/// `MAX_VALIDATORS` — one bit per validator, packed eight per byte.
-const MAX_BITS_BYTES_LEN: usize = MAX_VALIDATORS.div_ceil(8);
+/// `MAX_SIGNERS` — one bit per signer, packed eight per byte.
+const MAX_BITS_BYTES_LEN: usize = MAX_SIGNERS.div_ceil(8);
 
 /// A compact bitfield representing which validators have signed.
 ///
@@ -34,12 +34,12 @@ impl SignerBitfield {
     /// Create a new empty bitfield for the given number of validators.
     ///
     /// # Panics
-    /// Panics if `num_validators > MAX_VALIDATORS`.
+    /// Panics if `num_validators > MAX_SIGNERS`.
     #[must_use]
     pub fn new(num_validators: usize) -> Self {
         assert!(
-            num_validators <= MAX_VALIDATORS,
-            "num_validators {num_validators} exceeds MAX_VALIDATORS {MAX_VALIDATORS}"
+            num_validators <= MAX_SIGNERS,
+            "num_validators {num_validators} exceeds MAX_SIGNERS {MAX_SIGNERS}"
         );
         let num_bytes = num_validators.div_ceil(8);
         Self {
@@ -127,7 +127,7 @@ impl Default for SignerBitfield {
 
 // Manual SBOR impl — `BoundedBytes` covers the byte-length cap on `bits`,
 // but the cross-field validation (bits.len() must equal num_validators
-// div_ceil 8, num_validators must not exceed MAX_VALIDATORS, padding bits
+// div_ceil 8, num_validators must not exceed MAX_SIGNERS, padding bits
 // in the trailing byte must be zero) doesn't fit a derive. Without these
 // checks a peer can supply num_validators = u64::MAX, hanging
 // set_indices() and panicking set().
@@ -160,7 +160,7 @@ impl<D: Decoder<NoCustomValueKind>> Decode<NoCustomValueKind, D> for SignerBitfi
         }
         let bits: BoundedBytes<MAX_BITS_BYTES_LEN> = decoder.decode()?;
         let num_validators: usize = decoder.decode()?;
-        if num_validators > MAX_VALIDATORS {
+        if num_validators > MAX_SIGNERS {
             return Err(DecodeError::InvalidCustomValue);
         }
         if bits.len() != num_validators.div_ceil(8) {
@@ -272,10 +272,10 @@ mod tests {
 
     #[test]
     fn decode_rejects_oversized_num_validators() {
-        // Hand-roll a bitfield with num_validators > MAX_VALIDATORS.
+        // Hand-roll a bitfield with num_validators > MAX_SIGNERS.
         let attacker = ManualBitfield {
-            bits: vec![0u8; (MAX_VALIDATORS + 8).div_ceil(8)],
-            num_validators: MAX_VALIDATORS + 1,
+            bits: vec![0u8; (MAX_SIGNERS + 8).div_ceil(8)],
+            num_validators: MAX_SIGNERS + 1,
         };
         let bytes = basic_encode(&attacker).unwrap();
         assert!(basic_decode::<SignerBitfield>(&bytes).is_err());
