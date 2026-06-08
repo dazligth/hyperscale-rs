@@ -30,8 +30,8 @@ use hyperscale_types::{
     MAX_SHARD_WITNESSES_PER_PROPOSER, MAX_WITNESSES_PER_FETCH, MIN_BEACON_COMMITTEE_SIZE,
     NetworkDefinition, PcQc3, PcValueElement, PcVector, PcVote1, PcVote1VerifyError, PcVote2,
     PcVote2VerifyError, PcVote3, PcVote3VerifyError, PcVoteEquivocation, PcVoteEquivocationContext,
-    PcVoteRound, RETENTION_HORIZON, SKIP_TIMEOUT, SPC_VIEW_TIMEOUT, ShardId, ShardWitness,
-    SkipEpochCert, SkipRequest, SkipRequestVerifyError, SpcCert, SpcEmptyViewMsg,
+    PcVoteRound, QuorumCertificate, RETENTION_HORIZON, SKIP_TIMEOUT, SPC_VIEW_TIMEOUT, ShardId,
+    ShardWitness, SkipEpochCert, SkipRequest, SkipRequestVerifyError, SpcCert, SpcEmptyViewMsg,
     SpcEmptyViewMsgVerifyError, SpcNewCommitMsg, SpcNewCommitMsgVerifyError, SpcProposalObject,
     SpcProposalObjectVerifyError, SpcView, TopologySchedule, TopologySnapshot, ValidatorId,
     Verifiable, Verified, Verify, WeightedTimestamp,
@@ -1087,13 +1087,36 @@ impl BeaconCoordinator {
         }
         let epoch = self.proposal_pool.epoch();
         let recipients = self.spc_recipients();
+        let boundary_qcs = self.source_boundary_qcs(epoch);
         let (shard_witnesses, equivocations) = self.drain_witnesses_for(epoch);
         vec![Action::BuildAndBroadcastBeaconProposal {
             epoch,
             shard_witnesses,
+            boundary_qcs,
             equivocations,
             recipients,
         }]
+    }
+
+    /// Source this proposer's per-shard canonical boundary QCs for the
+    /// epoch whose window ends at `epoch_end_weighted_timestamp(epoch)`.
+    ///
+    /// One `Some(qc)` entry per active shard whose crossing the local
+    /// node has observed (a child header past the cut); shards not yet
+    /// seen crossing are simply absent. One honest reporter is enough to
+    /// mark a shard live in the fold, so partial coverage is fine.
+    fn source_boundary_qcs(&self, epoch: Epoch) -> BTreeMap<ShardId, Option<QuorumCertificate>> {
+        let epoch_end_wt =
+            epoch_end_weighted_timestamp(epoch, self.state.chain_config.epoch_duration_ms);
+        self.state
+            .shard_committees
+            .keys()
+            .filter_map(|shard| {
+                self.witness_fetcher
+                    .canonical_boundary(*shard, epoch_end_wt)
+                    .map(|qc| (*shard, Some(qc)))
+            })
+            .collect()
     }
 
     /// Drain eligible shard witnesses and observed equivocations for the
@@ -2785,6 +2808,7 @@ mod tests {
             Action::BuildAndBroadcastBeaconProposal {
                 epoch,
                 shard_witnesses,
+                boundary_qcs,
                 equivocations,
                 recipients,
             },
@@ -2794,6 +2818,9 @@ mod tests {
         };
         assert_eq!(*epoch, in_flight);
         assert!(shard_witnesses.is_empty());
+        // No source-shard headers observed in this fixture, so the
+        // proposer reports no crossings.
+        assert!(boundary_qcs.is_empty());
         assert!(equivocations.is_empty());
         // Three peers in the n=4 committee (self filtered out).
         assert_eq!(recipients.len(), 3);

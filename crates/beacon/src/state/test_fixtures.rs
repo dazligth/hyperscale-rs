@@ -38,7 +38,7 @@ pub fn net() -> NetworkDefinition {
 pub fn vrf_proposal(id: u64, epoch: Epoch) -> BeaconProposal {
     let sk = keypair(id);
     let proof = vrf_sign(&sk, &net(), epoch);
-    BeaconProposal::new(Vec::new(), Vec::new(), proof)
+    BeaconProposal::new(Vec::new(), BTreeMap::new(), Vec::new(), proof)
 }
 
 /// Build a `BeaconProposal` whose VRF proof has been tampered with so
@@ -48,7 +48,12 @@ pub fn malformed_vrf_proposal(id: u64, epoch: Epoch) -> BeaconProposal {
     let p = vrf_proposal(id, epoch);
     let mut bytes = *p.vrf_proof().as_bytes();
     bytes[0] ^= 1;
-    BeaconProposal::new(Vec::new(), Vec::new(), VrfProof::new(bytes))
+    BeaconProposal::new(
+        Vec::new(),
+        BTreeMap::new(),
+        Vec::new(),
+        VrfProof::new(bytes),
+    )
 }
 
 pub fn validator_record(id: u64, pool: u32, status: ValidatorStatus) -> ValidatorRecord {
@@ -142,7 +147,7 @@ pub fn vrf_proposal_with_witnesses(
 ) -> BeaconProposal {
     let sk = keypair(id);
     let proof = vrf_sign(&sk, &net(), epoch);
-    BeaconProposal::new(shard_witnesses, Vec::new(), proof)
+    BeaconProposal::new(shard_witnesses, BTreeMap::new(), Vec::new(), proof)
 }
 
 /// Build a `BeaconProposal` carrying `equivocations` and no shard
@@ -154,7 +159,7 @@ pub fn vrf_proposal_with_equivocations(
 ) -> BeaconProposal {
     let sk = keypair(id);
     let proof = vrf_sign(&sk, &net(), epoch);
-    BeaconProposal::new(Vec::new(), equivocations, proof)
+    BeaconProposal::new(Vec::new(), BTreeMap::new(), equivocations, proof)
 }
 
 /// Build a `ShardWitness` with a throwaway proof — the watermark gate

@@ -9,8 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use hyperscale_types::{
-    BeaconWitnessLeafCount, BlockHash, BlockHeight, CertifiedBlockHeader, LeafIndex, ShardId,
-    ShardWitness, Verified, WeightedTimestamp,
+    BeaconWitnessLeafCount, BlockHash, BlockHeight, CertifiedBlockHeader, LeafIndex,
+    QuorumCertificate, ShardId, ShardWitness, Verified, WeightedTimestamp,
 };
 
 /// Per-shard witness tracking.
@@ -247,6 +247,43 @@ impl ShardWitnessFetchTracker {
                 })
             })
         })
+    }
+
+    /// The shard's **canonical** boundary QC for an epoch whose time
+    /// window ends at `epoch_end_wt`: the `parent_qc` of the committed
+    /// child of the boundary block — the first block across the cut.
+    ///
+    /// Selects the unique boundary block `B` whose predecessor sits
+    /// at/before the cut and whose own weighted timestamp sits past it,
+    /// reading `B`'s timestamp **canonically** from its committed child
+    /// `C`'s `parent_qc` (hash-pinned, so every beacon validator that has
+    /// synced the crossing selects the identical QC). Returns that
+    /// `C.parent_qc` — the canonical QC, whose `block_hash` is `B`'s.
+    ///
+    /// `None` when the crossing hasn't been observed: no header pair
+    /// `(B, C)` at consecutive heights where `B.parent_qc.wt ≤
+    /// epoch_end_wt < C.parent_qc.wt`. By chain monotonicity at most one
+    /// such `B` exists, so the result is unambiguous.
+    #[must_use]
+    pub fn canonical_boundary(
+        &self,
+        shard: ShardId,
+        epoch_end_wt: WeightedTimestamp,
+    ) -> Option<QuorumCertificate> {
+        let headers = self.shard_headers.get(&shard)?;
+        for (height, b) in headers {
+            let Some(c) = headers.get(&height.next()) else {
+                continue;
+            };
+            let b_wt = c.header().parent_qc().weighted_timestamp();
+            let b_pred_wt = b.header().parent_qc().weighted_timestamp();
+            if b_pred_wt.as_millis() <= epoch_end_wt.as_millis()
+                && epoch_end_wt.as_millis() < b_wt.as_millis()
+            {
+                return Some(c.header().parent_qc().clone());
+            }
+        }
+        None
     }
 
     /// Called when the local validator is removed from the beacon
@@ -707,6 +744,51 @@ mod tests {
     fn is_ready_to_propose_false_when_shard_has_no_headers() {
         let t = ShardWitnessFetchTracker::new();
         assert!(!t.is_ready_to_propose(&[shard(0)], WeightedTimestamp::from_millis(1_000),));
+    }
+
+    /// `canonical_boundary` selects the first block across the cut and
+    /// returns its child's `parent_qc` (carrying the boundary's own
+    /// canonical weighted timestamp). With `parent_qc.wt` = 500/1000/1500
+    /// at heights 1/2/3, the block at height 2 is the first whose wt
+    /// (1500, read from height 3's `parent_qc`) is past a 1200 cut while
+    /// its predecessor (1000) sits at/before it.
+    #[test]
+    fn canonical_boundary_selects_first_block_across_cut() {
+        let mut t = ShardWitnessFetchTracker::new();
+        t.on_verified_remote_header(verified_header(shard(0), 1, 500, 0));
+        t.on_verified_remote_header(verified_header(shard(0), 2, 1_000, 0));
+        t.on_verified_remote_header(verified_header(shard(0), 3, 1_500, 0));
+        let qc = t
+            .canonical_boundary(shard(0), WeightedTimestamp::from_millis(1_200))
+            .expect("crossing observed");
+        assert_eq!(
+            qc.weighted_timestamp(),
+            WeightedTimestamp::from_millis(1_500)
+        );
+    }
+
+    /// `canonical_boundary` is `None` until the crossing's child header
+    /// arrives: with headers only up to height 2, the beacon can't read
+    /// height 2's canonical wt, so the crossing isn't demonstrably
+    /// observed.
+    #[test]
+    fn canonical_boundary_none_when_child_unobserved() {
+        let mut t = ShardWitnessFetchTracker::new();
+        t.on_verified_remote_header(verified_header(shard(0), 1, 500, 0));
+        t.on_verified_remote_header(verified_header(shard(0), 2, 1_000, 0));
+        assert!(
+            t.canonical_boundary(shard(0), WeightedTimestamp::from_millis(1_200))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn canonical_boundary_none_for_unknown_shard() {
+        let t = ShardWitnessFetchTracker::new();
+        assert!(
+            t.canonical_boundary(shard(0), WeightedTimestamp::from_millis(1_000))
+                .is_none()
+        );
     }
 
     #[test]

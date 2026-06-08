@@ -155,6 +155,7 @@ where
         Action::BuildAndBroadcastBeaconProposal {
             epoch,
             shard_witnesses,
+            boundary_qcs,
             equivocations,
             recipients,
         } => {
@@ -163,6 +164,7 @@ where
                 network,
                 epoch,
                 shard_witnesses,
+                boundary_qcs,
                 equivocations,
             );
             let proposal = Arc::new(verified);

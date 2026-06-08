@@ -45,10 +45,11 @@ impl BeaconProposal {
     ///
     /// # Panics
     ///
-    /// Panics if either list exceeds its per-proposer cap.
+    /// Panics if any list or map exceeds its per-proposer cap.
     #[must_use]
     pub fn new(
         shard_witnesses: Vec<ShardWitness>,
+        boundary_qcs: BTreeMap<ShardId, Option<QuorumCertificate>>,
         equivocations: Vec<PcVoteEquivocation>,
         vrf_proof: VrfProof,
     ) -> Self {
@@ -58,7 +59,11 @@ impl BeaconProposal {
                 .map(Verifiable::from)
                 .collect::<Vec<_>>()
                 .into(),
-            boundary_qcs: BoundedBTreeMap::new(),
+            boundary_qcs: boundary_qcs
+                .into_iter()
+                .map(|(shard, qc)| (shard, qc.map(Verifiable::from)))
+                .collect::<BTreeMap<_, _>>()
+                .into(),
             equivocations: equivocations
                 .into_iter()
                 .map(Verifiable::from)
@@ -223,7 +228,7 @@ impl Verified<BeaconProposal> {
     ///
     /// # Panics
     ///
-    /// Panics if either list exceeds its per-proposer cap (inherited
+    /// Panics if any list or map exceeds its per-proposer cap (inherited
     /// from [`BeaconProposal::new`]).
     #[must_use]
     pub fn sign_local(
@@ -231,11 +236,13 @@ impl Verified<BeaconProposal> {
         network: &NetworkDefinition,
         epoch: Epoch,
         shard_witnesses: Vec<ShardWitness>,
+        boundary_qcs: BTreeMap<ShardId, Option<QuorumCertificate>>,
         equivocations: Vec<PcVoteEquivocation>,
     ) -> Self {
         let vrf_proof = vrf_sign(sk, network, epoch);
         Self::new_unchecked(BeaconProposal::new(
             shard_witnesses,
+            boundary_qcs,
             equivocations,
             vrf_proof,
         ))
@@ -302,6 +309,7 @@ mod tests {
     fn sample_proposal() -> BeaconProposal {
         BeaconProposal::new(
             vec![sample_witness(0), sample_witness(1), sample_witness(2)],
+            BTreeMap::new(),
             Vec::new(),
             VrfProof::new([0xCD; 96]),
         )

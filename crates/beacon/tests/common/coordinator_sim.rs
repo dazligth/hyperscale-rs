@@ -610,6 +610,7 @@ impl CoordinatorSim {
             Action::BuildAndBroadcastBeaconProposal {
                 epoch,
                 mut shard_witnesses,
+                boundary_qcs,
                 mut equivocations,
                 recipients,
             } => {
@@ -627,6 +628,7 @@ impl CoordinatorSim {
                 let vrf_proof = vrf_sign(sk, &self.network, epoch);
                 let proposal = Arc::new(Verified::new_unchecked_for_test(BeaconProposal::new(
                     shard_witnesses,
+                    boundary_qcs,
                     equivocations,
                     vrf_proof,
                 )));
@@ -666,7 +668,7 @@ impl CoordinatorSim {
                     self.byzantine[emitter_idx] = None;
                     self.byzantine_fires[emitter_idx] += 1;
                     let conflicting = Arc::new(Verified::new_unchecked_for_test(
-                        BeaconProposal::new(Vec::new(), Vec::new(), vrf_proof),
+                        BeaconProposal::new(Vec::new(), BTreeMap::new(), Vec::new(), vrf_proof),
                     ));
                     for rcpt in &recipients {
                         let to_idx = self.idx_of(*rcpt);

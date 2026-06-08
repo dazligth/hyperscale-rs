@@ -1,6 +1,6 @@
 //! Action types for the deterministic state machine.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -942,6 +942,10 @@ pub enum Action {
         /// Shard witnesses to embed. Raw — verified by construction at
         /// the handler (drained from the local validated pool).
         shard_witnesses: Vec<ShardWitness>,
+        /// Per-shard canonical boundary QCs this proposer observed, or
+        /// `None` for an active shard whose crossing it hasn't yet seen.
+        /// Sourced from the local verified shard headers.
+        boundary_qcs: BTreeMap<ShardId, Option<QuorumCertificate>>,
         /// Equivocation evidence to embed. Raw — built locally from
         /// verified PC votes.
         equivocations: Vec<PcVoteEquivocation>,

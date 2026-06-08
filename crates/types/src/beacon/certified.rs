@@ -467,6 +467,7 @@ mod tests {
     fn proposal(seed: u8) -> BeaconProposal {
         BeaconProposal::new(
             Vec::new(),
+            BTreeMap::new(),
             Vec::new(),
             VrfProof::new([seed; VRF_PROOF_BYTES]),
         )
