@@ -79,11 +79,11 @@ pub enum FetchAbandon {
     },
     /// Cross-shard witness fetch keyed by
     /// `(source_shard, block_height, committed_block_hash, leaf_index)`.
-    /// Emitted by the beacon coordinator when `consumed_through[shard]`
-    /// advances past an in-flight leaf — the witness has been consumed
-    /// on-chain and a future proposal can't include it, so the FSM's
-    /// in-flight slot should release rather than pin on a payload the
-    /// pool would only evict.
+    /// Emitted by the beacon coordinator when a shard's applied watermark
+    /// (`boundaries[shard].witness_leaf_count`) advances past an in-flight
+    /// leaf — the witness has been folded on-chain and a future
+    /// contribution can't include it, so the FSM's in-flight slot should
+    /// release rather than pin on a payload the tracker would only evict.
     ShardWitnesses {
         /// Anchor + leaf ids whose in-flight fetch should be cancelled.
         ids: Vec<(ShardId, BlockHeight, BlockHash, LeafIndex)>,

@@ -9,9 +9,12 @@
 //!
 //! Light clients re-execute `apply_epoch` over committed
 //! [`BeaconBlock`](crate::BeaconBlock)s instead of verifying merkle
-//! proofs against an on-chain state root: the SPC cert is the sole
-//! block authenticator and there is no on-chain commitment to the
-//! resulting `BeaconState` to prove against.
+//! proofs against an on-chain state root: a block is authenticated by
+//! recomputing the fold — the `BeaconCert` authenticates
+//! `committed_proposals`, the canonical-projection check re-derives
+//! `shard_contributions`, and the deterministic fold ties them — and
+//! there is no on-chain commitment to the resulting `BeaconState` to
+//! prove against.
 //!
 //! # Epoch-time vs slot-time
 //!
@@ -36,8 +39,8 @@ use crate::beacon::genesis::BeaconChainConfig;
 use crate::topology::snapshot::TopologySnapshot;
 use crate::topology::validator::{ValidatorInfo, ValidatorSet};
 use crate::{
-    BeaconWitnessLeafCount, BlockHash, Bls12381G1PublicKey, Epoch, LeafIndex, Randomness, ShardId,
-    Stake, StakePoolId, StateRoot, ValidatorId,
+    BeaconWitnessLeafCount, BlockHash, Bls12381G1PublicKey, Epoch, Randomness, ShardId, Stake,
+    StakePoolId, StateRoot, ValidatorId,
 };
 
 // ─── pool types ──────────────────────────────────────────────────────────────
@@ -194,8 +197,11 @@ pub struct ShardCommittee {
 /// boundary, plus its liveness history.
 ///
 /// The `state_root` is the snap-sync anchor a re-tasked node reconstructs
-/// against; `witness_leaf_count` is the high-water mark over the shard's
-/// beacon-witness accumulator at that boundary. `consecutive_misses` is
+/// against; `witness_leaf_count` is the beacon's **applied** high-water
+/// mark over the shard's beacon-witness accumulator — how many leaves the
+/// fold has consumed, which equals the boundary block's count in steady
+/// state and lags it while a backlog drains in bounded chunks.
+/// `consecutive_misses` is
 /// the per-*shard* counter (distinct from the per-*validator*
 /// [`BeaconState::miss_counters`]) bumped each epoch the beacon committee
 /// observes no boundary crossing for this shard.
@@ -268,22 +274,13 @@ pub struct BeaconState {
     /// invariant holds here. At the start of the next `apply_epoch` this
     /// value is promoted into `shard_committees`.
     pub next_shard_committees: BTreeMap<ShardId, ShardCommittee>,
-    /// Per-shard high-water mark over each shard's beacon-witness
-    /// accumulator: the largest [`LeafIndex`] this beacon has lifted
-    /// from that shard. A `ShardWitness` with `proof.leaf_index !=
-    /// consumed_through[shard] + 1` is silently dropped (already
-    /// consumed, or a gap that must be filled first). Updates
-    /// monotonically; never reset.
-    ///
-    /// `PcVoteEquivocation` is not tracked here — it has no shard
-    /// provenance and re-application is idempotent once the validator
-    /// is `Jailed { Equivocation }`.
-    pub consumed_through: BTreeMap<ShardId, LeafIndex>,
     /// Per-shard boundary record: the snap-sync anchor (`state_root` /
-    /// `block_hash`), the witness high-water mark, and the liveness
-    /// history. Seeded for every genesis shard so it is never empty for
-    /// an active shard; a shard gains its entry when it first appears in
-    /// the trie. Refreshed by the boundary fold each epoch.
+    /// `block_hash`), the applied witness high-water mark, and the
+    /// liveness history. Seeded for every genesis shard so it is never
+    /// empty for an active shard; a shard gains its entry when it first
+    /// appears in the trie. Refreshed by the boundary fold each epoch,
+    /// which also advances `witness_leaf_count` as it applies each
+    /// boundary contribution's witness chunk.
     pub boundaries: BTreeMap<ShardId, ShardBoundary>,
     /// Per-validator `MissedProposal` counter, scoped to the current
     /// epoch and the validator's current shard. Incremented when a
@@ -745,7 +742,6 @@ mod tests {
             committee: Vec::new(),
             shard_committees: BTreeMap::new(),
             next_shard_committees: BTreeMap::new(),
-            consumed_through: BTreeMap::new(),
             boundaries: BTreeMap::new(),
             miss_counters: BTreeMap::new(),
         }

@@ -13,9 +13,8 @@ use std::sync::Arc;
 use common::{ByzantineBehaviour, CoordinatorSim};
 use hyperscale_core::Action;
 use hyperscale_types::{
-    BeaconCert, BeaconWitnessLeafCount, BlockHash, BoundedVec, Epoch, Hash, LeafIndex,
-    PcValueElement, PcVector, PcVoteEquivocation, PcVoteRound, ShardId, ShardWitness,
-    ShardWitnessPayload, ShardWitnessProof, SpcView, StateRoot, ValidatorId, ValidatorStatus,
+    BeaconCert, BeaconWitnessLeafCount, Epoch, Hash, PcValueElement, PcVector, PcVoteEquivocation,
+    PcVoteRound, ShardId, SpcView, StakePoolId, StateRoot, ValidatorId, ValidatorStatus,
     zero_bls_signature,
 };
 
@@ -176,6 +175,17 @@ fn observed_crossing_records_shard_boundary_through_full_commit() {
         boundary.consecutive_misses, 0,
         "a live crossing must not register as a miss",
     );
+
+    // The boundary's witnesses actually mutated state at commit, not just
+    // advanced the watermark: each of the three `StakeDeposit` payloads
+    // (pools 100..103, set by the sim's boundary builder) created its pool
+    // through the fold's `apply_contribution_witnesses` step.
+    for pool_n in 100..103 {
+        assert!(
+            commit.state.pools.contains_key(&StakePoolId::new(pool_n)),
+            "boundary witness payload didn't mutate state at commit — pool {pool_n} missing",
+        );
+    }
 
     // Every replica folds to the same boundary record.
     for r in 1..sim.n() {
@@ -353,46 +363,6 @@ fn with_byzantine_equivocate_pc_vote1_fires_once() {
     assert_eq!(sim.byzantine_fires[0], 1, "fired more than once");
 }
 
-#[test]
-fn inject_topology_change_splices_witnesses_into_epoch_one_proposal() {
-    let mut sim = CoordinatorSim::new(4, 0xE1C4);
-    // A `Ready` witness for validator 0 — purely structural; the
-    // assertion is on the witness surviving into the committed block's
-    // proposal set, not its semantic effect. It must be admissible: the
-    // witness-admission gate merkle-checks every peer's proposal, so the
-    // helper delivers a source header committing the witness's leaf root
-    // to all replicas first.
-    let witness = sim.admissible_shard_witness(
-        ShardId::ROOT,
-        1,
-        0,
-        ShardWitnessPayload::Ready {
-            id: ValidatorId::new(0),
-        },
-    );
-    let leaf_index = witness.proof.leaf_index;
-    sim.inject_topology_change(Epoch::new(1), vec![witness]);
-    sim.kick_off();
-    sim.run_until_committed(1, 10_000);
-
-    let commit = &sim.commits[0][0];
-    let any_proposal_has_witness =
-        commit
-            .block
-            .block()
-            .committed_proposals()
-            .iter()
-            .any(|(_, prop)| {
-                prop.shard_witnesses()
-                    .iter()
-                    .any(|w| w.as_unverified().proof.leaf_index == leaf_index)
-            });
-    assert!(
-        any_proposal_has_witness,
-        "scheduled witness didn't survive into any committed proposal at epoch 1",
-    );
-}
-
 // ─── Byzantine + topology-change scenarios ────────────────────────────────────
 //
 // Each test exercises one adversarial-or-degraded path end-to-end through the
@@ -469,62 +439,6 @@ fn silenced_replica_recovers_via_view_2_timeout() {
     }
 }
 
-/// Scenario 4: a witness-driven topology change is spliced into the epoch-1
-/// proposal and the effect surfaces in the committed state. Uses a
-/// `StakeDeposit` witness rather than `DeactivateValidator`: the sim is
-/// pinned at `BEACON_SIGNER_COUNT = 4` and PC requires `n >= 4`, so
-/// shrinking the committee mid-test would crash the next-epoch SPC
-/// bootstrap. `StakeDeposit` exercises the same flow (witness rides
-/// proposal → admitted into block → `apply_epoch` mutates state) without
-/// touching the committee size.
-#[test]
-fn injected_topology_witness_mutates_state_at_commit() {
-    use hyperscale_types::{MIN_STAKE_FLOOR, Stake, StakePoolId};
-
-    let mut sim = CoordinatorSim::new(4, 0x7010);
-    let pool_id = StakePoolId::new(0);
-    let bump = Stake::from_whole_tokens(500);
-    // Leaf 1 so the witness applies at `consumed_through + 1`. The helper
-    // delivers a source header so the witness-admission gate accepts the
-    // deposit on every peer.
-    let witness = sim.admissible_shard_witness(
-        ShardId::ROOT,
-        1,
-        1,
-        ShardWitnessPayload::StakeDeposit {
-            pool_id,
-            amount: bump,
-        },
-    );
-    sim.inject_topology_change(Epoch::new(1), vec![witness]);
-    sim.kick_off();
-    sim.run_until_committed(1, MAX_STEPS);
-
-    // Genesis pool stake is `n * MIN_STAKE_FLOOR` per `CoordinatorSim::new`.
-    // Post-epoch-1 it should be the genesis stake plus the deposit (and the
-    // epoch's rewards emission — which we account for by checking strict
-    // inequality rather than equality, since `EMISSIONS_PER_EPOCH` isn't part
-    // of the topology-change story this test pins).
-    let genesis_stake = Stake::from_attos(4u128 * MIN_STAKE_FLOOR.attos());
-    let post = &sim.commits[0][0].state;
-    let post_pool = post.pools.get(&pool_id).expect("pool still present");
-    assert!(
-        post_pool.total_stake >= genesis_stake.saturating_add(bump),
-        "StakeDeposit didn't credit pool: post={:?} expected >= {:?}",
-        post_pool.total_stake,
-        genesis_stake.saturating_add(bump),
-    );
-    // Every honest replica sees the same post-commit pool state.
-    for r in 1..sim.n() {
-        let cmp = &sim.commits[r][0].state;
-        assert_eq!(
-            cmp.pools.get(&pool_id).unwrap().total_stake,
-            post_pool.total_stake,
-            "replica {r} pool state diverged",
-        );
-    }
-}
-
 /// A Byzantine committee member embeds forged equivocation evidence
 /// (garbage sigs) naming an honest validator in its VRF-valid proposal.
 /// The witness-admission gate keeps the proposal out of honest pools, so
@@ -573,51 +487,6 @@ fn forged_equivocation_witness_cannot_jail_or_fork() {
         assert!(
             !committed_forged,
             "forged equivocation reached the committed block on replica {r}",
-        );
-    }
-}
-
-/// A forged shard witness (bad merkle proof, no source header) is
-/// unverifiable, so the admission gate keeps it out of honest pools and
-/// it never reaches the committed block — an unverified shard payload (a
-/// fake stake deposit, registration, or unjail) can't be applied to
-/// consensus state.
-#[test]
-fn forged_shard_witness_never_reaches_committed_block() {
-    use hyperscale_types::{Stake, StakePoolId};
-
-    let mut sim = CoordinatorSim::new(4, 0xF05D);
-    let forged = ShardWitness {
-        payload: ShardWitnessPayload::StakeDeposit {
-            pool_id: StakePoolId::new(0),
-            amount: Stake::from_whole_tokens(500),
-        },
-        proof: ShardWitnessProof {
-            shard_id: ShardId::ROOT,
-            committed_block_hash: BlockHash::ZERO,
-            leaf_index: LeafIndex::new(1),
-            siblings: BoundedVec::new(),
-        },
-    };
-    sim.inject_topology_change(Epoch::new(1), vec![forged]);
-    sim.kick_off();
-    sim.run_until_committed(1, MAX_STEPS);
-
-    let reference = &sim.commits[0][0].state;
-    for r in 0..sim.n() {
-        let committed_forged = sim.commits[r][0]
-            .block
-            .block()
-            .committed_proposals()
-            .iter()
-            .any(|(_, p)| !p.shard_witnesses().is_empty());
-        assert!(
-            !committed_forged,
-            "forged shard witness reached the committed block on replica {r}",
-        );
-        assert_eq!(
-            &sim.commits[r][0].state, reference,
-            "replica {r} diverged on a forged shard witness",
         );
     }
 }

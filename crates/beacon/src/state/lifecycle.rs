@@ -193,8 +193,8 @@ mod tests {
     };
 
     use super::super::test_fixtures::{
-        apply_next_epoch, empty_state, pubkey, shard_witness, single_pool_state,
-        state_with_pending_withdrawal, validator_record, vrf_proposal_with_witnesses,
+        apply_next_epoch, apply_witness_chunk, empty_state, pubkey, single_pool_state,
+        state_with_pending_withdrawal, validator_record,
     };
     use super::distribute_epoch_rewards;
     // ─── auto_reactivate ─────────────────────────────────────────────────
@@ -849,18 +849,13 @@ mod tests {
         // timeout path.
         insert_unready_on_shard(&mut state, 2, Epoch::new(0));
 
-        let ready_witness = shard_witness(
+        let effects = apply_witness_chunk(
+            &mut state,
             0,
-            1,
-            ShardWitnessPayload::Ready {
+            vec![ShardWitnessPayload::Ready {
                 id: ValidatorId::new(1),
-            },
+            }],
         );
-        let committed = vec![(
-            ValidatorId::new(0),
-            vrf_proposal_with_witnesses(0, state.current_epoch.next(), vec![ready_witness]),
-        )];
-        let effects = apply_next_epoch(&mut state, &committed);
 
         // Both ended up in readied: validator 1 via witness, validator
         // 2 via timeout. Order: witness path appends first, then

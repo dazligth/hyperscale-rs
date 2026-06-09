@@ -6,16 +6,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use hyperscale_types::{
-    BeaconCert, BeaconProposal, BeaconState, CertifiedBeaconBlock, Epoch, NetworkDefinition,
-    ShardBoundary, ShardEpochContribution, ShardId, SlotEffects, TransitionCause, ValidatorId,
-    Verifiable, WeightedTimestamp,
+    BeaconCert, BeaconProposal, BeaconState, BeaconWitnessLeafCount, CertifiedBeaconBlock, Epoch,
+    MAX_WITNESSES_PER_SHARD, NetworkDefinition, ShardBoundary, ShardEpochContribution, ShardId,
+    SlotEffects, TransitionCause, ValidatorId, Verifiable,
 };
 
 use crate::state::committee::{diff_shard_committees, resample_beacon_committee, run_shuffle_step};
 use crate::state::lifecycle::{auto_reactivate, auto_ready_timeout, distribute_epoch_rewards};
 use crate::state::vrf::filter_and_roll_randomness;
 use crate::state::withdrawals::complete_pending_withdrawals;
-use crate::state::witness::ingest_witnesses;
+use crate::state::witness::{WitnessOutcome, apply_contribution_witnesses, ingest_equivocations};
 
 /// Discriminator for [`apply_epoch`] — distinguishes a Normal epoch
 /// from a Skip epoch (empty proposal set, committee resampled with
@@ -121,20 +121,25 @@ pub fn apply_epoch(
         ApplyEpochInput::Skip => (&[], TransitionCause::Skip),
     };
 
-    // Fold this epoch's per-shard boundaries. A `Skip` carries every
-    // prior boundary forward untouched (no record, no miss bump); a
-    // Normal epoch records fresh boundaries and bumps the miss counter
-    // for any active shard with no qualifying contribution.
-    if let ApplyEpochInput::Normal {
+    // Fold this epoch's per-shard boundaries and apply their witness
+    // chunks. A `Skip` carries every prior boundary forward untouched (no
+    // record, no miss bump, no witnesses); a Normal epoch records fresh
+    // boundaries, applies each chunk, and bumps the miss counter for any
+    // active shard with no qualifying contribution.
+    let mut witness = if let ApplyEpochInput::Normal {
         committed,
         shard_contributions,
     } = input
     {
-        record_boundaries(state, epoch, committed, shard_contributions);
-    }
+        record_boundaries(state, epoch, committed, shard_contributions)
+    } else {
+        WitnessOutcome::default()
+    };
 
     let vrf = filter_and_roll_randomness(state, network, epoch, committed);
-    let witness = ingest_witnesses(state, network, &vrf.accepted);
+    // Equivocation evidence rides committed proposals; shard-witness lifts
+    // ride the boundary contributions applied above.
+    witness.extend(ingest_equivocations(state, network, &vrf.accepted));
     let withdrawal = complete_pending_withdrawals(state);
     let reactivated = auto_reactivate(state);
     let rewards_credited = distribute_epoch_rewards(state);
@@ -167,19 +172,6 @@ pub fn apply_epoch(
     }
 }
 
-/// Canonical end-of-epoch [`WeightedTimestamp`] derived from `epoch` and
-/// the chain's configured epoch duration. Beacon blocks carry no explicit
-/// `weighted_timestamp` field; the value is `epoch.inner() ×
-/// epoch_duration_ms` by construction, matching how shards stamp their
-/// accumulators' eligibility windows. Both the boundary fold and the
-/// proposer's boundary sourcing read the cut from here.
-pub const fn epoch_end_weighted_timestamp(
-    epoch: Epoch,
-    epoch_duration_ms: u64,
-) -> WeightedTimestamp {
-    WeightedTimestamp::from_millis(epoch.inner().saturating_mul(epoch_duration_ms))
-}
-
 /// The largest epoch-boundary weighted timestamp strictly below `wt`
 /// (`k × epoch_duration_ms` for the greatest `k ≥ 1`), or `None` when no
 /// boundary lies below it. The boundary block's predecessor must sit
@@ -196,36 +188,45 @@ pub const fn epoch_boundary_below(wt: u64, epoch_duration_ms: u64) -> Option<u64
     }
 }
 
-/// Record each shard's epoch boundary from the committed contributions.
+/// Record each shard's epoch boundary from the committed contributions and
+/// apply each boundary's witness chunk.
 ///
 /// A contribution's boundary header is authenticated by a committed
-/// boundary QC. For each shard, some committed proposal must carry a QC
-/// that (1) names this exact block (`hash(boundary_header) ==
-/// qc.block_hash`), (2) is a valid `2f+1` quorum of the shard's committee,
-/// and (3) places the boundary as the first block across the epoch cut —
-/// the predecessor at/before the cut, the boundary across it
-/// (`header.parent_qc.wt ≤ epoch_end_wt < qc.wt`), unique by chain
-/// monotonicity. A shard with a qualifying boundary records its
-/// `state_root` and witness leaf count and resets its miss counter; an
-/// active shard with none carries its prior record forward and bumps
-/// `consecutive_misses` (the "not observed crossing" signal). A forged QC
-/// fails the quorum check, so its shard simply reads as missed —
-/// identically on every node.
+/// boundary QC (the QC's `2f+1` is admission-gated, so the fold binds
+/// rather than re-verifies). For each shard, some committed proposal must
+/// carry a QC that (1) names this exact block (`hash(boundary_header) ==
+/// qc.block_hash`) and (2) places the boundary as the first block across
+/// the epoch cut (`header.parent_qc.wt ≤ cut < qc.wt`, unique by chain
+/// monotonicity). The contribution then carries the witness **chunk**
+/// `[prior, chunk_end)` — `prior = boundaries[shard].witness_leaf_count`
+/// (the applied watermark), `chunk_end = min(prior + MAX_WITNESSES_PER_SHARD,
+/// boundary_header.beacon_witness_leaf_count())`. The chunk must be exactly
+/// those contiguous 0-based leaves, each merkle-proving into the boundary
+/// root; it applies in leaf order and the watermark advances to
+/// `chunk_end` (which lags the boundary's full count while a backlog
+/// drains — the anchor still records the latest crossing).
+///
+/// A shard whose boundary qualifies and whose chunk is well-formed records
+/// its anchor + advanced watermark and resets its miss counter; an active
+/// shard with no qualifying, well-formed contribution carries its prior
+/// record forward and bumps `consecutive_misses`. A forged QC or malformed
+/// chunk simply reads as missed — identically on every node. Returns the
+/// validator-status events the applied chunks produced.
 fn record_boundaries(
     state: &mut BeaconState,
     epoch: Epoch,
     committed: &[(ValidatorId, BeaconProposal)],
     shard_contributions: &BTreeMap<ShardId, ShardEpochContribution>,
-) {
+) -> WitnessOutcome {
     let dur = state.chain_config.epoch_duration_ms;
+    let cap = MAX_WITNESSES_PER_SHARD as u64;
 
+    let mut outcome = WitnessOutcome::default();
     let mut refreshed: BTreeSet<ShardId> = BTreeSet::new();
     for (shard, contribution) in shard_contributions {
         let header = &contribution.boundary_header;
         let block_hash = header.hash();
-        // Find a committed boundary QC that names this block. The QC's
-        // quorum was checked by the remote-header pipeline that admitted
-        // the boundary header, so the fold binds rather than re-verifies.
+        // Bind the contribution to a committed boundary QC that names it.
         let Some(qc) = committed.iter().find_map(|(_, proposal)| {
             proposal
                 .boundary_qcs()
@@ -236,30 +237,49 @@ fn record_boundaries(
         }) else {
             continue;
         };
-        // Require a genuine epoch crossing: the boundary block (whose
-        // weighted timestamp is `qc.wt`) is the first across some epoch
-        // boundary, so its predecessor sits in an earlier epoch.
+        // Require a genuine epoch crossing: the boundary block (weighted
+        // timestamp `qc.wt`) is the first across some epoch boundary, so
+        // its predecessor sits at or before the cut.
         let Some(cut) = epoch_boundary_below(qc.weighted_timestamp().as_millis(), dur) else {
             continue;
         };
-        let leaf_count = header.beacon_witness_leaf_count();
-        let monotone = state
+        if header.parent_qc().weighted_timestamp().as_millis() > cut {
+            continue;
+        }
+        // Chunk math (0-based, count-aligned): `prior` is the applied
+        // watermark, `boundary_count` the boundary block's accumulator
+        // count. A boundary whose count regressed below what we've already
+        // applied is rejected (monotonicity).
+        let prior = state
             .boundaries
             .get(shard)
-            .is_none_or(|prior| leaf_count.inner() >= prior.witness_leaf_count.inner());
-        if header.parent_qc().weighted_timestamp().as_millis() <= cut && monotone {
-            state.boundaries.insert(
-                *shard,
-                ShardBoundary {
-                    state_root: header.state_root(),
-                    block_hash,
-                    witness_leaf_count: leaf_count,
-                    last_live_epoch: epoch,
-                    consecutive_misses: 0,
-                },
-            );
-            refreshed.insert(*shard);
+            .map_or(0, |b| b.witness_leaf_count.inner());
+        let boundary_count = header.beacon_witness_leaf_count().inner();
+        if boundary_count < prior {
+            continue;
         }
+        let chunk_end = prior.saturating_add(cap).min(boundary_count);
+        if !apply_contribution_witnesses(
+            state,
+            header,
+            &contribution.witnesses,
+            prior,
+            chunk_end,
+            &mut outcome,
+        ) {
+            continue;
+        }
+        state.boundaries.insert(
+            *shard,
+            ShardBoundary {
+                state_root: header.state_root(),
+                block_hash,
+                witness_leaf_count: BeaconWitnessLeafCount::new(chunk_end),
+                last_live_epoch: epoch,
+                consecutive_misses: 0,
+            },
+        );
+        refreshed.insert(*shard);
     }
 
     // Active shards with no fresh boundary carry their prior record
@@ -271,6 +291,8 @@ fn record_boundaries(
             boundary.consecutive_misses = boundary.consecutive_misses.saturating_add(1);
         }
     }
+
+    outcome
 }
 
 #[cfg(test)]
@@ -280,10 +302,12 @@ mod tests {
 
     use hyperscale_types::{
         BeaconProposal, BeaconWitnessLeafCount, BeaconWitnessRoot, BlockHash, BlockHeader,
-        BlockHeight, BoundedVec, CertificateRoot, Epoch, Hash, InFlightCount, LocalReceiptRoot,
-        ProposerTimestamp, ProvisionsRoot, QuorumCertificate, Round, ShardBoundary, ShardId,
-        SignerBitfield, StateRoot, TransactionRoot, TransitionCause, ValidatorId, VrfProof,
-        WeightedTimestamp, zero_bls_signature,
+        BlockHeight, BoundedVec, CertificateRoot, Epoch, Hash, InFlightCount, LeafIndex,
+        LocalReceiptRoot, ProposerTimestamp, ProvisionsRoot, QuorumCertificate, Round,
+        ShardBoundary, ShardId, ShardWitness, ShardWitnessPayload, ShardWitnessProof,
+        SignerBitfield, Stake, StakePoolId, StateRoot, TransactionRoot, TransitionCause,
+        ValidatorId, VrfProof, WeightedTimestamp, compute_merkle_root_with_proof,
+        zero_bls_signature,
     };
 
     use super::super::test_fixtures::{net, single_pool_state};
@@ -292,13 +316,14 @@ mod tests {
     // ─── boundary fold ──────────────────────────────────────────────────────
 
     /// A shard block header at `height` whose predecessor's weighted
-    /// timestamp (on its parent QC) is `pred_wt`, carrying `state_root` and
-    /// witness `leaf_count`.
-    fn boundary_block(
+    /// timestamp (on its parent QC) is `pred_wt`, carrying `state_root`,
+    /// `root` as its `beacon_witness_root`, and witness `leaf_count`.
+    fn boundary_block_with_root(
         shard: ShardId,
         height: u64,
         pred_wt: u64,
         state_root: StateRoot,
+        root: BeaconWitnessRoot,
         leaf_count: u64,
     ) -> BlockHeader {
         let parent_qc = QuorumCertificate::new(
@@ -328,9 +353,75 @@ mod tests {
             Vec::new(),
             BTreeMap::new(),
             InFlightCount::ZERO,
-            BeaconWitnessRoot::ZERO,
+            root,
             BeaconWitnessLeafCount::new(leaf_count),
         )
+    }
+
+    /// A boundary block carrying no witness accumulator (`ZERO` root).
+    fn boundary_block(
+        shard: ShardId,
+        height: u64,
+        pred_wt: u64,
+        state_root: StateRoot,
+        leaf_count: u64,
+    ) -> BlockHeader {
+        boundary_block_with_root(
+            shard,
+            height,
+            pred_wt,
+            state_root,
+            BeaconWitnessRoot::ZERO,
+            leaf_count,
+        )
+    }
+
+    /// A boundary block committing a real beacon-witness accumulator of
+    /// `leaf_count` `StakeDeposit` leaves, plus the matching per-leaf
+    /// witnesses (merkle-proven against the block's root, anchored to its
+    /// hash). Deposits apply without a validator-status precondition, so
+    /// the fold's chunk-apply step always succeeds on the well-formed set.
+    fn boundary_block_with_witnesses(
+        shard: ShardId,
+        height: u64,
+        pred_wt: u64,
+        state_root: StateRoot,
+        leaf_count: u64,
+    ) -> (BlockHeader, Vec<ShardWitness>) {
+        let payloads: Vec<ShardWitnessPayload> = (0..leaf_count)
+            .map(|i| ShardWitnessPayload::StakeDeposit {
+                pool_id: StakePoolId::new(200 + u32::try_from(i).unwrap_or(u32::MAX)),
+                amount: Stake::from_whole_tokens(1),
+            })
+            .collect();
+        let leaf_hashes: Vec<Hash> = payloads
+            .iter()
+            .map(ShardWitnessPayload::leaf_hash)
+            .collect();
+        let root = if leaf_hashes.is_empty() {
+            BeaconWitnessRoot::ZERO
+        } else {
+            BeaconWitnessRoot::from_raw(compute_merkle_root_with_proof(&leaf_hashes, 0).0)
+        };
+        let header = boundary_block_with_root(shard, height, pred_wt, state_root, root, leaf_count);
+        let block_hash = header.hash();
+        let witnesses = payloads
+            .into_iter()
+            .enumerate()
+            .map(|(i, payload)| {
+                let (_, siblings, _) = compute_merkle_root_with_proof(&leaf_hashes, i);
+                ShardWitness {
+                    payload,
+                    proof: ShardWitnessProof {
+                        shard_id: shard,
+                        committed_block_hash: block_hash,
+                        leaf_index: LeafIndex::new(i as u64),
+                        siblings: siblings.into(),
+                    },
+                }
+            })
+            .collect();
+        (header, witnesses)
     }
 
     /// A QC naming `header` with weighted timestamp `wt`.
@@ -357,10 +448,9 @@ mod tests {
         let shard = ShardId::leaf(1, 0);
 
         let anchor = StateRoot::from_raw(Hash::from_bytes(b"anchor"));
-        let b = boundary_block(shard, 5, 900, anchor, 7);
+        let (b, witnesses) = boundary_block_with_witnesses(shard, 5, 900, anchor, 7);
         let qc = qc_over(&b, 1_500);
         let proposal = BeaconProposal::new(
-            Vec::new(),
             std::iter::once((shard, Some(qc))).collect(),
             Vec::new(),
             VrfProof::ZERO,
@@ -370,7 +460,7 @@ mod tests {
             shard,
             ShardEpochContribution {
                 boundary_header: b,
-                witnesses: BoundedVec::new(),
+                witnesses: witnesses.into(),
             },
         ))
         .collect();
@@ -405,7 +495,6 @@ mod tests {
         let b = boundary_block(shard, 5, 1_200, StateRoot::ZERO, 0);
         let qc = qc_over(&b, 1_500);
         let proposal = BeaconProposal::new(
-            Vec::new(),
             std::iter::once((shard, Some(qc))).collect(),
             Vec::new(),
             VrfProof::ZERO,
@@ -423,6 +512,82 @@ mod tests {
         record_boundaries(&mut state, Epoch::new(1), &committed, &contributions);
 
         assert_eq!(state.boundaries.get(&shard).unwrap().consecutive_misses, 1,);
+    }
+
+    /// A backlog larger than `MAX_WITNESSES_PER_SHARD` drains in bounded
+    /// chunks across successive epochs: the applied watermark climbs by at
+    /// most the cap each epoch — never jumping straight to the boundary's
+    /// full leaf count — while the anchor stays pinned to the crossing,
+    /// until the watermark reaches that count. The contribution for each
+    /// epoch carries only that epoch's chunk, all proving against the one
+    /// boundary block's accumulator root.
+    #[test]
+    fn record_boundaries_drains_a_backlog_over_multiple_epochs() {
+        let mut state = single_pool_state(4);
+        state.chain_config.epoch_duration_ms = 1_000;
+        let shard = ShardId::leaf(1, 0);
+        let cap = MAX_WITNESSES_PER_SHARD;
+        // One full chunk plus a small remainder, so the drain spans two
+        // epochs: `[0, cap)` then `[cap, total)`.
+        let total = cap + 3;
+
+        let anchor = StateRoot::from_raw(Hash::from_bytes(b"backlog-anchor"));
+        let (b, witnesses) = boundary_block_with_witnesses(shard, 5, 900, anchor, total as u64);
+        let qc = qc_over(&b, 1_500);
+        let proposal = BeaconProposal::new(
+            std::iter::once((shard, Some(qc))).collect(),
+            Vec::new(),
+            VrfProof::ZERO,
+        );
+        let committed = vec![(ValidatorId::new(0), proposal)];
+
+        let contribution_with =
+            |chunk: &[ShardWitness]| -> BTreeMap<ShardId, ShardEpochContribution> {
+                std::iter::once((
+                    shard,
+                    ShardEpochContribution {
+                        boundary_header: b.clone(),
+                        witnesses: chunk.to_vec().into(),
+                    },
+                ))
+                .collect()
+            };
+
+        // Epoch 1: the watermark is cap-gated — it advances to exactly the
+        // cap even though the boundary commits `total > cap` leaves.
+        record_boundaries(
+            &mut state,
+            Epoch::new(1),
+            &committed,
+            &contribution_with(&witnesses[..cap]),
+        );
+        let after_1 = state.boundaries.get(&shard).expect("boundary recorded");
+        assert_eq!(
+            after_1.witness_leaf_count,
+            BeaconWitnessLeafCount::new(cap as u64)
+        );
+        assert_eq!(after_1.block_hash, b.hash());
+        assert_eq!(after_1.state_root, anchor);
+        assert_eq!(after_1.consecutive_misses, 0);
+
+        // Epoch 2: the remainder `[cap, total)` drains against the same
+        // crossing; the watermark reaches the boundary's full leaf count.
+        record_boundaries(
+            &mut state,
+            Epoch::new(2),
+            &committed,
+            &contribution_with(&witnesses[cap..]),
+        );
+        let after_2 = state
+            .boundaries
+            .get(&shard)
+            .expect("boundary still recorded");
+        assert_eq!(
+            after_2.witness_leaf_count,
+            BeaconWitnessLeafCount::new(total as u64)
+        );
+        assert_eq!(after_2.block_hash, b.hash());
+        assert_eq!(after_2.consecutive_misses, 0);
     }
 
     // ─── apply_epoch regression check + epoch advance ──────────────────────

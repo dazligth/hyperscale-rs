@@ -12,10 +12,9 @@ use thiserror::Error;
 
 use crate::{
     Bls12381G1PrivateKey, Bls12381G1PublicKey, BoundedBTreeMap, BoundedVec, Epoch,
-    MAX_EQUIVOCATIONS_PER_PROPOSER, MAX_SHARD_WITNESSES_PER_PROPOSER, MAX_SHARDS,
-    NetworkDefinition, PC_VALUE_ELEMENT_BYTES, PcValueElement, PcVoteEquivocation,
-    QuorumCertificate, ShardId, ShardWitness, Verifiable, Verified, Verify, VrfOutput, VrfProof,
-    vrf_output_from_proof, vrf_sign, vrf_verify,
+    MAX_EQUIVOCATIONS_PER_PROPOSER, MAX_SHARDS, NetworkDefinition, PC_VALUE_ELEMENT_BYTES,
+    PcValueElement, PcVoteEquivocation, QuorumCertificate, ShardId, Verifiable, Verified, Verify,
+    VrfOutput, VrfProof, vrf_output_from_proof, vrf_sign, vrf_verify,
 };
 
 /// One committee member's slot submission.
@@ -26,7 +25,6 @@ use crate::{
 /// crate's job — this is a pure data container.
 #[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
 pub struct BeaconProposal {
-    shard_witnesses: BoundedVec<Verifiable<ShardWitness>, MAX_SHARD_WITNESSES_PER_PROPOSER>,
     /// This proposer's view of where each live shard's chain sits at the
     /// epoch boundary: the **canonical** boundary QC per shard (the
     /// `parent_qc` of the boundary block's committed child), or `None`
@@ -48,17 +46,11 @@ impl BeaconProposal {
     /// Panics if any list or map exceeds its per-proposer cap.
     #[must_use]
     pub fn new(
-        shard_witnesses: Vec<ShardWitness>,
         boundary_qcs: BTreeMap<ShardId, Option<QuorumCertificate>>,
         equivocations: Vec<PcVoteEquivocation>,
         vrf_proof: VrfProof,
     ) -> Self {
         Self {
-            shard_witnesses: shard_witnesses
-                .into_iter()
-                .map(Verifiable::from)
-                .collect::<Vec<_>>()
-                .into(),
             boundary_qcs: boundary_qcs
                 .into_iter()
                 .map(|(shard, qc)| (shard, qc.map(Verifiable::from)))
@@ -79,21 +71,10 @@ impl BeaconProposal {
     #[must_use]
     pub const fn vrf_only(vrf_proof: VrfProof) -> Self {
         Self {
-            shard_witnesses: BoundedVec::new(),
             boundary_qcs: BoundedBTreeMap::new(),
             equivocations: BoundedVec::new(),
             vrf_proof,
         }
-    }
-
-    /// Shard witnesses lifted from source committees this slot. Each
-    /// rides as `Verifiable<ShardWitness>`: wire-decoded proposals land
-    /// `Unverified`; the beacon admission gate upgrades the marker.
-    #[must_use]
-    pub const fn shard_witnesses(
-        &self,
-    ) -> &BoundedVec<Verifiable<ShardWitness>, MAX_SHARD_WITNESSES_PER_PROPOSER> {
-        &self.shard_witnesses
     }
 
     /// Per-shard canonical boundary QCs this proposer observed (or `None`
@@ -107,9 +88,9 @@ impl BeaconProposal {
         &self.boundary_qcs
     }
 
-    /// Equivocation evidence observed this slot. Same `Verifiable`
-    /// lifecycle as [`Self::shard_witnesses`]; admission jails the named
-    /// validator once the block commits.
+    /// Equivocation evidence observed this slot. Each entry carries a
+    /// `Verifiable` marker upgraded at the admission gate; admission jails
+    /// the named validator once the block commits.
     #[must_use]
     pub const fn equivocations(
         &self,
@@ -194,13 +175,15 @@ pub enum BeaconProposalVerifyError {
     BadVrfReveal,
 }
 
-/// The witness lists handed to
-/// [`Verified::<BeaconProposal>::with_verified_witnesses`] aren't
-/// content-identical to the proposal's own — a marker rebind must not
-/// substitute witnesses.
+/// An equivocation marker rebind tried to substitute evidence.
+///
+/// Returned when the list handed to
+/// [`Verified::<BeaconProposal>::with_verified_equivocations`] isn't
+/// content-identical to the proposal's own — a rebind must upgrade
+/// markers, never swap the underlying evidence.
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
-#[error("witness rebind content mismatch")]
-pub struct BeaconProposalWitnessMismatch;
+#[error("equivocation rebind content mismatch")]
+pub struct BeaconProposalEquivocationMismatch;
 
 impl Verify<&BeaconProposalVerifyContext<'_>> for BeaconProposal {
     type Error = BeaconProposalVerifyError;
@@ -235,43 +218,35 @@ impl Verified<BeaconProposal> {
         sk: &Bls12381G1PrivateKey,
         network: &NetworkDefinition,
         epoch: Epoch,
-        shard_witnesses: Vec<ShardWitness>,
         boundary_qcs: BTreeMap<ShardId, Option<QuorumCertificate>>,
         equivocations: Vec<PcVoteEquivocation>,
     ) -> Self {
         let vrf_proof = vrf_sign(sk, network, epoch);
-        Self::new_unchecked(BeaconProposal::new(
-            shard_witnesses,
-            boundary_qcs,
-            equivocations,
-            vrf_proof,
-        ))
+        Self::new_unchecked(BeaconProposal::new(boundary_qcs, equivocations, vrf_proof))
     }
 
-    /// Rebind the proposal's witness lists to their marker-upgraded
-    /// forms. The supplied lists must be content-identical to the
-    /// proposal's own (`Verifiable` compares by raw `T`, so only the
-    /// verification markers may differ); the VRF predicate already
-    /// established on `self` covers `(network, epoch)` only and is
-    /// unaffected, so the rebind is sound by construction.
+    /// Rebind the proposal's equivocation list to its marker-upgraded
+    /// form. The supplied list must be content-identical to the proposal's
+    /// own (`Verifiable` compares by raw `T`, so only the verification
+    /// markers may differ); the VRF predicate already established on
+    /// `self` covers `(network, epoch)` only and is unaffected, so the
+    /// rebind is sound by construction.
     ///
     /// Mirrors [`Verified::<BlockHeader>::with_verified_parent_qc`].
     ///
     /// # Errors
     ///
-    /// Returns [`BeaconProposalWitnessMismatch`] if either supplied list
+    /// Returns [`BeaconProposalEquivocationMismatch`] if the supplied list
     /// isn't content-identical to the proposal's own — a rebind must
-    /// upgrade markers, never substitute witnesses.
-    pub fn with_verified_witnesses(
+    /// upgrade markers, never substitute evidence.
+    pub fn with_verified_equivocations(
         self,
-        shard_witnesses: BoundedVec<Verifiable<ShardWitness>, MAX_SHARD_WITNESSES_PER_PROPOSER>,
         equivocations: BoundedVec<Verifiable<PcVoteEquivocation>, MAX_EQUIVOCATIONS_PER_PROPOSER>,
-    ) -> Result<Self, BeaconProposalWitnessMismatch> {
-        if self.shard_witnesses() != &shard_witnesses || self.equivocations() != &equivocations {
-            return Err(BeaconProposalWitnessMismatch);
+    ) -> Result<Self, BeaconProposalEquivocationMismatch> {
+        if self.equivocations() != &equivocations {
+            return Err(BeaconProposalEquivocationMismatch);
         }
         Ok(Self::new_unchecked(BeaconProposal {
-            shard_witnesses,
             equivocations,
             ..self.into_inner()
         }))
@@ -280,39 +255,40 @@ impl Verified<BeaconProposal> {
 
 #[cfg(test)]
 mod tests {
-    use sbor::{
-        BASIC_SBOR_V1_MAX_DEPTH, BASIC_SBOR_V1_PAYLOAD_PREFIX, Categorize as _, DecodeError,
-        Encoder as _, NoCustomValueKind, ValueKind, VecEncoder,
-    };
-
     use super::*;
     use crate::{
-        BlockHash, LeafIndex, ShardId, ShardWitness, ShardWitnessPayload, ShardWitnessProof, Stake,
-        StakePoolId,
+        PcValueElement, PcVector, PcVoteRound, ShardId, SpcView, ValidatorId, zero_bls_signature,
     };
 
-    fn sample_witness(leaf_index: u64) -> ShardWitness {
-        ShardWitness {
-            payload: ShardWitnessPayload::StakeDeposit {
-                pool_id: StakePoolId::new(1),
-                amount: Stake::from_whole_tokens(1_000),
-            },
-            proof: ShardWitnessProof {
-                shard_id: ShardId::ROOT,
-                committed_block_hash: BlockHash::ZERO,
-                leaf_index: LeafIndex::new(leaf_index),
-                siblings: Vec::new().into(),
-            },
+    fn sample_boundary_qcs() -> BTreeMap<ShardId, Option<QuorumCertificate>> {
+        std::iter::once((
+            ShardId::ROOT,
+            Some(QuorumCertificate::genesis(ShardId::ROOT)),
+        ))
+        .collect()
+    }
+
+    /// A structurally well-formed (but cryptographically empty)
+    /// equivocation — `with_verified_equivocations` compares content, not
+    /// validity, so a zero-signature placeholder is enough to exercise the
+    /// rebind/reject paths.
+    fn sample_equivocation() -> PcVoteEquivocation {
+        let value_a = PcVector::new([PcValueElement::new([0xAA; 32])]);
+        let value_b = PcVector::new([PcValueElement::new([0xBB; 32])]);
+        PcVoteEquivocation {
+            validator: ValidatorId::new(0),
+            epoch: Epoch::new(1),
+            view: SpcView::new(0),
+            round: PcVoteRound::Vote1,
+            value_a,
+            sig_a: zero_bls_signature(),
+            value_b,
+            sig_b: zero_bls_signature(),
         }
     }
 
     fn sample_proposal() -> BeaconProposal {
-        BeaconProposal::new(
-            vec![sample_witness(0), sample_witness(1), sample_witness(2)],
-            BTreeMap::new(),
-            Vec::new(),
-            VrfProof::new([0xCD; 96]),
-        )
+        BeaconProposal::new(sample_boundary_qcs(), Vec::new(), VrfProof::new([0xCD; 96]))
     }
 
     #[test]
@@ -324,50 +300,19 @@ mod tests {
     }
 
     #[test]
-    fn vrf_only_has_no_witnesses() {
+    fn vrf_only_is_empty() {
         let p = BeaconProposal::vrf_only(VrfProof::ZERO);
-        assert!(p.shard_witnesses().is_empty());
+        assert!(p.boundary_qcs().is_empty());
         assert!(p.equivocations().is_empty());
         assert_eq!(p.vrf_proof(), VrfProof::ZERO);
         // Output is derived from the proof, not the all-zero sentinel.
         assert_eq!(p.vrf_output(), vrf_output_from_proof(&VrfProof::ZERO));
     }
 
-    /// Hand-roll a `BeaconProposal` whose `shard_witnesses` length
-    /// prefix exceeds the cap. The `BoundedVec` decoder fires before
-    /// any per-element work happens.
-    #[test]
-    fn decode_rejects_oversized_witness_count() {
-        let proposal = sample_proposal();
-        let mut buf = Vec::with_capacity(256);
-        {
-            let mut enc = VecEncoder::<NoCustomValueKind>::new(&mut buf, BASIC_SBOR_V1_MAX_DEPTH);
-            enc.write_payload_prefix(BASIC_SBOR_V1_PAYLOAD_PREFIX)
-                .unwrap();
-            enc.write_value_kind(ValueKind::Tuple).unwrap();
-            // BeaconProposal has 4 fields.
-            enc.write_size(4).unwrap();
-            // Oversized shard-witnesses array (the first field).
-            enc.write_value_kind(ValueKind::Array).unwrap();
-            enc.write_value_kind(ShardWitness::value_kind()).unwrap();
-            enc.write_size(MAX_SHARD_WITNESSES_PER_PROPOSER + 1)
-                .unwrap();
-            // Don't bother writing the rest — decode fails on the count.
-            let _ = &proposal;
-        }
-        let err = basic_decode::<BeaconProposal>(&buf).unwrap_err();
-        assert!(matches!(
-            err,
-            DecodeError::UnexpectedSize { expected, actual }
-                if expected == MAX_SHARD_WITNESSES_PER_PROPOSER
-                    && actual == MAX_SHARD_WITNESSES_PER_PROPOSER + 1
-        ));
-    }
-
     #[test]
     fn accessors_return_built_values() {
         let p = sample_proposal();
-        assert_eq!(p.shard_witnesses().len(), 3);
+        assert_eq!(p.boundary_qcs().len(), 1);
         assert!(p.equivocations().is_empty());
         assert_eq!(p.vrf_proof(), VrfProof::new([0xCD; 96]));
         // Output is derived from the proof.
@@ -378,24 +323,22 @@ mod tests {
     }
 
     #[test]
-    fn with_verified_witnesses_rebinds_equal_content_and_rejects_substitution() {
-        let verified = Verified::new_unchecked_for_test(sample_proposal());
-        // Content-equal lists (markers may differ) rebind cleanly.
-        let same_shard = verified.shard_witnesses().clone();
-        let same_equiv = verified.equivocations().clone();
-        assert!(
-            verified
-                .clone()
-                .with_verified_witnesses(same_shard, same_equiv)
-                .is_ok()
+    fn with_verified_equivocations_rebinds_equal_content_and_rejects_substitution() {
+        let proposal = BeaconProposal::new(
+            sample_boundary_qcs(),
+            vec![sample_equivocation()],
+            VrfProof::new([0xCD; 96]),
         );
-        // Substituting a different witness is rejected — a rebind must
+        let verified = Verified::new_unchecked_for_test(proposal);
+        // Content-equal list (markers may differ) rebinds cleanly.
+        let same = verified.equivocations().clone();
+        assert!(verified.clone().with_verified_equivocations(same).is_ok());
+        // Substituting different evidence is rejected — a rebind must
         // upgrade markers, never swap content.
-        let substituted: BoundedVec<_, MAX_SHARD_WITNESSES_PER_PROPOSER> =
-            vec![Verifiable::from(sample_witness(99))].into();
+        let substituted: BoundedVec<_, MAX_EQUIVOCATIONS_PER_PROPOSER> = BoundedVec::new();
         assert_eq!(
-            verified.with_verified_witnesses(substituted, BoundedVec::new()),
-            Err(BeaconProposalWitnessMismatch),
+            verified.with_verified_equivocations(substituted),
+            Err(BeaconProposalEquivocationMismatch),
         );
     }
 

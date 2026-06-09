@@ -50,10 +50,6 @@ pub enum ByzantineBehaviour {
     /// a second round-1 vote over a perturbed `v_in`. Both votes are
     /// well-formed signatures from the same validator at the same
     /// `(epoch, view, round)`, which is the PC double-sign condition.
-    ///
-    /// Round-2 and round-3 equivocation are not modelled: they require
-    /// fabricating divergent embedded QC1/QC2s, which the protocol's
-    /// pool aggregation makes structurally hard to forge.
     EquivocatePcVote1,
 }
 
@@ -145,11 +141,11 @@ pub struct CoordinatorSim {
     /// Number of Byzantine transforms each replica has applied so far —
     /// test introspection.
     pub byzantine_fires: Vec<usize>,
-    /// Observations (shard witnesses, equivocations) scheduled to splice
-    /// into the next `BuildAndBroadcastBeaconProposal` at the keyed
-    /// epoch, regardless of which replica emits it. Consumed (drained)
-    /// the first time a proposal at that epoch is absorbed.
-    pending_topology_changes: BTreeMap<Epoch, (Vec<ShardWitness>, Vec<PcVoteEquivocation>)>,
+    /// Equivocations scheduled to splice into the next
+    /// `BuildAndBroadcastBeaconProposal` at the keyed epoch, regardless of
+    /// which replica emits it. Consumed (drained) the first time a proposal
+    /// at that epoch is absorbed.
+    pending_equivocations: BTreeMap<Epoch, Vec<PcVoteEquivocation>>,
     /// Single-shot per-pair filter: when `(sender, receiver)` is
     /// present, the next `BuildAndBroadcastBeaconProposal` from
     /// `sender` skips queuing the envelope addressed to `receiver`,
@@ -244,7 +240,7 @@ impl CoordinatorSim {
             drop_counters: vec![0; n],
             byzantine: vec![None; n],
             byzantine_fires: vec![0; n],
-            pending_topology_changes: BTreeMap::new(),
+            pending_equivocations: BTreeMap::new(),
             blocked_proposal_pairs: BTreeSet::new(),
         }
     }
@@ -275,65 +271,16 @@ impl CoordinatorSim {
         self.byzantine[idx] = Some(behaviour);
     }
 
-    /// Splice `witnesses` into the next `BuildAndBroadcastBeaconProposal`
-    /// at `epoch` that the sim absorbs. Tests use this to inject
-    /// topology-mutating witnesses (e.g. `DeactivateValidator`) that the
-    /// natural sim driver wouldn't otherwise produce. Witnesses for a
+    /// Splice `equivocations` into the next
+    /// `BuildAndBroadcastBeaconProposal` at `epoch` that the sim absorbs.
+    /// Tests use this to inject forged equivocation evidence that the
+    /// natural sim driver wouldn't otherwise produce. Equivocations for a
     /// given epoch are drained on first fire.
-    pub fn inject_topology_change(&mut self, epoch: Epoch, shard_witnesses: Vec<ShardWitness>) {
-        self.pending_topology_changes
-            .entry(epoch)
-            .or_default()
-            .0
-            .extend(shard_witnesses);
-    }
-
-    /// Splice `equivocations` into the next proposal at `epoch`. Same
-    /// one-shot drain semantics as [`Self::inject_topology_change`].
     pub fn inject_equivocations(&mut self, epoch: Epoch, equivocations: Vec<PcVoteEquivocation>) {
-        self.pending_topology_changes
+        self.pending_equivocations
             .entry(epoch)
             .or_default()
-            .1
             .extend(equivocations);
-    }
-
-    /// Build a beacon-witness merkle tree carrying `payload` at
-    /// `leaf_index`, deliver a source-shard header committing its root to
-    /// every replica (so the witness-admission gate's merkle check passes
-    /// on peers), and return the matching `ShardWitness` for the caller
-    /// to splice via [`Self::inject_topology_change`]. Deliver before
-    /// `kick_off` so the header is present when peers evaluate the
-    /// proposal that carries the witness.
-    pub fn admissible_shard_witness(
-        &mut self,
-        shard: ShardId,
-        height: u64,
-        leaf_index: u64,
-        payload: ShardWitnessPayload,
-    ) -> ShardWitness {
-        let idx = usize::try_from(leaf_index).expect("leaf index fits usize");
-        let leaf_count = leaf_index + 1;
-        let mut leaves: Vec<Hash> = (0..leaf_count)
-            .map(|i| Hash::from_bytes(format!("beacon-witness-leaf-{i}").as_bytes()))
-            .collect();
-        leaves[idx] = payload.leaf_hash();
-        let (root, siblings, _) = compute_merkle_root_with_proof(&leaves, idx);
-        let header = make_source_header(shard, height, root, leaf_count);
-        let committed_block_hash = header.block_hash();
-        for replica_idx in 0..self.coordinators.len() {
-            let actions = self.coordinators[replica_idx].on_verified_remote_header(&header);
-            self.absorb(replica_idx, actions);
-        }
-        ShardWitness {
-            payload,
-            proof: ShardWitnessProof {
-                shard_id: shard,
-                committed_block_hash,
-                leaf_index: LeafIndex::new(leaf_index),
-                siblings: siblings.into(),
-            },
-        }
     }
 
     /// Deliver a two-block epoch-boundary crossing for `shard` to every
@@ -356,19 +303,69 @@ impl CoordinatorSim {
         state_root: StateRoot,
         leaf_count: u64,
     ) -> BlockHash {
+        let (b, witnesses) =
+            Self::build_boundary_block(shard, b_height, pred_wt, state_root, leaf_count);
+        // `C`'s parent QC is the canonical QC over `B` — a genuine `2f+1`
+        // of the governing shard committee, the form the beacon's
+        // boundary-QC verification authenticates.
+        let canonical_qc = self.genuine_boundary_qc(shard, &b, b_wt);
+        self.deliver_crossing_pair(shard, &b, b_height, canonical_qc, &witnesses)
+    }
+
+    /// Build boundary block `B` for `shard` whose beacon-witness
+    /// accumulator holds `leaf_count` deposit leaves, plus the matching
+    /// per-leaf `ShardWitness`es (merkle-proven against `B`'s root, anchored
+    /// to `B`). The leaves are distinct `StakeDeposit`s so the fold has
+    /// real payloads to apply.
+    fn build_boundary_block(
+        shard: ShardId,
+        b_height: u64,
+        pred_wt: u64,
+        state_root: StateRoot,
+        leaf_count: u64,
+    ) -> (Arc<Verified<CertifiedBlockHeader>>, Vec<Arc<ShardWitness>>) {
+        let payloads: Vec<ShardWitnessPayload> = (0..leaf_count)
+            .map(|i| ShardWitnessPayload::StakeDeposit {
+                pool_id: StakePoolId::new(100 + u32::try_from(i).unwrap_or(u32::MAX)),
+                amount: Stake::from_whole_tokens(1),
+            })
+            .collect();
+        let leaf_hashes: Vec<Hash> = payloads
+            .iter()
+            .map(ShardWitnessPayload::leaf_hash)
+            .collect();
+        let witness_root = if leaf_hashes.is_empty() {
+            BeaconWitnessRoot::ZERO
+        } else {
+            BeaconWitnessRoot::from_raw(compute_merkle_root_with_proof(&leaf_hashes, 0).0)
+        };
         let b = make_linked_source_header(
             shard,
             b_height,
             BlockHash::ZERO,
             pred_wt,
             state_root,
+            witness_root,
             leaf_count,
         );
-        // `C`'s parent QC is the canonical QC over `B` — a genuine `2f+1`
-        // of the governing shard committee, the form the beacon's
-        // boundary-QC verification authenticates.
-        let canonical_qc = self.genuine_boundary_qc(shard, &b, b_wt);
-        self.deliver_crossing_pair(shard, &b, b_height, canonical_qc, leaf_count)
+        let b_hash = b.block_hash();
+        let witnesses: Vec<Arc<ShardWitness>> = payloads
+            .into_iter()
+            .enumerate()
+            .map(|(i, payload)| {
+                let (_, siblings, _) = compute_merkle_root_with_proof(&leaf_hashes, i);
+                Arc::new(ShardWitness {
+                    payload,
+                    proof: ShardWitnessProof {
+                        shard_id: shard,
+                        committed_block_hash: b_hash,
+                        leaf_index: LeafIndex::new(i as u64),
+                        siblings: siblings.into(),
+                    },
+                })
+            })
+            .collect();
+        (b, witnesses)
     }
 
     /// Like [`Self::deliver_boundary_crossing`], but `C`'s parent QC over
@@ -387,14 +384,8 @@ impl CoordinatorSim {
         state_root: StateRoot,
         leaf_count: u64,
     ) -> BlockHash {
-        let b = make_linked_source_header(
-            shard,
-            b_height,
-            BlockHash::ZERO,
-            pred_wt,
-            state_root,
-            leaf_count,
-        );
+        let (b, witnesses) =
+            Self::build_boundary_block(shard, b_height, pred_wt, state_root, leaf_count);
         let mut signers = SignerBitfield::new(4);
         signers.set(0);
         signers.set(1);
@@ -409,32 +400,41 @@ impl CoordinatorSim {
             zero_bls_signature(),
             WeightedTimestamp::from_millis(b_wt),
         );
-        self.deliver_crossing_pair(shard, &b, b_height, forged_qc, leaf_count)
+        self.deliver_crossing_pair(shard, &b, b_height, forged_qc, &witnesses)
     }
 
-    /// Seat boundary block `B` and its child `C` (carrying `canonical_qc`
-    /// as its parent QC) into every replica's shard-source tracker.
+    /// Seat boundary block `B`, its child `C` (carrying `canonical_qc` as
+    /// its parent QC), and `B`'s witness chunk into every replica's
+    /// shard-source tracker. Seating the chunk is what lets a proposer
+    /// satisfy the witness-availability coupling and report `shard` in its
+    /// `boundary_qcs`, and what lets the assembler embed the contribution.
     fn deliver_crossing_pair(
         &mut self,
         shard: ShardId,
         b: &Arc<Verified<CertifiedBlockHeader>>,
         b_height: u64,
         canonical_qc: QuorumCertificate,
-        leaf_count: u64,
+        witnesses: &[Arc<ShardWitness>],
     ) -> BlockHash {
         let b_hash = b.block_hash();
+        // `C`'s own beacon-witness fields are never read for `B`'s
+        // boundary (the chunk proves against `B`); only `C.parent_qc` —
+        // the canonical QC over `B` — matters.
         let c = make_source_header_with_parent_qc(
             shard,
             b_height + 1,
             canonical_qc,
             StateRoot::ZERO,
-            leaf_count,
+            BeaconWitnessRoot::ZERO,
+            witnesses.len() as u64,
         );
         for idx in 0..self.coordinators.len() {
             let a_b = self.coordinators[idx].on_verified_remote_header(b);
             self.absorb(idx, a_b);
             let a_c = self.coordinators[idx].on_verified_remote_header(&c);
             self.absorb(idx, a_c);
+            let a_w = self.coordinators[idx].on_shard_witnesses_received(shard, witnesses.to_vec());
+            self.absorb(idx, a_w);
         }
         b_hash
     }
@@ -768,25 +768,20 @@ impl CoordinatorSim {
         match action {
             Action::BuildAndBroadcastBeaconProposal {
                 epoch,
-                mut shard_witnesses,
                 boundary_qcs,
                 mut equivocations,
                 recipients,
             } => {
-                // Splice in any test-scheduled observations for this epoch
+                // Splice in any test-scheduled equivocations for this epoch
                 // before the proposal's VRF reveal is signed. Consumed
                 // on first fire so only one replica's broadcast picks
                 // them up — that's enough to carry them to commit.
-                if let Some((extra_shard, extra_equiv)) =
-                    self.pending_topology_changes.remove(&epoch)
-                {
-                    shard_witnesses.extend(extra_shard);
+                if let Some(extra_equiv) = self.pending_equivocations.remove(&epoch) {
                     equivocations.extend(extra_equiv);
                 }
                 let sk = &self.sks[emitter_idx];
                 let vrf_proof = vrf_sign(sk, &self.network, epoch);
                 let proposal = Arc::new(Verified::new_unchecked_for_test(BeaconProposal::new(
-                    shard_witnesses,
                     boundary_qcs,
                     equivocations,
                     vrf_proof,
@@ -827,7 +822,7 @@ impl CoordinatorSim {
                     self.byzantine[emitter_idx] = None;
                     self.byzantine_fires[emitter_idx] += 1;
                     let conflicting = Arc::new(Verified::new_unchecked_for_test(
-                        BeaconProposal::new(Vec::new(), BTreeMap::new(), Vec::new(), vrf_proof),
+                        BeaconProposal::new(BTreeMap::new(), Vec::new(), vrf_proof),
                     ));
                     for rcpt in &recipients {
                         let to_idx = self.idx_of(*rcpt);
@@ -1044,9 +1039,8 @@ impl CoordinatorSim {
             } => {
                 // Production runs this on the consensus crypto pool; the
                 // sim collapses the round-trip to a synchronous inline
-                // verify + result-feedback so the verification-bound
-                // pipeline doesn't reshape envelope-delivery ordering
-                // relative to the pre-async flow.
+                // verify + result-feedback so verification timing doesn't
+                // reshape envelope-delivery ordering.
                 let result = Arc::unwrap_or_clone(block)
                     .upgrade(&CertifiedBeaconBlockVerifyContext {
                         network: &self.network,
@@ -1348,53 +1342,6 @@ impl CoordinatorSim {
     }
 }
 
-/// Build a verified source-shard `CertifiedBlockHeader` committing
-/// `witness_root` as its `beacon_witness_root`. Only the fields the
-/// beacon witness-admission gate reads — shard, height, witness root,
-/// leaf count, block hash — carry meaning; the rest are zeroed.
-fn make_source_header(
-    shard: ShardId,
-    height: u64,
-    witness_root: Hash,
-    leaf_count: u64,
-) -> Arc<Verified<CertifiedBlockHeader>> {
-    let parent_block_hash = BlockHash::ZERO;
-    let header = BlockHeader::new(
-        shard,
-        BlockHeight::new(height),
-        parent_block_hash,
-        QuorumCertificate::genesis(shard),
-        ValidatorId::new(0),
-        ProposerTimestamp::ZERO,
-        Round::INITIAL,
-        false,
-        StateRoot::ZERO,
-        TransactionRoot::ZERO,
-        CertificateRoot::ZERO,
-        LocalReceiptRoot::ZERO,
-        ProvisionsRoot::ZERO,
-        Vec::new(),
-        BTreeMap::new(),
-        InFlightCount::ZERO,
-        BeaconWitnessRoot::from_raw(witness_root),
-        BeaconWitnessLeafCount::new(leaf_count),
-    );
-    let block_hash = header.hash();
-    let qc = QuorumCertificate::new(
-        block_hash,
-        shard,
-        BlockHeight::new(height),
-        parent_block_hash,
-        Round::INITIAL,
-        SignerBitfield::new(4),
-        zero_bls_signature(),
-        WeightedTimestamp::from_millis(0),
-    );
-    Arc::new(Verified::new_unchecked_for_test(CertifiedBlockHeader::new(
-        header, qc,
-    )))
-}
-
 /// Build a verified source-shard `CertifiedBlockHeader` over an explicit
 /// `parent_qc`. The header's `parent_block_hash` is taken from the QC, so
 /// `parent_qc` doubles as the chain link and the timestamp anchor. Used
@@ -1406,6 +1353,7 @@ fn make_source_header_with_parent_qc(
     height: u64,
     parent_qc: QuorumCertificate,
     state_root: StateRoot,
+    witness_root: BeaconWitnessRoot,
     leaf_count: u64,
 ) -> Arc<Verified<CertifiedBlockHeader>> {
     let parent_hash = parent_qc.block_hash();
@@ -1427,9 +1375,7 @@ fn make_source_header_with_parent_qc(
         Vec::new(),
         BTreeMap::new(),
         InFlightCount::ZERO,
-        BeaconWitnessRoot::from_raw(Hash::from_bytes(
-            format!("bw-{shard:?}-{height}").as_bytes(),
-        )),
+        witness_root,
         BeaconWitnessLeafCount::new(leaf_count),
     );
     let block_hash = header.hash();
@@ -1453,12 +1399,14 @@ fn make_source_header_with_parent_qc(
 /// weighted timestamp — a placeholder parent QC (not BLS-genuine) used for
 /// the boundary block `B`, whose own QC the beacon doesn't verify (only
 /// the canonical QC over `B`, supplied as its child's `parent_qc`, is).
+/// `witness_root` commits the block's beacon-witness accumulator.
 fn make_linked_source_header(
     shard: ShardId,
     height: u64,
     parent_hash: BlockHash,
     parent_wt: u64,
     state_root: StateRoot,
+    witness_root: BeaconWitnessRoot,
     leaf_count: u64,
 ) -> Arc<Verified<CertifiedBlockHeader>> {
     let parent_qc = QuorumCertificate::new(
@@ -1471,7 +1419,14 @@ fn make_linked_source_header(
         zero_bls_signature(),
         WeightedTimestamp::from_millis(parent_wt),
     );
-    make_source_header_with_parent_qc(shard, height, parent_qc, state_root, leaf_count)
+    make_source_header_with_parent_qc(
+        shard,
+        height,
+        parent_qc,
+        state_root,
+        witness_root,
+        leaf_count,
+    )
 }
 
 /// Build a `PcVector` guaranteed to differ from `v`. Used for round-1

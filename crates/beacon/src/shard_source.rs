@@ -1,20 +1,26 @@
 //! Per-shard source tracking for beacon proposals.
 //!
 //! Holds the beacon's verified view of each source shard, everything a
-//! proposer draws on to build a `BeaconProposal`:
+//! proposer draws on to build a `BeaconProposal` and an epoch's
+//! `shard_contributions`:
 //!
-//! - recent verified headers — witness eligibility, readiness, and the
-//!   verify context for inbound `BeaconBlock`s and `ShardWitness`es;
+//! - recent verified headers — the verify context for inbound
+//!   `BeaconBlock`s and `ShardWitness`es and the input to crossing
+//!   detection;
 //! - observed epoch-boundary crossings — the per-shard anchors the
 //!   proposer reports in `boundary_qcs`;
-//! - the pool of verified witnesses ready for proposal inclusion.
+//! - per-anchor witness chunks — verified witnesses for a boundary
+//!   block's accumulator range, keyed by the boundary block they prove
+//!   against (the accumulator is append-only, so a leaf's merkle path is
+//!   root-specific — a witness only counts toward the boundary block it
+//!   was fetched against).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use hyperscale_types::{
-    BeaconWitnessLeafCount, BlockHash, BlockHeader, BlockHeight, CertifiedBlockHeader, Epoch,
-    LeafIndex, QuorumCertificate, ShardId, ShardWitness, Verified, WeightedTimestamp,
+    BlockHash, BlockHeader, BlockHeight, CertifiedBlockHeader, Epoch, LeafIndex, QuorumCertificate,
+    ShardId, ShardWitness, Verified,
 };
 
 /// How many recent epoch-boundary crossings to retain per shard. The
@@ -22,6 +28,13 @@ use hyperscale_types::{
 /// "latest observed" across beacon committee members so a node can seat
 /// the contribution for whichever crossing committed.
 const MAX_RETAINED_CROSSINGS_PER_SHARD: usize = 4;
+
+/// How many recent verified headers to retain per shard. Crossing
+/// detection reads consecutive `(B, C)` pairs near the tip and inbound
+/// verification reads the most recent headers; a boundary block's own
+/// header is retained separately on its [`ObservedCrossing`], so the
+/// sliding window only needs to cover tip-adjacent work.
+const MAX_RETAINED_HEADERS_PER_SHARD: usize = 8;
 
 /// A shard's observed crossing of an epoch boundary.
 ///
@@ -39,7 +52,7 @@ pub struct ObservedCrossing {
 
 impl ObservedCrossing {
     /// The boundary block's header — its `state_root` is the snap-sync
-    /// anchor.
+    /// anchor and its `beacon_witness_root` authenticates the chunk.
     #[must_use]
     pub fn boundary_header(&self) -> &BlockHeader {
         self.boundary_header.header()
@@ -52,41 +65,44 @@ impl ObservedCrossing {
     }
 }
 
-/// Per-shard witness tracking.
+/// A boundary block's verified witness chunk, keyed by leaf index. A
+/// witness proves against one block's `beacon_witness_root`, so each chunk
+/// is scoped to a single `(shard, anchor block hash)`.
+type AnchorChunk = BTreeMap<LeafIndex, Arc<Verified<ShardWitness>>>;
+
+/// Per-shard source tracking.
 ///
-/// Four internal maps:
-///
-/// - `shard_headers` — verified source-shard headers, populated from
-///   every verified remote header regardless of committee membership;
-///   needed by off-committee vnodes to verify incoming `BeaconBlock`s'
-///   witness Merkle paths and used as the verify context for inbound
-///   [`ShardWitness`]es. Bounded to a sliding window of recent /
-///   unconsumed headers by [`prune_stale_headers`](Self::prune_stale_headers).
-/// - `pool` — verified witnesses ready for inclusion. Empty when the
-///   local validator is off-committee. `drain_for_proposal` clones
-///   eligible entries out without removing them; physical eviction
-///   happens only when [`notify_consumed_advanced`](Self::notify_consumed_advanced)
-///   advances past a leaf index. This keeps witnesses available for a
-///   future proposal if the current epoch's block doesn't commit
-///   (e.g. SPC fails to reach `OutputHigh`, or the epoch is skipped).
-/// - `pending_in_proposal` — leaves the local proposer has drained
-///   into a proposal but not yet seen committed. Mirrors the eviction
-///   path of `pool`.
-/// - `pending_fetches` — outstanding fetch dedup mapping each leaf to
-///   the `(anchor_height, anchor_hash)` it was issued against, so
-///   eviction can hand the matching ids to `FetchAbandon::ShardWitnesses`.
-///   Empty when off-committee.
+/// - `shard_headers` — verified source-shard headers, a sliding window of
+///   the most recent per shard (bounded by
+///   [`MAX_RETAINED_HEADERS_PER_SHARD`]). Populated from every verified
+///   remote header regardless of committee membership; needed by
+///   off-committee vnodes to verify inbound `BeaconBlock`s' witness merkle
+///   paths and as crossing-detection input.
+/// - `boundary_crossings` — observed epoch-boundary crossings per shard,
+///   keyed by the crossed epoch (bounded by
+///   [`MAX_RETAINED_CROSSINGS_PER_SHARD`]), retained past header pruning so
+///   the proposer can report a crossing long after its headers age out.
+/// - `witness_chunks` — verified witnesses keyed by their anchor boundary
+///   block `(shard, block_hash)` then leaf index. A witness proves against
+///   one block's `beacon_witness_root`, so it counts only toward that
+///   boundary. Empty when the local validator is off-committee.
+/// - `pending_fetches` — outstanding witness-fetch dedup per anchor.
 #[derive(Debug, Default)]
 pub struct ShardSourceTracker {
     shard_headers: BTreeMap<ShardId, BTreeMap<BlockHeight, Arc<Verified<CertifiedBlockHeader>>>>,
-    /// Observed epoch-boundary crossings per shard, keyed by the crossed
-    /// epoch. Recorded as `(B, C)` pairs become visible near the tip and
-    /// retained (bounded by [`MAX_RETAINED_CROSSINGS_PER_SHARD`]) so the
-    /// proposer can report a crossing long after its headers are pruned.
     boundary_crossings: BTreeMap<ShardId, BTreeMap<Epoch, ObservedCrossing>>,
-    pool: BTreeMap<ShardId, BTreeMap<LeafIndex, Arc<Verified<ShardWitness>>>>,
-    pending_in_proposal: BTreeMap<ShardId, BTreeSet<LeafIndex>>,
-    pending_fetches: BTreeMap<ShardId, BTreeMap<LeafIndex, (BlockHeight, BlockHash)>>,
+    witness_chunks: BTreeMap<(ShardId, BlockHash), AnchorChunk>,
+    pending_fetches: BTreeMap<(ShardId, BlockHash), PendingFetch>,
+}
+
+/// An anchor's outstanding witness fetch. Carries the boundary block
+/// `height` alongside the in-flight `leaves` so an eviction can name each
+/// cancelled leaf as the `(shard, height, block_hash, leaf)` id the
+/// runner's `FetchAbandon::ShardWitnesses` handler matches against.
+#[derive(Debug)]
+struct PendingFetch {
+    height: BlockHeight,
+    leaves: BTreeSet<LeafIndex>,
 }
 
 impl ShardSourceTracker {
@@ -112,185 +128,130 @@ impl ShardSourceTracker {
             .insert(height, certified_header);
     }
 
-    /// Admit a verified witness into the pool.
+    /// Admit a verified witness into the chunk for its anchor boundary
+    /// block (`witness.proof.committed_block_hash`). Clears the matching
+    /// pending-fetch entry.
     pub fn admit_witness(&mut self, witness: Arc<Verified<ShardWitness>>) {
         let shard = witness.proof.shard_id;
+        let anchor = witness.proof.committed_block_hash;
         let leaf = witness.proof.leaf_index;
-        self.pool.entry(shard).or_default().insert(leaf, witness);
-        if let Some(map) = self.pending_fetches.get_mut(&shard) {
-            map.remove(&leaf);
+        self.witness_chunks
+            .entry((shard, anchor))
+            .or_default()
+            .insert(leaf, witness);
+        if let Some(pending) = self.pending_fetches.get_mut(&(shard, anchor)) {
+            pending.leaves.remove(&leaf);
         }
     }
 
-    /// Mark a `(shard, leaf_index)` fetch as in-flight against the
-    /// `(anchor_height, anchor_hash)` it was issued against. Returns
-    /// `true` if newly inserted, `false` if already tracked or already
-    /// in the pool — the caller treats `false` as "don't redispatch."
-    /// The anchor is retained so [`notify_consumed_advanced`] can
-    /// surface the exact id tuple for `FetchAbandon::ShardWitnesses`.
+    /// Mark a `(shard, anchor, leaf)` witness fetch in flight against the
+    /// boundary block at `block_height`. Returns `true` if newly inserted,
+    /// `false` if already pooled or already tracked — the caller treats
+    /// `false` as "don't redispatch." The height is retained so a later
+    /// eviction can hand the runner the exact in-flight fetch id to cancel.
     pub fn register_pending_fetch(
         &mut self,
         shard: ShardId,
-        leaf_index: LeafIndex,
-        anchor_height: BlockHeight,
-        anchor_hash: BlockHash,
+        block_height: BlockHeight,
+        anchor: BlockHash,
+        leaf: LeafIndex,
     ) -> bool {
         let already_pooled = self
-            .pool
-            .get(&shard)
-            .is_some_and(|m| m.contains_key(&leaf_index));
+            .witness_chunks
+            .get(&(shard, anchor))
+            .is_some_and(|m| m.contains_key(&leaf));
         if already_pooled {
             return false;
         }
         self.pending_fetches
-            .entry(shard)
-            .or_default()
-            .insert(leaf_index, (anchor_height, anchor_hash))
-            .is_none()
+            .entry((shard, anchor))
+            .or_insert_with(|| PendingFetch {
+                height: block_height,
+                leaves: BTreeSet::new(),
+            })
+            .leaves
+            .insert(leaf)
     }
 
-    /// Drain witnesses eligible for inclusion in an epoch whose time
-    /// window ends at `epoch_end_wt`. For each shard, takes leaves
-    /// from the pool with `leaf_index` strictly greater than the
-    /// shard's `consumed_through` watermark and `≤` the largest
-    /// `beacon_witness_leaf_count` from any header whose
-    /// `weighted_timestamp ≤ epoch_end_wt`.
-    ///
-    /// Mark-not-remove: returned `Arc`s are clones; the witnesses stay
-    /// in the pool until [`notify_consumed_advanced`](Self::notify_consumed_advanced)
-    /// evicts them after `consumed_through` advances on-chain. A second
-    /// drain at the same watermark returns the same set — so a proposer
-    /// whose block doesn't commit (e.g. SPC stall, epoch skipped) can
-    /// re-propose the same witnesses without re-fetching from shards.
-    /// Drained leaves are recorded in `pending_in_proposal`.
-    pub fn drain_for_proposal(
-        &mut self,
-        epoch_end_wt: WeightedTimestamp,
-        consumed_through: &BTreeMap<ShardId, LeafIndex>,
-    ) -> Vec<Arc<Verified<ShardWitness>>> {
-        let mut out = Vec::new();
-        for (shard, headers) in &self.shard_headers {
-            let Some(max_eligible) = max_eligible_leaf_count(headers, epoch_end_wt) else {
-                continue;
-            };
-            let watermark = consumed_through
-                .get(shard)
-                .copied()
-                .unwrap_or(LeafIndex::new(0));
-            let Some(pool_for_shard) = self.pool.get(shard) else {
-                continue;
-            };
-            let drained: Vec<(LeafIndex, Arc<Verified<ShardWitness>>)> = pool_for_shard
-                .range(..)
-                .filter(|(idx, _)| {
-                    idx.inner() > watermark.inner() && idx.inner() <= max_eligible.inner()
-                })
-                .map(|(idx, w)| (*idx, Arc::clone(w)))
-                .collect();
-            if drained.is_empty() {
-                continue;
-            }
-            let pip_for_shard = self.pending_in_proposal.entry(*shard).or_default();
-            for (idx, w) in drained {
-                pip_for_shard.insert(idx);
-                out.push(w);
-            }
+    /// The contiguous witness chunk `[prior, chunk_end)` anchored to
+    /// `anchor`, in leaf-index order, or `None` if any leaf in the range
+    /// isn't held yet (the assembler defers). An empty range
+    /// (`chunk_end <= prior`) returns an empty vec.
+    #[must_use]
+    pub fn witness_chunk(
+        &self,
+        shard: ShardId,
+        anchor: BlockHash,
+        prior: u64,
+        chunk_end: u64,
+    ) -> Option<Vec<ShardWitness>> {
+        if chunk_end <= prior {
+            return Some(Vec::new());
         }
-        out
+        let map = self.witness_chunks.get(&(shard, anchor))?;
+        let mut out = Vec::with_capacity(usize::try_from(chunk_end - prior).unwrap_or(0));
+        for leaf in prior..chunk_end {
+            let witness = map.get(&LeafIndex::new(leaf))?;
+            out.push(witness.as_ref().as_ref().clone());
+        }
+        Some(out)
     }
 
-    /// On-chain `consumed_through[shard]` has advanced to `new_watermark`.
-    /// Evict pool, `pending_in_proposal`, and `pending_fetches` entries
-    /// at-or-below the new watermark — witnesses past their consumed
-    /// leaf are stale and can't appear in a future proposal.
-    /// `O(log n + evicted)` via `BTreeMap::split_off`. Idempotent:
-    /// calling with a non-advancing watermark is a no-op.
+    /// Drop witnesses and pending fetches for `shard` below the applied
+    /// watermark `consumed` (leaf index `< consumed`), across every
+    /// anchor. Called from the coordinator's `adopt_block` once a
+    /// boundary fold advances `boundaries[shard].witness_leaf_count`.
+    /// Empty per-anchor maps are removed.
     ///
-    /// Returns the evicted in-flight ids so the caller can hand them to
-    /// `FetchAbandon::ShardWitnesses`. Empty when no fetch was pending
-    /// at-or-below the new watermark.
-    pub fn notify_consumed_advanced(
+    /// Returns the in-flight fetch ids that were dropped, so the caller can
+    /// cancel them via `FetchAbandon::ShardWitnesses` — the witness is now
+    /// consumed on-chain and a future contribution can't include it, so the
+    /// runner's in-flight slot should release rather than pin on a payload
+    /// the tracker would only evict on arrival.
+    pub fn evict_consumed(
         &mut self,
         shard: ShardId,
-        new_watermark: LeafIndex,
+        consumed: u64,
     ) -> Vec<(ShardId, BlockHeight, BlockHash, LeafIndex)> {
-        let cutoff = LeafIndex::new(new_watermark.inner().saturating_add(1));
-        if let Some(pool_for_shard) = self.pool.get_mut(&shard) {
-            let above = pool_for_shard.split_off(&cutoff);
-            *pool_for_shard = above;
-        }
-        if let Some(pip_for_shard) = self.pending_in_proposal.get_mut(&shard) {
-            let above = pip_for_shard.split_off(&cutoff);
-            *pip_for_shard = above;
-        }
-        let mut evicted = Vec::new();
-        if let Some(pf_for_shard) = self.pending_fetches.get_mut(&shard) {
-            let above = pf_for_shard.split_off(&cutoff);
-            let stale = std::mem::replace(pf_for_shard, above);
-            for (leaf, (height, hash)) in stale {
-                evicted.push((shard, height, hash, leaf));
+        self.witness_chunks.retain(|(s, _), leaves| {
+            if *s == shard {
+                leaves.retain(|leaf, _| leaf.inner() >= consumed);
+                !leaves.is_empty()
+            } else {
+                true
+            }
+        });
+        let mut abandoned = Vec::new();
+        self.pending_fetches.retain(|(s, anchor), pending| {
+            if *s != shard {
+                return true;
+            }
+            pending.leaves.retain(|leaf| {
+                if leaf.inner() < consumed {
+                    abandoned.push((*s, pending.height, *anchor, *leaf));
+                    false
+                } else {
+                    true
+                }
+            });
+            !pending.leaves.is_empty()
+        });
+        abandoned
+    }
+
+    /// Bound `shard_headers` to a sliding window of the most recent
+    /// [`MAX_RETAINED_HEADERS_PER_SHARD`] heights per shard. Boundary
+    /// block headers needed past the window are retained on their
+    /// [`ObservedCrossing`]. Called from `adopt_block`.
+    pub fn prune_stale_headers(&mut self) {
+        for headers in self.shard_headers.values_mut() {
+            while headers.len() > MAX_RETAINED_HEADERS_PER_SHARD {
+                let Some(oldest) = headers.keys().next().copied() else {
+                    break;
+                };
+                headers.remove(&oldest);
             }
         }
-        evicted
-    }
-
-    /// Evict source-shard headers whose leaves are all consumed,
-    /// bounding `shard_headers` to a sliding window. For each shard,
-    /// keeps the latest header (highest height — needed by
-    /// [`is_ready_to_propose`](Self::is_ready_to_propose) to prove the
-    /// shard crossed an epoch boundary) and any header still holding
-    /// unconsumed leaves (`beacon_witness_leaf_count > consumed_through`,
-    /// needed for eligibility and to verify inbound witnesses /
-    /// `BeaconBlock`s referencing those leaves). Headers below the
-    /// consumed watermark hold only already-consumed leaves and can't
-    /// appear in a future proposal or witness, so they're dropped.
-    ///
-    /// Without this, `shard_headers` grows once per committed source
-    /// block forever — the witness pool is bounded by
-    /// [`notify_consumed_advanced`](Self::notify_consumed_advanced) but
-    /// the headers are not. Called from the coordinator's `adopt_block`
-    /// after `apply_epoch` advances `consumed_through`. Covers every
-    /// shard with stored headers, including any not yet present in
-    /// `consumed_through` (treated as watermark 0).
-    pub fn prune_stale_headers(&mut self, consumed_through: &BTreeMap<ShardId, LeafIndex>) {
-        for (shard, headers) in &mut self.shard_headers {
-            let Some(&latest_height) = headers.keys().next_back() else {
-                continue;
-            };
-            let watermark = consumed_through
-                .get(shard)
-                .copied()
-                .unwrap_or(LeafIndex::new(0))
-                .inner();
-            headers.retain(|&height, h| {
-                height == latest_height
-                    || h.header().beacon_witness_leaf_count().inner() > watermark
-            });
-        }
-    }
-
-    /// Whether the local proposer can build an epoch's contribution:
-    /// every shard in `active_shards` must have at least one observed
-    /// header whose parent-QC `weighted_timestamp` is strictly past
-    /// `epoch_end_wt`, which proves no further headers from that shard
-    /// can land inside the current epoch's window. The anchor is the
-    /// parent QC's timestamp — hash-pinned in the header, so every
-    /// beacon validator cuts the window at the same place — not the
-    /// block's own QC timestamp, which rides outside the signed message.
-    #[must_use]
-    pub fn is_ready_to_propose(
-        &self,
-        active_shards: &[ShardId],
-        epoch_end_wt: WeightedTimestamp,
-    ) -> bool {
-        active_shards.iter().all(|shard| {
-            self.shard_headers.get(shard).is_some_and(|headers| {
-                headers.values().any(|h| {
-                    h.header().parent_qc().weighted_timestamp().as_millis()
-                        > epoch_end_wt.as_millis()
-                })
-            })
-        })
     }
 
     /// Record any epoch-boundary crossing made visible by the verified
@@ -355,12 +316,11 @@ impl ShardSourceTracker {
     }
 
     /// Called when the local validator is removed from the beacon
-    /// committee. Drops the pool, pending-fetch, and in-proposal state;
-    /// keeps `shard_headers` since the vnode still needs them to verify
-    /// incoming `BeaconBlock`s.
+    /// committee. Drops witness chunks and pending fetches; keeps
+    /// `shard_headers` since the vnode still needs them to verify incoming
+    /// `BeaconBlock`s.
     pub fn evicted_from_committee(&mut self) {
-        self.pool.clear();
-        self.pending_in_proposal.clear();
+        self.witness_chunks.clear();
         self.pending_fetches.clear();
     }
 
@@ -378,22 +338,26 @@ impl ShardSourceTracker {
             .values()
             .find(|h| h.block_hash() == block_hash)
     }
-}
 
-/// Largest `beacon_witness_leaf_count` from headers whose parent-QC
-/// `weighted_timestamp` is at or before `epoch_end_wt`. `None` if no
-/// such header exists yet.
-fn max_eligible_leaf_count(
-    headers: &BTreeMap<BlockHeight, Arc<Verified<CertifiedBlockHeader>>>,
-    epoch_end_wt: WeightedTimestamp,
-) -> Option<BeaconWitnessLeafCount> {
-    headers
-        .values()
-        .filter(|h| {
-            h.header().parent_qc().weighted_timestamp().as_millis() <= epoch_end_wt.as_millis()
-        })
-        .map(|h| h.header().beacon_witness_leaf_count())
-        .max()
+    /// Look up the verified header for `block_hash`, checking retained
+    /// crossings first (a boundary block survives header pruning on its
+    /// [`ObservedCrossing`]) then the sliding header window. Used to verify
+    /// inbound witnesses against their anchor boundary block's root.
+    #[must_use]
+    pub fn verified_header_by_block_hash(
+        &self,
+        shard: ShardId,
+        block_hash: BlockHash,
+    ) -> Option<&Arc<Verified<CertifiedBlockHeader>>> {
+        if let Some(crossing) = self.boundary_crossings.get(&shard).and_then(|per_shard| {
+            per_shard
+                .values()
+                .find(|c| c.boundary_header.block_hash() == block_hash)
+        }) {
+            return Some(&crossing.boundary_header);
+        }
+        self.find_header_by_block_hash(shard, block_hash)
+    }
 }
 
 /// If `c` is `b`'s committed child and `b` is the first block across an
@@ -445,39 +409,22 @@ impl ShardSourceTracker {
     }
 
     #[must_use]
-    pub fn pool_len(&self, shard: ShardId) -> usize {
-        self.pool.get(&shard).map_or(0, BTreeMap::len)
+    pub fn chunk_len(&self, shard: ShardId, anchor: BlockHash) -> usize {
+        self.witness_chunks
+            .get(&(shard, anchor))
+            .map_or(0, BTreeMap::len)
     }
 
     #[must_use]
-    pub fn total_pool_len(&self) -> usize {
-        self.pool.values().map(BTreeMap::len).sum()
+    pub fn total_chunk_len(&self) -> usize {
+        self.witness_chunks.values().map(BTreeMap::len).sum()
     }
 
     #[must_use]
-    pub fn pending_fetches_len(&self, shard: ShardId) -> usize {
-        self.pending_fetches.get(&shard).map_or(0, BTreeMap::len)
-    }
-
-    #[must_use]
-    pub fn is_pending_fetch(&self, shard: ShardId, leaf_index: LeafIndex) -> bool {
+    pub fn is_pending_fetch(&self, shard: ShardId, anchor: BlockHash, leaf: LeafIndex) -> bool {
         self.pending_fetches
-            .get(&shard)
-            .is_some_and(|m| m.contains_key(&leaf_index))
-    }
-
-    #[must_use]
-    pub fn pending_in_proposal_len(&self, shard: ShardId) -> usize {
-        self.pending_in_proposal
-            .get(&shard)
-            .map_or(0, BTreeSet::len)
-    }
-
-    #[must_use]
-    pub fn is_pending_in_proposal(&self, shard: ShardId, leaf_index: LeafIndex) -> bool {
-        self.pending_in_proposal
-            .get(&shard)
-            .is_some_and(|s| s.contains(&leaf_index))
+            .get(&(shard, anchor))
+            .is_some_and(|pending| pending.leaves.contains(&leaf))
     }
 }
 
@@ -497,65 +444,6 @@ mod tests {
 
     fn shard(n: u64) -> ShardId {
         ShardId::leaf(1, n)
-    }
-
-    /// Build a verified `CertifiedBlockHeader` with the few fields the
-    /// tracker reads — shard, height, `weighted_timestamp` (carried on the
-    /// parent QC, which is the hash-pinned anchor the tracker reads),
-    /// witness root, leaf count.
-    fn verified_header(
-        s: ShardId,
-        height: u64,
-        wt_millis: u64,
-        leaf_count: u64,
-    ) -> Arc<Verified<CertifiedBlockHeader>> {
-        // The tracker anchors on the parent QC's weighted timestamp, so
-        // that's where the header's nominal time must live.
-        let parent_qc = QuorumCertificate::new(
-            BlockHash::ZERO,
-            s,
-            BlockHeight::new(height.saturating_sub(1)),
-            BlockHash::ZERO,
-            Round::INITIAL,
-            SignerBitfield::new(4),
-            zero_bls_signature(),
-            WeightedTimestamp::from_millis(wt_millis),
-        );
-        let parent_block_hash = BlockHash::ZERO;
-        let header = BlockHeader::new(
-            s,
-            BlockHeight::new(height),
-            parent_block_hash,
-            parent_qc,
-            ValidatorId::new(0),
-            ProposerTimestamp::ZERO,
-            Round::INITIAL,
-            false,
-            StateRoot::ZERO,
-            TransactionRoot::ZERO,
-            CertificateRoot::ZERO,
-            LocalReceiptRoot::ZERO,
-            ProvisionsRoot::ZERO,
-            Vec::new(),
-            BTreeMap::new(),
-            InFlightCount::ZERO,
-            BeaconWitnessRoot::from_raw(Hash::from_bytes(format!("r-{s:?}-{height}").as_bytes())),
-            BeaconWitnessLeafCount::new(leaf_count),
-        );
-        let block_hash = header.hash();
-        let qc = QuorumCertificate::new(
-            block_hash,
-            s,
-            BlockHeight::new(height),
-            parent_block_hash,
-            Round::INITIAL,
-            SignerBitfield::new(4),
-            zero_bls_signature(),
-            WeightedTimestamp::from_millis(wt_millis),
-        );
-        Arc::new(Verified::new_unchecked_for_test(CertifiedBlockHeader::new(
-            header, qc,
-        )))
     }
 
     /// Build a verified header that links to its parent: its `parent_qc`
@@ -621,7 +509,7 @@ mod tests {
         t.observe_crossing(h.header().shard_id(), h.header().height(), dur);
     }
 
-    fn witness(s: ShardId, leaf_index: u64) -> Arc<Verified<ShardWitness>> {
+    fn witness(s: ShardId, anchor: BlockHash, leaf: u64) -> Arc<Verified<ShardWitness>> {
         Arc::new(Verified::new_unchecked_for_test(ShardWitness {
             payload: ShardWitnessPayload::StakeDeposit {
                 pool_id: StakePoolId::new(0),
@@ -629,295 +517,134 @@ mod tests {
             },
             proof: ShardWitnessProof {
                 shard_id: s,
-                committed_block_hash: BlockHash::ZERO,
-                leaf_index: LeafIndex::new(leaf_index),
+                committed_block_hash: anchor,
+                leaf_index: LeafIndex::new(leaf),
                 siblings: BoundedVec::new(),
             },
         }))
+    }
+
+    fn anchor(n: u64) -> BlockHash {
+        BlockHash::from_raw(Hash::from_bytes(format!("anchor-{n}").as_bytes()))
     }
 
     #[test]
     fn empty_after_new() {
         let t = ShardSourceTracker::new();
         assert!(t.header(shard(0), BlockHeight::new(0)).is_none());
-        assert_eq!(t.pool_len(shard(0)), 0);
-        assert_eq!(t.pending_fetches_len(shard(0)), 0);
+        assert_eq!(t.chunk_len(shard(0), anchor(0)), 0);
     }
 
     #[test]
-    fn on_verified_remote_header_inserts_header() {
-        let mut t = ShardSourceTracker::new();
-        t.on_verified_remote_header(verified_header(shard(0), 1, 1_000, 7));
-        let h = t.header(shard(0), BlockHeight::new(1)).unwrap();
-        assert_eq!(
-            h.header().beacon_witness_leaf_count(),
-            BeaconWitnessLeafCount::new(7),
-        );
-        assert_eq!(
-            h.qc().weighted_timestamp(),
-            WeightedTimestamp::from_millis(1_000),
-        );
-    }
-
-    #[test]
-    fn admit_witness_lands_in_pool_and_clears_pending_fetch() {
+    fn admit_witness_lands_in_chunk_and_clears_pending() {
         let mut t = ShardSourceTracker::new();
         assert!(t.register_pending_fetch(
             shard(0),
-            LeafIndex::new(3),
-            BlockHeight::new(1),
-            BlockHash::ZERO
+            BlockHeight::new(5),
+            anchor(1),
+            LeafIndex::new(3)
         ));
-        assert!(t.is_pending_fetch(shard(0), LeafIndex::new(3)));
-        t.admit_witness(witness(shard(0), 3));
-        assert_eq!(t.pool_len(shard(0)), 1);
-        assert!(!t.is_pending_fetch(shard(0), LeafIndex::new(3)));
+        assert!(t.is_pending_fetch(shard(0), anchor(1), LeafIndex::new(3)));
+        t.admit_witness(witness(shard(0), anchor(1), 3));
+        assert_eq!(t.chunk_len(shard(0), anchor(1)), 1);
+        assert!(!t.is_pending_fetch(shard(0), anchor(1), LeafIndex::new(3)));
     }
 
     #[test]
-    fn register_pending_fetch_is_idempotent() {
+    fn register_pending_fetch_is_idempotent_and_rejects_when_pooled() {
         let mut t = ShardSourceTracker::new();
         assert!(t.register_pending_fetch(
             shard(0),
-            LeafIndex::new(3),
-            BlockHeight::new(1),
-            BlockHash::ZERO
+            BlockHeight::new(5),
+            anchor(1),
+            LeafIndex::new(3)
         ));
         assert!(!t.register_pending_fetch(
             shard(0),
-            LeafIndex::new(3),
-            BlockHeight::new(1),
-            BlockHash::ZERO
+            BlockHeight::new(5),
+            anchor(1),
+            LeafIndex::new(3)
         ));
-    }
-
-    #[test]
-    fn register_pending_fetch_rejects_when_already_pooled() {
-        let mut t = ShardSourceTracker::new();
-        t.admit_witness(witness(shard(0), 5));
+        t.admit_witness(witness(shard(0), anchor(1), 5));
         assert!(!t.register_pending_fetch(
             shard(0),
-            LeafIndex::new(5),
-            BlockHeight::new(1),
-            BlockHash::ZERO,
+            BlockHeight::new(5),
+            anchor(1),
+            LeafIndex::new(5)
         ));
     }
 
     #[test]
-    fn drain_for_proposal_returns_witnesses_inside_wt_and_above_watermark() {
+    fn witness_chunk_returns_contiguous_range_or_none_on_gap() {
         let mut t = ShardSourceTracker::new();
-        // One header at WT 1_000 with leaf_count 5 — leaves 1..=5 are
-        // eligible for any epoch with t_end ≥ 1_000.
-        t.on_verified_remote_header(verified_header(shard(0), 1, 1_000, 5));
-        // Pool has leaves 2, 3, 4. consumed_through says we've already
-        // consumed up to 2, so only 3 and 4 should drain.
-        t.admit_witness(witness(shard(0), 2));
-        t.admit_witness(witness(shard(0), 3));
-        t.admit_witness(witness(shard(0), 4));
-        let mut consumed = BTreeMap::new();
-        consumed.insert(shard(0), LeafIndex::new(2));
-
-        let drained = t.drain_for_proposal(WeightedTimestamp::from_millis(2_000), &consumed);
-        let indices: Vec<u64> = drained.iter().map(|w| w.proof.leaf_index.inner()).collect();
-        assert_eq!(indices, vec![3, 4]);
-        // Mark-not-remove: all three leaves still resident; the two
-        // drained ones are marked in pending_in_proposal.
-        assert_eq!(t.pool_len(shard(0)), 3);
-        assert_eq!(t.pending_in_proposal_len(shard(0)), 2);
-        assert!(t.is_pending_in_proposal(shard(0), LeafIndex::new(3)));
-        assert!(t.is_pending_in_proposal(shard(0), LeafIndex::new(4)));
-    }
-
-    /// A drained witness whose block doesn't commit is still in the
-    /// pool, and a subsequent drain at the same watermark returns it
-    /// again. This is the property that lets a proposer re-propose
-    /// after an SPC stall or a skipped epoch without re-fetching from
-    /// shards.
-    #[test]
-    fn drain_is_idempotent_when_watermark_unchanged() {
-        let mut t = ShardSourceTracker::new();
-        t.on_verified_remote_header(verified_header(shard(0), 1, 1_000, 5));
-        t.admit_witness(witness(shard(0), 3));
-        t.admit_witness(witness(shard(0), 4));
-        let consumed = BTreeMap::new();
-
-        let first = t.drain_for_proposal(WeightedTimestamp::from_millis(2_000), &consumed);
-        let second = t.drain_for_proposal(WeightedTimestamp::from_millis(2_000), &consumed);
-        let first_indices: Vec<u64> = first.iter().map(|w| w.proof.leaf_index.inner()).collect();
-        let second_indices: Vec<u64> = second.iter().map(|w| w.proof.leaf_index.inner()).collect();
-        assert_eq!(first_indices, vec![3, 4]);
-        assert_eq!(second_indices, vec![3, 4]);
-    }
-
-    /// `notify_consumed_advanced(shard, w)` evicts pool entries with
-    /// `leaf_index ≤ w` and retains those with `leaf_index > w`.
-    #[test]
-    fn notify_consumed_advanced_evicts_at_or_below_watermark() {
-        let mut t = ShardSourceTracker::new();
-        t.admit_witness(witness(shard(0), 1));
-        t.admit_witness(witness(shard(0), 2));
-        t.admit_witness(witness(shard(0), 3));
-        t.admit_witness(witness(shard(0), 4));
-        t.admit_witness(witness(shard(0), 5));
-
-        t.notify_consumed_advanced(shard(0), LeafIndex::new(3));
-
-        assert_eq!(t.pool_len(shard(0)), 2);
-        assert!(
-            t.pool
-                .get(&shard(0))
-                .unwrap()
-                .contains_key(&LeafIndex::new(4))
+        // Empty range is trivially available.
+        assert_eq!(
+            t.witness_chunk(shard(0), anchor(1), 4, 4).map(|c| c.len()),
+            Some(0),
         );
-        assert!(
-            t.pool
-                .get(&shard(0))
-                .unwrap()
-                .contains_key(&LeafIndex::new(5))
-        );
+        // Seat leaves 4 and 5 (the chunk [4, 6)).
+        t.admit_witness(witness(shard(0), anchor(1), 4));
+        t.admit_witness(witness(shard(0), anchor(1), 5));
+        let chunk = t
+            .witness_chunk(shard(0), anchor(1), 4, 6)
+            .expect("chunk present");
+        let indices: Vec<u64> = chunk.iter().map(|w| w.proof.leaf_index.inner()).collect();
+        assert_eq!(indices, vec![4, 5]);
+        // A gap (leaf 6 missing) defers.
+        assert!(t.witness_chunk(shard(0), anchor(1), 4, 7).is_none());
+        // The wrong anchor has nothing.
+        assert!(t.witness_chunk(shard(0), anchor(2), 4, 6).is_none());
     }
 
-    /// `notify_consumed_advanced` mirrors the eviction over
-    /// `pending_in_proposal`: leaves at-or-below the watermark are
-    /// dropped, leaves above are retained.
     #[test]
-    fn notify_consumed_advanced_evicts_pending_in_proposal() {
+    fn evict_consumed_drops_below_watermark() {
         let mut t = ShardSourceTracker::new();
-        t.on_verified_remote_header(verified_header(shard(0), 1, 1_000, 5));
-        for leaf in 1..=5u64 {
-            t.admit_witness(witness(shard(0), leaf));
+        for leaf in 0..5u64 {
+            t.admit_witness(witness(shard(0), anchor(1), leaf));
         }
-        let consumed = BTreeMap::new();
-        let _ = t.drain_for_proposal(WeightedTimestamp::from_millis(2_000), &consumed);
-        assert_eq!(t.pending_in_proposal_len(shard(0)), 5);
-
-        t.notify_consumed_advanced(shard(0), LeafIndex::new(3));
-
-        assert_eq!(t.pending_in_proposal_len(shard(0)), 2);
-        assert!(t.is_pending_in_proposal(shard(0), LeafIndex::new(4)));
-        assert!(t.is_pending_in_proposal(shard(0), LeafIndex::new(5)));
-    }
-
-    /// `notify_consumed_advanced` with a non-advancing watermark is a
-    /// no-op — calling it repeatedly across blocks that don't advance
-    /// `consumed_through` for this shard doesn't disturb the pool.
-    #[test]
-    fn notify_consumed_advanced_is_idempotent() {
-        let mut t = ShardSourceTracker::new();
-        t.admit_witness(witness(shard(0), 4));
-        t.admit_witness(witness(shard(0), 5));
-
-        t.notify_consumed_advanced(shard(0), LeafIndex::new(3));
-        t.notify_consumed_advanced(shard(0), LeafIndex::new(3));
-        assert_eq!(t.pool_len(shard(0)), 2);
-    }
-
-    /// `prune_stale_headers` drops headers whose leaves are all consumed
-    /// (`leaf_count ≤ watermark`) while keeping unconsumed headers and
-    /// each shard's latest header.
-    #[test]
-    fn prune_stale_headers_drops_consumed_keeps_unconsumed_and_latest() {
-        let mut t = ShardSourceTracker::new();
-        // Heights 1..=4; leaf counts 2, 4, 6, 6 (height 4 added no leaves).
-        t.on_verified_remote_header(verified_header(shard(0), 1, 1_000, 2));
-        t.on_verified_remote_header(verified_header(shard(0), 2, 2_000, 4));
-        t.on_verified_remote_header(verified_header(shard(0), 3, 3_000, 6));
-        t.on_verified_remote_header(verified_header(shard(0), 4, 4_000, 6));
-
-        let mut consumed = BTreeMap::new();
-        consumed.insert(shard(0), LeafIndex::new(4));
-        t.prune_stale_headers(&consumed);
-
-        // leaf_count ≤ 4 and not latest → dropped.
-        assert!(t.header(shard(0), BlockHeight::new(1)).is_none());
-        assert!(t.header(shard(0), BlockHeight::new(2)).is_none());
-        // leaf_count 6 > 4 → kept; latest (height 4) always kept.
-        assert!(t.header(shard(0), BlockHeight::new(3)).is_some());
-        assert!(t.header(shard(0), BlockHeight::new(4)).is_some());
-    }
-
-    /// The latest header is retained even when fully consumed, since
-    /// `is_ready_to_propose` needs it to prove the shard crossed the
-    /// epoch boundary.
-    #[test]
-    fn prune_stale_headers_keeps_latest_even_when_fully_consumed() {
-        let mut t = ShardSourceTracker::new();
-        t.on_verified_remote_header(verified_header(shard(0), 1, 1_000, 5));
-        t.on_verified_remote_header(verified_header(shard(0), 2, 2_000, 5));
-        let mut consumed = BTreeMap::new();
-        consumed.insert(shard(0), LeafIndex::new(10));
-        t.prune_stale_headers(&consumed);
-        assert!(t.header(shard(0), BlockHeight::new(1)).is_none());
-        assert!(t.header(shard(0), BlockHeight::new(2)).is_some());
-    }
-
-    /// A shard absent from `consumed_through` is treated as watermark 0:
-    /// only its zero-leaf headers (below the latest) are dropped.
-    #[test]
-    fn prune_stale_headers_treats_absent_shard_as_watermark_zero() {
-        let mut t = ShardSourceTracker::new();
-        t.on_verified_remote_header(verified_header(shard(0), 1, 1_000, 0));
-        t.on_verified_remote_header(verified_header(shard(0), 2, 2_000, 3));
-        let consumed = BTreeMap::new();
-        t.prune_stale_headers(&consumed);
-        assert!(t.header(shard(0), BlockHeight::new(1)).is_none());
-        assert!(t.header(shard(0), BlockHeight::new(2)).is_some());
+        t.evict_consumed(shard(0), 3);
+        // Leaves 0..3 dropped; 3, 4 remain.
+        assert_eq!(t.chunk_len(shard(0), anchor(1)), 2);
+        assert!(t.witness_chunk(shard(0), anchor(1), 3, 5).is_some());
+        assert!(t.witness_chunk(shard(0), anchor(1), 0, 5).is_none());
     }
 
     #[test]
-    fn drain_excludes_leaves_above_wt_eligible_count() {
+    fn evict_consumed_removes_emptied_anchor() {
         let mut t = ShardSourceTracker::new();
-        t.on_verified_remote_header(verified_header(shard(0), 1, 1_000, 3));
-        // Pool has leaf 5 which is above the WT-eligible count of 3.
-        t.admit_witness(witness(shard(0), 5));
-        let consumed = BTreeMap::new();
-        let drained = t.drain_for_proposal(WeightedTimestamp::from_millis(2_000), &consumed);
-        assert!(drained.is_empty());
-        assert_eq!(t.pool_len(shard(0)), 1);
+        t.admit_witness(witness(shard(0), anchor(1), 0));
+        t.evict_consumed(shard(0), 1);
+        assert_eq!(t.total_chunk_len(), 0);
     }
 
+    /// Eviction hands back the in-flight fetches it dropped — full
+    /// `(shard, height, anchor, leaf)` ids — so the coordinator can cancel
+    /// them via `FetchAbandon::ShardWitnesses`. Leaves at or above the
+    /// watermark stay in flight.
     #[test]
-    fn drain_with_no_headers_for_shard_returns_nothing() {
+    fn evict_consumed_returns_abandoned_in_flight_fetches() {
         let mut t = ShardSourceTracker::new();
-        t.admit_witness(witness(shard(0), 1));
-        let consumed = BTreeMap::new();
-        let drained = t.drain_for_proposal(WeightedTimestamp::from_millis(2_000), &consumed);
-        assert!(drained.is_empty());
-    }
-
-    #[test]
-    fn is_ready_to_propose_true_when_all_shards_crossed() {
-        let mut t = ShardSourceTracker::new();
-        // Both shards have observed a header past t_end = 1_000.
-        t.on_verified_remote_header(verified_header(shard(0), 1, 1_500, 0));
-        t.on_verified_remote_header(verified_header(shard(1), 1, 2_000, 0));
-        assert!(
-            t.is_ready_to_propose(&[shard(0), shard(1)], WeightedTimestamp::from_millis(1_000),)
+        let height = BlockHeight::new(5);
+        let a = anchor(1);
+        for leaf in 0..3u64 {
+            t.register_pending_fetch(shard(0), height, a, LeafIndex::new(leaf));
+        }
+        let abandoned = t.evict_consumed(shard(0), 2);
+        assert_eq!(
+            abandoned,
+            vec![
+                (shard(0), height, a, LeafIndex::new(0)),
+                (shard(0), height, a, LeafIndex::new(1)),
+            ],
         );
-    }
-
-    #[test]
-    fn is_ready_to_propose_false_when_a_shard_hasnt_crossed() {
-        let mut t = ShardSourceTracker::new();
-        t.on_verified_remote_header(verified_header(shard(0), 1, 1_500, 0));
-        // shard(1) only has a header at WT 500 — not past t_end = 1_000.
-        t.on_verified_remote_header(verified_header(shard(1), 1, 500, 0));
-        assert!(
-            !t.is_ready_to_propose(&[shard(0), shard(1)], WeightedTimestamp::from_millis(1_000),)
-        );
-    }
-
-    #[test]
-    fn is_ready_to_propose_false_when_shard_has_no_headers() {
-        let t = ShardSourceTracker::new();
-        assert!(!t.is_ready_to_propose(&[shard(0)], WeightedTimestamp::from_millis(1_000),));
+        assert!(t.is_pending_fetch(shard(0), a, LeafIndex::new(2)));
+        assert!(!t.is_pending_fetch(shard(0), a, LeafIndex::new(0)));
     }
 
     /// A `(B, C)` parent/child pair straddling an epoch boundary records a
     /// crossing: `B` at predecessor-wt 900 (≤ the 1000 boundary) and own
     /// canonical wt 1500 (read from `C.parent_qc`, past 1000) is the first
-    /// block across epoch 1. The crossing carries `B`'s header and that
-    /// canonical QC.
+    /// block across epoch 1.
     #[test]
     fn observe_crossing_records_first_block_across_boundary() {
         let mut t = ShardSourceTracker::new();
@@ -935,8 +662,7 @@ mod tests {
     }
 
     /// A pair wholly inside one epoch (predecessor 1200 and own wt 1500,
-    /// both past the 1000 boundary) is not a crossing — `B` is not the
-    /// first block across.
+    /// both past the 1000 boundary) is not a crossing.
     #[test]
     fn observe_crossing_ignores_within_epoch_pair() {
         let mut t = ShardSourceTracker::new();
@@ -965,25 +691,32 @@ mod tests {
     }
 
     #[test]
-    fn evicted_from_committee_clears_pool_and_pending_keeps_headers() {
+    fn prune_stale_headers_bounds_the_window() {
         let mut t = ShardSourceTracker::new();
-        t.on_verified_remote_header(verified_header(shard(0), 1, 1_000, 5));
-        t.admit_witness(witness(shard(0), 3));
-        t.register_pending_fetch(
-            shard(0),
-            LeafIndex::new(4),
-            BlockHeight::new(1),
-            BlockHash::ZERO,
+        for height in 1..=(MAX_RETAINED_HEADERS_PER_SHARD as u64 + 3) {
+            t.on_verified_remote_header(linked_header(shard(0), height, BlockHash::ZERO, 0, 0));
+        }
+        t.prune_stale_headers();
+        // Oldest heights dropped; the window holds the most recent set.
+        assert!(t.header(shard(0), BlockHeight::new(1)).is_none());
+        assert!(
+            t.header(
+                shard(0),
+                BlockHeight::new(MAX_RETAINED_HEADERS_PER_SHARD as u64 + 3)
+            )
+            .is_some()
         );
-        let consumed = BTreeMap::new();
-        let _ = t.drain_for_proposal(WeightedTimestamp::from_millis(2_000), &consumed);
-        assert_eq!(t.pending_in_proposal_len(shard(0)), 1);
+    }
 
+    #[test]
+    fn evicted_from_committee_clears_chunks_keeps_headers() {
+        let mut t = ShardSourceTracker::new();
+        t.on_verified_remote_header(linked_header(shard(0), 1, BlockHash::ZERO, 0, 0));
+        t.admit_witness(witness(shard(0), anchor(1), 0));
+        t.register_pending_fetch(shard(0), BlockHeight::new(5), anchor(1), LeafIndex::new(1));
         t.evicted_from_committee();
-
-        assert_eq!(t.pool_len(shard(0)), 0);
-        assert_eq!(t.pending_fetches_len(shard(0)), 0);
-        assert_eq!(t.pending_in_proposal_len(shard(0)), 0);
+        assert_eq!(t.total_chunk_len(), 0);
+        assert!(!t.is_pending_fetch(shard(0), anchor(1), LeafIndex::new(1)));
         assert!(t.header(shard(0), BlockHeight::new(1)).is_some());
     }
 }

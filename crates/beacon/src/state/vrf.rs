@@ -18,8 +18,8 @@ use crate::state::pool::pool_draw;
 const DOMAIN_BEACON_RANDOMNESS: &[u8] = b"hyperscale-beacon-randomness-v1";
 
 /// Outcome of [`filter_and_roll_randomness`]. The borrowed `accepted`
-/// slice lets [`super::witness::ingest_witnesses`] iterate the proposals
-/// that survived the VRF check without re-running the filter.
+/// slice lets [`super::witness::ingest_equivocations`] iterate the
+/// proposals that survived the VRF check without re-running the filter.
 pub(super) struct VrfStageOutcome<'a> {
     /// Proposals from committee members whose VRF reveal verified.
     /// References into the `committed` slice supplied to

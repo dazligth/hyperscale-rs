@@ -13,9 +13,9 @@ use sbor::prelude::*;
 use thiserror::Error;
 
 use crate::{
-    BlockHash, BlockHeight, Bls12381G1PublicKey, BoundedVec, CertifiedBlockHeader, Hash, LeafIndex,
-    MAX_WITNESS_PROOF_DEPTH, Round, ShardId, Stake, StakePoolId, ValidatorId, Verified, Verify,
-    verify_merkle_inclusion,
+    BlockHash, BlockHeader, BlockHeight, Bls12381G1PublicKey, BoundedVec, CertifiedBlockHeader,
+    Hash, LeafIndex, MAX_WITNESS_PROOF_DEPTH, Round, ShardId, Stake, StakePoolId, ValidatorId,
+    Verified, Verify, verify_merkle_inclusion,
 };
 
 /// Domain tag for accumulator leaf hashing.
@@ -248,6 +248,37 @@ pub struct ShardWitness {
     pub payload: ShardWitnessPayload,
     /// Where it came from.
     pub proof: ShardWitnessProof,
+}
+
+impl ShardWitness {
+    /// Whether this witness's merkle proof places it at the claimed leaf
+    /// index in `header`'s beacon-witness accumulator — the raw-`BlockHeader`
+    /// form of the [`Verify`] predicate. The boundary fold and received-block
+    /// validation use this against a contribution's `boundary_header`, which
+    /// is already authenticated by its canonical-QC binding
+    /// (`hash(boundary_header) == qc.block_hash`), so no
+    /// `Verified<CertifiedBlockHeader>` is in hand. The shard and
+    /// anchor-block-hash must match the header, the leaf index must fit the
+    /// merkle helper's `u32` width, and the path from `payload.leaf_hash()`
+    /// must reach `header.beacon_witness_root()`.
+    #[must_use]
+    pub fn merkle_includes_in(&self, header: &BlockHeader) -> bool {
+        if self.proof.shard_id != header.shard_id() {
+            return false;
+        }
+        if self.proof.committed_block_hash != header.hash() {
+            return false;
+        }
+        let Ok(leaf_index_u32) = u32::try_from(self.proof.leaf_index.inner()) else {
+            return false;
+        };
+        verify_merkle_inclusion(
+            *header.beacon_witness_root().as_raw(),
+            self.payload.leaf_hash(),
+            &self.proof.siblings,
+            leaf_index_u32,
+        )
+    }
 }
 
 /// Failure modes of a [`ShardWitness`].

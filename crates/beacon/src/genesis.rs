@@ -146,7 +146,6 @@ pub fn build_genesis_beacon_state(config: &BeaconGenesisConfig) -> BeaconState {
         // pipeline first rotates it.
         shard_committees: next_shard_committees.clone(),
         next_shard_committees,
-        consumed_through: BTreeMap::new(),
         boundaries,
         miss_counters: BTreeMap::new(),
     }
@@ -350,7 +349,6 @@ mod tests {
         let state = build_genesis_beacon_state(&cfg);
         assert_eq!(state.current_epoch, Epoch::GENESIS);
         assert_eq!(state.randomness, cfg.initial_randomness);
-        assert!(state.consumed_through.is_empty());
         assert!(state.miss_counters.is_empty());
     }
 

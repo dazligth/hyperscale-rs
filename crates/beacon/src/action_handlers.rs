@@ -154,7 +154,6 @@ where
         }
         Action::BuildAndBroadcastBeaconProposal {
             epoch,
-            shard_witnesses,
             boundary_qcs,
             equivocations,
             recipients,
@@ -163,7 +162,6 @@ where
                 ctx.signing_key,
                 network,
                 epoch,
-                shard_witnesses,
                 boundary_qcs,
                 equivocations,
             );

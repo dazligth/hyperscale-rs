@@ -13,10 +13,10 @@ use hyperscale_types::{
     LocalReceiptRoot, NodeId, PcQc1, PcQc2, PcVector, PcVote1, PcVote2, PcVote3,
     PcVoteEquivocation, ProposerTimestamp, ProvisionHash, ProvisionTxRootsMap, Provisions,
     ProvisionsRoot, QuorumCertificate, ReadySignal, Round, RoutableTransaction, ShardId,
-    ShardWitness, SharedCertificates, SharedTransactions, SkipEpochCert, SkipRequest,
-    SpcEmptyViewMsg, SpcHighTriple, SpcNewCommitMsg, SpcProposalObject, SpcView, StateRoot,
-    SubstateEntry, Timeout, TopologySnapshot, TransactionRoot, TransactionStatus, TxHash,
-    TxOutcome, ValidatorId, Verifiable, Verified, VoteCount, WaveId, WeightedTimestamp,
+    SharedCertificates, SharedTransactions, SkipEpochCert, SkipRequest, SpcEmptyViewMsg,
+    SpcHighTriple, SpcNewCommitMsg, SpcProposalObject, SpcView, StateRoot, SubstateEntry, Timeout,
+    TopologySnapshot, TransactionRoot, TransactionStatus, TxHash, TxOutcome, ValidatorId,
+    Verifiable, Verified, VoteCount, WaveId, WeightedTimestamp,
 };
 
 use crate::{CommitSource, FetchAbandon, FetchRequest, ProtocolEvent, TimerId};
@@ -929,22 +929,21 @@ pub enum Action {
         recipients: Vec<ValidatorId>,
     },
 
-    /// Sign a VRF reveal, build a `BeaconProposal` carrying
-    /// `witnesses`, and unicast it to the rest of the beacon
-    /// committee. Handler feeds the signed proposal back to the
-    /// state machine via `ProtocolEvent::BeaconProposalReceived`
-    /// with `from = local validator` so the same admission path
-    /// peer proposals use also admits our own.
+    /// Sign a VRF reveal, build a `BeaconProposal` carrying the
+    /// proposer's `boundary_qcs` and equivocation evidence, and unicast
+    /// it to the rest of the beacon committee. Handler feeds the signed
+    /// proposal back to the state machine via
+    /// `ProtocolEvent::BeaconProposalReceived` with `from = local
+    /// validator` so the same admission path peer proposals use also
+    /// admits our own. Shard witnesses no longer ride the proposal — they
+    /// ride the block's per-shard boundary contributions.
     BuildAndBroadcastBeaconProposal {
         /// Epoch this proposal targets; bound into the VRF reveal's
         /// signing context.
         epoch: Epoch,
-        /// Shard witnesses to embed. Raw — verified by construction at
-        /// the handler (drained from the local validated pool).
-        shard_witnesses: Vec<ShardWitness>,
-        /// Per-shard canonical boundary QCs this proposer observed, or
-        /// `None` for an active shard whose crossing it hasn't yet seen.
-        /// Sourced from the local verified shard headers.
+        /// Per-shard canonical boundary QCs this proposer observed (only
+        /// shards whose witness chunk it can supply), or `None` for an
+        /// active shard whose crossing it hasn't yet seen.
         boundary_qcs: BTreeMap<ShardId, Option<QuorumCertificate>>,
         /// Equivocation evidence to embed. Raw — built locally from
         /// verified PC votes.

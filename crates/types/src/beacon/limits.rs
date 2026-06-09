@@ -36,16 +36,6 @@ pub const MAX_SHARDS: usize = 4096;
 /// catch-up.
 pub const MAX_WITNESSES_PER_SHARD: usize = 1024;
 
-/// Per-proposer cap on shard witnesses in a single
-/// [`BeaconProposal`](crate::BeaconProposal).
-///
-/// Bounds the proposer's raw wire-bandwidth contribution and the
-/// allocator pressure their proposal can impose at decode time. Sized
-/// to cover legitimate committee turnover (registrations, jails,
-/// unjails) plus headroom; a proposer that tries to crowd in more
-/// loses everything past the cap before any per-witness work runs.
-pub const MAX_SHARD_WITNESSES_PER_PROPOSER: usize = 32;
-
 /// Per-proposer cap on equivocation evidence in a single
 /// [`BeaconProposal`](crate::BeaconProposal).
 ///

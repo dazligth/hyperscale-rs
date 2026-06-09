@@ -15,7 +15,7 @@
 //! - [`prefix_ops`]: prefix algebra ([`mcp`], [`mce`], [`qc1_certify`])
 //!   the PC build path consumes.
 //! - [`proposal`]: [`BeaconProposal`] (one committee member's slot
-//!   submission: witnesses + VRF reveal).
+//!   submission: per-shard boundary QCs, equivocations, and a VRF reveal).
 //! - [`skip`]: [`SkipRequest`] and [`SkipEpochCert`] (pool-quorum
 //!   abandonment of a stalled epoch).
 //! - [`spc`]: Strong Prefix Consensus wire types, verify / sign /
@@ -62,9 +62,8 @@ pub use genesis::{
 };
 pub use limits::{
     MAX_BEACON_COMMITTEE, MAX_BEACON_WITNESS_EVENTS_PER_TX, MAX_EQUIVOCATIONS_PER_PROPOSER,
-    MAX_PREFIX_SIGS, MAX_READY_SIGNALS_PER_BLOCK, MAX_READY_WINDOW_BLOCKS,
-    MAX_SHARD_WITNESSES_PER_PROPOSER, MAX_SHARDS, MAX_VOTE_VECTOR_LEN, MAX_WITNESS_PROOF_DEPTH,
-    MAX_WITNESSES_PER_FETCH, MAX_WITNESSES_PER_SHARD,
+    MAX_PREFIX_SIGS, MAX_READY_SIGNALS_PER_BLOCK, MAX_READY_WINDOW_BLOCKS, MAX_SHARDS,
+    MAX_VOTE_VECTOR_LEN, MAX_WITNESS_PROOF_DEPTH, MAX_WITNESSES_PER_FETCH, MAX_WITNESSES_PER_SHARD,
 };
 pub use pc::{
     PC_VALUE_ELEMENT_BYTES, PcCompactVote, PcDivergingProof, PcQc1, PcQc1VerifyError, PcQc2,
@@ -77,8 +76,8 @@ pub use pc::{
 };
 pub use prefix_ops::{mce, mcp, qc1_certify};
 pub use proposal::{
-    BeaconProposal, BeaconProposalVerifyContext, BeaconProposalVerifyError,
-    BeaconProposalWitnessMismatch,
+    BeaconProposal, BeaconProposalEquivocationMismatch, BeaconProposalVerifyContext,
+    BeaconProposalVerifyError,
 };
 pub use ready_signal::ReadySignal;
 pub use skip::{

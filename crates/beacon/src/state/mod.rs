@@ -29,9 +29,10 @@ mod vrf;
 mod withdrawals;
 mod witness;
 
+pub(crate) use epoch::epoch_boundary_below;
 pub use epoch::{ApplyEpochInput, apply_epoch, apply_input_for};
-pub(crate) use epoch::{epoch_boundary_below, epoch_end_weighted_timestamp};
 pub use pool::pool_draw;
+pub(crate) use witness::contribution_chunk_valid;
 
 #[cfg(test)]
 mod test_fixtures;

@@ -115,7 +115,6 @@ fn initial_state() -> BeaconState {
         committee: (0u64..4).map(ValidatorId::new).collect(),
         shard_committees: shard_committees.clone(),
         next_shard_committees: shard_committees,
-        consumed_through: BTreeMap::new(),
         boundaries: BTreeMap::new(),
         miss_counters: BTreeMap::new(),
     }

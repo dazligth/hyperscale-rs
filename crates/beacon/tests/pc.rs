@@ -320,9 +320,8 @@ fn sim_n4_with_one_silent_party_still_converges() {
 // identical `x`. Round 2 collapses to `PcXpProof::Full`. Forcing two signers
 // to back round-2 with different QC1s — which is what Diverging and
 // ShortWitness require — has to be done by composing the votes directly.
-// These tests cover the same code path (`build_qc2` → `build_xp_proof`) as
-// the planned sim tests would have, at the layer that can actually produce
-// divergent inputs.
+// These tests exercise that path (`build_qc2` → `build_xp_proof`) at the
+// layer that can actually produce divergent inputs.
 
 /// Build a QC1 over `v_in` from a `quorum`-sized subset of the
 /// committee. The signers collectively cover positions `0..quorum`.
