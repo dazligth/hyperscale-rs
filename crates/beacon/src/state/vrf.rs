@@ -1,5 +1,5 @@
-//! VRF reveal verification + randomness roll + the shared
-//! [`jail_validator`] cascade primitive.
+//! VRF reveal verification + randomness roll + the [`jail_validator`]
+//! transition.
 
 use std::collections::BTreeSet;
 
@@ -9,7 +9,7 @@ use hyperscale_types::{
     ValidatorStatus, VrfOutput, vrf_verify,
 };
 
-use crate::state::pool::pool_draw;
+use crate::state::pool::exit_placement;
 
 /// Domain tag for the beacon-randomness mixer. Binds the BLAKE3 input
 /// to "beacon randomness v1" so the digest can't collide with any
@@ -119,11 +119,10 @@ pub(super) fn filter_and_roll_randomness<'a>(
     }
 }
 
-/// Transition `victim` to `Jailed { since_epoch, reason }` and run
-/// the shared cleanup: clear any per-validator state scoped to their
-/// old placement (currently [`BeaconState::miss_counters`]); if they
-/// were `OnShard`, remove from that shard's committee and draw a
-/// refill from the global pool.
+/// Transition `victim` to `Jailed { since_epoch, reason }`, then run
+/// [`exit_placement`]'s shared cleanup (clear miss counters; if they
+/// were `OnShard`, drop from that shard's committee and refill from the
+/// global pool).
 ///
 /// Silent no-op if `victim` isn't in `state.validators`. Callers that
 /// want to gate on the prior status (e.g. equivocation's "skip
@@ -138,18 +137,12 @@ pub(super) fn jail_validator(
     let Some(rec) = state.validators.get_mut(&victim) else {
         return;
     };
-    let prior_status = rec.status;
+    let prior = rec.status;
     rec.status = ValidatorStatus::Jailed {
         since_epoch,
         reason,
     };
-    state.miss_counters.remove(&victim);
-    if let ValidatorStatus::OnShard { shard, .. } = prior_status {
-        if let Some(committee) = state.next_shard_committees.get_mut(&shard) {
-            committee.members.retain(|v| *v != victim);
-        }
-        pool_draw(state, shard);
-    }
+    exit_placement(state, victim, prior);
 }
 
 #[cfg(test)]

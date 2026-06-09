@@ -1,16 +1,17 @@
-//! Pending-withdrawal maturation, plus the shared
-//! [`deactivate_to_insufficient_stake`] cascade primitive.
+//! Pending-withdrawal maturation, plus the
+//! [`deactivate_to_insufficient_stake`] transition.
 
 use hyperscale_types::{
     BeaconState, Stake, StakePoolId, UNBONDING_WINDOW_EPOCHS, ValidatorId, ValidatorStatus,
 };
 
-use crate::state::pool::pool_draw;
+use crate::state::pool::exit_placement;
 
-/// Transition `victim_id` to `InsufficientStake` with the standard
-/// `OnShard` cascade (remove from shard committee + `pool_draw`
-/// refill). Other statuses (`Pooled`, fault-cause `Jailed`) flip in
-/// place. Already-`InsufficientStake` and already-permanent
+/// Transition `victim_id` to `InsufficientStake`, then run
+/// [`exit_placement`]'s shared cleanup (drop from the shard committee +
+/// pool refill if `OnShard`; clear miss counters). Other statuses
+/// (`Pooled`, fault-cause `Jailed`) flip in place with no committee
+/// change. Already-`InsufficientStake` and already-permanent
 /// `Jailed { Equivocation }` callers should not invoke this — there's
 /// no transition to make. Callers gate on those cases at the variant
 /// dispatch level (see `DeactivateValidator`).
@@ -18,17 +19,9 @@ pub(super) fn deactivate_to_insufficient_stake(state: &mut BeaconState, victim_i
     let Some(rec) = state.validators.get_mut(&victim_id) else {
         return;
     };
-    let prior_status = rec.status;
+    let prior = rec.status;
     rec.status = ValidatorStatus::InsufficientStake;
-    if let ValidatorStatus::OnShard { shard, .. } = prior_status {
-        if let Some(committee) = state.next_shard_committees.get_mut(&shard) {
-            committee.members.retain(|v| *v != victim_id);
-        }
-        pool_draw(state, shard);
-    }
-    // Miss counters are scoped to the validator's current `OnShard`
-    // placement; any transition out clears them.
-    state.miss_counters.remove(&victim_id);
+    exit_placement(state, victim_id, prior);
 }
 
 /// Outcome of [`complete_pending_withdrawals`].

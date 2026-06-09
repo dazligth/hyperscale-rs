@@ -9,12 +9,14 @@
 //!
 //! Pipeline modules:
 //!
-//! - [`pool`]: [`pool_draw`] — draw a `Pooled` validator onto a shard.
+//! - [`pool`]: [`pool_draw`] — draw a `Pooled` validator onto a shard —
+//!   and `exit_placement`, the inverse cascade shared by every
+//!   shard-placement teardown.
 //! - [`vrf`]: VRF reveal filter, randomness roll, `jail_validator`
-//!   cascade primitive.
+//!   transition.
 //! - [`witness`]: shard-lift dispatch and equivocation re-verification.
-//! - [`withdrawals`]: pending-withdrawal maturation and the shared
-//!   `deactivate_to_insufficient_stake` primitive.
+//! - [`withdrawals`]: pending-withdrawal maturation and the
+//!   `deactivate_to_insufficient_stake` transition.
 //! - [`lifecycle`]: auto-reactivation, reward distribution, auto-ready
 //!   timeout.
 //! - [`committee`]: shuffle step, beacon-committee resample, per-shard
