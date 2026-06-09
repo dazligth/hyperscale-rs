@@ -7,9 +7,7 @@ use hyperscale_dispatch::Dispatch;
 use hyperscale_metrics::record_fetch_response_sent;
 use hyperscale_network::Network;
 use hyperscale_storage::ShardStorage;
-use hyperscale_types::network::gossip::beacon::{
-    BeaconBlockGossip, SkipCertGossip, SkipRequestGossip,
-};
+use hyperscale_types::network::gossip::beacon::{BeaconBlockGossip, SkipRequestGossip};
 use hyperscale_types::network::gossip::{CertifiedBlockHeaderGossip, TransactionGossip};
 use hyperscale_types::network::notification::beacon::{
     BeaconProposalNotification, PcVote1Notification, PcVote2Notification, PcVote3Notification,
@@ -482,24 +480,6 @@ where
                         ProtocolEvent::UnverifiedSkipRequestReceived {
                             request: gossip.request,
                         },
-                    );
-                    GossipVerdict::Accept
-                },
-            );
-
-        // ── beacon.skip_cert → ProtocolEvent::SkipCertReceived ─────
-        let senders = self.process.shard_event_senders.clone();
-        self.process
-            .network
-            .register_gossip_handler::<SkipCertGossip>(
-                move |gossip: SkipCertGossip, target_shard: ShardId| -> GossipVerdict {
-                    let Some(tx) = senders.get(&target_shard) else {
-                        return GossipVerdict::Reject;
-                    };
-                    push_protocol_event(
-                        tx,
-                        target_shard,
-                        ProtocolEvent::SkipCertReceived { cert: gossip.cert },
                     );
                     GossipVerdict::Accept
                 },

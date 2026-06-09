@@ -91,7 +91,6 @@ where
             | Action::BuildAndBroadcastBeaconProposal { .. }
             | Action::BroadcastBeaconBlock { .. }
             | Action::BroadcastSkipRequest { .. }
-            | Action::BroadcastSkipCert { .. }
             | Action::VerifyBeaconBlock { .. }
             | Action::VerifySkipRequest { .. }
             | Action::VerifyPcVote1 { .. }

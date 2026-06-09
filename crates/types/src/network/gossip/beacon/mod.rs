@@ -12,9 +12,7 @@
 //! validators fetch witness contents on demand via request/response.
 
 mod beacon_block;
-mod skip_cert;
 mod skip_request;
 
 pub use beacon_block::BeaconBlockGossip;
-pub use skip_cert::SkipCertGossip;
 pub use skip_request::SkipRequestGossip;

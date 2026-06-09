@@ -1012,37 +1012,6 @@ impl BeaconCoordinator {
         self.admit_verified_skip_request(Arc::unwrap_or_clone(request))
     }
 
-    /// A peer-assembled [`SkipEpochCert`](hyperscale_types::SkipEpochCert)
-    /// arrived via gossip. Validate the non-crypto fields and dispatch
-    /// BLS aggregate verification to the crypto pool. On a verified
-    /// result, [`Self::on_beacon_block_verified`] builds and adopts the
-    /// skip block (idempotent: ignored if the local tip has already
-    /// advanced past the cert's epoch).
-    pub fn on_skip_cert_received(&mut self, cert: Arc<Verifiable<SkipEpochCert>>) -> Vec<Action> {
-        if cert.anchor_hash() != self.latest_block.block_hash() {
-            trace!("SkipCert at unknown anchor — dropping");
-            return Vec::new();
-        }
-        let expected_epoch = self.state.current_epoch.next();
-        if cert.epoch_to_skip() != expected_epoch {
-            trace!(
-                epoch_to_skip = cert.epoch_to_skip().inner(),
-                expected = expected_epoch.inner(),
-                "SkipCert at unexpected epoch — dropping",
-            );
-            return Vec::new();
-        }
-        let active_pool = self.state.derive_active_pool();
-        let anchor = self.latest_block.block_hash();
-        let raw_cert = Arc::unwrap_or_clone(cert).into_unverified();
-        let block = BeaconBlock::skip(expected_epoch, anchor);
-        let certified = CertifiedBeaconBlock::new_unchecked(block, BeaconCert::Skip(raw_cert));
-        let block_arc = Arc::new(Verifiable::from(certified));
-        // Skip blocks carry no `committed_proposals`, so the equivocation
-        // lookup is necessarily empty.
-        self.dispatch_block_verification(block_arc, active_pool, Vec::new())
-    }
-
     /// Build the skip block paired with `cert`, adopt it via the
     /// shared adoption path, and emit a broadcast so peers converge.
     fn commit_skip_block(&mut self, cert: Verified<SkipEpochCert>) -> Vec<Action> {

@@ -16,12 +16,11 @@ use hyperscale_types::{
     LocalReceiptRoot, LocalReceiptRootVerifyError, PcVote1, PcVote1VerifyError, PcVote2,
     PcVote2VerifyError, PcVote3, PcVote3VerifyError, ProvisionRootVerifyError, ProvisionTxRootsMap,
     ProvisionTxRootsVerifyError, Provisions, ProvisionsRoot, ProvisionsVerifyError, QcVerifyError,
-    QuorumCertificate, ReadySignal, Round, RoutableTransaction, ShardId, ShardWitness,
-    SkipEpochCert, SkipRequest, SkipRequestVerifyError, SpcEmptyViewMsg,
-    SpcEmptyViewMsgVerifyError, SpcNewCommitMsg, SpcNewCommitMsgVerifyError, SpcProposalObject,
-    SpcProposalObjectVerifyError, SpcView, StateRoot, StateRootVerifyError, StoredReceipt, Timeout,
-    TransactionRoot, TxOutcome, TxRootVerifyError, ValidatorId, Verifiable, Verified, WaveId,
-    WeightedTimestamp,
+    QuorumCertificate, ReadySignal, Round, RoutableTransaction, ShardId, ShardWitness, SkipRequest,
+    SkipRequestVerifyError, SpcEmptyViewMsg, SpcEmptyViewMsgVerifyError, SpcNewCommitMsg,
+    SpcNewCommitMsgVerifyError, SpcProposalObject, SpcProposalObjectVerifyError, SpcView,
+    StateRoot, StateRootVerifyError, StoredReceipt, Timeout, TransactionRoot, TxOutcome,
+    TxRootVerifyError, ValidatorId, Verifiable, Verified, WaveId, WeightedTimestamp,
 };
 
 /// How a node learned about the certifying QC that commits a given block.
@@ -836,15 +835,6 @@ pub enum ProtocolEvent {
         /// Verified request, sealed via
         /// [`Verified::<SkipRequest>::sign_local`].
         request: Arc<Verified<SkipRequest>>,
-    },
-
-    /// A standalone `SkipEpochCert` arrived via gossip. Useful for
-    /// late-joining or syncing nodes that didn't observe the requests
-    /// directly. Wire decode lands the wrapper as `Unverified`;
-    /// locally-relayed broadcasts preserve the marker.
-    SkipCertReceived {
-        /// Received cert.
-        cert: Arc<Verifiable<SkipEpochCert>>,
     },
 
     /// A shard-witness fetch response landed. `BeaconCoordinator`

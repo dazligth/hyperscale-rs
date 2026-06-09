@@ -12,9 +12,7 @@ use std::sync::Arc;
 use hyperscale_core::{Action, ActionContext, ProtocolEvent};
 use hyperscale_network::Network;
 use hyperscale_storage::ShardStorage;
-use hyperscale_types::network::gossip::beacon::{
-    BeaconBlockGossip, SkipCertGossip, SkipRequestGossip,
-};
+use hyperscale_types::network::gossip::beacon::{BeaconBlockGossip, SkipRequestGossip};
 use hyperscale_types::network::notification::{
     BeaconProposalNotification, PcVote1Notification, PcVote2Notification, PcVote3Notification,
     SpcEmptyViewMsgNotification, SpcNewCommitNotification, SpcNewViewNotification,
@@ -203,12 +201,6 @@ where
                     (*request).clone(),
                 ))));
             ctx.notify_protocol(ProtocolEvent::VerifiedSkipRequestReceived { request });
-        }
-        Action::BroadcastSkipCert { cert } => {
-            ctx.network
-                .broadcast_global(&SkipCertGossip::new(Arc::new(Verifiable::from(
-                    (*cert).clone(),
-                ))));
         }
         Action::VerifyBeaconBlock {
             block,

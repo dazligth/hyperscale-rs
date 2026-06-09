@@ -79,9 +79,6 @@ impl NodeStateMachine {
             ProtocolEvent::VerifiedSkipRequestReceived { request } => self
                 .beacon_coordinator
                 .on_verified_skip_request_received(request),
-            ProtocolEvent::SkipCertReceived { cert } => {
-                self.beacon_coordinator.on_skip_cert_received(cert)
-            }
             ProtocolEvent::ShardWitnessesReceived {
                 shard_id,
                 witnesses,

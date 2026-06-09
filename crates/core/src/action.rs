@@ -13,8 +13,8 @@ use hyperscale_types::{
     LocalReceiptRoot, NodeId, PcQc1, PcQc2, PcVector, PcVote1, PcVote2, PcVote3,
     PcVoteEquivocation, ProposerTimestamp, ProvisionHash, ProvisionTxRootsMap, Provisions,
     ProvisionsRoot, QuorumCertificate, ReadySignal, Round, RoutableTransaction, ShardId,
-    SharedCertificates, SharedTransactions, SkipEpochCert, SkipRequest, SpcEmptyViewMsg,
-    SpcHighTriple, SpcNewCommitMsg, SpcProposalObject, SpcView, StateRoot, SubstateEntry, Timeout,
+    SharedCertificates, SharedTransactions, SkipRequest, SpcEmptyViewMsg, SpcHighTriple,
+    SpcNewCommitMsg, SpcProposalObject, SpcView, StateRoot, SubstateEntry, Timeout,
     TopologySnapshot, TransactionRoot, TransactionStatus, TxHash, TxOutcome, ValidatorId,
     Verifiable, Verified, VoteCount, WaveId, WeightedTimestamp,
 };
@@ -977,17 +977,6 @@ pub enum Action {
         anchor: BeaconBlockHash,
     },
 
-    /// Broadcast an assembled [`SkipEpochCert`] globally. Standalone
-    /// cert gossip helps late-joining or syncing nodes that didn't
-    /// observe the requests directly. The FSM aggregates the cert from
-    /// verified requests via
-    /// [`Verified::<SkipEpochCert>::from_verified_requests`]; the
-    /// marker rides through.
-    BroadcastSkipCert {
-        /// Cert to broadcast.
-        cert: Arc<Verified<SkipEpochCert>>,
-    },
-
     /// Verify the cert authenticating a beacon block (SPC cert on a
     /// Normal block, pool-quorum cert on a Skip block — the handler
     /// reads `block.cert()` to branch) **and** every
@@ -1165,7 +1154,6 @@ impl Action {
             | Self::BuildAndBroadcastBeaconProposal { .. }
             | Self::BroadcastBeaconBlock { .. }
             | Self::BroadcastSkipRequest { .. }
-            | Self::BroadcastSkipCert { .. }
             | Self::VerifyBeaconBlock { .. }
             | Self::VerifySkipRequest { .. }
             | Self::VerifyPcVote1 { .. }
@@ -1234,7 +1222,6 @@ impl Action {
             | Self::BuildAndBroadcastBeaconProposal { .. }
             | Self::BroadcastBeaconBlock { .. }
             | Self::BroadcastSkipRequest { .. }
-            | Self::BroadcastSkipCert { .. }
             | Self::VerifyBeaconBlock { .. }
             | Self::VerifySkipRequest { .. }
             | Self::VerifyPcVote1 { .. }

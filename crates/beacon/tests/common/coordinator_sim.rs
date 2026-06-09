@@ -106,9 +106,6 @@ enum SimEvent {
     SkipRequest {
         request: Arc<Verifiable<SkipRequest>>,
     },
-    SkipCert {
-        cert: Arc<Verifiable<SkipEpochCert>>,
-    },
     BeaconProposalFetched {
         epoch: Epoch,
         validator: ValidatorId,
@@ -739,9 +736,6 @@ impl CoordinatorSim {
             SimEvent::SkipRequest { request } => {
                 self.coordinators[env.to_idx].on_unverified_skip_request_received(request)
             }
-            SimEvent::SkipCert { cert } => {
-                self.coordinators[env.to_idx].on_skip_cert_received(cert)
-            }
             SimEvent::BeaconProposalFetched {
                 epoch,
                 validator,
@@ -1007,20 +1001,6 @@ impl CoordinatorSim {
                         to_idx,
                         event: SimEvent::SkipRequest {
                             request: Arc::clone(&wire),
-                        },
-                    });
-                }
-            }
-            Action::BroadcastSkipCert { cert } => {
-                let wire = Arc::new(Verifiable::from((*cert).clone()));
-                for to_idx in 0..self.coordinators.len() {
-                    if to_idx == emitter_idx {
-                        continue;
-                    }
-                    self.network_q.push_back(Envelope {
-                        to_idx,
-                        event: SimEvent::SkipCert {
-                            cert: Arc::clone(&wire),
                         },
                     });
                 }
