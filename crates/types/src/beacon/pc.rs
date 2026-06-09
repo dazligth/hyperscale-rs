@@ -1944,8 +1944,13 @@ impl Verify<&PcVoteVerifyContext<'_>> for PcVote2 {
     type Error = PcVote2VerifyError;
 
     fn verify(&self, ctx: &PcVoteVerifyContext<'_>) -> Result<Verified<Self>, Self::Error> {
-        verify_vote2(self, ctx.network, ctx.pc_ctx, ctx.committee)?;
-        Ok(Verified::new_unchecked(self.clone()))
+        let mut verified = self.clone();
+        verified
+            .qc1
+            .upgrade_in_place(ctx)
+            .map_err(|_| PcVote2VerifyError::EmbeddedQc1Rejected)?;
+        verify_vote2(&verified, ctx.network, ctx.pc_ctx, ctx.committee)?;
+        Ok(Verified::new_unchecked(verified))
     }
 }
 
@@ -1962,8 +1967,13 @@ impl Verify<&PcVoteVerifyContext<'_>> for PcVote3 {
     type Error = PcVote3VerifyError;
 
     fn verify(&self, ctx: &PcVoteVerifyContext<'_>) -> Result<Verified<Self>, Self::Error> {
-        verify_vote3(self, ctx.network, ctx.pc_ctx, ctx.committee)?;
-        Ok(Verified::new_unchecked(self.clone()))
+        let mut verified = self.clone();
+        verified
+            .qc2
+            .upgrade_in_place(ctx)
+            .map_err(|_| PcVote3VerifyError::EmbeddedQc2Rejected)?;
+        verify_vote3(&verified, ctx.network, ctx.pc_ctx, ctx.committee)?;
+        Ok(Verified::new_unchecked(verified))
     }
 }
 
@@ -1971,8 +1981,18 @@ impl Verify<&PcVoteVerifyContext<'_>> for PcQc3 {
     type Error = PcQc3VerifyError;
 
     fn verify(&self, ctx: &PcVoteVerifyContext<'_>) -> Result<Verified<Self>, Self::Error> {
-        verify_qc3(self, ctx.network, ctx.pc_ctx, ctx.committee)?;
-        Ok(Verified::new_unchecked(self.clone()))
+        let mut verified = self.clone();
+        verified
+            .qc2_xpp
+            .upgrade_in_place(ctx)
+            .map_err(|_| PcQc3VerifyError::EmbeddedQc2XppRejected)?;
+        if let Some(qc2_xpe) = verified.qc2_xpe.as_mut() {
+            qc2_xpe
+                .upgrade_in_place(ctx)
+                .map_err(|_| PcQc3VerifyError::EmbeddedQc2XpeRejected)?;
+        }
+        verify_qc3(&verified, ctx.network, ctx.pc_ctx, ctx.committee)?;
+        Ok(Verified::new_unchecked(verified))
     }
 }
 

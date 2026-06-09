@@ -787,12 +787,57 @@ pub enum SpcNewCommitMsgVerifyError {
     ValueMismatch,
 }
 
+/// Upgrade a cert's embedded QC3 marker in place, against the PC context
+/// the cert's variant pins it to (`Direct` → `prev_view`, `Indirect` →
+/// `target_view`) — the same contexts [`verify_cert`] checks under. Keeps
+/// the marker on the verified cert so a sibling vnode receiving it via
+/// local dispatch short-circuits the embedded QC3 check.
+fn upgrade_cert_proof(
+    cert: &mut SpcCert,
+    ctx: &SpcVerifyContext<'_>,
+) -> Result<(), SpcCertVerifyError> {
+    let (view, proof, on_reject) = match cert {
+        SpcCert::Direct {
+            prev_view, proof, ..
+        } => (*prev_view, proof, SpcCertVerifyError::DirectBadQc3),
+        SpcCert::Indirect {
+            target_view,
+            target_proof,
+            ..
+        } => (
+            *target_view,
+            target_proof,
+            SpcCertVerifyError::IndirectBadTargetQc3,
+        ),
+    };
+    let pc_ctx = pc_context(ctx.spc_ctx, view);
+    proof
+        .upgrade_in_place(&PcVoteVerifyContext {
+            network: ctx.network,
+            pc_ctx: &pc_ctx,
+            committee: ctx.committee,
+        })
+        .map_err(|_| on_reject)?;
+    Ok(())
+}
+
 impl Verify<&SpcVerifyContext<'_>> for SpcEmptyViewMsg {
     type Error = SpcEmptyViewMsgVerifyError;
 
     fn verify(&self, ctx: &SpcVerifyContext<'_>) -> Result<Verified<Self>, Self::Error> {
-        verify_empty_view_msg(self, ctx.network, ctx.spc_ctx, ctx.committee)?;
-        Ok(Verified::new_unchecked(self.clone()))
+        let mut verified = self.clone();
+        let pc_ctx = pc_context(ctx.spc_ctx, verified.reported.view);
+        verified
+            .reported
+            .proof
+            .upgrade_in_place(&PcVoteVerifyContext {
+                network: ctx.network,
+                pc_ctx: &pc_ctx,
+                committee: ctx.committee,
+            })
+            .map_err(|_| SpcEmptyViewMsgVerifyError::BadReportedQc3)?;
+        verify_empty_view_msg(&verified, ctx.network, ctx.spc_ctx, ctx.committee)?;
+        Ok(Verified::new_unchecked(verified))
     }
 }
 
@@ -803,8 +848,10 @@ impl Verify<&SpcVerifyContext<'_>> for SpcCert {
     /// claimed view-entry from the cert's own contents (Direct →
     /// `prev_view + 1`; Indirect → `for_view`).
     fn verify(&self, ctx: &SpcVerifyContext<'_>) -> Result<Verified<Self>, Self::Error> {
-        verify_block_cert(self, ctx.network, ctx.spc_ctx, ctx.committee)?;
-        Ok(Verified::new_unchecked(self.clone()))
+        let mut verified = self.clone();
+        upgrade_cert_proof(&mut verified, ctx)?;
+        verify_block_cert(&verified, ctx.network, ctx.spc_ctx, ctx.committee)?;
+        Ok(Verified::new_unchecked(verified))
     }
 }
 
@@ -812,8 +859,10 @@ impl Verify<&SpcVerifyContext<'_>> for SpcProposalObject {
     type Error = SpcProposalObjectVerifyError;
 
     fn verify(&self, ctx: &SpcVerifyContext<'_>) -> Result<Verified<Self>, Self::Error> {
-        verify_proposal_object(self, ctx.network, ctx.spc_ctx, ctx.committee)?;
-        Ok(Verified::new_unchecked(self.clone()))
+        let mut verified = self.clone();
+        upgrade_cert_proof(&mut verified.cert, ctx).map_err(SpcProposalObjectVerifyError)?;
+        verify_proposal_object(&verified, ctx.network, ctx.spc_ctx, ctx.committee)?;
+        Ok(Verified::new_unchecked(verified))
     }
 }
 
@@ -825,21 +874,19 @@ impl Verify<&SpcVerifyContext<'_>> for SpcHighTriple {
     /// Short-circuits the embedded QC3 check when its marker is live.
     fn verify(&self, ctx: &SpcVerifyContext<'_>) -> Result<Verified<Self>, Self::Error> {
         let pc_ctx = pc_context(ctx.spc_ctx, self.view);
-        if self.proof.verified().is_none()
-            && verify_qc3(
-                self.proof.as_unverified(),
-                ctx.network,
-                &pc_ctx,
-                ctx.committee,
-            )
-            .is_err()
-        {
-            return Err(SpcHighTripleVerifyError::BadQc3);
-        }
-        if self.proof.x_pe() != &self.value {
+        let mut verified = self.clone();
+        verified
+            .proof
+            .upgrade_in_place(&PcVoteVerifyContext {
+                network: ctx.network,
+                pc_ctx: &pc_ctx,
+                committee: ctx.committee,
+            })
+            .map_err(|_| SpcHighTripleVerifyError::BadQc3)?;
+        if verified.proof.x_pe() != &verified.value {
             return Err(SpcHighTripleVerifyError::ValueMismatch);
         }
-        Ok(Verified::new_unchecked(self.clone()))
+        Ok(Verified::new_unchecked(verified))
     }
 }
 
