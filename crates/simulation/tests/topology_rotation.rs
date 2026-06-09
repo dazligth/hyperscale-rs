@@ -26,8 +26,14 @@ use tracing_test::traced_test;
 const TEST_EPOCH_MS: u64 = 2000;
 
 /// Committee validators per shard. The shuffle retires one member at the
-/// boundary; seven keeps the post-rotation committee above quorum.
+/// boundary; seven keeps the post-rotation committee above quorum even when
+/// the replacement drawn from the pool runs no host.
 const PER_SHARD: u32 = 7;
+
+/// Hostless `Pooled` validators registered in genesis. The shuffle only
+/// rotates a shard it can refill, so an empty pool would mean no rotation
+/// at all — these give each shard's draw stock.
+const POOL_EXTRAS: u32 = 2;
 
 fn rotation_config() -> NetworkConfig {
     NetworkConfig {
@@ -42,6 +48,7 @@ fn rotation_config() -> NetworkConfig {
             shard_size: PER_SHARD,
             ..BeaconChainConfig::default()
         }),
+        pool_extra_validators: POOL_EXTRAS,
         ..Default::default()
     }
 }

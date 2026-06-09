@@ -165,9 +165,12 @@ impl SimulationRunner {
         let network = SimulatedNetwork::new(network_config.clone());
         let rng = ChaCha8Rng::seed_from_u64(seed);
 
-        // Generate keys for all validators using deterministic seeding
+        // Generate keys for all registered validators using deterministic
+        // seeding. Pool extras are registered in beacon genesis (landing
+        // `Pooled`, giving the shuffle refill stock) but run no host.
         let total_validators = network_config.num_shards * network_config.validators_per_shard;
-        let keys: Vec<Bls12381G1PrivateKey> = (0..total_validators)
+        let registered_validators = total_validators + network_config.pool_extra_validators;
+        let keys: Vec<Bls12381G1PrivateKey> = (0..registered_validators)
             .map(|i| {
                 let mut seed_bytes = [0u8; 32];
                 let key_seed = seed
@@ -181,8 +184,9 @@ impl SimulationRunner {
         let public_keys: Vec<Bls12381G1PublicKey> =
             keys.iter().map(Bls12381G1PrivateKey::public_key).collect();
 
-        // Build global validator set
-        let global_validators: Vec<ValidatorInfo> = (0..total_validators)
+        // Build global validator set (pool extras included — fold-derived
+        // snapshots carry every registered validator, so genesis matches)
+        let global_validators: Vec<ValidatorInfo> = (0..registered_validators)
             .map(|i| ValidatorInfo {
                 validator_id: ValidatorId::new(u64::from(i)),
                 public_key: public_keys[i as usize],
@@ -219,8 +223,8 @@ impl SimulationRunner {
         let (beacon_genesis_block, beacon_genesis_state, beacon_config_hash, beacon_network) = {
             let network = NetworkDefinition::simulator();
             let pool_id = StakePoolId::new(0);
-            let n = u128::from(total_validators);
-            let initial_validators: Vec<GenesisValidator> = (0..total_validators)
+            let n = u128::from(registered_validators);
+            let initial_validators: Vec<GenesisValidator> = (0..registered_validators)
                 .map(|i| GenesisValidator {
                     id: ValidatorId::new(u64::from(i)),
                     pool: pool_id,

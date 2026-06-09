@@ -76,6 +76,17 @@ pub(super) fn run_shuffle_step(state: &mut BeaconState) {
         if ready_members.is_empty() {
             continue;
         }
+        // Rotation must never shrink a committee: with nobody `Pooled` to
+        // refill the freed slot, removing the victim would permanently drop
+        // the committee below `shard_size` — and below the BFT minimum at
+        // small validator counts, parking the beacon on the skip path and
+        // tightening the shard quorum toward all-of-N. Skip this shard's
+        // rotation until the pool recovers. An earlier shard's victim in
+        // the same step is already `Pooled` here, so it still backfills a
+        // later shard (the legitimate cross-shard reassignment).
+        if state.pooled_validators().is_empty() {
+            continue;
+        }
         let mut h = Hasher::new();
         h.update(DOMAIN_SHUFFLE_EXIT);
         h.update(state.randomness.as_bytes());
@@ -399,44 +410,64 @@ mod tests {
         assert_eq!(rotated, 1, "exactly one ready member rotates out");
     }
 
-    /// With the pool empty before the shuffle, the per-shard
-    /// `pool_draw` must not pick the just-rotated victim and restore
-    /// them. Victim flips to `Pooled` *after* the draw, so the draw
-    /// sees an empty pool and returns `None` — the shard shrinks by
-    /// one (no validator was available to fill).
+    /// The per-shard `pool_draw` must not pick the just-rotated victim
+    /// and restore them. Victim flips to `Pooled` *after* the draw, so a
+    /// pool holding exactly one spare must always refill with the spare —
+    /// never the victim.
     #[test]
     fn shuffle_avoids_self_replacement() {
+        let shard = ShardId::leaf(1, 0);
+        let mut state = single_pool_state(4);
+        state.committee = (0u64..4).map(ValidatorId::new).collect();
+        let spare = ValidatorId::new(99);
+        state
+            .validators
+            .insert(spare, validator_record(99, 0, ValidatorStatus::Pooled));
+        let pool = state.pools.get_mut(&StakePoolId::new(0)).unwrap();
+        pool.validators.insert(spare);
+        pool.total_stake = Stake::from_attos(10 * MIN_STAKE_FLOOR.attos());
+        state.current_epoch = Epoch::new(SHUFFLE_INTERVAL_EPOCHS - 1);
+
+        let initial_members = state.next_shard_committees[&shard].members.clone();
+        apply_next_epoch(&mut state, &[]);
+
+        // Capacity preserved: the spare filled the freed slot.
+        let members = state.next_shard_committees[&shard].members.clone();
+        assert_eq!(members.len(), 4);
+        assert!(members.contains(&spare), "the lone spare must refill");
+        // Exactly one original member rotated out, into the pool.
+        let pool_now = state.pooled_validators();
+        assert_eq!(pool_now.len(), 1);
+        let victim = pool_now[0];
+        assert!(initial_members.contains(&victim));
+        assert!(!members.contains(&victim), "victim must not be re-drawn");
+        assert!(matches!(
+            state.validators[&victim].status,
+            ValidatorStatus::Pooled,
+        ));
+    }
+
+    /// With nobody `Pooled` to refill the freed slot, the shuffle skips
+    /// the shard's rotation entirely: removing a member without a
+    /// replacement would permanently shrink the committee — below the
+    /// BFT minimum at small validator counts.
+    #[test]
+    fn shuffle_skips_rotation_when_pool_cannot_refill() {
+        let shard = ShardId::leaf(1, 0);
         let mut state = single_pool_state(4);
         state.committee = (0u64..4).map(ValidatorId::new).collect();
         state.current_epoch = Epoch::new(SHUFFLE_INTERVAL_EPOCHS - 1);
         assert!(state.pooled_validators().is_empty());
 
-        let initial_members = state.next_shard_committees[&ShardId::leaf(1, 0)]
-            .members
-            .clone();
-        apply_next_epoch(&mut state, &[]);
+        let initial_members = state.next_shard_committees[&shard].members.clone();
+        let effects = apply_next_epoch(&mut state, &[]);
 
-        // Shard shrunk by one — empty pool, no refill possible.
         assert_eq!(
-            state.next_shard_committees[&ShardId::leaf(1, 0)]
-                .members
-                .len(),
-            3
+            state.next_shard_committees[&shard].members, initial_members,
+            "an unrefillable rotation must not run",
         );
-        // Victim ended up in the pool, not back on the shard.
-        let pool_now = state.pooled_validators();
-        assert_eq!(pool_now.len(), 1);
-        let victim = pool_now[0];
-        assert!(initial_members.contains(&victim));
-        assert!(
-            !state.next_shard_committees[&ShardId::leaf(1, 0)]
-                .members
-                .contains(&victim)
-        );
-        assert!(matches!(
-            state.validators[&victim].status,
-            ValidatorStatus::Pooled,
-        ));
+        assert!(state.pooled_validators().is_empty());
+        assert!(effects.shard_committee_transitions.is_empty());
     }
 
     /// On a shuffle-boundary epoch, any shard membership change is

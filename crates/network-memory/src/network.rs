@@ -99,6 +99,11 @@ pub struct NetworkConfig {
     /// compile-time constants (5-minute epochs, committee 4). Tests
     /// that want fast beacon kickoff override `epoch_duration_ms` here.
     pub beacon_chain_config: Option<BeaconChainConfig>,
+    /// Validators registered in beacon genesis beyond the shard
+    /// committees. They land `Pooled` and run no host, so they give the
+    /// shuffle refill stock (rotation skips shards it cannot refill) at
+    /// the cost of one unresponsive committee member per draw.
+    pub pool_extra_validators: u32,
 }
 
 impl Default for NetworkConfig {
@@ -113,6 +118,7 @@ impl Default for NetworkConfig {
             vnodes_per_host: 1,
             hosting_mode: HostingMode::SameShardBundled,
             beacon_chain_config: None,
+            pool_extra_validators: 0,
         }
     }
 }
@@ -535,6 +541,12 @@ impl SimulatedNetwork {
         to: NodeIndex,
         rng: &mut ChaCha8Rng,
     ) -> Option<Duration> {
+        // A destination with no host (a hostless pool-extra validator) is
+        // unreachable, same as a partitioned peer.
+        if to as usize >= self.total_nodes() {
+            return None;
+        }
+
         // Check partition first (deterministic)
         if self.is_partitioned(from, to) {
             return None;

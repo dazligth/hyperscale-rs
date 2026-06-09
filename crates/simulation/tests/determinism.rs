@@ -2068,6 +2068,7 @@ fn test_packet_loss_application() {
         vnodes_per_host: 1,
         hosting_mode: HostingMode::SameShardBundled,
         beacon_chain_config: None,
+        pool_extra_validators: 0,
     };
 
     let mut runner = SimulationRunner::new(&config, 42);
@@ -2133,6 +2134,7 @@ fn test_packet_loss_determinism() {
         vnodes_per_host: 1,
         hosting_mode: HostingMode::SameShardBundled,
         beacon_chain_config: None,
+        pool_extra_validators: 0,
     };
 
     let seed = 12345u64;
