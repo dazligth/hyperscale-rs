@@ -1314,11 +1314,11 @@ impl ShardCoordinator {
             "Adopted verified parent QC"
         );
         self.latest_qc = Some(qc.clone());
-        self.advance_view_for_qc(qc.as_ref());
+        self.advance_view_for_qc(qc);
         // Non-proposers learn about QCs via block headers rather than
         // forming them locally — they need two-chain commit + a proposal
         // kick to advance the chain in the event-driven model.
-        let actions = self.try_two_chain_commit(qc.as_ref(), CommitSource::Header);
+        let actions = self.try_two_chain_commit(qc, CommitSource::Header);
         self.queue_ready_proposal();
         actions
     }
@@ -2341,7 +2341,7 @@ impl ShardCoordinator {
         let Some(qc) = self.latest_qc.clone() else {
             return vec![];
         };
-        self.try_two_chain_commit(qc.as_ref(), CommitSource::Aggregator)
+        self.try_two_chain_commit(&qc, CommitSource::Aggregator)
     }
 
     /// Populate `verified_certified_blocks[block_hash]` so the 2-chain
@@ -2667,7 +2667,7 @@ impl ShardCoordinator {
             // to look up parent_state_root / parent_in_flight at proposal time.
             if self.chain_view().get_header(block_hash).is_some() {
                 self.latest_qc = Some(qc.clone());
-                self.advance_view_for_qc(qc.as_ref());
+                self.advance_view_for_qc(qc);
                 // Cache the just-formed QC so the next 2-chain commit
                 // (driven by the *next* QC certifying our successor)
                 // can look up this QC as the certifying handle for the
@@ -2689,7 +2689,7 @@ impl ShardCoordinator {
             duration: self.current_view_change_timeout(),
         }];
 
-        actions.extend(self.try_two_chain_commit(qc.as_ref(), CommitSource::Aggregator));
+        actions.extend(self.try_two_chain_commit(qc, CommitSource::Aggregator));
 
         // Propose the next block immediately — under the 2-chain commit rule,
         // block N+1 is what certifies block N, so any gap in proposing N+1
@@ -2711,7 +2711,11 @@ impl ShardCoordinator {
     /// `on_block_header` (when we learn about a QC via the next block's
     /// `parent_qc`). This ensures all validators commit regardless of whether
     /// they received votes directly.
-    fn try_two_chain_commit(&self, qc: &QuorumCertificate, source: CommitSource) -> Vec<Action> {
+    fn try_two_chain_commit(
+        &self,
+        qc: &Verified<QuorumCertificate>,
+        source: CommitSource,
+    ) -> Vec<Action> {
         if !qc.has_committable_block() {
             return vec![];
         }
@@ -3238,7 +3242,7 @@ impl ShardCoordinator {
             .as_ref()
             .is_none_or(|existing| verified_qc.round() > existing.round())
         {
-            self.advance_view_for_qc(verified_qc.as_ref());
+            self.advance_view_for_qc(&verified_qc);
             self.latest_qc = Some(verified_qc.clone());
         }
 
@@ -3250,12 +3254,15 @@ impl ShardCoordinator {
             .certificates()
             .iter()
             .map(|fw| {
-                let verified = Verifiable::verified(fw.as_ref())
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        Verified::<FinalizedWave>::from_committed_block(fw.as_unverified().clone())
-                    });
-                Arc::new(verified.into())
+                // Reuse a live marker when present (local dispatch) by keeping the
+                // existing `Arc`; otherwise mint via the committed-block gate.
+                if fw.is_verified() {
+                    Arc::clone(fw)
+                } else {
+                    let verified =
+                        Verified::<FinalizedWave>::from_committed_block(fw.as_unverified().clone());
+                    Arc::new(verified.into())
+                }
             })
             .collect();
         let parent_qc_round = block.header().parent_qc().round();
@@ -3282,7 +3289,7 @@ impl ShardCoordinator {
                 .is_none_or(|existing| parent_qc_round > existing.round())
         {
             let verified_parent = certified.parent_qc_attested();
-            self.advance_view_for_qc(verified_parent.as_ref());
+            self.advance_view_for_qc(&verified_parent);
             self.latest_qc = Some(verified_parent);
         }
 
@@ -3293,8 +3300,7 @@ impl ShardCoordinator {
             .insert_verified_certified_block(block_hash, Arc::clone(&certified));
         self.block_sync.set_sync_applied_height(height);
 
-        let mut actions =
-            self.try_two_chain_commit(certified.qc_verified().as_ref(), CommitSource::Sync);
+        let mut actions = self.try_two_chain_commit(certified.qc_verified(), CommitSource::Sync);
 
         if !synced_waves.is_empty() {
             actions.push(Action::Continuation(
@@ -3718,7 +3724,7 @@ impl ShardCoordinator {
     ///
     /// The safe-vote lock is *not* touched here — `locked_round` only ever
     /// advances on a vote (`create_vote`), never on adopting someone else's QC.
-    fn advance_view_for_qc(&mut self, qc: &QuorumCertificate) {
+    fn advance_view_for_qc(&mut self, qc: &Verified<QuorumCertificate>) {
         if qc.is_genesis() {
             return;
         }
@@ -5564,7 +5570,7 @@ mod tests {
 
         let committable_hash = BlockHash::from_raw(Hash::from_bytes(b"parent"));
         let child_hash = BlockHash::from_raw(Hash::from_bytes(b"child"));
-        let qc = QuorumCertificate::new(
+        let qc = Verified::<QuorumCertificate>::new_unchecked_for_test(QuorumCertificate::new(
             child_hash,
             ShardId::ROOT,
             BlockHeight::new(4),
@@ -5573,7 +5579,7 @@ mod tests {
             SignerBitfield::empty(),
             zero_bls_signature(),
             WeightedTimestamp::from_millis(100_000),
-        );
+        ));
 
         // No verified certified cached — exercises the deferral path.
         let actions = state.try_two_chain_commit(&qc, CommitSource::Aggregator);
