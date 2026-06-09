@@ -173,6 +173,27 @@ impl ShardSourceTracker {
             .insert(leaf)
     }
 
+    /// Whether every leaf of the chunk `[prior, chunk_end)` anchored to
+    /// `anchor` is held — the presence check behind the proposer's
+    /// witness-availability coupling, without cloning the payloads. An
+    /// empty range is trivially held.
+    #[must_use]
+    pub fn has_witness_chunk(
+        &self,
+        shard: ShardId,
+        anchor: BlockHash,
+        prior: u64,
+        chunk_end: u64,
+    ) -> bool {
+        if chunk_end <= prior {
+            return true;
+        }
+        let Some(map) = self.witness_chunks.get(&(shard, anchor)) else {
+            return false;
+        };
+        (prior..chunk_end).all(|leaf| map.contains_key(&LeafIndex::new(leaf)))
+    }
+
     /// The contiguous witness chunk `[prior, chunk_end)` anchored to
     /// `anchor`, in leaf-index order, or `None` if any leaf in the range
     /// isn't held yet (the assembler defers). An empty range
@@ -300,21 +321,6 @@ impl ShardSourceTracker {
         self.boundary_crossings.get(&shard)?.values().next_back()
     }
 
-    /// A retained crossing for `shard` whose canonical QC names `block_hash`
-    /// — used by the assembler to seat a committed boundary QC's header
-    /// even after that header has left the sliding window.
-    #[must_use]
-    pub fn crossing_by_block_hash(
-        &self,
-        shard: ShardId,
-        block_hash: BlockHash,
-    ) -> Option<&ObservedCrossing> {
-        self.boundary_crossings
-            .get(&shard)?
-            .values()
-            .find(|c| c.canonical_qc.block_hash() == block_hash)
-    }
-
     /// Called by the coordinator when a commit rotates the local
     /// validator off the beacon committee. Drops witness chunks and
     /// pending fetches — off-committee vnodes neither propose nor fetch —
@@ -339,8 +345,7 @@ impl ShardSourceTracker {
     /// Look up the verified source-shard header by `committed_block_hash`.
     /// Linear scan over the shard's stored headers — bounded by the
     /// sliding window held in `shard_headers`.
-    #[must_use]
-    pub fn find_header_by_block_hash(
+    fn find_header_by_block_hash(
         &self,
         shard: ShardId,
         block_hash: BlockHash,
@@ -685,21 +690,36 @@ mod tests {
         assert!(t.latest_crossing(shard(0)).is_none());
     }
 
-    /// A recorded crossing is retrievable by the canonical QC's block hash
-    /// (used by the assembler), and absent for unknown shards/hashes.
+    /// A boundary block's header stays retrievable by hash via its
+    /// retained crossing even after the sliding header window prunes it
+    /// — the lookup the assembler and admission gate rely on. Unknown
+    /// shards/hashes resolve to nothing.
     #[test]
-    fn crossing_by_block_hash_finds_retained_crossing() {
+    fn verified_header_lookup_survives_header_pruning_via_crossing() {
         let mut t = ShardSourceTracker::new();
         let b = linked_header(shard(0), 2, BlockHash::ZERO, 900, 0);
         let c = linked_header(shard(0), 3, b.block_hash(), 1_500, 0);
         note(&mut t, &b, 1_000);
         note(&mut t, &c, 1_000);
-        assert!(t.crossing_by_block_hash(shard(0), b.block_hash()).is_some());
+        // Push the boundary block out of the sliding header window.
+        for height in 4..=(MAX_RETAINED_HEADERS_PER_SHARD as u64 + 4) {
+            t.on_verified_remote_header(linked_header(shard(0), height, BlockHash::ZERO, 1_600, 0));
+        }
+        t.prune_stale_headers();
+        assert!(t.header(shard(0), BlockHeight::new(2)).is_none());
+
+        let held = t
+            .verified_header_by_block_hash(shard(0), b.block_hash())
+            .expect("boundary header retained on its crossing");
+        assert_eq!(held.block_hash(), b.block_hash());
         assert!(
-            t.crossing_by_block_hash(shard(0), BlockHash::ZERO)
+            t.verified_header_by_block_hash(shard(0), BlockHash::ZERO)
                 .is_none()
         );
-        assert!(t.crossing_by_block_hash(shard(1), b.block_hash()).is_none());
+        assert!(
+            t.verified_header_by_block_hash(shard(1), b.block_hash())
+                .is_none()
+        );
     }
 
     #[test]

@@ -90,8 +90,9 @@ pub fn source_boundary_qcs(
             let (prior, chunk_end) =
                 rules::witness_chunk_bounds(state, *shard, crossing.boundary_header());
             // Coupling: only report a shard whose chunk we can supply.
-            shard_source.witness_chunk(*shard, qc.block_hash(), prior, chunk_end)?;
-            Some((*shard, Some(qc.clone())))
+            shard_source
+                .has_witness_chunk(*shard, qc.block_hash(), prior, chunk_end)
+                .then(|| (*shard, Some(qc.clone())))
         })
         .collect()
 }
@@ -155,19 +156,16 @@ fn boundary_qc_admissible(
         && rules::is_boundary_crossing(header, qc, state.chain_config.epoch_duration_ms)
 }
 
-/// The locally-held header for `block_hash` in `shard`: a retained
-/// epoch-boundary crossing first (kept past header pruning), then the
-/// sliding header window. `None` when the node hasn't synced the block.
+/// The locally-held header for `block_hash` in `shard`, via the
+/// tracker's crossings-then-window lookup. `None` when the node hasn't
+/// synced the block.
 fn boundary_header_for(
     shard_source: &ShardSourceTracker,
     shard: ShardId,
     block_hash: BlockHash,
 ) -> Option<&BlockHeader> {
-    if let Some(crossing) = shard_source.crossing_by_block_hash(shard, block_hash) {
-        return Some(crossing.boundary_header());
-    }
     shard_source
-        .find_header_by_block_hash(shard, block_hash)
+        .verified_header_by_block_hash(shard, block_hash)
         .map(|h| h.header())
 }
 

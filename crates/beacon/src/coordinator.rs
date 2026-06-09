@@ -602,11 +602,11 @@ impl BeaconCoordinator {
             if !self.evaluated_proposers.insert(from) {
                 return Vec::new();
             }
-            let Some(upgraded) = self.upgrade_proposal_witnesses(&proposal) else {
+            let Some(upgraded) = self.upgrade_proposal_equivocations(&proposal) else {
                 trace!(
                     ?from,
                     epoch = epoch.inner(),
-                    "BeaconProposalReceived carries an unverifiable witness — dropping",
+                    "BeaconProposalReceived carries unverifiable equivocation evidence — dropping",
                 );
                 return Vec::new();
             };
@@ -641,24 +641,15 @@ impl BeaconCoordinator {
         Vec::new()
     }
 
-    /// Verify every observation embedded in `proposal` against
-    /// locally-available state and return the proposal with each
-    /// `Verifiable` marker upgraded in place, or `None` if any is
-    /// unverifiable. Each list runs its own element type's `Verify`:
-    /// - equivocation evidence — both BLS sigs verify under the named
-    ///   validator's pubkey (from `state.validators`); evidence naming an
-    ///   unknown validator is unverifiable.
-    /// - shard witness — the merkle path reaches the source-shard
-    ///   header's `beacon_witness_root`; a witness whose source header
-    ///   hasn't synced yet is unverifiable.
-    ///
-    /// A forged observation fails regardless of header availability (a bad
-    /// merkle path can't be made to verify, a forged sig can't pass), so
-    /// an honest node never votes for it. A genuine-but-unsynced shard
-    /// witness merely abstains until the header lands — the proposer
-    /// re-includes the still-unconsumed witness next epoch. The upgraded
-    /// markers ride the pooled proposal through to `apply_epoch`.
-    fn upgrade_proposal_witnesses(
+    /// Verify the equivocation evidence embedded in `proposal` and
+    /// return the proposal with each `Verifiable` marker upgraded in
+    /// place, or `None` if any entry is unverifiable. An entry verifies
+    /// when both BLS sigs check out under the named validator's pubkey
+    /// (from `state.validators`); evidence naming an unknown validator
+    /// is unverifiable. A forged sig can't be made to pass, so an honest
+    /// node never votes for it. The upgraded markers ride the pooled
+    /// proposal through to `apply_epoch`.
+    fn upgrade_proposal_equivocations(
         &self,
         proposal: &Verified<BeaconProposal>,
     ) -> Option<Verified<BeaconProposal>> {
@@ -1287,10 +1278,8 @@ impl BeaconCoordinator {
         // here.
         let prior_tip = self.latest_block.block_hash();
         let was_on_committee = self.is_on_committee();
-        let mut new_state = self.state.clone();
         let input = apply_input_for(&block);
-        apply_epoch(&mut new_state, &self.network, block.epoch(), input);
-        self.state = new_state;
+        apply_epoch(&mut self.state, &self.network, block.epoch(), input);
         self.latest_block = Arc::clone(&block);
         self.spc.clear();
         self.skip_tracker.forget_anchor(prior_tip);
@@ -1416,16 +1405,12 @@ impl BeaconCoordinator {
     /// SPC has decided this epoch. When every committed-vector
     /// element resolves to a pooled proposal, assemble the block
     /// directly. Otherwise stash the cert + output keyed by `epoch`
-    /// and emit one `Action::Fetch(FetchRequest::BeaconProposal { … })`
-    /// per missing element; assembly resumes from
+    /// and emit one fetch per missing element via
+    /// [`Self::fetch_missing_proposals`]; assembly resumes from
     /// [`Self::on_beacon_proposal_fetched`] once every awaited fetch
     /// lands. Concurrent stashes for different epochs are allowed —
     /// stale entries get evicted from `adopt_block` once
-    /// `current_epoch` advances past them. The fetch's routing
-    /// `shard` is the dispatching vnode's `local_shard` (peer
-    /// selection rides the local committee); `preferred` rotates
-    /// through the beacon committee so multiple missing proposals
-    /// don't all target the same peer.
+    /// `current_epoch` advances past them.
     fn on_spc_output_high(
         &mut self,
         epoch: Epoch,

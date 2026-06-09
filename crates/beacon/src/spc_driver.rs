@@ -724,10 +724,10 @@ impl SpcDriver {
         event: SpcEvent,
         skip_quorum: bool,
     ) -> Vec<SpcEffect> {
-        if self.spc.is_none() {
+        let Some(spc) = self.spc.as_mut() else {
             trace!(?from, "SPC event received but no SPC instance bootstrapped");
             return Vec::new();
-        }
+        };
         if skip_quorum {
             trace!(
                 ?from,
@@ -735,7 +735,6 @@ impl SpcDriver {
             );
             return Vec::new();
         }
-        let spc = self.spc.as_mut().expect("checked is_none above");
         spc.handle(event)
     }
 
