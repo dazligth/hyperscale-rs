@@ -292,20 +292,20 @@ mod tests {
         };
 
         for i in 0..4 {
-            observe(t.borrow_mut(), i);
+            observe(&mut t, i);
         }
         assert!(!t.quorum_reached(anchor(), Epoch::new(9), active.len()));
         assert!(t.try_assemble(anchor(), Epoch::new(9), &active).is_none());
 
         // Dup observes — no advance.
         for i in 0..3 {
-            assert!(!observe(t.borrow_mut(), i));
+            assert!(!observe(&mut t, i));
         }
         assert!(!t.quorum_reached(anchor(), Epoch::new(9), active.len()));
 
         // Two more distinct signers crosses quorum.
-        observe(t.borrow_mut(), 4);
-        observe(t.borrow_mut(), 5);
+        observe(&mut t, 4);
+        observe(&mut t, 5);
         assert!(t.quorum_reached(anchor(), Epoch::new(9), active.len()));
         let cert = t
             .try_assemble(anchor(), Epoch::new(9), &active)
@@ -319,23 +319,12 @@ mod tests {
 
         // Re-observe six → quorum returns.
         for i in 0..6 {
-            observe(t.borrow_mut(), i);
+            observe(&mut t, i);
         }
         assert!(t.quorum_reached(anchor(), Epoch::new(9), active.len()));
         let cert = t
             .try_assemble(anchor(), Epoch::new(9), &active)
             .expect("quorum reached after re-observe");
         assert!(verify_skip_cert(&cert, &net(), &active).is_ok());
-    }
-
-    // Small helper trait so the closure inside `property_*` doesn't
-    // need a mutable reborrow gymnastics for every call.
-    trait BorrowMut {
-        fn borrow_mut(&mut self) -> &mut Self;
-    }
-    impl BorrowMut for SkipTracker {
-        fn borrow_mut(&mut self) -> &mut Self {
-            self
-        }
     }
 }

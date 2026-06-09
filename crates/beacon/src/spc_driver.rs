@@ -749,3 +749,140 @@ impl SpcDriver {
         self.pc_votes.clear(&(epoch, view, signer, round));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use hyperscale_types::{
+        Bls12381G1PrivateKey, NetworkDefinition, PC_VALUE_ELEMENT_BYTES, PcValueElement,
+        bls_keypair_from_seed, pc_context, sign_vote1, spc_context,
+    };
+
+    use super::*;
+
+    /// Epoch the test instance is bootstrapped at; the admission gate
+    /// echoes it back on every dispatched `Action`.
+    const EPOCH: u64 = 7;
+
+    /// Deterministic BLS key for validator index `i`.
+    fn bls_sk(i: u64) -> Bls12381G1PrivateKey {
+        let mut bytes = [0u8; 32];
+        bytes[..8].copy_from_slice(&i.to_le_bytes());
+        bls_keypair_from_seed(&bytes)
+    }
+
+    /// An `n`-member committee with ids `0..n` and matching deterministic
+    /// keys, in the shape `bootstrap` consumes.
+    fn committee(n: u64) -> Vec<(ValidatorId, Bls12381G1PublicKey)> {
+        (0..n)
+            .map(|i| (ValidatorId::new(i), bls_sk(i).public_key()))
+            .collect()
+    }
+
+    /// A driver bootstrapped at [`EPOCH`] under a BFT-minimum committee,
+    /// with the local validator at id 0. Its instance starts at view 1.
+    fn bootstrapped() -> SpcDriver {
+        let mut driver = SpcDriver::new(ValidatorId::new(0));
+        driver.bootstrap(
+            Epoch::new(EPOCH),
+            committee(MIN_BEACON_COMMITTEE_SIZE as u64),
+        );
+        driver
+    }
+
+    /// A round-1 PC vote from validator `i` carrying `view`. Only the
+    /// signer id and the passed-in view matter to the admission gate —
+    /// the signature isn't checked until the async dispatch resolves.
+    fn vote1(i: u64, view: u32) -> PcVote1 {
+        let ctx = pc_context(&spc_context(Epoch::new(EPOCH)), SpcView::new(view));
+        let v_in = PcVector::new((0..3).map(|b| PcValueElement::new([b; PC_VALUE_ELEMENT_BYTES])));
+        sign_vote1(
+            &bls_sk(i),
+            ValidatorId::new(i),
+            &NetworkDefinition::simulator(),
+            &ctx,
+            v_in,
+        )
+    }
+
+    /// Assert `actions` is exactly one `VerifyPcVote1` carrying the
+    /// instance epoch, the expected `view`, and the full committee.
+    fn assert_dispatches(actions: &[Action], view: u32) {
+        assert_eq!(actions.len(), 1, "expected exactly one verify dispatch");
+        match &actions[0] {
+            Action::VerifyPcVote1 {
+                epoch,
+                view: v,
+                committee,
+                ..
+            } => {
+                assert_eq!(epoch.inner(), EPOCH);
+                assert_eq!(v.inner(), view);
+                assert_eq!(committee.len(), MIN_BEACON_COMMITTEE_SIZE);
+            }
+            _ => panic!("expected Action::VerifyPcVote1"),
+        }
+    }
+
+    #[test]
+    fn admissible_pc_vote_dispatches_verification() {
+        let mut driver = bootstrapped();
+        let actions = driver.on_pc_vote1_received(SpcView::new(1), vote1(1, 1), false);
+        assert_dispatches(&actions, 1);
+    }
+
+    #[test]
+    fn pc_vote_admitted_at_window_upper_edge() {
+        let mut driver = bootstrapped();
+        let edge = 1 + MAX_PENDING_EMPTY_VIEW_AHEAD;
+        let actions = driver.on_pc_vote1_received(SpcView::new(edge), vote1(1, edge), false);
+        assert_dispatches(&actions, edge);
+    }
+
+    #[test]
+    fn pc_vote_dropped_when_no_instance_bootstrapped() {
+        let mut driver = SpcDriver::new(ValidatorId::new(0));
+        let actions = driver.on_pc_vote1_received(SpcView::new(1), vote1(1, 1), false);
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn pc_vote_dropped_once_skip_quorum_reached() {
+        let mut driver = bootstrapped();
+        let actions = driver.on_pc_vote1_received(SpcView::new(1), vote1(1, 1), true);
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn pc_vote_from_non_committee_signer_dropped() {
+        let mut driver = bootstrapped();
+        // Id 99 sits outside the `0..MIN_BEACON_COMMITTEE_SIZE` committee.
+        let actions = driver.on_pc_vote1_received(SpcView::new(1), vote1(99, 1), false);
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn pc_vote_below_current_view_dropped() {
+        let mut driver = bootstrapped();
+        assert_eq!(driver.current_view(), Some(SpcView::new(1)));
+        let actions = driver.on_pc_vote1_received(SpcView::new(0), vote1(1, 0), false);
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn pc_vote_beyond_window_dropped() {
+        let mut driver = bootstrapped();
+        let beyond = 1 + MAX_PENDING_EMPTY_VIEW_AHEAD + 1;
+        let actions = driver.on_pc_vote1_received(SpcView::new(beyond), vote1(1, beyond), false);
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn duplicate_in_flight_pc_vote_not_redispatched() {
+        let mut driver = bootstrapped();
+        let first = driver.on_pc_vote1_received(SpcView::new(1), vote1(1, 1), false);
+        assert_eq!(first.len(), 1);
+        // Same (epoch, view, signer, round) slot is still in flight.
+        let second = driver.on_pc_vote1_received(SpcView::new(1), vote1(1, 1), false);
+        assert!(second.is_empty());
+    }
+}
