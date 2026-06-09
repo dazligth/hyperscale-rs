@@ -516,6 +516,9 @@ fn skip_quorum_drives_chain_past_abandoned_epoch() {
     // the same `epoch_to_skip = pre_epoch.next()`. The sim's
     // `fire_skip_trigger` mirrors what the production runner does on
     // the skip-trigger timer firing: sign, admit locally, fan out.
+    // Requests only count once the epoch's deadline passes on each
+    // tracker's clock, so advance them first.
+    sim.pass_skip_deadline();
     for idx in 0..n {
         sim.fire_skip_trigger(idx);
     }
@@ -578,6 +581,7 @@ fn consecutive_skips_advance_chain() {
     let n = sim.n();
 
     // First skip: at the genesis tip, abandon epoch 1.
+    sim.pass_skip_deadline();
     for idx in 0..n {
         sim.fire_skip_trigger(idx);
     }
@@ -603,6 +607,7 @@ fn consecutive_skips_advance_chain() {
     let _ = sim.run_for_at_most(0);
 
     // Second skip: from the post-skip-1 tip, abandon epoch 2.
+    sim.pass_skip_deadline();
     for idx in 0..n {
         sim.fire_skip_trigger(idx);
     }

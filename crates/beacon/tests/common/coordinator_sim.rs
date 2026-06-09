@@ -25,15 +25,16 @@ use hyperscale_types::{
     BeaconState, BeaconWitnessLeafCount, BeaconWitnessRoot, BlockHash, BlockHeader, BlockHeight,
     BlockVote, Bls12381G1PrivateKey, Bls12381G1PublicKey, CertificateRoot, CertifiedBeaconBlock,
     CertifiedBeaconBlockVerifyContext, CertifiedBlockHeader, Epoch, GenesisPool, GenesisValidator,
-    Hash, InFlightCount, LeafIndex, LocalReceiptRoot, MIN_STAKE_FLOOR, NetworkDefinition,
-    PcValueElement, PcVector, PcVote1, PcVote2, PcVote3, PcVoteEquivocation, PcVoteVerifyContext,
-    ProposerTimestamp, ProvisionsRoot, QuorumCertificate, Randomness, Round, ShardId, ShardWitness,
-    ShardWitnessPayload, ShardWitnessProof, SignerBitfield, SkipEpochCert, SkipRequest,
-    SkipVerifyContext, SpcEmptyViewMsg, SpcNewCommitMsg, SpcProposalObject, SpcVerifyContext,
-    SpcView, Stake, StakePoolId, StateRoot, TransactionRoot, ValidatorId, Verifiable, Verified,
-    WeightedTimestamp, bls_keypair_from_seed, compute_merkle_root_with_proof, genesis_config_hash,
-    pc_context, sign_empty_view_msg, sign_vote1, sign_vote2, sign_vote3, spc_context,
-    verify_skip_cert, verify_vote1, verify_vote2, verify_vote3, vrf_sign, zero_bls_signature,
+    Hash, InFlightCount, LeafIndex, LocalReceiptRoot, LocalTimestamp, MIN_STAKE_FLOOR,
+    NetworkDefinition, PcValueElement, PcVector, PcVote1, PcVote2, PcVote3, PcVoteEquivocation,
+    PcVoteVerifyContext, ProposerTimestamp, ProvisionsRoot, QuorumCertificate, Randomness, Round,
+    SKIP_TIMEOUT, ShardId, ShardWitness, ShardWitnessPayload, ShardWitnessProof, SignerBitfield,
+    SkipEpochCert, SkipRequest, SkipVerifyContext, SpcEmptyViewMsg, SpcNewCommitMsg,
+    SpcProposalObject, SpcVerifyContext, SpcView, Stake, StakePoolId, StateRoot, TransactionRoot,
+    ValidatorId, Verifiable, Verified, WeightedTimestamp, bls_keypair_from_seed,
+    compute_merkle_root_with_proof, genesis_config_hash, pc_context, sign_empty_view_msg,
+    sign_vote1, sign_vote2, sign_vote3, spc_context, verify_skip_cert, verify_vote1, verify_vote2,
+    verify_vote3, vrf_sign, zero_bls_signature,
 };
 
 /// Adversarial transform a flagged replica applies to its next matching
@@ -557,6 +558,22 @@ impl CoordinatorSim {
             }
         }
         out
+    }
+
+    /// Advance every replica's clock past the next epoch's skip deadline
+    /// (its boundary plus `SKIP_TIMEOUT`), the precondition for honest
+    /// trackers to count a skip request. Mirrors the real stall a skip
+    /// models: the deadline passes on every clock before anyone asks.
+    pub fn pass_skip_deadline(&mut self) {
+        let timeout_ms: u64 = SKIP_TIMEOUT
+            .as_millis()
+            .try_into()
+            .expect("SKIP_TIMEOUT fits in u64 millis");
+        for coord in &mut self.coordinators {
+            let next = coord.current_state().current_epoch.next().inner();
+            let boundary = next * coord.current_state().chain_config.epoch_duration_ms;
+            coord.set_now(LocalTimestamp::from_millis(boundary + timeout_ms));
+        }
     }
 
     /// Fire the skip-trigger path on `signer_idx`: build and sign a

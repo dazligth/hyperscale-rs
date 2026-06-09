@@ -1029,6 +1029,20 @@ impl BeaconCoordinator {
             return Vec::new();
         }
 
+        // Honest trackers count a skip request only once the epoch's
+        // deadline has passed on their own clock. Without this, a peer's
+        // stale timer — or a Byzantine pool member — can march the chain
+        // past wall-clock one premature skip at a time; with it, an early
+        // skip needs a quorum of dishonest clocks. Screened here before
+        // the BLS dispatch and re-checked at admission.
+        if !self.skip_trigger_due(self.next_epoch_boundary()) {
+            trace!(
+                signer = ?request.signer(),
+                "SkipRequest before the epoch's skip deadline — dropping",
+            );
+            return Vec::new();
+        }
+
         let active_pool = self.state.derive_active_pool();
         if !active_pool.iter().any(|(id, _)| *id == request.signer()) {
             trace!(
@@ -1172,6 +1186,17 @@ impl BeaconCoordinator {
             trace!(
                 signer = ?request.signer(),
                 "Verified SkipRequest no longer matches tip — dropping",
+            );
+            return Vec::new();
+        }
+        // Admission is the authoritative deadline gate: the unverified
+        // intake screens wire requests before spending a pairing, but the
+        // local loopback enters here directly and the clock is re-read
+        // after the BLS round trip.
+        if !self.skip_trigger_due(self.next_epoch_boundary()) {
+            trace!(
+                signer = ?request.signer(),
+                "Verified SkipRequest before the epoch's skip deadline — dropping",
             );
             return Vec::new();
         }
@@ -1896,6 +1921,18 @@ mod tests {
         )
     }
 
+    /// Advance `coord`'s clock past the next epoch's skip deadline so
+    /// skip-request intake and admission accept requests.
+    fn pass_skip_deadline(coord: &mut BeaconCoordinator) {
+        let next = coord.current_state().current_epoch.next().inner();
+        let boundary = next * coord.current_state().chain_config.epoch_duration_ms;
+        let timeout_ms: u64 = SKIP_TIMEOUT
+            .as_millis()
+            .try_into()
+            .expect("SKIP_TIMEOUT fits in u64 millis");
+        coord.set_now(LocalTimestamp::from_millis(boundary + timeout_ms));
+    }
+
     fn fresh_coord() -> BeaconCoordinator {
         new_coord(ValidatorId::new(0))
     }
@@ -2550,6 +2587,7 @@ mod tests {
     fn skip_request_verification_keys_on_signer_not_signature() {
         use hyperscale_types::{Bls12381G2Signature, SkipRequest};
         let mut coord = fresh_coord();
+        pass_skip_deadline(&mut coord);
         let anchor = coord.latest_block().block_hash();
         let epoch = coord.current_epoch().next();
         let signer = ValidatorId::new(1); // a peer on the active pool
@@ -2584,6 +2622,7 @@ mod tests {
     fn failed_skip_request_verification_releases_slot() {
         use hyperscale_types::{Bls12381G2Signature, SkipRequest};
         let mut coord = fresh_coord();
+        pass_skip_deadline(&mut coord);
         let anchor = coord.latest_block().block_hash();
         let epoch = coord.current_epoch().next();
         let signer = ValidatorId::new(1);
@@ -3307,6 +3346,58 @@ mod tests {
         Arc::new(Verifiable::from(raw))
     }
 
+    /// A skip request for an epoch whose deadline hasn't passed on the
+    /// local clock is dropped on both receive paths — the wire intake
+    /// (before spending a BLS pairing) and the verified admission (the
+    /// loopback's entry). Otherwise a peer's stale timer, or a Byzantine
+    /// pool member, marches the chain past wall-clock one premature skip
+    /// at a time.
+    #[test]
+    fn early_skip_request_dropped_on_both_receive_paths() {
+        use hyperscale_types::SkipRequest;
+        let mut coord = fresh_coord();
+        let anchor = coord.latest_block.block_hash();
+        let epoch_to_skip = coord.state.current_epoch.next();
+
+        // Clock at genesis: the deadline (boundary + SKIP_TIMEOUT) is
+        // far in the future.
+        let wire = signed_skip_request(1, ValidatorId::new(1), anchor, epoch_to_skip);
+        assert!(
+            coord.on_unverified_skip_request_received(wire).is_empty(),
+            "early wire request must drop before the BLS dispatch",
+        );
+
+        let verified = Verified::<SkipRequest>::sign_local(
+            &keypair(0),
+            ValidatorId::new(0),
+            &NetworkDefinition::simulator(),
+            anchor,
+            epoch_to_skip,
+        );
+        assert!(
+            coord
+                .on_verified_skip_request_received(Arc::new(verified))
+                .is_empty(),
+            "early loopback request must drop at admission",
+        );
+        assert_eq!(
+            coord.skip_tracker.signer_count(anchor, epoch_to_skip),
+            0,
+            "no early request may reach the tracker",
+        );
+
+        // Past the deadline the same wire request dispatches its verify.
+        pass_skip_deadline(&mut coord);
+        let wire = signed_skip_request(1, ValidatorId::new(1), anchor, epoch_to_skip);
+        assert!(
+            coord
+                .on_unverified_skip_request_received(wire)
+                .iter()
+                .any(|a| matches!(a, Action::VerifySkipRequest { .. })),
+            "a due request must be delegated for verification",
+        );
+    }
+
     #[test]
     fn on_skip_request_drops_at_wrong_anchor() {
         let mut coord = fresh_coord();
@@ -3355,6 +3446,7 @@ mod tests {
     fn on_skip_request_drops_invalid_sig_via_async_result() {
         use hyperscale_types::Bls12381G2Signature;
         let mut coord = fresh_coord();
+        pass_skip_deadline(&mut coord);
         // Signer 0 is in the pool, but sig is all-zeros — verification
         // returns false on the result path.
         let req = Arc::new(Verifiable::from(SkipRequest::new(
@@ -3377,6 +3469,7 @@ mod tests {
     #[test]
     fn on_skip_request_admits_valid_request_below_quorum() {
         let mut coord = fresh_coord();
+        pass_skip_deadline(&mut coord);
         coord.bootstrap_spc_for_next_epoch();
         let anchor = coord.latest_block.block_hash();
         let epoch_to_skip = coord.state.current_epoch.next();
@@ -3404,6 +3497,7 @@ mod tests {
     #[test]
     fn on_skip_request_assembles_cert_and_adopts_skip_block_on_quorum() {
         let mut coord = fresh_coord();
+        pass_skip_deadline(&mut coord);
         coord.bootstrap_spc_for_next_epoch();
         let anchor = coord.latest_block.block_hash();
         let epoch_to_skip = coord.state.current_epoch.next();
@@ -3473,6 +3567,7 @@ mod tests {
     #[test]
     fn dispatch_spc_event_gated_by_skip_quorum() {
         let mut coord = fresh_coord();
+        pass_skip_deadline(&mut coord);
         coord.bootstrap_spc_for_next_epoch();
         let anchor = coord.latest_block.block_hash();
         let epoch_to_skip = coord.state.current_epoch.next();
