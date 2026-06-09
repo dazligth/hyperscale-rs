@@ -600,7 +600,6 @@ impl BeaconCoordinator {
         let proposal = match result {
             Ok(p) => p,
             Err(err) => {
-                self.verification.on_spc_msg_result(key, false);
                 self.verification.forget_spc_msg(key);
                 warn!(
                     ?from,
@@ -612,7 +611,6 @@ impl BeaconCoordinator {
                 return Vec::new();
             }
         };
-        self.verification.on_spc_msg_result(key, true);
         self.verification.forget_spc_msg(key);
         if self.spc.as_ref().is_some_and(|s| s.epoch() != epoch) {
             return Vec::new();
@@ -640,7 +638,6 @@ impl BeaconCoordinator {
         let msg = match result {
             Ok(m) => m,
             Err(err) => {
-                self.verification.on_spc_msg_result(key, false);
                 self.verification.forget_spc_msg(key);
                 warn!(
                     ?from,
@@ -652,7 +649,6 @@ impl BeaconCoordinator {
                 return Vec::new();
             }
         };
-        self.verification.on_spc_msg_result(key, true);
         self.verification.forget_spc_msg(key);
         if self.spc.as_ref().is_some_and(|s| s.epoch() != epoch) {
             return Vec::new();
@@ -681,7 +677,6 @@ impl BeaconCoordinator {
         let msg = match result {
             Ok(m) => m,
             Err(err) => {
-                self.verification.on_spc_msg_result(key, false);
                 self.verification.forget_spc_msg(key);
                 warn!(
                     ?from,
@@ -693,7 +688,6 @@ impl BeaconCoordinator {
                 return Vec::new();
             }
         };
-        self.verification.on_spc_msg_result(key, true);
         self.verification.forget_spc_msg(key);
         if self.spc.as_ref().is_some_and(|s| s.epoch() != epoch) {
             return Vec::new();
@@ -716,7 +710,7 @@ impl BeaconCoordinator {
         let verified = match result {
             Ok(v) => v,
             Err(err) => {
-                self.clear_pc_vote_slot(epoch, view, signer, PcVoteRound::Vote1, false);
+                self.clear_pc_vote_slot(epoch, view, signer, PcVoteRound::Vote1);
                 warn!(
                     epoch = epoch.inner(),
                     view = view.inner(),
@@ -727,7 +721,7 @@ impl BeaconCoordinator {
                 return Vec::new();
             }
         };
-        self.clear_pc_vote_slot(epoch, view, signer, PcVoteRound::Vote1, true);
+        self.clear_pc_vote_slot(epoch, view, signer, PcVoteRound::Vote1);
         if self.spc.as_ref().is_some_and(|s| s.epoch() != epoch) {
             return Vec::new();
         }
@@ -751,7 +745,7 @@ impl BeaconCoordinator {
         let verified = match result {
             Ok(v) => v,
             Err(err) => {
-                self.clear_pc_vote_slot(epoch, view, signer, PcVoteRound::Vote2, false);
+                self.clear_pc_vote_slot(epoch, view, signer, PcVoteRound::Vote2);
                 warn!(
                     epoch = epoch.inner(),
                     view = view.inner(),
@@ -762,7 +756,7 @@ impl BeaconCoordinator {
                 return Vec::new();
             }
         };
-        self.clear_pc_vote_slot(epoch, view, signer, PcVoteRound::Vote2, true);
+        self.clear_pc_vote_slot(epoch, view, signer, PcVoteRound::Vote2);
         if self.spc.as_ref().is_some_and(|s| s.epoch() != epoch) {
             return Vec::new();
         }
@@ -786,7 +780,7 @@ impl BeaconCoordinator {
         let verified = match result {
             Ok(v) => v,
             Err(err) => {
-                self.clear_pc_vote_slot(epoch, view, signer, PcVoteRound::Vote3, false);
+                self.clear_pc_vote_slot(epoch, view, signer, PcVoteRound::Vote3);
                 warn!(
                     epoch = epoch.inner(),
                     view = view.inner(),
@@ -797,7 +791,7 @@ impl BeaconCoordinator {
                 return Vec::new();
             }
         };
-        self.clear_pc_vote_slot(epoch, view, signer, PcVoteRound::Vote3, true);
+        self.clear_pc_vote_slot(epoch, view, signer, PcVoteRound::Vote3);
         if self.spc.as_ref().is_some_and(|s| s.epoch() != epoch) {
             return Vec::new();
         }
@@ -823,7 +817,7 @@ impl BeaconCoordinator {
         let Some((epoch, _)) = self.spc_admission_ctx(signer, view, "PcVote") else {
             return Vec::new();
         };
-        self.clear_pc_vote_slot(epoch, view, signer, PcVoteRound::Vote1, true);
+        self.clear_pc_vote_slot(epoch, view, signer, PcVoteRound::Vote1);
         if self.spc.as_ref().is_some_and(|s| s.epoch() != epoch) {
             return Vec::new();
         }
@@ -840,7 +834,7 @@ impl BeaconCoordinator {
         let Some((epoch, _)) = self.spc_admission_ctx(signer, view, "PcVote") else {
             return Vec::new();
         };
-        self.clear_pc_vote_slot(epoch, view, signer, PcVoteRound::Vote2, true);
+        self.clear_pc_vote_slot(epoch, view, signer, PcVoteRound::Vote2);
         if self.spc.as_ref().is_some_and(|s| s.epoch() != epoch) {
             return Vec::new();
         }
@@ -857,7 +851,7 @@ impl BeaconCoordinator {
         let Some((epoch, _)) = self.spc_admission_ctx(signer, view, "PcVote") else {
             return Vec::new();
         };
-        self.clear_pc_vote_slot(epoch, view, signer, PcVoteRound::Vote3, true);
+        self.clear_pc_vote_slot(epoch, view, signer, PcVoteRound::Vote3);
         if self.spc.as_ref().is_some_and(|s| s.epoch() != epoch) {
             return Vec::new();
         }
@@ -874,11 +868,9 @@ impl BeaconCoordinator {
         view: SpcView,
         signer: ValidatorId,
         round: PcVoteRound,
-        valid: bool,
     ) {
-        let key = (epoch, view, signer, round);
-        self.verification.on_pc_vote_result(key, valid);
-        self.verification.forget_pc_vote(key);
+        self.verification
+            .forget_pc_vote((epoch, view, signer, round));
     }
 
     /// `TimerId::BeaconSpcView` fired. Route a synthesized
@@ -1629,7 +1621,6 @@ impl BeaconCoordinator {
             }
         };
         let block_hash = block.block_hash();
-        self.verification.on_block_result(block_hash, true);
         // Idempotency: another path (local skip-quorum assembly, an
         // earlier peer-broadcast adoption) may have already advanced
         // the tip at or past this block's epoch. Re-entering
@@ -1679,13 +1670,11 @@ impl BeaconCoordinator {
         let request = match result {
             Ok(r) => r,
             Err(err) => {
-                self.verification.on_skip_request_result(key, false);
                 self.verification.forget_skip_request(key);
                 warn!(%err, "SkipRequest BLS verification failed — dropping");
                 return Vec::new();
             }
         };
-        self.verification.on_skip_request_result(key, true);
         self.verification.forget_skip_request(key);
         self.admit_verified_skip_request(request)
     }
