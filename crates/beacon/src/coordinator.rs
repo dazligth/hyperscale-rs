@@ -26,14 +26,14 @@ use hyperscale_types::{
     BeaconBlock, BeaconBlockHash, BeaconCert, BeaconProposal, BeaconProposalVerifyContext,
     BeaconState, BlockHash, BlockHeight, Bls12381G1PublicKey, CertifiedBeaconBlock,
     CertifiedBeaconBlockVerifyError, CertifiedBlockHeader, EPOCH_DURATION, Epoch,
-    GenesisConfigHash, LeafIndex, LocalTimestamp, MAX_EQUIVOCATIONS_PER_PROPOSER,
+    GenesisConfigHash, JailReason, LeafIndex, LocalTimestamp, MAX_EQUIVOCATIONS_PER_PROPOSER,
     MAX_WITNESSES_PER_FETCH, NetworkDefinition, PcValueElement, PcVector, PcVote1,
     PcVote1VerifyError, PcVote2, PcVote2VerifyError, PcVote3, PcVote3VerifyError,
     PcVoteEquivocation, PcVoteEquivocationContext, RETENTION_HORIZON, SKIP_TIMEOUT, ShardId,
     ShardWitness, SkipEpochCert, SkipRequest, SkipRequestVerifyError, SpcCert, SpcEmptyViewMsg,
     SpcEmptyViewMsgVerifyError, SpcNewCommitMsg, SpcNewCommitMsgVerifyError, SpcProposalObject,
     SpcProposalObjectVerifyError, SpcView, TopologySchedule, TopologySnapshot, ValidatorId,
-    Verifiable, Verified, Verify,
+    ValidatorStatus, Verifiable, Verified, Verify,
 };
 use tracing::{trace, warn};
 
@@ -1317,6 +1317,7 @@ impl BeaconCoordinator {
         // stale on any commit path once the tip advances, so drop them
         // here.
         let prior_tip = self.latest_block.block_hash();
+        let was_on_committee = self.is_on_committee();
         let mut new_state = self.state.clone();
         let input = apply_input_for(&block);
         apply_epoch(&mut new_state, &self.network, block.epoch(), input);
@@ -1324,6 +1325,20 @@ impl BeaconCoordinator {
         self.latest_block = Arc::clone(&block);
         self.spc.clear();
         self.skip_tracker.forget_anchor(prior_tip);
+
+        // Evidence for a validator the fold now holds permanently jailed
+        // is dead weight in future proposals — the jail can't be upgraded
+        // further — so drop it from the local buffer.
+        let validators = &self.state.validators;
+        self.equivocations.prune(|v| {
+            matches!(
+                validators.get(&v).map(|r| r.status),
+                Some(ValidatorStatus::Jailed {
+                    reason: JailReason::Equivocation,
+                    ..
+                })
+            )
+        });
 
         // Refresh the head and record the active snapshot for the just-applied
         // epoch plus the lookahead for the next, then drop entries that fell
@@ -1356,6 +1371,13 @@ impl BeaconCoordinator {
             Vec::new();
         for (shard, watermark) in consumed {
             abandoned_witness_ids.extend(self.shard_source.evict_consumed(shard, watermark));
+        }
+        // A commit that rotates the local validator off the beacon
+        // committee ends its witness-fetching duties: drop the pooled
+        // chunks and release the in-flight fetches alongside the
+        // consumed ones.
+        if was_on_committee && !self.is_on_committee() {
+            abandoned_witness_ids.extend(self.shard_source.evicted_from_committee());
         }
         self.shard_source.prune_stale_headers();
 
@@ -2989,6 +3011,93 @@ mod tests {
             assert_eq!(observer.latest_block().block_hash(), block_hash);
         }
         assert!(!observer.spc.is_bootstrapped());
+    }
+
+    /// Adoption prunes buffered equivocation evidence for validators the
+    /// fold now holds permanently jailed — their jail can't be upgraded
+    /// further, so re-proposing the evidence would only waste block
+    /// space. Evidence for other validators stays buffered.
+    #[test]
+    fn adopt_prunes_evidence_for_permanently_jailed_validators() {
+        use hyperscale_types::{Bls12381G2Signature, PcVoteRound};
+        let mut coord = fresh_coord();
+        let evidence = |v: u64| PcVoteEquivocation {
+            validator: ValidatorId::new(v),
+            epoch: Epoch::new(1),
+            view: SpcView::new(1),
+            round: PcVoteRound::Vote1,
+            value_a: PcVector::empty(),
+            sig_a: Bls12381G2Signature([0x11; 96]),
+            value_b: PcVector::empty(),
+            sig_b: Bls12381G2Signature([0x22; 96]),
+        };
+        assert!(coord.equivocations.record_pc_equivocation(evidence(1)));
+        assert!(coord.equivocations.record_pc_equivocation(evidence(2)));
+        // Validator 1's jail is already permanent by the time the next
+        // block applies.
+        coord
+            .state
+            .validators
+            .get_mut(&ValidatorId::new(1))
+            .unwrap()
+            .status = ValidatorStatus::Jailed {
+            since_epoch: Epoch::GENESIS,
+            reason: JailReason::Equivocation,
+        };
+
+        let prev = coord.latest_block.block_hash();
+        let block = valid_block_at(&coord, Epoch::new(1), prev);
+        let dispatched = coord.on_beacon_block_received(block);
+        let _ = complete_verifications(&mut coord, dispatched);
+
+        assert_eq!(coord.current_epoch(), Epoch::new(1));
+        assert!(!coord.equivocations.contains(ValidatorId::new(1)));
+        assert!(coord.equivocations.contains(ValidatorId::new(2)));
+    }
+
+    /// A commit that rotates the local validator off the beacon
+    /// committee drops the pooled witness chunks and releases in-flight
+    /// witness fetches as `FetchAbandon::ShardWitnesses`, so the
+    /// runner's fetch slots don't pin on payloads an off-committee vnode
+    /// no longer wants.
+    #[test]
+    fn adopt_releases_witness_state_when_local_falls_off_committee() {
+        let mut coord = fresh_coord();
+        let shard = ShardId::leaf(1, 0);
+        let anchor = BlockHash::from_raw(Hash::from_bytes(b"witness-anchor"));
+        let height = BlockHeight::new(5);
+        let leaf = LeafIndex::new(0);
+        assert!(
+            coord
+                .shard_source
+                .register_pending_fetch(shard, height, anchor, leaf)
+        );
+
+        // Jail the local validator so the post-apply resample drops it
+        // from the beacon committee.
+        coord.state.validators.get_mut(&coord.me).unwrap().status = ValidatorStatus::Jailed {
+            since_epoch: Epoch::GENESIS,
+            reason: JailReason::Performance,
+        };
+
+        let prev = coord.latest_block.block_hash();
+        let block = valid_block_at(&coord, Epoch::new(1), prev);
+        let dispatched = coord.on_beacon_block_received(block);
+        let actions = complete_verifications(&mut coord, dispatched);
+
+        assert!(!coord.is_on_committee());
+        assert!(!coord.shard_source.is_pending_fetch(shard, anchor, leaf));
+        let abandoned = actions.iter().any(|a| {
+            matches!(
+                a,
+                Action::AbandonFetch(FetchAbandon::ShardWitnesses { ids })
+                    if ids.contains(&(shard, height, anchor, leaf))
+            )
+        });
+        assert!(
+            abandoned,
+            "expected FetchAbandon::ShardWitnesses naming the in-flight fetch, got {actions:?}",
+        );
     }
 
     /// A committed element whose digest diverges from the locally-pooled

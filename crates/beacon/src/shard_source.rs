@@ -315,13 +315,25 @@ impl ShardSourceTracker {
             .find(|c| c.canonical_qc.block_hash() == block_hash)
     }
 
-    /// Called when the local validator is removed from the beacon
-    /// committee. Drops witness chunks and pending fetches; keeps
-    /// `shard_headers` since the vnode still needs them to verify incoming
-    /// `BeaconBlock`s.
-    pub fn evicted_from_committee(&mut self) {
+    /// Called by the coordinator when a commit rotates the local
+    /// validator off the beacon committee. Drops witness chunks and
+    /// pending fetches — off-committee vnodes neither propose nor fetch —
+    /// but keeps `shard_headers` since the vnode still needs them to
+    /// verify incoming `BeaconBlock`s.
+    ///
+    /// Returns the in-flight fetch ids that were dropped, so the caller
+    /// can cancel them via `FetchAbandon::ShardWitnesses` — same contract
+    /// as [`Self::evict_consumed`], keeping the runner's fetch slots from
+    /// pinning on payloads no longer wanted.
+    pub fn evicted_from_committee(&mut self) -> Vec<(ShardId, BlockHeight, BlockHash, LeafIndex)> {
         self.witness_chunks.clear();
-        self.pending_fetches.clear();
+        let mut abandoned = Vec::new();
+        for ((shard, anchor), pending) in std::mem::take(&mut self.pending_fetches) {
+            for leaf in pending.leaves {
+                abandoned.push((shard, pending.height, anchor, leaf));
+            }
+        }
+        abandoned
     }
 
     /// Look up the verified source-shard header by `committed_block_hash`.
@@ -714,9 +726,14 @@ mod tests {
         t.on_verified_remote_header(linked_header(shard(0), 1, BlockHash::ZERO, 0, 0));
         t.admit_witness(witness(shard(0), anchor(1), 0));
         t.register_pending_fetch(shard(0), BlockHeight::new(5), anchor(1), LeafIndex::new(1));
-        t.evicted_from_committee();
+        let abandoned = t.evicted_from_committee();
         assert_eq!(t.total_chunk_len(), 0);
         assert!(!t.is_pending_fetch(shard(0), anchor(1), LeafIndex::new(1)));
         assert!(t.header(shard(0), BlockHeight::new(1)).is_some());
+        // The in-flight fetch comes back as a cancellable id.
+        assert_eq!(
+            abandoned,
+            vec![(shard(0), BlockHeight::new(5), anchor(1), LeafIndex::new(1))],
+        );
     }
 }

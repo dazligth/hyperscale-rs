@@ -51,11 +51,13 @@ impl EquivocationObservations {
             .collect()
     }
 
-    /// Drop evidence for `validator` — the coordinator calls this
-    /// after `apply_epoch` confirms the validator is now
-    /// `Jailed { Equivocation }` and further evidence is wasted.
-    pub fn forget(&mut self, validator: ValidatorId) {
-        self.by_validator.remove(&validator);
+    /// Drop every buffered entry whose validator `obsolete` matches.
+    /// The coordinator calls this after each `apply_epoch` with
+    /// "permanently jailed for equivocation" — once the fold holds that
+    /// status, re-proposing the evidence can't change anything, so it
+    /// only wastes proposal space.
+    pub fn prune(&mut self, mut obsolete: impl FnMut(ValidatorId) -> bool) {
+        self.by_validator.retain(|v, _| !obsolete(*v));
     }
 }
 
@@ -136,11 +138,11 @@ mod tests {
     }
 
     #[test]
-    fn forget_drops_evidence_for_that_validator_only() {
+    fn prune_drops_matching_validators_only() {
         let mut e = EquivocationObservations::new();
         e.record_pc_equivocation(pc_evidence(1));
         e.record_pc_equivocation(pc_evidence(2));
-        e.forget(ValidatorId::new(1));
+        e.prune(|v| v == ValidatorId::new(1));
         assert!(!e.contains(ValidatorId::new(1)));
         assert!(e.contains(ValidatorId::new(2)));
         assert_eq!(e.len(), 1);
