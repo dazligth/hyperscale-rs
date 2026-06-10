@@ -3168,20 +3168,25 @@ impl ShardCoordinator {
         }
 
         // The synced block's QC was signed by its own committee,
-        // `at(parent_qc weighted ts)`. A not-yet-committed epoch defers
-        // (drop; sync retries once the beacon catches up). An evicted epoch
-        // rejects: the schedule's floor retains every epoch the local chain
-        // can still verify against, so a synced block keyed below it carries
-        // a forged weighted timestamp (it rides outside the signed message)
-        // or sits on a stale fork — no amount of retrying resolves it.
+        // `at(parent_qc weighted ts)`. A not-yet-committed epoch defers:
+        // the block goes back to the buffer and `on_beacon_block_persisted`
+        // re-drains it once the beacon catches up — discarding it here
+        // would leave a hole the drain can never refill without a network
+        // re-fetch. An evicted epoch rejects: the schedule's floor retains
+        // every epoch the local chain can still verify against, so a synced
+        // block keyed below it carries a forged weighted timestamp (it
+        // rides outside the signed message) or sits on a stale fork — no
+        // amount of retrying resolves it.
         let committee =
             match topology.lookup(certified.block().header().parent_qc().weighted_timestamp()) {
                 ScheduleLookup::Committee(committee) => committee,
                 ScheduleLookup::NotYetCommitted => {
                     warn!(
                         height = certified.block().height().inner(),
-                        "No committee for synced block's epoch yet — beacon behind, deferring"
+                        "No committee for synced block's epoch yet — beacon behind, re-buffering"
                     );
+                    let height = certified.block().height();
+                    self.block_sync.buffer_block(height, certified);
                     return vec![];
                 }
                 ScheduleLookup::Evicted => {
@@ -3242,6 +3247,15 @@ impl ShardCoordinator {
             actions.extend(self.submit_synced_block_for_verification(topology, certified));
         }
         actions
+    }
+
+    /// The beacon committed an epoch — replay synced blocks parked in the
+    /// buffer because their committee epoch wasn't yet in the schedule
+    /// (`submit_synced_block_for_verification` re-buffers on a
+    /// `NotYetCommitted` lookup). The beacon adopting the epoch is that
+    /// path's only retry signal.
+    pub fn on_beacon_block_persisted(&mut self, topology: &TopologySchedule) -> Vec<Action> {
+        self.try_drain_buffered_synced_blocks(topology)
     }
 
     /// Admit a QC-verified synced block into the chain state and drive the
@@ -6248,6 +6262,144 @@ mod tests {
         let actions = state.on_block_sync_complete();
         assert!(!state.is_block_syncing());
         assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn beacon_behind_synced_block_re_buffers_until_epoch_adoption() {
+        // A synced block whose committee epoch the beacon hasn't committed
+        // yet must survive the lookup miss: it returns to the buffer and the
+        // beacon adopting the epoch replays it into QC verification.
+        // Discarding it would leave a hole the drain could never refill
+        // without a network re-fetch.
+        const ED: u64 = 1_000;
+        let epoch0 = Arc::new(committee_snapshot_with_ids(&[0, 1, 2, 3]));
+        let mut schedule = TopologySchedule::new(ED, Epoch::new(0), epoch0);
+
+        let mut state = ShardCoordinator::new(
+            ValidatorId::new(0),
+            ShardId::ROOT,
+            ShardConsensusConfig::default(),
+            RecoveredState::default(),
+        );
+        state.set_time(LocalTimestamp::from_millis(100_000));
+        state.committed_height = BlockHeight::new(3);
+        state.set_block_syncing(true);
+
+        // Parent QC weighted timestamp in epoch 5 — above the schedule head.
+        let block = block_with_parent_qc_ts(BlockHeight::new(4), 5 * ED);
+        let block_hash = block.hash();
+        let mut signers = SignerBitfield::new(4);
+        signers.set(0);
+        signers.set(1);
+        signers.set(2);
+        let qc = QuorumCertificate::new(
+            block_hash,
+            ShardId::ROOT,
+            BlockHeight::new(4),
+            block.header().parent_block_hash(),
+            block.header().round(),
+            signers,
+            zero_bls_signature(),
+            WeightedTimestamp::from_millis(5 * ED),
+        );
+        let certified = CertifiedBlock::new_unchecked(block, qc);
+
+        let actions = state.on_sync_block_ready_to_apply(&schedule, certified);
+        assert!(
+            actions.is_empty(),
+            "beacon-behind defer emits nothing: {actions:?}"
+        );
+        assert!(
+            state
+                .block_sync
+                .has_buffered(BlockHeight::new(4), &block_hash)
+        );
+
+        // Beacon adopts the epoch: the parked block replays into verification.
+        schedule.insert(
+            Epoch::new(5),
+            Arc::new(committee_snapshot_with_ids(&[0, 1, 2, 3])),
+        );
+        let actions = state.on_beacon_block_persisted(&schedule);
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::VerifyQcSignature { .. })),
+            "expected VerifyQcSignature after epoch adoption; got {actions:?}"
+        );
+        assert!(
+            !state
+                .block_sync
+                .has_buffered(BlockHeight::new(4), &block_hash)
+        );
+    }
+
+    #[test]
+    fn sync_recovers_hole_left_by_failed_qc_verification() {
+        // A synced block that fails QC verification leaves a gap with
+        // verified entries stranded above it. The re-fetched replacement
+        // arrives above `committed + 1` (admission runs ahead of the lagging
+        // round-contiguous commit), so it lands in the buffer — and the
+        // drain must reach down to that hole instead of starting above the
+        // stranded heights, or sync wedges until restart.
+        let (mut state, topology) = make_test_state();
+        state.set_time(LocalTimestamp::from_millis(100_000));
+        state.committed_height = BlockHeight::new(3);
+        state.set_block_syncing(true);
+        // Height 4 admitted to chain state, commit lagging a block behind.
+        state
+            .block_sync
+            .set_sync_applied_height(BlockHeight::new(4));
+
+        let deliver = |state: &mut ShardCoordinator, height: u64, ts: u64| {
+            let block = block_with_parent_qc_ts(BlockHeight::new(height), ts);
+            let block_hash = block.hash();
+            let mut signers = SignerBitfield::new(4);
+            signers.set(0);
+            signers.set(1);
+            signers.set(2);
+            let qc = QuorumCertificate::new(
+                block_hash,
+                ShardId::ROOT,
+                BlockHeight::new(height),
+                block.header().parent_block_hash(),
+                block.header().round(),
+                signers,
+                zero_bls_signature(),
+                WeightedTimestamp::from_millis(ts),
+            );
+            let actions = state
+                .on_sync_block_ready_to_apply(&topology, CertifiedBlock::new_unchecked(block, qc));
+            (block_hash, actions)
+        };
+
+        let (hash5, actions) = deliver(&mut state, 5, 100);
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::VerifyQcSignature { .. }))
+        );
+        let (hash6, _) = deliver(&mut state, 6, 110);
+        let (hash7, _) = deliver(&mut state, 7, 120);
+
+        // 6 and 7 verify; 5 fails (Byzantine peer served a forged QC).
+        for (hash, height) in [(hash6, 6), (hash7, 7)] {
+            let qc = make_test_qc(hash, BlockHeight::new(height));
+            let _ = state.on_qc_signature_verified(&topology, hash, Ok(qc));
+        }
+        let _ =
+            state.on_qc_signature_verified(&topology, hash5, Err(QcVerifyError::InvalidSignature));
+
+        // The honest replacement at height 5 buffers (5 > committed + 1) and
+        // must drain into a fresh verification despite 6 and 7 pending above.
+        let (hash5b, actions) = deliver(&mut state, 5, 200);
+        assert_ne!(hash5b, hash5);
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::VerifyQcSignature { .. })),
+            "re-fetched block at the hole must resubmit for verification; got {actions:?}"
+        );
     }
 
     #[test]

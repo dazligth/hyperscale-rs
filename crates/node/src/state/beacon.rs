@@ -170,6 +170,10 @@ impl NodeStateMachine {
                     self.execution_coordinator
                         .on_beacon_block_persisted(self.beacon_coordinator.topology_schedule()),
                 );
+                actions.extend(
+                    self.shard_coordinator
+                        .on_beacon_block_persisted(self.beacon_coordinator.topology_schedule()),
+                );
                 // A proposer whose committee lookup stalled on the missing
                 // epoch has no other retry signal: without this kick the
                 // view-change timer fires first, the height is re-proposed in

@@ -238,15 +238,25 @@ impl BlockSyncManager {
     }
 
     /// Plan the next batch of buffered synced blocks to dispatch for QC
-    /// verification. Respects `max_parallel_sync_verifications` and starts
-    /// from one above the highest already-handled height so we don't resubmit
-    /// work already in flight.
+    /// verification. Respects `max_parallel_sync_verifications`.
     ///
-    /// "Already-handled" is the max of the highest pending verification, the
-    /// committed tip, and `sync_applied_height` — the last covers blocks
+    /// Walks heights from one above the applied frontier (the max of the
+    /// committed tip and `sync_applied_height` — the latter covers blocks
     /// admitted to the chain state but not yet finalized, since the
-    /// round-contiguous commit lags admission by a block and `committed_height`
-    /// alone would re-drain the gap.
+    /// round-contiguous commit lags admission by a block). A height with a
+    /// pending verification is already covered and is skipped without
+    /// touching its buffered candidates; a height with only buffered
+    /// candidates is a hole — drain it. This lets a re-fetched block fill a
+    /// gap left by a failed or dropped verification even while
+    /// already-verified entries sit stranded at higher heights; starting
+    /// above the highest pending height instead would pin the drain past
+    /// the hole forever. The walk stops at the first height with neither
+    /// (nothing contiguous remains) or once the slots are spent.
+    ///
+    /// At a hole, *every* buffered candidate at that height drains together
+    /// (one Byzantine and several honest blocks may sit at the same height
+    /// under the slot-squat defense), so the batch may overshoot the slot
+    /// count by up to `MAX_BUFFERED_PER_HEIGHT`.
     ///
     /// Returns empty when the pending set is already saturated or no
     /// sequentially-eligible buffered block is available.
@@ -261,13 +271,28 @@ impl BlockSyncManager {
         }
         let slots_available = max_parallel - pending_count;
 
-        let highest_pending_height = self.highest_pending_height(committed_height);
-        let start_height = highest_pending_height
-            .max(committed_height)
-            .max(self.sync_applied_height)
-            + 1u64;
+        let mut height = committed_height.max(self.sync_applied_height) + 1u64;
+        let mut result = Vec::new();
+        while result.len() < slots_available {
+            if self.has_pending_at_height(height) {
+                height += 1u64;
+                continue;
+            }
+            let Some(entries) = self.buffered_synced_blocks.remove(&height) else {
+                break;
+            };
+            for (block_hash, certified) in entries {
+                debug!(
+                    height = height.inner(),
+                    ?block_hash,
+                    "Draining buffered synced block"
+                );
+                result.push(certified);
+            }
+            height += 1u64;
+        }
 
-        self.drain_buffered(start_height, slots_available)
+        result
     }
 
     /// Classify a freshly received synced block against our current state:
@@ -414,6 +439,21 @@ impl BlockSyncManager {
             .remove(&block_hash)?;
 
         let Some(verified_qc) = verified_qc else {
+            // A failure callback for an entry that already verified can only
+            // be a duplicate dispatch — keep the verified work rather than
+            // tearing a hole in the pending sequence.
+            if let PendingSyncedBlockVerification::QcVerified { block, qc } = pending {
+                warn!(
+                    block_hash = ?block_hash,
+                    height = block.height().inner(),
+                    "Duplicate QC verification failure for an already-verified synced block - keeping it"
+                );
+                self.pending_synced_block_verifications.insert(
+                    block_hash,
+                    PendingSyncedBlockVerification::QcVerified { block, qc },
+                );
+                return Some(BlockSyncVerificationResult::Verified);
+            }
             warn!(
                 block_hash = ?block_hash,
                 height = pending.block().height().inner(),
@@ -422,7 +462,7 @@ impl BlockSyncManager {
             // Only this block is removed (already done above). Other pending
             // verifications are kept — a single bad peer shouldn't cascade
             // into losing all in-flight sync work. Blocks above this height
-            // will be blocked by the gap until a re-sync fills it.
+            // will be blocked by the gap until a re-fetched block fills it.
             return Some(BlockSyncVerificationResult::Failed);
         };
 
@@ -548,55 +588,6 @@ impl BlockSyncManager {
             unverified_heights = ?unverified_heights,
             "try_apply_verified_synced_blocks: checking"
         );
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Drain buffered blocks
-    // ═══════════════════════════════════════════════════════════════════════
-
-    /// Drain buffered blocks that can be submitted for verification.
-    ///
-    /// Walks contiguous heights starting at `start_height`. At each height,
-    /// drains *every* buffered candidate (one Byzantine and several honest
-    /// blocks may sit at the same height under the slot-squat defense);
-    /// each gets dispatched for QC verification independently. Stops at the
-    /// first height with no buffered entries OR once `max_count` is reached.
-    /// May produce slightly more blocks than `max_count` so an entire
-    /// height's candidate set is delivered atomically — the per-height cap
-    /// (`MAX_BUFFERED_PER_HEIGHT`) bounds that overshoot.
-    pub fn drain_buffered(
-        &mut self,
-        start_height: BlockHeight,
-        max_count: usize,
-    ) -> Vec<CertifiedBlock> {
-        let mut result = Vec::new();
-        let mut height = start_height;
-
-        while result.len() < max_count {
-            let Some(entries) = self.buffered_synced_blocks.remove(&height) else {
-                break;
-            };
-            for (block_hash, certified) in entries {
-                debug!(
-                    height = height.inner(),
-                    ?block_hash,
-                    "Draining buffered synced block"
-                );
-                result.push(certified);
-            }
-            height += 1u64;
-        }
-
-        result
-    }
-
-    /// Get the highest height among pending verifications.
-    pub fn highest_pending_height(&self, committed_height: BlockHeight) -> BlockHeight {
-        self.pending_synced_block_verifications
-            .values()
-            .map(|p| p.block().height())
-            .max()
-            .unwrap_or(committed_height)
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -1000,6 +991,68 @@ mod tests {
         );
     }
 
+    #[test]
+    fn next_submitable_drains_hole_below_stranded_verified_entries() {
+        // A failed verification at height 6 left verified entries stranded
+        // at 7 and 8. The re-fetched block buffered at 6 must drain even
+        // though pending heights sit above it — anchoring the drain above
+        // the highest pending height instead would pin it past the hole
+        // forever and wedge sync.
+        let mut sm = BlockSyncManager::new();
+        sm.set_sync_applied_height(BlockHeight::new(5));
+        sm.track_verified_for_test(certified(BlockHeight::new(7), b"v7"));
+        sm.track_verified_for_test(certified(BlockHeight::new(8), b"v8"));
+        sm.buffer_block(
+            BlockHeight::new(6),
+            certified(BlockHeight::new(6), b"refetched"),
+        );
+
+        let out = sm.next_submitable(BlockHeight::new(4), 16);
+        let heights: Vec<_> = out.iter().map(|c| c.block().height().inner()).collect();
+        assert_eq!(heights, vec![6]);
+    }
+
+    #[test]
+    fn next_submitable_skips_height_with_candidate_already_in_flight() {
+        // One candidate at height 6 is in flight; a rival candidate at the
+        // same height stays buffered until that verification resolves, but
+        // the walk still drains the uncovered height above.
+        let mut sm = BlockSyncManager::new();
+        sm.track_pending_verification_for_test(certified(BlockHeight::new(6), b"in_flight"));
+        let rival = certified(BlockHeight::new(6), b"rival");
+        let rival_hash = rival.block().hash();
+        sm.buffer_block(BlockHeight::new(6), rival);
+        sm.buffer_block(BlockHeight::new(7), certified(BlockHeight::new(7), b"next"));
+
+        let out = sm.next_submitable(BlockHeight::new(5), 16);
+        let heights: Vec<_> = out.iter().map(|c| c.block().height().inner()).collect();
+        assert_eq!(heights, vec![7]);
+        assert!(sm.has_buffered(BlockHeight::new(6), &rival_hash));
+    }
+
+    #[test]
+    fn duplicate_failure_callback_keeps_verified_entry() {
+        // The entry is removed before the result is inspected; a duplicate
+        // failure callback for an already-verified entry must reinsert it
+        // rather than tear a hole in the pending sequence.
+        let mut sm = BlockSyncManager::new();
+        let cb = certified(BlockHeight::new(6), b"v");
+        let hash = cb.block().hash();
+        let qc = cb.qc().clone();
+        sm.track_pending_verification_for_test(cb);
+        let verified = Verified::new_unchecked_for_test(qc);
+        assert!(matches!(
+            sm.on_qc_verified(hash, Some(verified)),
+            Some(BlockSyncVerificationResult::Verified)
+        ));
+
+        assert!(matches!(
+            sm.on_qc_verified(hash, None),
+            Some(BlockSyncVerificationResult::Verified)
+        ));
+        assert!(sm.take_verified_at_height(BlockHeight::new(6)).is_some());
+    }
+
     // ─── health_check ───────────────────────────────────────────────────
 
     #[test]
@@ -1218,14 +1271,27 @@ mod tests {
         )
     }
 
-    // Test-only shim avoiding the `pub fn` gate on the tracked insertion,
-    // which is otherwise reached only via `register_for_verification`.
+    // Test-only shims avoiding the `pub fn` gate on the tracked insertion,
+    // which is otherwise reached only via `register_for_verification` (and,
+    // for the verified state, `on_qc_verified`).
     impl BlockSyncManager {
         fn track_pending_verification_for_test(&mut self, certified: CertifiedBlock) {
             let block_hash = certified.block().hash();
             self.pending_synced_block_verifications.insert(
                 block_hash,
                 PendingSyncedBlockVerification::InFlight(certified),
+            );
+        }
+
+        fn track_verified_for_test(&mut self, certified: CertifiedBlock) {
+            let block_hash = certified.block().hash();
+            let (block, qc) = certified.into_parts();
+            self.pending_synced_block_verifications.insert(
+                block_hash,
+                PendingSyncedBlockVerification::QcVerified {
+                    block,
+                    qc: Verified::new_unchecked_for_test(qc.into_unverified()),
+                },
             );
         }
     }
