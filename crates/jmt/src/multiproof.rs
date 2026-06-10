@@ -148,6 +148,11 @@ pub enum ProofError {
     /// A claim's stored value disagrees with the verifier's expected value.
     #[error("claim asserts a value the proof does not support")]
     ValueMismatch,
+
+    /// A range proof's sibling subtree overlaps the claimed-complete key
+    /// span — the range omits leaves it claims to cover.
+    #[error("range proof omits leaves inside its claimed span")]
+    RangeIncomplete,
 }
 
 impl<H: Hasher, const ARITY_BITS: u8> Tree<H, ARITY_BITS> {
@@ -319,7 +324,7 @@ impl<H: Hasher, const ARITY_BITS: u8> Tree<H, ARITY_BITS> {
 
 /// Extract `count` bits from `key` starting at bit offset `depth_bits`
 /// from the MSB.
-fn bits_at(key: &Key, depth_bits: u16, count: u8) -> u8 {
+pub(crate) fn bits_at(key: &Key, depth_bits: u16, count: u8) -> u8 {
     debug_assert!(count <= 8);
     debug_assert!(depth_bits as usize + count as usize <= 256);
 
@@ -333,7 +338,7 @@ fn bits_at(key: &Key, depth_bits: u16, count: u8) -> u8 {
     u8::try_from((combined >> shift) & mask).unwrap_or(u8::MAX)
 }
 
-fn termination_hash<H: Hasher>(claim: &ProofClaim) -> Hash {
+pub(crate) fn termination_hash<H: Hasher>(claim: &ProofClaim) -> Hash {
     match &claim.termination {
         ClaimTermination::Leaf => {
             // value_hash must be Some for Leaf; validated at construction.
