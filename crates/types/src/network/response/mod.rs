@@ -10,6 +10,7 @@ mod finalized_wave;
 mod local_provision;
 mod provision;
 mod remote_header;
+mod state_range;
 mod transaction;
 
 pub use block::GetBlockResponse;
@@ -18,4 +19,8 @@ pub use finalized_wave::GetFinalizedWavesResponse;
 pub use local_provision::{GetLocalProvisionsResponse, LocalProvisionEntry};
 pub use provision::GetProvisionResponse;
 pub use remote_header::GetRemoteHeadersResponse;
+pub use state_range::{
+    GetStateRangeResponse, MAX_LEAVES_PER_STATE_RANGE, MAX_STATE_RANGE_KEY_LEN,
+    MAX_STATE_RANGE_VALUE_LEN, StateRangeChunk, StateRangeLeaf,
+};
 pub use transaction::GetTransactionsResponse;
