@@ -52,11 +52,10 @@ use hyperscale_types::{
     BeaconChainConfig, BeaconGenesisConfig, BeaconState, Block, BlockHeight, Bls12381G1PrivateKey,
     CertifiedBeaconBlock, CertifiedBlock, GenesisPool, GenesisValidator, InFlightCount,
     LocalTimestamp, MAX_TX_IN_FLIGHT, MIN_STAKE_FLOOR, NodeId, Randomness, RoutableTransaction,
-    ShardId, ShardTrie, Stake, StakePoolId, TopologySnapshot, TransactionStatus, TxHash,
-    ValidatorId, Verified, genesis_config_hash,
+    ShardId, ShardTrie, Stake, StakePoolId, TopologySnapshot, ValidatorId, Verified,
+    genesis_config_hash,
 };
 use libp2p::identity::Keypair;
-use quick_cache::sync::Cache as QuickCache;
 use radix_common::types::ComponentAddress;
 use thiserror::Error;
 use tokio::runtime::Handle as TokioHandle;
@@ -67,7 +66,8 @@ use tracing::{debug, info, warn};
 
 use crate::rpc::state::VnodeMempoolSnapshot;
 use crate::rpc::{
-    MempoolSnapshot, NodeStatusState, TxSubmissionSender, VnodeMempoolStats, VnodeStatusEntry,
+    MempoolSnapshot, NodeStatusState, SharedTxStatusCaches, TxSubmissionSender, VnodeMempoolStats,
+    VnodeStatusEntry,
 };
 use crate::status::{ShardSyncState, SyncStatus};
 use crate::supervisor::{ShardCommand, ShardSupervisor, StorageFactory};
@@ -642,8 +642,10 @@ impl ProductionRunnerBuilder {
         // The status RPC surface probes every hosted shard's cache so a
         // tx that lands on any of them shows up — cross-shard packed has
         // a vnode in every shard, and a single primary entry would hide
-        // half the txs.
-        let tx_status_caches = host.tx_status_caches();
+        // half the txs. Behind a swap so the supervisor can update the
+        // hosted set on runtime membership changes.
+        let tx_status_caches: SharedTxStatusCaches =
+            Arc::new(ArcSwap::from_pointee(host.tx_status_caches()));
 
         // Per-shard vnode counts seed the supervisor's membership
         // refcounts for the startup shards.
@@ -669,6 +671,7 @@ impl ProductionRunnerBuilder {
             Arc::clone(&storages),
             self.storage_factory,
             participation_tx,
+            Arc::clone(&tx_status_caches),
         );
 
         Ok(ProductionRunner {
@@ -770,8 +773,9 @@ pub struct ProductionRunner {
     /// Per-shard transaction status caches, shared from `NodeHost` for
     /// lock-free RPC queries. One entry per hosted shard; the RPC
     /// handler probes every entry on a status lookup since a tx may
-    /// have landed on any of the hosted shards.
-    tx_status_caches: HashMap<ShardId, Arc<QuickCache<TxHash, TransactionStatus>>>,
+    /// have landed on any of the hosted shards. The supervisor swaps
+    /// the map as shards join and leave at runtime.
+    tx_status_caches: SharedTxStatusCaches,
 
     /// Shutdown signal receiver (external shutdown request).
     shutdown_rx: Option<oneshot::Receiver<()>>,
@@ -819,15 +823,13 @@ impl ProductionRunner {
     /// Get the per-shard transaction status caches shared from `NodeHost`.
     ///
     /// One `Arc<QuickCache>` per hosted shard, same instances used by
-    /// `NodeHost` on the pinned thread. Passed directly to the RPC server,
-    /// which probes every entry on a status lookup since a tx may have
-    /// landed on any of the hosted shards.
+    /// `NodeHost` on the pinned thread. Passed directly to the RPC
+    /// server, which probes every entry on a status lookup since a tx
+    /// may have landed on any of the hosted shards; the supervisor
+    /// swaps the map as shards join and leave at runtime.
     #[must_use]
-    pub fn tx_status_caches(&self) -> HashMap<ShardId, Arc<QuickCache<TxHash, TransactionStatus>>> {
-        self.tx_status_caches
-            .iter()
-            .map(|(s, c)| (*s, Arc::clone(c)))
-            .collect()
+    pub fn tx_status_caches(&self) -> SharedTxStatusCaches {
+        Arc::clone(&self.tx_status_caches)
     }
 
     /// Build a transaction-submission closure for RPC handlers.

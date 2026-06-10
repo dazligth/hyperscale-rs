@@ -22,6 +22,15 @@ use crate::status::SyncStatus;
 /// envelopes onto the relevant per-shard event channels.
 pub type TxSubmissionSender = Arc<dyn Fn(Arc<RoutableTransaction>) -> bool + Send + Sync + 'static>;
 
+/// Per-shard transaction status caches behind a lock-free swap.
+///
+/// Writers are the pinned shard threads (each shard's own
+/// `QuickCache`); the map itself is swapped by the supervisor as
+/// shards join and leave at runtime, so RPC lookups always see the
+/// currently hosted set.
+pub type SharedTxStatusCaches =
+    Arc<ArcSwap<HashMap<ShardId, Arc<QuickCache<TxHash, TransactionStatus>>>>>;
+
 /// Shared state for RPC handlers.
 #[derive(Clone)]
 pub struct RpcState {
@@ -43,13 +52,14 @@ pub struct RpcState {
     pub start_time: Instant,
     /// Per-shard transaction status caches for querying transaction state.
     ///
-    /// One entry per hosted shard, shared directly from `IoLoop`'s
-    /// internal `QuickCache` instances — writes happen on the pinned
+    /// One entry per hosted shard, shared directly from each shard
+    /// loop's internal `QuickCache` — writes happen on the pinned
     /// thread, reads happen here on the RPC thread, no locking needed.
-    /// Status lookup probes every entry: a tx may have landed on any
-    /// hosted shard, and under cross-shard packed a single primary
-    /// entry would hide half the txs.
-    pub tx_status_caches: HashMap<ShardId, Arc<QuickCache<TxHash, TransactionStatus>>>,
+    /// The supervisor swaps the map as shards join and leave at
+    /// runtime. Status lookup probes every entry: a tx may have landed
+    /// on any hosted shard, and under cross-shard packed a single
+    /// primary entry would hide half the txs.
+    pub tx_status_caches: SharedTxStatusCaches,
     /// Mempool snapshot for querying mempool stats.
     pub mempool_snapshot: Arc<ArcSwap<MempoolSnapshot>>,
     /// Number of blocks behind before rejecting transaction submissions.
@@ -65,7 +75,10 @@ impl RpcState {
     /// so iteration order doesn't matter.
     #[must_use]
     pub fn lookup_tx_status(&self, hash: &TxHash) -> Option<TransactionStatus> {
-        self.tx_status_caches.values().find_map(|c| c.get(hash))
+        self.tx_status_caches
+            .load()
+            .values()
+            .find_map(|c| c.get(hash))
     }
 }
 

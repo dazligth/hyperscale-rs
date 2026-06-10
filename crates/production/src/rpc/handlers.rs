@@ -428,8 +428,9 @@ mod tests {
             node_status: Arc::new(ArcSwap::new(Arc::new(NodeStatusState::default()))),
             tx_submission_tx,
             start_time: Instant::now(),
-            tx_status_caches: std::iter::once((ShardId::ROOT, Arc::new(Cache::new(1000))))
-                .collect(),
+            tx_status_caches: Arc::new(ArcSwap::from_pointee(
+                std::iter::once((ShardId::ROOT, Arc::new(Cache::new(1000)))).collect(),
+            )),
             mempool_snapshot: Arc::new(ArcSwap::new(Arc::new(MempoolSnapshot::default()))),
             sync_backpressure_threshold: Some(10),
         }
@@ -598,6 +599,7 @@ mod tests {
         // Insert a transaction into the (single hosted shard's) cache.
         state
             .tx_status_caches
+            .load()
             .values()
             .next()
             .expect("test fixture inserts a shard 0 cache")
@@ -662,8 +664,9 @@ mod tests {
             node_status: Arc::new(ArcSwap::new(Arc::new(NodeStatusState::default()))),
             tx_submission_tx,
             start_time: Instant::now(),
-            tx_status_caches: std::iter::once((ShardId::ROOT, Arc::new(Cache::new(1000))))
-                .collect(),
+            tx_status_caches: Arc::new(ArcSwap::from_pointee(
+                std::iter::once((ShardId::ROOT, Arc::new(Cache::new(1000)))).collect(),
+            )),
             mempool_snapshot: Arc::new(ArcSwap::new(Arc::new(MempoolSnapshot::default()))),
             sync_backpressure_threshold: Some(10),
         };
@@ -716,8 +719,9 @@ mod tests {
             node_status: Arc::new(ArcSwap::new(Arc::new(NodeStatusState::default()))),
             tx_submission_tx,
             start_time: Instant::now(),
-            tx_status_caches: std::iter::once((ShardId::ROOT, Arc::new(Cache::new(1000))))
-                .collect(),
+            tx_status_caches: Arc::new(ArcSwap::from_pointee(
+                std::iter::once((ShardId::ROOT, Arc::new(Cache::new(1000)))).collect(),
+            )),
             mempool_snapshot: Arc::new(ArcSwap::new(Arc::new(MempoolSnapshot::default()))),
             sync_backpressure_threshold: Some(10),
         };

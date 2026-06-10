@@ -37,7 +37,7 @@ mod types;
 
 pub use server::{RpcServer, RpcServerConfig, RpcServerHandle};
 pub use state::{
-    MempoolSnapshot, NodeStatusState, RpcState, TxSubmissionSender, VnodeMempoolStats,
-    VnodeStatusEntry,
+    MempoolSnapshot, NodeStatusState, RpcState, SharedTxStatusCaches, TxSubmissionSender,
+    VnodeMempoolStats, VnodeStatusEntry,
 };
 pub use types::*;

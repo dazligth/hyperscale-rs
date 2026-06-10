@@ -639,6 +639,7 @@ async fn test_runtime_shard_join_and_leave() {
 
     let adapter = Arc::clone(runner.network());
     let reconfigure = runner.reconfigure_handle();
+    let tx_status_caches = runner.tx_status_caches();
     let shutdown = runner
         .shutdown_handle()
         .expect("Should have shutdown handle");
@@ -646,6 +647,7 @@ async fn test_runtime_shard_join_and_leave() {
     sleep(Duration::from_millis(200)).await;
     assert!(adapter.local_shards().contains(&shard_a));
     assert!(!adapter.local_shards().contains(&shard_b));
+    assert!(!tx_status_caches.load().contains_key(&shard_b));
 
     // Join shard B at runtime.
     reconfigure
@@ -666,6 +668,8 @@ async fn test_runtime_shard_join_and_leave() {
     })
     .await
     .expect("joined shard becomes hosted on the adapter");
+    // The joined shard's tx statuses are RPC-visible.
+    assert!(tx_status_caches.load().contains_key(&shard_b));
 
     // Leave shard B: the single vnode departing tears the shard down.
     reconfigure
@@ -680,6 +684,8 @@ async fn test_runtime_shard_join_and_leave() {
     .await
     .expect("left shard is removed from the adapter");
     assert!(adapter.local_shards().contains(&shard_a));
+    assert!(!tx_status_caches.load().contains_key(&shard_b));
+    assert!(tx_status_caches.load().contains_key(&shard_a));
 
     drop(shutdown);
     let result = timeout(Duration::from_secs(5), handle).await;

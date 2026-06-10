@@ -77,8 +77,9 @@ mod tests {
             }))),
             tx_submission_tx,
             start_time: Instant::now(),
-            tx_status_caches: std::iter::once((ShardId::ROOT, Arc::new(Cache::new(1000))))
-                .collect(),
+            tx_status_caches: Arc::new(ArcSwap::from_pointee(
+                std::iter::once((ShardId::ROOT, Arc::new(Cache::new(1000)))).collect(),
+            )),
             mempool_snapshot: Arc::new(ArcSwap::new(Arc::new(MempoolSnapshot::default()))),
             sync_backpressure_threshold: Some(10),
         }
