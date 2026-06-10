@@ -59,8 +59,10 @@ pub fn qc_has_local_quorum_power(
 /// irreversibly. An honestly-aggregated weighted timestamp is a mean of voters'
 /// clocks from an earlier round, so it leads ours by at most the honest skew
 /// envelope; anything beyond is rejected. Checked wherever an untrusted QC
-/// enters chain state: header validation, synced-block admission, and
-/// timeout-quorum `high_qc` adoption.
+/// enters chain state: header validation, synced-block admission,
+/// timeout-quorum `high_qc` adoption, and local QC aggregation (per-vote
+/// timestamps are equally unsigned, so the aggregated mean is no more
+/// trustworthy than a received QC's field).
 #[must_use]
 pub fn qc_weighted_timestamp_too_far_ahead(qc: &QuorumCertificate, now: LocalTimestamp) -> bool {
     let weighted_ms = qc.weighted_timestamp().as_millis();

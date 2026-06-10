@@ -2679,6 +2679,27 @@ impl ShardCoordinator {
             "QC formed"
         );
 
+        // The QC's weighted timestamp is the mean of per-vote `timestamp`
+        // fields, which ride outside the vote's signed message — ~f Byzantine
+        // voters (or a relay rewriting timestamps in flight) can drag the
+        // mean far forward. A locally-aggregated QC is as untrusted an
+        // ingress as any other; adopting one past the bound poisons
+        // `latest_qc` so `tip_committee()` resolves to an epoch beyond the
+        // schedule and proposals + timeout tallying stall. Drop it instead:
+        // the untouched view-change timer recovers the round, and peers
+        // would reject a header carrying this QC for the same reason.
+        if qc_weighted_timestamp_too_far_ahead(qc, self.now) {
+            warn!(
+                validator = ?self.me,
+                block_hash = ?block_hash,
+                height = height.inner(),
+                weighted_ms = qc.weighted_timestamp().as_millis(),
+                now_ms = self.now.as_millis(),
+                "Locally formed QC weighted timestamp too far ahead — discarding"
+            );
+            return vec![];
+        }
+
         // Record leader activity - QC forming indicates progress
         self.record_leader_activity();
 
@@ -4264,10 +4285,11 @@ mod tests {
     use hyperscale_core::Action;
     use hyperscale_types::{
         BeaconWitnessLeafCount, BeaconWitnessRoot, Bls12381G1PrivateKey, BoundedVec,
-        CertificateRoot, Epoch, Hash, InFlightCount, LocalReceiptRoot, NetworkDefinition,
-        ProvisionsRoot, RoutableTransaction, ShardId, SignerBitfield, TopologySchedule,
-        TopologySnapshot, TransactionRoot, ValidatorId, ValidatorInfo, ValidatorSet, VoteCount,
-        WeightedTimestamp, generate_bls_keypair, test_utils, zero_bls_signature,
+        CertificateRoot, Epoch, Hash, InFlightCount, LocalReceiptRoot, MAX_TIMESTAMP_DELAY,
+        MAX_TIMESTAMP_RUSH, NetworkDefinition, ProvisionsRoot, RoutableTransaction, ShardId,
+        SignerBitfield, TopologySchedule, TopologySnapshot, TransactionRoot, ValidatorId,
+        ValidatorInfo, ValidatorSet, VoteCount, WeightedTimestamp, generate_bls_keypair,
+        test_utils, zero_bls_signature,
     };
 
     use super::*;
@@ -5767,6 +5789,59 @@ mod tests {
         assert!(
             has_build_proposal,
             "Should propose empty block immediately after QC formation to advance finalization"
+        );
+    }
+
+    #[test]
+    fn qc_formed_rejects_weighted_timestamp_past_the_envelope() {
+        // Per-vote timestamps ride outside the vote's signed message, so the
+        // aggregated mean can be dragged far forward by Byzantine voters or
+        // a rewriting relay. A locally formed QC past the bound must not be
+        // adopted: it would poison `latest_qc` and stall proposals and
+        // timeout tallying on an unresolvable tip committee. One at the
+        // bound's edge must still adopt and drive the next proposal.
+        let (mut state, topology) = make_test_state();
+        let now = LocalTimestamp::from_millis(100_000);
+        state.set_time(now);
+        state.committed_height = BlockHeight::new(3);
+        state.verification.on_block_persisted(BlockHeight::new(3));
+        state.view_change.view = Round::new(4);
+        let envelope_ms =
+            u64::try_from((MAX_TIMESTAMP_DELAY + MAX_TIMESTAMP_RUSH).as_millis()).unwrap();
+
+        let block_3_hash = BlockHash::from_raw(Hash::from_bytes(b"block_3"));
+        let qc_with_ts = |weighted_ms: u64| {
+            let __qc = make_test_qc(block_3_hash, BlockHeight::new(3));
+            // SAFETY: synthetic test fixture, no real signature.
+            Verified::<QuorumCertificate>::new_unchecked_for_test(QuorumCertificate::new(
+                __qc.block_hash(),
+                __qc.shard_id(),
+                __qc.height(),
+                BlockHash::from_raw(Hash::from_bytes(b"block_2")),
+                __qc.round(),
+                __qc.signers().clone(),
+                __qc.aggregated_signature(),
+                WeightedTimestamp::from_millis(weighted_ms),
+            ))
+        };
+
+        // One millisecond past the envelope: discarded outright.
+        let forged = qc_with_ts(now.as_millis() + envelope_ms + 1);
+        let actions = state.on_qc_formed(&topology, block_3_hash, &forged, &[], vec![], vec![]);
+        assert!(
+            actions.is_empty(),
+            "forged QC must emit nothing: {actions:?}"
+        );
+        assert!(state.latest_qc().is_none(), "forged QC must not be adopted");
+
+        // Exactly at the envelope: kept, and the next proposal fires.
+        let honest = qc_with_ts(now.as_millis() + envelope_ms);
+        let actions = state.on_qc_formed(&topology, block_3_hash, &honest, &[], vec![], vec![]);
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::BuildProposal { .. })),
+            "honest QC must drive the next proposal: {actions:?}"
         );
     }
 
