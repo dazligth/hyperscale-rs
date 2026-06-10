@@ -113,6 +113,23 @@ pub enum Action {
         recipients: Vec<ValidatorId>,
     },
 
+    /// Sign and broadcast a "ready on shard" signal to the local committee.
+    ///
+    /// Emitted when block sync reaches the tip while the local validator is
+    /// a committee member still outside the consensus subset. The `io_loop`
+    /// signs the canonical ready-signal message and notifies `recipients`;
+    /// their pools hold the signal until a proposer drains it into a block
+    /// manifest and the beacon's `Ready` witness flips `ready: true`.
+    SignAndBroadcastReadySignal {
+        /// First block height at which the signal is eligible for inclusion.
+        height_window_start: BlockHeight,
+        /// Last eligible inclusion height; the signer re-emits if the
+        /// window passes uncollected.
+        height_window_end: BlockHeight,
+        /// Local-shard committee members (full membership view).
+        recipients: Vec<ValidatorId>,
+    },
+
     // ═══════════════════════════════════════════════════════════════════════
     // Network: Execution Layer (domain-specific, batchable by runner)
     // ═══════════════════════════════════════════════════════════════════════
@@ -1144,6 +1161,7 @@ impl Action {
             | Self::BroadcastBlockHeader { .. }
             | Self::SignAndBroadcastBlockVote { .. }
             | Self::SignAndBroadcastTimeout { .. }
+            | Self::SignAndBroadcastReadySignal { .. }
             | Self::BroadcastCertifiedBlockHeader { .. }
             | Self::SignAndBroadcastPcVote1 { .. }
             | Self::SignAndBroadcastPcVote2 { .. }
@@ -1198,6 +1216,7 @@ impl Action {
             | Self::BroadcastBlockHeader { .. }
             | Self::SignAndBroadcastBlockVote { .. }
             | Self::SignAndBroadcastTimeout { .. }
+            | Self::SignAndBroadcastReadySignal { .. }
             | Self::BroadcastCertifiedBlockHeader { .. } => ActionOwner::Shard,
 
             Self::AggregateExecutionCertificate { .. }

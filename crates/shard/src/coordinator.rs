@@ -15,8 +15,8 @@
 use hyperscale_core::{Action, CommitSource, ProtocolEvent, TimerId};
 use hyperscale_types::{
     BlockHash, LocalTimestamp, MAX_FINALIZED_TX_PER_BLOCK, MAX_PROGRESS_WAIT,
-    MAX_READY_SIGNALS_PER_BLOCK, MAX_TXS_PER_BLOCK, ProposerTimestamp, ProvisionHash, ReadySignal,
-    ScheduleLookup, ShardId, StoredReceipt, WaveId, WeightedTimestamp,
+    MAX_READY_SIGNALS_PER_BLOCK, MAX_READY_WINDOW_BLOCKS, MAX_TXS_PER_BLOCK, ProposerTimestamp,
+    ProvisionHash, ReadySignal, ScheduleLookup, ShardId, StoredReceipt, WaveId, WeightedTimestamp,
 };
 
 /// Shard consensus statistics for monitoring.
@@ -557,7 +557,7 @@ impl ShardCoordinator {
     /// `NodeStateMachine` flushes expected remote headers and provisions in
     /// the same `BlockSyncComplete` arm, so this returns only shard-local
     /// resume actions.
-    pub fn on_block_sync_complete(&mut self) -> Vec<Action> {
+    pub fn on_block_sync_complete(&mut self, topology: &TopologySchedule) -> Vec<Action> {
         info!(
             validator = ?self.me,
             "Sync complete, resuming normal consensus"
@@ -570,7 +570,48 @@ impl ShardCoordinator {
         // is done, we need to fetch any missing transactions/certificates.
         // Use force_immediate=true to bypass the age timeout — blocks received
         // during sync shouldn't wait another timeout period to be fetched.
-        self.check_pending_block_fetches(true)
+        let mut actions = self.check_pending_block_fetches(true);
+        actions.extend(self.maybe_emit_ready_signal(topology));
+        actions
+    }
+
+    /// A self-signed `ReadySignal` if the local validator is a committee
+    /// member of this shard still outside the consensus subset — placed,
+    /// now synced to tip, and waiting on the beacon to flip
+    /// `ready: true`. `None` for already-ready members (a routine
+    /// catch-up resync stays silent) and for non-members.
+    ///
+    /// The window opens at the next committable height and spans the
+    /// maximum the proposer-side checks accept; if it passes uncollected
+    /// the beacon's ready timeout remains the fallback.
+    fn maybe_emit_ready_signal(&self, topology: &TopologySchedule) -> Option<Action> {
+        let head = topology.head();
+        let committee = head.committee_for_shard(self.local_shard);
+        if !committee.contains(&self.me)
+            || head
+                .consensus_committee_for_shard(self.local_shard)
+                .contains(&self.me)
+        {
+            return None;
+        }
+        let height_window_start = self.committed_height + 1;
+        let height_window_end = height_window_start + (MAX_READY_WINDOW_BLOCKS - 1);
+        let recipients: Vec<ValidatorId> = committee
+            .iter()
+            .copied()
+            .filter(|&v| v != self.me)
+            .collect();
+        info!(
+            validator = ?self.me,
+            window_start = height_window_start.inner(),
+            window_end = height_window_end.inner(),
+            "Synced to tip while not yet ready — broadcasting ReadySignal"
+        );
+        Some(Action::SignAndBroadcastReadySignal {
+            height_window_start,
+            height_window_end,
+            recipients,
+        })
     }
 
     /// Record leader activity (resets the view change timeout).
@@ -2618,7 +2659,11 @@ impl ShardCoordinator {
     /// (boot-time catch-up or fallback if the consensus-commit hook was
     /// missed). Also auto-resumes from sync when persistence reaches the
     /// sync target.
-    pub fn on_block_persisted(&mut self, block_height: BlockHeight) -> Vec<Action> {
+    pub fn on_block_persisted(
+        &mut self,
+        topology: &TopologySchedule,
+        block_height: BlockHeight,
+    ) -> Vec<Action> {
         self.verification.on_block_persisted(block_height);
 
         // Auto-resume from sync the moment persistence catches up to the
@@ -2628,7 +2673,7 @@ impl ShardCoordinator {
             && let Some(target) = self.block_sync.sync_target_height()
             && block_height >= target
         {
-            return self.on_block_sync_complete();
+            return self.on_block_sync_complete(topology);
         }
         vec![]
     }
@@ -3467,7 +3512,7 @@ impl ShardCoordinator {
             && let Some(target) = self.block_sync.sync_target_height()
             && self.block_sync.sync_applied_height() >= target
         {
-            actions.extend(self.on_block_sync_complete());
+            actions.extend(self.on_block_sync_complete(topology));
         }
         actions
     }
@@ -6547,16 +6592,73 @@ mod tests {
 
     #[test]
     fn test_sync_complete_exits_sync_mode() {
-        let (mut state, _topology) = make_test_state();
+        let (mut state, topology) = make_test_state();
         state.set_block_syncing(true);
         assert!(state.is_block_syncing());
 
-        // Fresh state has no pending blocks, so on_sync_complete returns
-        // no actions — the remote-header / provision flushes happen in
-        // NodeStateMachine's BlockSyncComplete arm.
-        let actions = state.on_block_sync_complete();
+        // Fresh state has no pending blocks and is already in the
+        // consensus subset, so on_sync_complete returns no actions — the
+        // remote-header / provision flushes happen in NodeStateMachine's
+        // BlockSyncComplete arm.
+        let actions = state.on_block_sync_complete(&topology);
         assert!(!state.is_block_syncing());
         assert!(actions.is_empty());
+    }
+
+    /// A committee member outside the consensus subset — placed but not
+    /// yet ready — emits exactly one `SignAndBroadcastReadySignal` when
+    /// sync reaches the tip, windowed from the next committable height
+    /// and addressed to every other committee member. (The already-ready
+    /// case stays silent: `test_sync_complete_exits_sync_mode`.)
+    #[test]
+    fn sync_complete_emits_ready_signal_when_not_in_consensus_subset() {
+        use std::collections::HashMap;
+
+        let (mut state, _) = make_test_state();
+        let validators: Vec<ValidatorInfo> = (0..4)
+            .map(|i| ValidatorInfo {
+                validator_id: ValidatorId::new(i),
+                public_key: generate_bls_keypair().public_key(),
+            })
+            .collect();
+        let vs = ValidatorSet::new(validators);
+        let members: Vec<ValidatorId> = (0..4).map(ValidatorId::new).collect();
+        let mut committees = HashMap::new();
+        committees.insert(ShardId::ROOT, members.clone());
+        // Validator 0 (the local node) is a member but not ready.
+        let mut consensus = HashMap::new();
+        consensus.insert(ShardId::ROOT, members[1..].to_vec());
+        let snapshot = TopologySnapshot::from_explicit_committees(
+            NetworkDefinition::simulator(),
+            &vs,
+            committees,
+            consensus,
+            HashMap::new(),
+        );
+        let topology = TopologySchedule::single(Arc::new(snapshot));
+
+        state.set_block_syncing(true);
+        let actions = state.on_block_sync_complete(&topology);
+        assert!(!state.is_block_syncing());
+
+        let signals: Vec<_> = actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::SignAndBroadcastReadySignal {
+                    height_window_start,
+                    height_window_end,
+                    recipients,
+                } => Some((height_window_start, height_window_end, recipients)),
+                _ => None,
+            })
+            .collect();
+        let [(start, end, recipients)] = signals.as_slice() else {
+            panic!("expected exactly one ready signal, got {actions:?}");
+        };
+        assert_eq!(**start, state.committed_height + 1);
+        assert_eq!(**end, **start + (MAX_READY_WINDOW_BLOCKS - 1));
+        assert_eq!(recipients.len(), 3);
+        assert!(!recipients.contains(&state.me));
     }
 
     #[test]
@@ -6738,12 +6840,12 @@ mod tests {
     fn test_sync_mode_resets_leader_activity_on_exit() {
         // Leaving sync resets leader activity to `now` so the fresh round doesn't
         // immediately time out on stale activity from before sync started.
-        let (mut state, _topology) = make_test_state();
+        let (mut state, topology) = make_test_state();
         state.set_time(LocalTimestamp::from_millis(100_000));
         state.view_change.last_leader_activity = Some(LocalTimestamp::ZERO);
 
         state.set_block_syncing(true);
-        state.on_block_sync_complete();
+        state.on_block_sync_complete(&topology);
 
         assert_eq!(
             state.view_change.last_leader_activity,

@@ -252,7 +252,9 @@ impl NodeStateMachine {
             // but an empty in-memory set, so child verifications of just-
             // persisted parents unblock here) and for auto-resume-from-sync.
             ProtocolEvent::BlockPersisted { height, .. } => {
-                let mut actions = self.shard_coordinator.on_block_persisted(height);
+                let mut actions = self
+                    .shard_coordinator
+                    .on_block_persisted(self.beacon_coordinator.topology_schedule(), height);
                 // If shard consensus just resumed from sync, reschedule the cleanup timer.
                 if !actions.is_empty() {
                     actions.push(Action::SetTimer {

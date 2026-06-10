@@ -12,7 +12,7 @@ use hyperscale_network::Network;
 use hyperscale_storage::{JmtSnapshot, ShardChainWriter, ShardStorage};
 use hyperscale_types::network::gossip::CertifiedBlockHeaderGossip;
 use hyperscale_types::network::notification::{
-    BlockHeaderNotification, BlockVoteNotification, TimeoutNotification,
+    BlockHeaderNotification, BlockVoteNotification, ReadySignalNotification, TimeoutNotification,
 };
 use hyperscale_types::{
     BeaconWitnessLeafCount, BeaconWitnessRoot, BeaconWitnessRootContext, Block, BlockHash,
@@ -25,7 +25,7 @@ use hyperscale_types::{
     StateRootContext, StoredReceipt, Timeout, TimeoutContext, TopologySnapshot, TransactionRoot,
     TransactionRootContext, ValidatorId, Verifiable, Verified, Verify, VoteCount,
     WeightedTimestamp, block_header_message, block_vote_message, certified_block_header_message,
-    compute_waves,
+    compute_waves, ready_signal_message,
 };
 
 /// Result of QC verification and assembly.
@@ -761,6 +761,26 @@ where
             ctx.network.notify(&recipients, &gossip);
             // Feed our own signed timeout back for local TimeoutKeeper tracking.
             ctx.notify_protocol(ProtocolEvent::VerifiedTimeoutReceived { timeout: verified });
+        }
+
+        Action::SignAndBroadcastReadySignal {
+            height_window_start,
+            height_window_end,
+            recipients,
+        } => {
+            let msg = ready_signal_message(
+                ctx.topology_snapshot.network(),
+                ctx.me,
+                height_window_start,
+                height_window_end,
+            );
+            let sig = ctx.signing_key.sign_v1(&msg);
+            let signal = ReadySignal::new(ctx.me, height_window_start, height_window_end, sig);
+            // No local feedback: the sender is outside the consensus
+            // subset, so it never proposes and its own pool entry would
+            // never drain — only the recipients' pools matter.
+            ctx.network
+                .notify(&recipients, &ReadySignalNotification::new(signal));
         }
 
         Action::VerifyTimeout {

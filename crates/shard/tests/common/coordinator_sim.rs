@@ -421,7 +421,7 @@ impl ShardCoordinatorSim {
     /// of sync mode.
     pub fn deliver_block_persisted(&mut self, replica: ValidatorId, height: BlockHeight) {
         let idx = self.idx_of(replica);
-        let actions = self.coordinators[idx].on_block_persisted(height);
+        let actions = self.coordinators[idx].on_block_persisted(&self.topology, height);
         self.absorb(idx, actions);
     }
 

@@ -79,6 +79,7 @@ where
             | Action::BroadcastBlockHeader { .. }
             | Action::SignAndBroadcastBlockVote { .. }
             | Action::SignAndBroadcastTimeout { .. }
+            | Action::SignAndBroadcastReadySignal { .. }
             | Action::BroadcastCertifiedBlockHeader { .. }
             | Action::SignAndSendExecutionVote { .. }
             | Action::BroadcastExecutionCertificate { .. }

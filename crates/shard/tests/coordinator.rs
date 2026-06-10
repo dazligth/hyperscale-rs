@@ -170,10 +170,10 @@ fn proposal_parent_block_hash_falls_back_to_committed_hash_without_qc() {
 
 #[test]
 fn on_block_persisted_returns_no_actions_when_not_syncing() {
-    let (mut coordinator, _topology) =
+    let (mut coordinator, topology) =
         fresh_coordinator_with_topology(ShardConsensusConfig::default());
 
-    let actions = coordinator.on_block_persisted(BlockHeight::new(1));
+    let actions = coordinator.on_block_persisted(&topology, BlockHeight::new(1));
     assert!(actions.is_empty());
     assert!(!coordinator.is_block_syncing());
 }
