@@ -66,6 +66,18 @@ pub fn jmt_value_hash(value: &[u8]) -> [u8; 32] {
     *blake3_hash(value).as_bytes()
 }
 
+/// Whether `leaf_key` binds `storage_key`: its low half equals
+/// `blake3(storage_key)`'s.
+///
+/// The high (owner-routing) half is positional — attested by whatever
+/// proof the leaf arrives under — so a verifier without the ownership
+/// map checks exactly this half to tie a shipped raw key to a proven
+/// leaf (snap-sync chunk verification).
+#[must_use]
+pub fn leaf_key_binds_storage_key(leaf_key: &[u8; 32], storage_key: &[u8]) -> bool {
+    leaf_key[16..] == blake3_hash(storage_key).as_bytes()[..16]
+}
+
 /// Decode the [`NodeId`] embedded in a `db_node_key` (or any storage key that
 /// begins with one). Returns `None` when the slice is shorter than a full
 /// `db_node_key`.

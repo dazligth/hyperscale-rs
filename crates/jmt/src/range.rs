@@ -447,6 +447,40 @@ fn subtree_high(path: &NibblePath, bucket: u8, arity_bits: u8) -> Key {
     key
 }
 
+/// The `index`-th of `2^split_bits` equal key sub-spans of the subtree
+/// at `path`, as an inclusive `(low, high)` pair.
+///
+/// Snap-sync fan-out partitions a shard's span this way so peers serve
+/// disjoint ranges in parallel.
+///
+/// # Panics
+///
+/// Panics if `index >= 2^split_bits`, `split_bits > 8`, or the split
+/// extends past the 256-bit key space.
+#[must_use]
+pub fn subspan(path: &NibblePath, split_bits: u8, index: u64) -> (Key, Key) {
+    assert!(split_bits <= 8, "subspan splits at most 8 bits at a time");
+    assert!(
+        index < 1 << split_bits,
+        "subspan index {index} out of range for {split_bits} split bits",
+    );
+    assert!(
+        usize::from(path.len()) + usize::from(split_bits) <= 256,
+        "subspan split extends past the key space",
+    );
+    let mut low = [0u8; 32];
+    low[..path.as_bytes().len()].copy_from_slice(path.as_bytes());
+    set_bits(
+        &mut low,
+        path.len(),
+        split_bits,
+        u8::try_from(index).expect("index < 2^split_bits <= 256"),
+    );
+    let mut high = low;
+    fill_from(&mut high, path.len() + u16::from(split_bits), true);
+    (low, high)
+}
+
 /// Overwrite `count` bits of `key` at bit offset `at` (from the MSB)
 /// with the low `count` bits of `val`.
 fn set_bits(key: &mut Key, at: u16, count: u8, val: u8) {

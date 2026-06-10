@@ -36,6 +36,7 @@ pub mod host;
 pub mod process_io;
 mod shard_io;
 pub mod shard_loop;
+pub mod snap_sync;
 mod state;
 mod vnode;
 
