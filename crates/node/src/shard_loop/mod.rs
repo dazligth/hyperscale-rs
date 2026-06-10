@@ -71,18 +71,28 @@ pub type SharedTopologySnapshot = Arc<ArcSwap<TopologySnapshot>>;
 ///
 /// Shard-scoped handles (`pending_chain`, `prepared_commits`) live in
 /// `per_shard`, keyed by the hosted shard id. Delegated handlers select
-/// the right entry from the emitting vnode's shard.
+/// the right entry from the emitting vnode's shard, loading the map per
+/// dispatch so shards added or dropped at runtime are observed.
 pub(crate) struct DispatchHandles<S: ShardStorage, N> {
     pub(crate) executor: RadixExecutor,
     pub(crate) network: Arc<N>,
     pub(crate) execution_cache: Arc<ProcessExecutionCache>,
-    pub(crate) per_shard: HashMap<ShardId, ShardDispatchHandles<S>>,
+    pub(crate) per_shard: ArcSwap<HashMap<ShardId, ShardDispatchHandles<S>>>,
 }
 
 /// Per-shard subset of [`DispatchHandles`]. One entry per hosted shard.
 pub(crate) struct ShardDispatchHandles<S: ShardStorage> {
     pub(crate) pending_chain: Arc<PendingChain<S>>,
     pub(crate) prepared_commits: Arc<Mutex<PreparedCommitMap>>,
+}
+
+impl<S: ShardStorage> Clone for ShardDispatchHandles<S> {
+    fn clone(&self) -> Self {
+        Self {
+            pending_chain: Arc::clone(&self.pending_chain),
+            prepared_commits: Arc::clone(&self.prepared_commits),
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -196,6 +206,11 @@ where
     /// held inline so methods on `ShardLoop` can self-identify without a
     /// parent-map lookup.
     pub shard: ShardId,
+    /// Sender for this shard's own event channel. The channel is created
+    /// with the loop and torn down with it, so the handle is cached here
+    /// rather than looked up through `ProcessIo`'s swappable map on
+    /// every dispatch.
+    pub(crate) event_tx: Sender<ShardEvent>,
     /// Process-scoped resources shared with every other hosted shard:
     /// network adapter, dispatch pool, tx validator, topology snapshot,
     /// dispatch handles, event sender. Cloned `Arc` so off-thread
@@ -247,8 +262,8 @@ where
     /// every callback this loop spawns (block-commit completions, fetch
     /// results, BLS-verify outcomes) and every protocol event it pushes
     /// back to itself.
-    pub(crate) fn event_sender(&self) -> &Sender<ShardEvent> {
-        self.process.shard_sender(self.shard)
+    pub(crate) const fn event_sender(&self) -> &Sender<ShardEvent> {
+        &self.event_tx
     }
 
     /// Access the vnode at `vnode_idx` within this shard's group.

@@ -379,7 +379,7 @@ impl SimulatedNetwork {
                         ShardTrie::uniform_from_count(num_shards).leaves().collect()
                     }
                 };
-                Arc::new(HandlerRegistry::new(Arc::new(hosted)))
+                Arc::new(HandlerRegistry::new(hosted))
             })
             .collect();
         Self {

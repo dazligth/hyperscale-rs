@@ -10,10 +10,12 @@
 //! Handlers are stored as type-erased closures. Typed wrappers are
 //! created by the typed registration methods in this module.
 //!
-//! All registrations happen at init (before any messages arrive), so
-//! the read path is lock-free: each map is an `ArcSwap<HashMap<_, _>>`
-//! that `register_*` clones-modifies-stores under the implicit init
-//! serialization, and `get_*` resolves with a single atomic load.
+//! The read path is lock-free: each map is an `ArcSwap<HashMap<_, _>>`
+//! and `get_*` resolves with a single atomic load. Writes (handler
+//! registration, per-shard unregistration, hosted-set swaps) clone-
+//! modify-store without a CAS retry, which is safe because they are
+//! serialized — at init before any messages arrive, and afterwards
+//! only from the single thread driving shard reconfiguration.
 
 use std::any::{Any, TypeId};
 use std::collections::{HashMap, HashSet};
@@ -94,7 +96,7 @@ const DEDUP_CACHE_CAPACITY: usize = 1024;
 
 struct TypedGossipDispatcher<M, H> {
     handler: Arc<H>,
-    hosted_shards: Arc<HashSet<ShardId>>,
+    hosted_shards: Arc<ArcSwap<HashSet<ShardId>>>,
     /// Content-key dedup cache (see [`GossipMessage::dedup_key`]). Idle
     /// for types whose `dedup_key` returns `None`.
     dedup: QuickCache<u64, ()>,
@@ -106,23 +108,22 @@ where
     M: GossipMessage + 'static,
     H: GossipHandler<M>,
 {
-    /// Compute the per-message target hosted-shard set.
+    /// Compute the per-message target hosted-shard set, loaded fresh so
+    /// a shard added or dropped at runtime is observed on the next
+    /// message.
     ///
     /// - `Shard` messages: the topic's shard, if hosted.
     /// - `Global` messages: every hosted shard except [`GossipMessage::source_shard`].
     fn target_shards(&self, msg: &M, topic_shard: Option<ShardId>) -> Vec<ShardId> {
+        let hosted = self.hosted_shards.load();
         match M::SCOPE {
             TopicScope::Shard => match topic_shard {
-                Some(s) if self.hosted_shards.contains(&s) => vec![s],
+                Some(s) if hosted.contains(&s) => vec![s],
                 _ => Vec::new(),
             },
             TopicScope::Global => {
                 let src = msg.source_shard();
-                self.hosted_shards
-                    .iter()
-                    .copied()
-                    .filter(|s| Some(*s) != src)
-                    .collect()
+                hosted.iter().copied().filter(|s| Some(*s) != src).collect()
             }
         }
     }
@@ -235,8 +236,10 @@ where
 ///   routing logic.
 pub struct HandlerRegistry {
     /// Shards hosted by the owning process. Drives the per-vnode
-    /// fan-out inside [`TypedGossipDispatcher`].
-    hosted_shards: Arc<HashSet<ShardId>>,
+    /// fan-out inside [`TypedGossipDispatcher`], which loads it per
+    /// message; swapped via [`Self::set_hosted_shards`] when shard
+    /// participation changes.
+    hosted_shards: Arc<ArcSwap<HashSet<ShardId>>>,
     gossip: ArcSwap<HashMap<&'static str, Arc<RawGossipHandler>>>,
     request: ArcSwap<HashMap<(&'static str, ShardId), Arc<RawRequestHandler>>>,
     notification: ArcSwap<HashMap<&'static str, Arc<RawNotificationHandler>>>,
@@ -255,9 +258,9 @@ pub struct HandlerRegistry {
 impl HandlerRegistry {
     /// Create a registry serving the given hosted shards.
     #[must_use]
-    pub fn new(hosted_shards: Arc<HashSet<ShardId>>) -> Self {
+    pub fn new(hosted_shards: HashSet<ShardId>) -> Self {
         Self {
-            hosted_shards,
+            hosted_shards: Arc::new(ArcSwap::from_pointee(hosted_shards)),
             gossip: ArcSwap::from_pointee(HashMap::new()),
             request: ArcSwap::from_pointee(HashMap::new()),
             notification: ArcSwap::from_pointee(HashMap::new()),
@@ -267,10 +270,32 @@ impl HandlerRegistry {
         }
     }
 
-    /// Shards hosted by the registry's owner.
+    /// Shards hosted by the registry's owner (a loaded snapshot).
     #[must_use]
-    pub const fn hosted_shards(&self) -> &Arc<HashSet<ShardId>> {
-        &self.hosted_shards
+    pub fn hosted_shards(&self) -> Arc<HashSet<ShardId>> {
+        self.hosted_shards.load_full()
+    }
+
+    /// Replace the hosted-shard set. Every gossip dispatcher observes
+    /// the new set on its next message; in-flight dispatches finish
+    /// against the snapshot they loaded.
+    pub fn set_hosted_shards(&self, hosted: HashSet<ShardId>) {
+        self.hosted_shards.store(Arc::new(hosted));
+    }
+
+    /// Remove every request handler registered for `shard` — both the
+    /// wire map and the in-process dispatch map — so a later re-join
+    /// can register the shard afresh without tripping the duplicate-
+    /// registration assert. Requests already dispatched against the old
+    /// snapshot complete against the handlers they resolved.
+    pub fn unregister_requests_for_shard(&self, shard: ShardId) {
+        let mut wire = (**self.request.load()).clone();
+        wire.retain(|(_, s), _| *s != shard);
+        self.request.store(Arc::new(wire));
+
+        let mut local = (**self.local_request.load()).clone();
+        local.retain(|(_, s), _| *s != shard);
+        self.local_request.store(Arc::new(local));
     }
 
     // ── Typed registration (used by Network impls) ──
@@ -569,7 +594,7 @@ impl HandlerRegistry {
 
 impl Default for HandlerRegistry {
     fn default() -> Self {
-        Self::new(Arc::new(HashSet::new()))
+        Self::new(HashSet::new())
     }
 }
 
@@ -595,7 +620,7 @@ mod tests {
             const SCOPE: TopicScope = TopicScope::Shard;
         }
 
-        let hosted = Arc::new(std::iter::once(ShardId::leaf(1, 0)).collect());
+        let hosted = std::iter::once(ShardId::leaf(1, 0)).collect();
         let registry = HandlerRegistry::new(hosted);
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
@@ -663,6 +688,107 @@ mod tests {
         );
     }
 
+    /// Gossip fan-out tracks the hosted-shard set live: a dispatcher
+    /// registered before a hosted-set swap routes to the new set on its
+    /// next message.
+    #[test]
+    fn gossip_fanout_observes_hosted_shard_swap() {
+        use hyperscale_types::NetworkMessage;
+        use sbor::{Decode, Encode, basic_encode};
+
+        #[derive(Debug, Clone, Encode, Decode)]
+        struct SwapMsg(u32);
+        impl NetworkMessage for SwapMsg {
+            fn message_type_id() -> &'static str {
+                "test.hosted_swap"
+            }
+        }
+        impl GossipMessage for SwapMsg {
+            const SCOPE: TopicScope = TopicScope::Shard;
+        }
+
+        let shard_a = ShardId::leaf(1, 0);
+        let shard_b = ShardId::leaf(1, 1);
+        let registry = HandlerRegistry::new(std::iter::once(shard_a).collect());
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_clone = Arc::clone(&hits);
+        registry.register_gossip(move |_msg: SwapMsg, _shard: ShardId| -> GossipVerdict {
+            hits_clone.fetch_add(1, Ordering::SeqCst);
+            GossipVerdict::Accept
+        });
+        let handler = registry.get_gossip("test.hosted_swap").unwrap();
+        let encoded = basic_encode(&SwapMsg(1)).unwrap();
+
+        // Shard B isn't hosted — the message is forwarded but not delivered.
+        let _ = handler(encoded.clone(), Some(shard_b));
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+
+        // After the swap the same registered handler receives shard B and
+        // no longer receives shard A.
+        registry.set_hosted_shards(std::iter::once(shard_b).collect());
+        let _ = handler(encoded.clone(), Some(shard_b));
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        let _ = handler(encoded, Some(shard_a));
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    /// Per-shard request unregistration clears both dispatch maps and
+    /// lets the shard register afresh without tripping the duplicate-
+    /// registration assert; other shards' handlers are untouched.
+    #[test]
+    fn unregister_requests_for_shard_clears_and_allows_rejoin() {
+        use hyperscale_types::{NetworkMessage, Request};
+        use sbor::{Decode, Encode};
+
+        #[derive(Debug, Encode, Decode)]
+        struct RejoinReq(u32);
+        impl NetworkMessage for RejoinReq {
+            fn message_type_id() -> &'static str {
+                "test.rejoin_request"
+            }
+        }
+        #[derive(Debug, Encode, Decode, PartialEq)]
+        struct RejoinResp(u32);
+        impl NetworkMessage for RejoinResp {
+            fn message_type_id() -> &'static str {
+                "test.rejoin_response"
+            }
+        }
+        impl Request for RejoinReq {
+            type Response = RejoinResp;
+        }
+
+        let registry = HandlerRegistry::default();
+        let shard_a = ShardId::leaf(1, 0);
+        let shard_b = ShardId::leaf(1, 1);
+        registry.register_request(shard_a, |req: RejoinReq| RejoinResp(req.0));
+        registry.register_request(shard_b, |req: RejoinReq| RejoinResp(req.0 + 100));
+
+        registry.unregister_requests_for_shard(shard_a);
+        assert!(
+            registry
+                .get_request("test.rejoin_request", shard_a)
+                .is_none()
+        );
+        assert!(
+            registry
+                .local_dispatch_request(shard_a, RejoinReq(1))
+                .is_none()
+        );
+        // Shard B's handler survives.
+        assert_eq!(
+            registry.local_dispatch_request(shard_b, RejoinReq(1)),
+            Some(RejoinResp(101))
+        );
+
+        // Re-join: registration succeeds again and serves.
+        registry.register_request(shard_a, |req: RejoinReq| RejoinResp(req.0 + 1));
+        assert_eq!(
+            registry.local_dispatch_request(shard_a, RejoinReq(1)),
+            Some(RejoinResp(2))
+        );
+    }
+
     #[test]
     #[should_panic(expected = "duplicate gossip handler registration")]
     fn test_double_registration_panics() {
@@ -715,8 +841,7 @@ mod tests {
             const SCOPE: TopicScope = TopicScope::Shard;
         }
 
-        let hosted: Arc<HashSet<ShardId>> =
-            Arc::new(std::iter::once(ShardId::leaf(1, 0)).collect());
+        let hosted: HashSet<ShardId> = std::iter::once(ShardId::leaf(1, 0)).collect();
         let registry = HandlerRegistry::new(hosted);
 
         let observed: Arc<Mutex<Option<Verifiable<u32>>>> = Arc::new(Mutex::new(None));

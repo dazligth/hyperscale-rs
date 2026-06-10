@@ -1132,7 +1132,7 @@ struct NetworkStack {
 }
 
 fn build_network_stack(args: NetworkBuildArgs) -> Result<NetworkStack, RunnerError> {
-    let registry = Arc::new(HandlerRegistry::new(Arc::new(args.local_shards.clone())));
+    let registry = Arc::new(HandlerRegistry::new(args.local_shards.clone()));
 
     let adapter = Libp2pAdapter::new(
         args.network_config,

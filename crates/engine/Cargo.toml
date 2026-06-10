@@ -9,6 +9,7 @@ hyperscale-storage.workspace = true
 hyperscale-types.workspace = true
 
 # External dependencies
+arc-swap.workspace = true
 dashmap.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

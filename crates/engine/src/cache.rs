@@ -28,6 +28,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
+use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry as DashEntry;
 use hyperscale_types::{RETENTION_HORIZON, ShardId, TxHash, WeightedTimestamp};
@@ -116,8 +117,11 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 pub struct ProcessExecutionCache {
     /// Shards this process hosts. Used to narrow each tx's participating
     /// shard set down to the slice this cache can actually observe
-    /// finalising via [`Self::on_finalized_wave`].
-    hosted_shards: HashSet<ShardId>,
+    /// finalising via [`Self::on_finalized_wave`]. Loaded per acquire;
+    /// swapped via [`Self::set_hosted_shards`] when shard participation
+    /// changes, with the retention sweep covering entries whose claims
+    /// were stamped under the old set.
+    hosted_shards: ArcSwap<HashSet<ShardId>>,
     entries: DashMap<TxHash, Entry>,
     timeline: Mutex<Timeline>,
 }
@@ -130,13 +134,21 @@ impl ProcessExecutionCache {
     #[must_use]
     pub fn new(hosted_shards: HashSet<ShardId>) -> Self {
         Self {
-            hosted_shards,
+            hosted_shards: ArcSwap::from_pointee(hosted_shards),
             entries: DashMap::new(),
             timeline: Mutex::new(Timeline {
                 by_ts: BTreeMap::new(),
                 now: WeightedTimestamp::ZERO,
             }),
         }
+    }
+
+    /// Replace the hosted-shard set. New entries stamp their pending
+    /// claims from the new set on the next acquire; existing entries
+    /// keep the claims they were inserted with — a dropped shard can no
+    /// longer decrement them, so the retention sweep reaps those.
+    pub fn set_hosted_shards(&self, hosted: HashSet<ShardId>) {
+        self.hosted_shards.store(Arc::new(hosted));
     }
 
     /// Non-blocking slot acquisition keyed by `tx_hash`.
@@ -182,9 +194,10 @@ impl ProcessExecutionCache {
                 )
             }
             DashEntry::Vacant(vac) => {
+                let hosted = self.hosted_shards.load();
                 let pending_shards: HashSet<ShardId> = participating
                     .into_iter()
-                    .filter(|s| self.hosted_shards.contains(s))
+                    .filter(|s| hosted.contains(s))
                     .collect();
                 // Stamp `inserted_at_ts` from the same `now` snapshot
                 // that publishes the tx hash into `by_ts`, so the
@@ -385,6 +398,23 @@ mod tests {
         let cache = ProcessExecutionCache::new(hosted(&[0]));
         populate(&cache, tx_hash(1), [shard(0), shard(5)]);
         cache.on_finalized_wave(shard(0), [tx_hash(1)]);
+        assert!(cache.is_empty());
+    }
+
+    /// New entries stamp their pending claims from the hosted set as it
+    /// stands at acquire time, so a swapped set governs entries inserted
+    /// after it.
+    #[test]
+    fn hosted_shard_swap_governs_new_entries() {
+        let cache = ProcessExecutionCache::new(hosted(&[0]));
+        cache.set_hosted_shards(hosted(&[1]));
+        populate(&cache, tx_hash(1), [shard(0), shard(1)]);
+
+        // Shard 0 is no longer hosted — its wave can't decrement.
+        cache.on_finalized_wave(shard(0), [tx_hash(1)]);
+        assert_eq!(cache.len(), 1);
+        // Shard 1 owns the entry's lifetime under the new set.
+        cache.on_finalized_wave(shard(1), [tx_hash(1)]);
         assert!(cache.is_empty());
     }
 

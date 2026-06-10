@@ -13,6 +13,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use crossbeam::channel::Sender;
 use hyperscale_beacon::proposal_pool::BeaconProposalPool;
 use hyperscale_dispatch::Dispatch;
@@ -237,7 +238,7 @@ where
             executor,
             network: Arc::clone(&network),
             execution_cache,
-            per_shard: per_shard_dispatch,
+            per_shard: ArcSwap::from_pointee(per_shard_dispatch),
         });
         assert_eq!(
             shard_event_senders.len(),
@@ -269,6 +270,7 @@ where
             .map(|(shard, (io, vnodes))| {
                 let shard_loop = ShardLoop {
                     shard,
+                    event_tx: process.shard_sender(shard),
                     process: Arc::clone(&process),
                     io,
                     vnodes,

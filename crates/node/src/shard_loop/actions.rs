@@ -155,7 +155,7 @@ where
                     });
                 self.process_beacon_block_sync_outputs(outputs);
                 push_protocol_event(
-                    self.process.shard_sender(self.shard),
+                    self.event_sender(),
                     self.shard,
                     ProtocolEvent::BeaconBlockPersisted { epoch },
                 );
@@ -673,8 +673,8 @@ where
         let par = self.process.dispatch.parallelism();
 
         self.process.dispatch.spawn(pool, move || {
-            let shard_handles = handles
-                .per_shard
+            let per_shard = handles.per_shard.load();
+            let shard_handles = per_shard
                 .get(&shard)
                 .expect("hosted shard derived from vnode");
             // Action handlers emit `ProtocolEvent`s; stamp each with the

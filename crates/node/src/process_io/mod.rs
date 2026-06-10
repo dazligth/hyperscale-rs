@@ -14,6 +14,7 @@ mod network_handlers;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 pub(crate) use beacon_commit::BeaconCommitCoordinator;
 use crossbeam::channel::Sender;
 use hyperscale_beacon::proposal_pool::BeaconProposalPool;
@@ -24,6 +25,13 @@ use hyperscale_types::{RoutableTransaction, ShardId};
 
 use crate::event::{ShardEvent, ShardScopedInput};
 use crate::shard_loop::{DispatchHandles, SharedTopologySnapshot};
+
+/// Lock-free per-shard event-sender map.
+///
+/// Handler closures and RPC fan-out `.load()` for an atomic snapshot on
+/// every use; the map is swapped only when shard participation changes,
+/// and the reconfiguring thread is the sole writer.
+pub(crate) type SharedShardSenders = Arc<ArcSwap<HashMap<ShardId, Sender<ShardEvent>>>>;
 
 /// Process-scoped resources shared across every hosted shard.
 ///
@@ -54,8 +62,10 @@ where
     /// results here as [`ShardEvent`] envelopes (a `NodeInput` plus its
     /// hosted-shard tag), routed to the shard's sender so the right
     /// driver picks them up on its next iteration. Inbound network
-    /// handlers route by the shard tag inside the decoded payload.
-    pub(crate) shard_event_senders: HashMap<ShardId, Sender<ShardEvent>>,
+    /// handlers route by the shard tag inside the decoded payload,
+    /// loading the map per message so a shard added or dropped at
+    /// runtime is observed immediately.
+    pub(crate) shard_event_senders: SharedShardSenders,
 
     /// Lock-free topology snapshot shared with network handler closures
     /// and delegated dispatch jobs. The pinned thread is the sole writer
@@ -113,7 +123,7 @@ where
         Self {
             network,
             dispatch,
-            shard_event_senders,
+            shard_event_senders: Arc::new(ArcSwap::from_pointee(shard_event_senders)),
             topology_snapshot,
             dispatch_handles,
             tx_validator,
@@ -123,14 +133,17 @@ where
         }
     }
 
-    /// Sender for `shard`'s event channel.
+    /// Sender for `shard`'s event channel (an owned clone — crossbeam
+    /// senders are cheap `Arc` handles).
     ///
     /// # Panics
     /// Panics if `shard` isn't hosted by this `ProcessIo`.
-    pub(crate) fn shard_sender(&self, shard: ShardId) -> &Sender<ShardEvent> {
+    pub(crate) fn shard_sender(&self, shard: ShardId) -> Sender<ShardEvent> {
         self.shard_event_senders
+            .load()
             .get(&shard)
             .unwrap_or_else(|| panic!("shard {shard:?} not hosted by this ProcessIo"))
+            .clone()
     }
 
     /// Compute the cross-shard admission plan for a locally-submitted
@@ -156,8 +169,8 @@ where
             .into_iter()
             .collect();
 
-        let mut hosted_touched = self
-            .shard_event_senders
+        let senders = self.shard_event_senders.load();
+        let mut hosted_touched = senders
             .keys()
             .copied()
             .filter(|s| touched_shards.contains(s));
@@ -171,8 +184,7 @@ where
         } else {
             // `NodeHost::new` asserts at least one hosted shard, so
             // there is always a host available to flush gossip.
-            let host = self
-                .shard_event_senders
+            let host = senders
                 .keys()
                 .copied()
                 .next()

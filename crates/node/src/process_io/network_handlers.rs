@@ -385,6 +385,7 @@ where
             .network
             .register_gossip_handler::<TransactionGossip>(
                 move |gossip: TransactionGossip, shard: ShardId| -> GossipVerdict {
+                    let senders = senders.load();
                     let Some(tx) = senders.get(&shard) else {
                         warn!(
                             shard = shard.inner(),
@@ -415,6 +416,7 @@ where
             .network
             .register_gossip_handler::<CertifiedBlockHeaderGossip>(
                 move |gossip: CertifiedBlockHeaderGossip, target_shard: ShardId| -> GossipVerdict {
+                    let senders = senders.load();
                     let Some(tx) = senders.get(&target_shard) else {
                         warn!(
                             target_shard = target_shard.inner(),
@@ -458,6 +460,7 @@ where
             .network
             .register_gossip_handler::<BeaconBlockGossip>(
                 move |gossip: BeaconBlockGossip, target_shard: ShardId| -> GossipVerdict {
+                    let senders = senders.load();
                     let Some(tx) = senders.get(&target_shard) else {
                         warn!(
                             target_shard = target_shard.inner(),
@@ -482,6 +485,7 @@ where
             .network
             .register_gossip_handler::<SkipRequestGossip>(
                 move |gossip: SkipRequestGossip, target_shard: ShardId| -> GossipVerdict {
+                    let senders = senders.load();
                     let Some(tx) = senders.get(&target_shard) else {
                         return GossipVerdict::Reject;
                     };
@@ -518,6 +522,7 @@ where
             .register_notification_handler::<BlockVoteNotification>(
                 move |gossip: BlockVoteNotification| {
                     let shard = gossip.vote.shard_id();
+                    let senders = senders.load();
                     let Some(tx) = senders.get(&shard) else {
                         warn!(
                             target_shard = shard.inner(),
@@ -540,6 +545,7 @@ where
             .register_notification_handler::<TimeoutNotification>(
                 move |gossip: TimeoutNotification| {
                     let shard = gossip.timeout.shard_id();
+                    let senders = senders.load();
                     let Some(tx) = senders.get(&shard) else {
                         warn!(
                             target_shard = shard.inner(),
@@ -564,6 +570,7 @@ where
             .register_notification_handler::<BlockHeaderNotification>(
                 move |gossip: BlockHeaderNotification| {
                     let shard = gossip.header.shard_id();
+                    let senders = senders.load();
                     let Some(tx) = senders.get(&shard) else {
                         warn!(
                             target_shard = shard.inner(),
@@ -602,6 +609,7 @@ where
                     let target_shard = notification.provisions.target_shard();
                     // Drop provisions not destined for any hosted shard before
                     // paying the BLS verification cost.
+                    let senders = senders.load();
                     let Some(tx) = senders.get(&target_shard) else {
                         warn!(
                             source_shard = notification.provisions.source_shard().inner(),
@@ -658,6 +666,7 @@ where
                     // shard to identify the target hosted shard and gate
                     // before paying the BLS verification cost.
                     let target_shard = batch.votes[0].shard_id();
+                    let senders = senders.load();
                     let Some(tx) = senders.get(&target_shard) else {
                         warn!(
                             target_shard = target_shard.inner(),
@@ -744,7 +753,7 @@ where
                     // shard for a cert isn't known here without inspecting
                     // expected-cert sets, so each hosted shard decides
                     // whether to admit (no-op if unexpected).
-                    for (hosted_shard, tx) in &senders {
+                    for (hosted_shard, tx) in senders.load().iter() {
                         push_protocol_event(
                             tx,
                             *hosted_shard,
@@ -792,7 +801,7 @@ where
                         );
                         return;
                     }
-                    for (hosted_shard, tx) in &senders {
+                    for (hosted_shard, tx) in senders.load().iter() {
                         push_protocol_event(
                             tx,
                             *hosted_shard,
@@ -829,7 +838,7 @@ where
                             proposal: Arc::new(unverified.into()),
                         },
                     };
-                    for (hosted_shard, tx) in &senders {
+                    for (hosted_shard, tx) in senders.load().iter() {
                         push_protocol_event(tx, *hosted_shard, event.clone());
                     }
                 },
@@ -855,7 +864,7 @@ where
                                 vote: register_pc_vote_handler!(@wrap $($box)? unverified.into()),
                             },
                         };
-                        for (hosted_shard, tx) in &senders {
+                        for (hosted_shard, tx) in senders.load().iter() {
                             push_protocol_event(tx, *hosted_shard, event.clone());
                         }
                     },
@@ -909,7 +918,7 @@ where
                         from,
                         proposal: gossip.proposal,
                     };
-                    for (hosted_shard, tx) in &senders {
+                    for (hosted_shard, tx) in senders.load().iter() {
                         push_protocol_event(tx, *hosted_shard, event.clone());
                     }
                 },
@@ -936,7 +945,7 @@ where
                         from,
                         msg: gossip.msg,
                     };
-                    for (hosted_shard, tx) in &senders {
+                    for (hosted_shard, tx) in senders.load().iter() {
                         push_protocol_event(tx, *hosted_shard, event.clone());
                     }
                 },
@@ -976,7 +985,7 @@ where
                             msg: Arc::new(unverified.into()),
                         },
                     };
-                    for (hosted_shard, tx) in &senders {
+                    for (hosted_shard, tx) in senders.load().iter() {
                         push_protocol_event(tx, *hosted_shard, event.clone());
                     }
                 },
