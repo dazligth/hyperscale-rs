@@ -24,7 +24,7 @@ pub fn vote_recipients(
     round: Round,
 ) -> Vec<ValidatorId> {
     const K: usize = 2;
-    let committee_len = topology.committee_for_shard(shard).len();
+    let committee_len = topology.consensus_committee_for_shard(shard).len();
     let mut recipients = Vec::with_capacity(K + 1);
 
     let block_proposer = topology.proposer_for(shard, round);
@@ -47,11 +47,12 @@ pub fn vote_recipients(
     recipients
 }
 
-/// Committee public keys in canonical index order.
+/// Consensus-committee public keys in canonical index order.
 ///
 /// Used when delegating QC signature verification: the runner receives all
-/// keys and filters by the QC's `signers` bitfield. Passing the full list
-/// in canonical order ensures consistent aggregation across validators.
+/// keys and filters by the QC's `signers` bitfield, whose indices encode
+/// positions in the ready-filtered consensus committee. Passing the full
+/// list in canonical order ensures consistent aggregation across validators.
 ///
 /// # Panics
 ///
@@ -65,7 +66,7 @@ pub fn committee_public_keys(
     shard: ShardId,
 ) -> Vec<Bls12381G1PublicKey> {
     topology
-        .committee_for_shard(shard)
+        .consensus_committee_for_shard(shard)
         .iter()
         .map(|&validator_id| {
             topology.public_key(validator_id).unwrap_or_else(|| {

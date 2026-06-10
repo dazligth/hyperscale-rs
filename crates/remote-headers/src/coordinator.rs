@@ -689,7 +689,7 @@ impl RemoteHeaderCoordinator {
         sender: ValidatorId,
         certified_header: Arc<CertifiedBlockHeader>,
     ) -> Vec<Action> {
-        let committee = topology.committee_for_shard(shard);
+        let committee = topology.consensus_committee_for_shard(shard);
         let committee_public_keys: Vec<Bls12381G1PublicKey> = committee
             .iter()
             .map(|v| {

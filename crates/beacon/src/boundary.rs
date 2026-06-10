@@ -208,7 +208,7 @@ fn boundary_qc_authentic(
             return false;
         }
     };
-    let committee = snapshot.committee_for_shard(shard);
+    let committee = snapshot.consensus_committee_for_shard(shard);
     if committee.is_empty() {
         return false;
     }

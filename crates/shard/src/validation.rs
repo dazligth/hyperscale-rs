@@ -34,7 +34,7 @@ pub fn qc_has_local_quorum_power(
     local_shard: ShardId,
     qc: &QuorumCertificate,
 ) -> bool {
-    let committee = topology.committee_for_shard(local_shard);
+    let committee = topology.consensus_committee_for_shard(local_shard);
     let qc_power: VoteCount = qc
         .signers()
         .set_indices()

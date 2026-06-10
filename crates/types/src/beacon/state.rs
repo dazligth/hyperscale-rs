@@ -277,6 +277,22 @@ pub struct BeaconState {
     /// invariant holds here. At the start of the next `apply_epoch` this
     /// value is promoted into `shard_committees`.
     pub next_shard_committees: BTreeMap<ShardId, ShardCommittee>,
+    /// Ready-filtered consensus subset of `shard_committees`, frozen at
+    /// promotion: each shard's members whose status was `OnShard { shard,
+    /// ready: true }` when the lookahead committee was promoted — i.e.
+    /// statuses as of the end of the prior epoch's fold, before this
+    /// epoch's witnesses apply. Proposer rotation, quorum thresholds, and
+    /// vote-bitfield indexing for the window this state governs read this
+    /// subset; full `shard_committees` membership remains the networking
+    /// view.
+    ///
+    /// Freezing here keeps the subset byte-identical to what the prior
+    /// state's lookahead derivation computed live from the same statuses,
+    /// so a window's consensus committee is the same whether a node
+    /// resolves it from the lookahead schedule entry or the re-derived
+    /// active one — a Ready or Jail witness folding this epoch takes
+    /// consensus effect one window out, exactly like membership changes.
+    pub shard_consensus_members: BTreeMap<ShardId, Vec<ValidatorId>>,
     /// Per-shard boundary record: the snap-sync anchor (`state_root` /
     /// `block_hash`), the applied witness high-water mark, and the
     /// liveness history. Seeded for every genesis shard so it is never
@@ -531,7 +547,9 @@ impl BeaconState {
     }
 
     /// Derive the immutable [`TopologySnapshot`] for the window this
-    /// state governs — the **active** committee (`shard_committees`).
+    /// state governs — the **active** committee (`shard_committees`)
+    /// with the promotion-frozen consensus subset
+    /// (`shard_consensus_members`).
     ///
     /// The snapshot is the read-only consumer-facing view of validator
     /// placement: shard committees, per-validator pubkeys, and the
@@ -541,22 +559,63 @@ impl BeaconState {
     /// All validators are assigned uniform [`VoteCount::new(1)`].
     #[must_use]
     pub fn derive_topology_snapshot(&self, network: NetworkDefinition) -> TopologySnapshot {
-        self.derive_topology_from(&self.shard_committees, network)
+        self.derive_topology_from(
+            &self.shard_committees,
+            self.shard_consensus_members.clone(),
+            network,
+        )
     }
 
     /// Derive the [`TopologySnapshot`] for the **next** epoch's window —
     /// the lookahead committee (`next_shard_committees`) that becomes
-    /// active one epoch from now. The coordinator inserts this under the
-    /// next epoch's key so a shard can resolve its committee before the
-    /// window opens.
+    /// active one epoch from now, with its consensus subset resolved live
+    /// from current validator statuses (the same statuses promotion will
+    /// freeze when that window opens). The coordinator inserts this under
+    /// the next epoch's key so a shard can resolve its committee before
+    /// the window opens.
     #[must_use]
     pub fn derive_next_topology_snapshot(&self, network: NetworkDefinition) -> TopologySnapshot {
-        self.derive_topology_from(&self.next_shard_committees, network)
+        self.derive_topology_from(
+            &self.next_shard_committees,
+            self.ready_consensus_members(&self.next_shard_committees),
+            network,
+        )
+    }
+
+    /// Ready-filtered consensus subset of `committees`, resolved per
+    /// `(member, shard)` against current validator statuses: a member of
+    /// shard `s` counts iff its status is `OnShard { shard: s, ready:
+    /// true }`. Member order is preserved, so bitfield indices are stable
+    /// across every node deriving from the same state.
+    #[must_use]
+    pub fn ready_consensus_members(
+        &self,
+        committees: &BTreeMap<ShardId, ShardCommittee>,
+    ) -> BTreeMap<ShardId, Vec<ValidatorId>> {
+        committees
+            .iter()
+            .map(|(shard, committee)| {
+                let ready: Vec<ValidatorId> = committee
+                    .members
+                    .iter()
+                    .filter(|id| {
+                        matches!(
+                            self.validators.get(id).map(|r| r.status),
+                            Some(ValidatorStatus::OnShard { shard: s, ready: true, .. })
+                                if s == *shard
+                        )
+                    })
+                    .copied()
+                    .collect();
+                (*shard, ready)
+            })
+            .collect()
     }
 
     fn derive_topology_from(
         &self,
         committees: &BTreeMap<ShardId, ShardCommittee>,
+        consensus_members: BTreeMap<ShardId, Vec<ValidatorId>>,
         network: NetworkDefinition,
     ) -> TopologySnapshot {
         let validators: Vec<ValidatorInfo> = self
@@ -573,6 +632,8 @@ impl BeaconState {
             .iter()
             .map(|(sid, sc)| (*sid, sc.members.clone()))
             .collect();
+        let consensus_members: HashMap<ShardId, Vec<ValidatorId>> =
+            consensus_members.into_iter().collect();
 
         // Project each shard's snap-sync anchor across the CQRS firewall.
         // Genesis seeds zeroed placeholder boundaries until a shard's first
@@ -599,6 +660,7 @@ impl BeaconState {
             network,
             &validator_set,
             shard_committees,
+            consensus_members,
             boundaries,
         )
     }
@@ -771,6 +833,7 @@ mod tests {
             committee: Vec::new(),
             shard_committees: BTreeMap::new(),
             next_shard_committees: BTreeMap::new(),
+            shard_consensus_members: BTreeMap::new(),
             boundaries: BTreeMap::new(),
             miss_counters: BTreeMap::new(),
         }
@@ -958,6 +1021,57 @@ mod tests {
         });
         let pool = state.pools.get(&StakePoolId::new(0)).unwrap();
         assert_eq!(pool.max_active_count(&state), 0);
+    }
+
+    // ─── ready_consensus_members ──────────────────────────────────────
+
+    /// The consensus subset resolves per `(member, shard)`: a member of
+    /// shard `s` counts only when its status is `OnShard { shard: s,
+    /// ready: true }`. Not-ready, jailed, and elsewhere-placed members
+    /// stay in the committee (the networking view) but drop out of the
+    /// subset, in member order.
+    #[test]
+    fn ready_consensus_members_filters_per_member_shard_status() {
+        let mut state = single_pool_state(4);
+        let shard = ShardId::ROOT;
+        state
+            .validators
+            .get_mut(&ValidatorId::new(1))
+            .unwrap()
+            .status = ValidatorStatus::OnShard {
+            shard,
+            ready: false,
+            placed_at_epoch: Epoch::GENESIS,
+        };
+        state
+            .validators
+            .get_mut(&ValidatorId::new(2))
+            .unwrap()
+            .status = ValidatorStatus::Jailed {
+            since_epoch: Epoch::GENESIS,
+            reason: JailReason::Performance,
+        };
+        state
+            .validators
+            .get_mut(&ValidatorId::new(3))
+            .unwrap()
+            .status = ValidatorStatus::OnShard {
+            shard: ShardId::leaf(1, 1),
+            ready: true,
+            placed_at_epoch: Epoch::GENESIS,
+        };
+
+        let subset = state.ready_consensus_members(&state.next_shard_committees);
+        assert_eq!(subset[&shard], vec![ValidatorId::new(0)]);
+
+        // The lookahead snapshot reflects the same split: full
+        // membership intact, consensus queries over the subset only.
+        let snapshot = state.derive_next_topology_snapshot(NetworkDefinition::simulator());
+        assert_eq!(snapshot.committee_for_shard(shard).len(), 4);
+        assert_eq!(
+            snapshot.consensus_committee_for_shard(shard),
+            [ValidatorId::new(0)]
+        );
     }
 
     // ─── miss counter sanity ──────────────────────────────────────────

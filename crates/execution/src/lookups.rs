@@ -50,7 +50,7 @@ pub fn peers_excluding_self(
 #[must_use]
 pub fn ec_has_shard_quorum_power(topology: &TopologySnapshot, ec: &ExecutionCertificate) -> bool {
     let shard = ec.shard_id();
-    let committee = topology.committee_for_shard(shard);
+    let committee = topology.consensus_committee_for_shard(shard);
     let signers_power: VoteCount = ec
         .signers()
         .set_indices()
@@ -64,7 +64,8 @@ pub fn ec_has_shard_quorum_power(topology: &TopologySnapshot, ec: &ExecutionCert
     VoteCount::has_quorum(signers_power, topology.committee_votes(shard))
 }
 
-/// Public keys for a shard's committee, in canonical committee order.
+/// Public keys for a shard's consensus committee, in canonical order —
+/// the positions EC signer bitfields index into.
 ///
 /// Returns `None` if any committee member's public key is missing from the
 /// topology — a signal the snapshot is corrupt and verification should not
@@ -73,7 +74,7 @@ pub fn committee_public_keys_for_shard(
     topology: &TopologySnapshot,
     shard: ShardId,
 ) -> Option<Vec<Bls12381G1PublicKey>> {
-    let committee = topology.committee_for_shard(shard);
+    let committee = topology.consensus_committee_for_shard(shard);
     let mut pubkeys = Vec::with_capacity(committee.len());
     for &vid in committee {
         pubkeys.push(topology.public_key(vid)?);

@@ -3832,6 +3832,7 @@ mod tests {
             .insert(ShardId::leaf(1, 0), committee.clone());
         s.next_shard_committees
             .insert(ShardId::leaf(1, 0), committee);
+        s.shard_consensus_members = s.ready_consensus_members(&s.shard_committees);
         s
     }
 

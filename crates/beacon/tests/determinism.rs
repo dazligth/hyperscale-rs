@@ -106,7 +106,7 @@ fn initial_state() -> BeaconState {
         },
     );
 
-    BeaconState {
+    let mut state = BeaconState {
         chain_config: BeaconChainConfig::default(),
         current_epoch: Epoch::GENESIS,
         validators,
@@ -115,9 +115,12 @@ fn initial_state() -> BeaconState {
         committee: (0u64..4).map(ValidatorId::new).collect(),
         shard_committees: shard_committees.clone(),
         next_shard_committees: shard_committees,
+        shard_consensus_members: BTreeMap::new(),
         boundaries: BTreeMap::new(),
         miss_counters: BTreeMap::new(),
-    }
+    };
+    state.shard_consensus_members = state.ready_consensus_members(&state.shard_committees);
+    state
 }
 
 #[test]

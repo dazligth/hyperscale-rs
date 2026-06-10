@@ -410,7 +410,11 @@ impl ExecutionCoordinator {
             // fallback-tracker path corrects a boundary-straddling wave whose
             // real committee differs.
             if let Some(committee) = setup_committee
-                && self.me == wave_leader(&wave_id, committee.committee_for_shard(local_shard))
+                && self.me
+                    == wave_leader(
+                        &wave_id,
+                        committee.consensus_committee_for_shard(local_shard),
+                    )
             {
                 let quorum = committee.quorum_threshold_for_shard(local_shard);
                 let tracker = VoteTracker::new(wave_id.clone(), block_hash, quorum);
@@ -559,7 +563,7 @@ impl ExecutionCoordinator {
             // that epoch) defers this completion; it re-scans on a later commit.
             let Some(committee) = topology
                 .at(completion.vote_anchor_ts)
-                .map(|s| s.committee_for_shard(self.local_shard).to_vec())
+                .map(|s| s.consensus_committee_for_shard(self.local_shard).to_vec())
             else {
                 continue;
             };
@@ -1404,7 +1408,7 @@ impl ExecutionCoordinator {
             // behind) defers this retry to a later commit.
             let Some(committee) = topology
                 .at(vote_anchor_ts)
-                .map(|s| s.committee_for_shard(self.local_shard).to_vec())
+                .map(|s| s.consensus_committee_for_shard(self.local_shard).to_vec())
             else {
                 continue;
             };

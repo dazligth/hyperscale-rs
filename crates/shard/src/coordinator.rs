@@ -2020,11 +2020,13 @@ impl ShardCoordinator {
     /// entry and reset the dwell clock.
     pub fn on_ready_signal_received(&mut self, topology: &TopologySchedule, signal: ReadySignal) {
         // Membership admission gate — "is this validator on our committee
-        // now?" — answered on the routing head.
-        if topology
+        // now?" — answered on the routing head against full membership: a
+        // Ready signal's sender is by definition not yet in the consensus
+        // subset.
+        if !topology
             .head()
-            .committee_index_for_shard(self.local_shard, signal.validator_id())
-            .is_none()
+            .committee_for_shard(self.local_shard)
+            .contains(&signal.validator_id())
         {
             return;
         }

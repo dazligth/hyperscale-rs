@@ -75,6 +75,7 @@ pub fn empty_state() -> BeaconState {
         committee: Vec::new(),
         shard_committees: BTreeMap::new(),
         next_shard_committees: BTreeMap::new(),
+        shard_consensus_members: BTreeMap::new(),
         boundaries: BTreeMap::new(),
         miss_counters: BTreeMap::new(),
     }

@@ -190,7 +190,7 @@ impl VoteKeeper {
             return vec![];
         };
 
-        let committee_size = topology.committee_for_shard(local_shard).len();
+        let committee_size = topology.consensus_committee_for_shard(local_shard).len();
         let vote_set = self
             .vote_sets
             .entry(block_hash)
@@ -241,7 +241,7 @@ impl VoteKeeper {
             return vec![];
         }
 
-        let committee_size = topology.committee_for_shard(local_shard).len();
+        let committee_size = topology.consensus_committee_for_shard(local_shard).len();
         let vote_set = self
             .vote_sets
             .entry(block_hash)

@@ -101,11 +101,16 @@ pub fn apply_epoch(
     // Promote the lookahead committee into the active slot before the
     // pipeline runs. `next_shard_committees` was finalized one epoch ago
     // and governs this epoch's shard consensus; freeze it here as
-    // `shard_committees`. The pipeline below then evolves
-    // `next_shard_committees` into the lookahead for the epoch after this
-    // one — so the committee for any window is fixed a full epoch before
-    // the window opens, and a validator jailed this epoch leaves the
-    // committee one epoch out rather than mid-window.
+    // `shard_committees`, along with its ready-filtered consensus subset
+    // resolved from statuses as they stand right now — before any of this
+    // epoch's witnesses apply — so it matches what the prior state's
+    // lookahead derivation computed from the same statuses. The pipeline
+    // below then evolves `next_shard_committees` into the lookahead for
+    // the epoch after this one — so the committee (and its consensus
+    // subset) for any window is fixed a full epoch before the window
+    // opens, and a validator jailed or readied this epoch changes the
+    // consensus set one epoch out rather than mid-window.
+    state.shard_consensus_members = state.ready_consensus_members(&state.next_shard_committees);
     state.shard_committees = state.next_shard_committees.clone();
 
     // Snapshot each shard's member list before the pipeline runs so the
@@ -359,24 +364,17 @@ mod tests {
         )
     }
 
-    /// A boundary block committing a real beacon-witness accumulator of
-    /// `leaf_count` `StakeDeposit` leaves, plus the matching per-leaf
-    /// witnesses (merkle-proven against the block's root, anchored to its
-    /// hash). Deposits apply without a validator-status precondition, so
-    /// the fold's chunk-apply step always succeeds on the well-formed set.
-    fn boundary_block_with_witnesses(
+    /// A boundary block committing a real beacon-witness accumulator over
+    /// `payloads`, plus the matching per-leaf witnesses (merkle-proven
+    /// against the block's root, anchored to its hash).
+    fn boundary_block_with_payloads(
         shard: ShardId,
         height: u64,
         pred_wt: u64,
         state_root: StateRoot,
-        leaf_count: u64,
+        payloads: Vec<ShardWitnessPayload>,
     ) -> (BlockHeader, Vec<ShardWitness>) {
-        let payloads: Vec<ShardWitnessPayload> = (0..leaf_count)
-            .map(|i| ShardWitnessPayload::StakeDeposit {
-                pool_id: StakePoolId::new(200 + u32::try_from(i).unwrap_or(u32::MAX)),
-                amount: Stake::from_whole_tokens(1),
-            })
-            .collect();
+        let leaf_count = payloads.len() as u64;
         let leaf_hashes: Vec<Hash> = payloads
             .iter()
             .map(ShardWitnessPayload::leaf_hash)
@@ -405,6 +403,25 @@ mod tests {
             })
             .collect();
         (header, witnesses)
+    }
+
+    /// [`boundary_block_with_payloads`] over `leaf_count` `StakeDeposit`
+    /// leaves. Deposits apply without a validator-status precondition, so
+    /// the fold's chunk-apply step always succeeds on the well-formed set.
+    fn boundary_block_with_witnesses(
+        shard: ShardId,
+        height: u64,
+        pred_wt: u64,
+        state_root: StateRoot,
+        leaf_count: u64,
+    ) -> (BlockHeader, Vec<ShardWitness>) {
+        let payloads: Vec<ShardWitnessPayload> = (0..leaf_count)
+            .map(|i| ShardWitnessPayload::StakeDeposit {
+                pool_id: StakePoolId::new(200 + u32::try_from(i).unwrap_or(u32::MAX)),
+                amount: Stake::from_whole_tokens(1),
+            })
+            .collect();
+        boundary_block_with_payloads(shard, height, pred_wt, state_root, payloads)
     }
 
     /// A QC naming `header` with weighted timestamp `wt`.
@@ -630,6 +647,90 @@ mod tests {
         );
         assert_eq!(after_2.block_hash, b.hash());
         assert_eq!(after_2.consecutive_misses, 0);
+    }
+
+    /// A Ready witness folding in epoch E flips the validator's status
+    /// but not E's consensus committee: the active window's subset is
+    /// frozen at promotion from pre-fold statuses, so it is identical to
+    /// what the prior state's lookahead derivation computed — a node
+    /// resolving the window from either schedule entry sees the same
+    /// committee — and the newly-ready member first counts one window
+    /// out. Full membership keeps the member reachable throughout.
+    #[test]
+    fn ready_flip_takes_consensus_effect_one_window_out() {
+        use hyperscale_types::ValidatorStatus;
+
+        let mut state = single_pool_state(4);
+        state.chain_config.epoch_duration_ms = 1_000;
+        let shard = ShardId::leaf(1, 0);
+        let joiner = ValidatorId::new(3);
+        let ready_members: Vec<ValidatorId> = [0u64, 1, 2].map(ValidatorId::new).to_vec();
+        state.validators.get_mut(&joiner).unwrap().status = ValidatorStatus::OnShard {
+            shard,
+            ready: false,
+            placed_at_epoch: Epoch::GENESIS,
+        };
+
+        // The lookahead snapshot for the next window: full membership
+        // keeps the joiner, the consensus subset excludes it.
+        let lookahead = state.derive_next_topology_snapshot(net());
+        assert!(lookahead.committee_for_shard(shard).contains(&joiner));
+        assert_eq!(
+            lookahead.consensus_committee_for_shard(shard),
+            ready_members.as_slice()
+        );
+
+        // Epoch 1 folds a Ready witness for the joiner, carried in the
+        // boundary contribution's chunk.
+        let (b, witnesses) = boundary_block_with_payloads(
+            shard,
+            5,
+            900,
+            StateRoot::from_raw(Hash::from_bytes(b"anchor")),
+            vec![ShardWitnessPayload::Ready { id: joiner }],
+        );
+        let qc = qc_over(&b, 1_500);
+        let proposal = BeaconProposal::new(
+            std::iter::once((shard, Some(qc))).collect(),
+            Vec::new(),
+            VrfProof::ZERO,
+        );
+        let committed = vec![(ValidatorId::new(0), proposal)];
+        let contributions: BTreeMap<ShardId, ShardEpochContribution> = std::iter::once((
+            shard,
+            ShardEpochContribution {
+                boundary_header: b,
+                witnesses: witnesses.into(),
+            },
+        ))
+        .collect();
+        let effects = apply_epoch(
+            &mut state,
+            &net(),
+            Epoch::new(1),
+            ApplyEpochInput::Normal {
+                committed: &committed,
+                shard_contributions: &contributions,
+            },
+        );
+        assert_eq!(effects.readied, vec![joiner]);
+        assert!(matches!(
+            state.validators.get(&joiner).unwrap().status,
+            ValidatorStatus::OnShard { ready: true, .. }
+        ));
+
+        // The active window's consensus subset matches the lookahead's —
+        // the mid-fold flip did not retroactively change the window.
+        let active = state.derive_topology_snapshot(net());
+        assert_eq!(
+            active.consensus_committee_for_shard(shard),
+            lookahead.consensus_committee_for_shard(shard)
+        );
+        assert!(active.committee_for_shard(shard).contains(&joiner));
+
+        // The next window's lookahead picks the joiner up.
+        let next = state.derive_next_topology_snapshot(net());
+        assert!(next.consensus_committee_for_shard(shard).contains(&joiner));
     }
 
     // ─── apply_epoch regression check + epoch advance ──────────────────────

@@ -15,10 +15,19 @@ use crate::{
     RoutableTransaction, ShardId, ShardTrie, StateRoot, ValidatorId, ValidatorSet, VoteCount,
 };
 
-/// Per-shard committee membership.
+/// Per-shard committee membership, split into its two consumer views.
 #[derive(Debug, Clone)]
 struct ShardCommittee {
+    /// Full membership — the networking view. Gossip fan-out, fetch peer
+    /// pools, and sender-identity checks read this, so a member that is
+    /// still bootstrapping (or has just been rotated out) keeps receiving
+    /// traffic and can serve sync.
     active_validators: Vec<ValidatorId>,
+    /// Ready-filtered subset of `active_validators`, in the same order —
+    /// the consensus view. Proposer rotation, quorum thresholds, and
+    /// vote-bitfield indexing read this, so a not-ready member never
+    /// counts toward 2f+1 and imposes no liveness drag.
+    consensus_validators: Vec<ValidatorId>,
 }
 
 /// A shard's beacon-attested committed boundary — the snap-sync anchor.
@@ -115,6 +124,7 @@ impl TopologySnapshot {
             let shard = uniform_leaf(num_shards, v.validator_id.inner() % num_shards);
             if let Some(committee) = shard_committees.get_mut(&shard) {
                 committee.active_validators.push(v.validator_id);
+                committee.consensus_validators.push(v.validator_id);
             }
         }
 
@@ -151,6 +161,7 @@ impl TopologySnapshot {
             .expect("shard should be within num_shards");
         for v in &validator_set.validators {
             committee.active_validators.push(v.validator_id);
+            committee.consensus_validators.push(v.validator_id);
         }
 
         Self {
@@ -193,6 +204,7 @@ impl TopologySnapshot {
                          that is not in the global validator set",
                     );
                     committee.active_validators.push(validator_id);
+                    committee.consensus_validators.push(validator_id);
                 }
             }
         }
@@ -214,18 +226,23 @@ impl TopologySnapshot {
     /// `num_shards`-way partition), the live shards are precisely those keys.
     /// Used to mirror a `BeaconState`'s committees, whose keys define the
     /// active partition — uniform today, non-uniform under resharding.
-    /// `boundaries` carries each shard's attested boundary anchor; shards
-    /// with no attested boundary yet are simply absent.
+    /// `consensus_members` carries each shard's ready-filtered consensus
+    /// subset (the validators that count for proposer rotation, quorum, and
+    /// vote-bitfield indexing); a shard absent from it has an empty consensus
+    /// committee. `boundaries` carries each shard's attested boundary anchor;
+    /// shards with no attested boundary yet are simply absent.
     ///
     /// # Panics
     ///
     /// Panics if a committee references a validator absent from
-    /// `global_validator_set`.
+    /// `global_validator_set`, or if a consensus member is not also a
+    /// member of the same shard's full committee.
     #[must_use]
     pub fn from_explicit_committees(
         network: NetworkDefinition,
         global_validator_set: &ValidatorSet,
         shard_committees: HashMap<ShardId, Vec<ValidatorId>>,
+        mut consensus_members: HashMap<ShardId, Vec<ValidatorId>>,
         boundaries: HashMap<ShardId, ShardAnchor>,
     ) -> Self {
         let validator_pubkeys = build_validator_pubkeys(global_validator_set);
@@ -235,6 +252,7 @@ impl TopologySnapshot {
             .map(|(shard, validators)| {
                 let mut committee = ShardCommittee {
                     active_validators: Vec::new(),
+                    consensus_validators: consensus_members.remove(&shard).unwrap_or_default(),
                 };
                 for validator_id in validators {
                     assert!(
@@ -243,6 +261,13 @@ impl TopologySnapshot {
                          that is not in the global validator set",
                     );
                     committee.active_validators.push(validator_id);
+                }
+                for validator_id in &committee.consensus_validators {
+                    assert!(
+                        committee.active_validators.contains(validator_id),
+                        "consensus subset for shard {shard:?} references validator \
+                         {validator_id:?} outside the shard's committee",
+                    );
                 }
                 (shard, committee)
             })
@@ -287,7 +312,13 @@ impl TopologySnapshot {
         &self.shard_trie
     }
 
-    /// Get the ordered committee members for a shard.
+    /// Get the ordered committee members for a shard — full membership,
+    /// the networking view.
+    ///
+    /// Includes members that are not yet ready (bootstrapping joiners),
+    /// so gossip fan-out and fetch peer pools still reach them. Consensus
+    /// queries (proposer rotation, quorum, vote-bitfield indexing) read
+    /// [`Self::consensus_committee_for_shard`] instead.
     #[must_use]
     pub fn committee_for_shard(&self, shard: ShardId) -> &[ValidatorId] {
         self.shard_committees
@@ -295,13 +326,27 @@ impl TopologySnapshot {
             .map_or(&[][..], |c| c.active_validators.as_slice())
     }
 
-    /// Total votes a shard's committee can cast — one per member.
+    /// Ready-filtered consensus members for a shard, in canonical order.
+    ///
+    /// This is the set vote/QC signer bitfields index into, the proposer
+    /// rotation cycles over, and the 2f+1 denominator counts. A committee
+    /// member that has not signalled Ready is absent here while remaining
+    /// in [`Self::committee_for_shard`].
+    #[must_use]
+    pub fn consensus_committee_for_shard(&self, shard: ShardId) -> &[ValidatorId] {
+        self.shard_committees
+            .get(&shard)
+            .map_or(&[][..], |c| c.consensus_validators.as_slice())
+    }
+
+    /// Total votes a shard's consensus committee can cast — one per ready
+    /// member.
     #[must_use]
     pub fn committee_votes(&self, shard: ShardId) -> VoteCount {
         self.shard_committees
             .get(&shard)
             .map_or(VoteCount::ZERO, |c| {
-                VoteCount::of(c.active_validators.len())
+                VoteCount::of(c.consensus_validators.len())
             })
     }
 
@@ -345,14 +390,16 @@ impl TopologySnapshot {
         self.committee_for_shard(shard).len()
     }
 
-    /// Get the index of a validator in a shard's committee.
+    /// Get the index of a validator in a shard's consensus committee —
+    /// the position vote/QC signer bitfields encode. `None` for
+    /// non-members and for members that have not signalled Ready.
     #[must_use]
     pub fn committee_index_for_shard(
         &self,
         shard: ShardId,
         validator_id: ValidatorId,
     ) -> Option<usize> {
-        self.committee_for_shard(shard)
+        self.consensus_committee_for_shard(shard)
             .iter()
             .position(|v| *v == validator_id)
     }
@@ -374,19 +421,20 @@ impl TopologySnapshot {
     /// Get the proposer for `shard` at a given round.
     ///
     /// Rounds increase per block, so the round alone determines the leader:
-    /// `committee[round % n]`. The round is QC- and header-attested, so every
-    /// validator selects the same proposer. A large `round` is harmless here —
-    /// the modulo can never panic — and is rejected separately at header
-    /// admission.
+    /// `committee[round % n]` over the ready-filtered consensus committee.
+    /// The round is QC- and header-attested, so every validator selects the
+    /// same proposer. A large `round` is harmless here — the modulo can
+    /// never panic — and is rejected separately at header admission.
     ///
     /// # Panics
-    /// Panics if the committee for `shard` is empty (invariant violation).
+    /// Panics if the consensus committee for `shard` is empty (invariant
+    /// violation).
     #[must_use]
     pub fn proposer_for(&self, shard: ShardId, round: Round) -> ValidatorId {
-        let committee = self.committee_for_shard(shard);
+        let committee = self.consensus_committee_for_shard(shard);
         assert!(
             !committee.is_empty(),
-            "proposer_for called with empty committee for shard {shard:?}",
+            "proposer_for called with empty consensus committee for shard {shard:?}",
         );
         let index = usize::try_from(round.inner() % committee.len() as u64)
             .expect("modulo of usize len fits in usize");
@@ -474,6 +522,7 @@ fn empty_committees(num_shards: u64) -> HashMap<ShardId, ShardCommittee> {
                 shard,
                 ShardCommittee {
                     active_validators: Vec::new(),
+                    consensus_validators: Vec::new(),
                 },
             )
         })
@@ -637,12 +686,84 @@ mod tests {
         let snapshot = TopologySnapshot::from_explicit_committees(
             NetworkDefinition::simulator(),
             &vs,
+            committees.clone(),
             committees,
             boundaries,
         );
 
         assert_eq!(snapshot.boundary(ShardId::leaf(1, 0)), Some(anchor));
         assert_eq!(snapshot.boundary(ShardId::leaf(1, 1)), None);
+    }
+
+    /// The committee view splits: full membership answers networking
+    /// queries while the consensus subset drives proposer rotation,
+    /// quorum arithmetic, and bitfield indexing.
+    #[test]
+    fn test_consensus_subset_excluded_from_consensus_queries() {
+        let validators: Vec<_> = (0..4).map(make_test_validator).collect();
+        let vs = ValidatorSet::new(validators);
+        let shard = ShardId::ROOT;
+        let members: Vec<ValidatorId> = (0..4).map(ValidatorId::new).collect();
+        // Validator 2 is a member but not ready — absent from the subset.
+        let ready: Vec<ValidatorId> = [0u64, 1, 3].map(ValidatorId::new).to_vec();
+
+        let mut committees = HashMap::new();
+        committees.insert(shard, members.clone());
+        let mut consensus = HashMap::new();
+        consensus.insert(shard, ready.clone());
+
+        let snapshot = TopologySnapshot::from_explicit_committees(
+            NetworkDefinition::simulator(),
+            &vs,
+            committees,
+            consensus,
+            HashMap::new(),
+        );
+
+        // Networking view keeps everyone.
+        assert_eq!(snapshot.committee_for_shard(shard), members.as_slice());
+        // Consensus view drops the not-ready member everywhere.
+        assert_eq!(
+            snapshot.consensus_committee_for_shard(shard),
+            ready.as_slice()
+        );
+        assert_eq!(snapshot.committee_votes(shard), VoteCount::of(3));
+        assert_eq!(snapshot.quorum_threshold_for_shard(shard), VoteCount::of(3));
+        assert_eq!(
+            snapshot.committee_index_for_shard(shard, ValidatorId::new(2)),
+            None
+        );
+        assert_eq!(
+            snapshot.committee_index_for_shard(shard, ValidatorId::new(3)),
+            Some(2)
+        );
+        // Proposer rotation cycles over the subset only.
+        for round in 0..8u64 {
+            assert_ne!(
+                snapshot.proposer_for(shard, Round::new(round)),
+                ValidatorId::new(2)
+            );
+        }
+    }
+
+    /// A consensus member outside the shard's full committee is a
+    /// constructor invariant violation.
+    #[test]
+    #[should_panic(expected = "outside the shard's committee")]
+    fn test_consensus_subset_must_be_within_committee() {
+        let validators: Vec<_> = (0..2).map(make_test_validator).collect();
+        let vs = ValidatorSet::new(validators);
+        let mut committees = HashMap::new();
+        committees.insert(ShardId::ROOT, vec![ValidatorId::new(0)]);
+        let mut consensus = HashMap::new();
+        consensus.insert(ShardId::ROOT, vec![ValidatorId::new(1)]);
+        let _ = TopologySnapshot::from_explicit_committees(
+            NetworkDefinition::simulator(),
+            &vs,
+            committees,
+            consensus,
+            HashMap::new(),
+        );
     }
 
     /// A committee's vote count is its member count — one vote each.

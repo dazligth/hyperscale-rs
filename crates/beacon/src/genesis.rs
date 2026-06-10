@@ -134,7 +134,7 @@ pub fn build_genesis_beacon_state(config: &BeaconGenesisConfig) -> BeaconState {
         })
         .collect();
 
-    BeaconState {
+    let mut state = BeaconState {
         chain_config: config.chain_config,
         current_epoch: Epoch::GENESIS,
         validators,
@@ -147,9 +147,14 @@ pub fn build_genesis_beacon_state(config: &BeaconGenesisConfig) -> BeaconState {
         // pipeline first rotates it.
         shard_committees: next_shard_committees.clone(),
         next_shard_committees,
+        shard_consensus_members: BTreeMap::new(),
         boundaries,
         miss_counters: BTreeMap::new(),
-    }
+    };
+    // Genesis placements are `ready: true` by construction, so the frozen
+    // consensus subset starts as full membership.
+    state.shard_consensus_members = state.ready_consensus_members(&state.shard_committees);
+    state
 }
 
 /// Walk every invariant the builder relies on, panicking on the first
