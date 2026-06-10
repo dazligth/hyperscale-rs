@@ -282,6 +282,12 @@ impl<H: Hasher, const ARITY_BITS: u8> Tree<H, ARITY_BITS> {
             if claim.depth_bits > MAX_DEPTH_BITS || claim.depth_bits % u16::from(ARITY_BITS) != 0 {
                 return Err(ProofError::Malformed("claim depth off the arity grid"));
             }
+            // A claim terminating above the proof's root never matches the
+            // recursion depth, so the bucket split would descend past the
+            // key space and index out of bounds.
+            if claim.depth_bits < proof.root_depth_bits {
+                return Err(ProofError::Malformed("claim depth above the proof root"));
+            }
         }
 
         if proof.root_depth_bits > MAX_DEPTH_BITS
@@ -1260,6 +1266,29 @@ mod tests {
         };
         let err = Jmt4::verify(&proof, [0u8; 32], &[]).unwrap_err();
         assert!(matches!(err, ProofError::Malformed(_)));
+    }
+
+    /// A claim terminating above the proof's root depth must be rejected,
+    /// not descended through — with enough siblings supplied, the
+    /// recursion never reaches a terminal depth and walks past the
+    /// 256-bit key space, indexing out of bounds on a peer-supplied proof.
+    #[test]
+    fn verify_rejects_claim_above_proof_root() {
+        let proof = MultiProof {
+            root_depth_bits: 1,
+            claims: vec![ProofClaim {
+                key: k(1),
+                value_hash: None,
+                depth_bits: 0,
+                termination: ClaimTermination::EmptySubtree,
+            }],
+            siblings: vec![EMPTY_HASH; MAX_DEPTH_BITS as usize],
+        };
+        let err = Jmt::verify(&proof, [0u8; 32], &[]).unwrap_err();
+        assert!(matches!(
+            err,
+            ProofError::Malformed("claim depth above the proof root")
+        ));
     }
 
     #[test]
