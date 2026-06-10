@@ -222,6 +222,15 @@ impl Network for Libp2pNetwork {
         }
     }
 
+    fn subscribe_shard(&self, shard: ShardId) {
+        self.registry.add_hosted_shard(shard);
+    }
+
+    fn unsubscribe_shard(&self, shard: ShardId) {
+        self.registry.remove_hosted_shard(shard);
+        self.registry.unregister_requests_for_shard(shard);
+    }
+
     fn notify<M: NetworkMessage + 'static>(&self, recipients: &[ValidatorId], message: &M) {
         // Split into local + remote. Local recipients (our own hosted
         // vnodes) never get a `validator_peers` entry from the bind

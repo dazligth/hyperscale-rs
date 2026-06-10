@@ -146,6 +146,25 @@ where
             .clone()
     }
 
+    /// Install the event sender for a newly hosted `shard`. The
+    /// reconfiguring thread is the sole writer, so the clone-modify-store
+    /// needs no CAS retry; concurrent readers keep their loaded snapshot.
+    pub(crate) fn insert_shard_sender(&self, shard: ShardId, sender: Sender<ShardEvent>) {
+        let mut map = (**self.shard_event_senders.load()).clone();
+        map.insert(shard, sender);
+        self.shard_event_senders.store(Arc::new(map));
+    }
+
+    /// Drop the event sender for a no-longer-hosted `shard`. Inbound
+    /// handlers observing the new map reject the shard's traffic;
+    /// in-flight sends on the old snapshot land in a channel that dies
+    /// with its receiver.
+    pub(crate) fn remove_shard_sender(&self, shard: ShardId) {
+        let mut map = (**self.shard_event_senders.load()).clone();
+        map.remove(&shard);
+        self.shard_event_senders.store(Arc::new(map));
+    }
+
     /// Compute the cross-shard admission plan for a locally-submitted
     /// transaction.
     ///

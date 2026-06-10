@@ -80,6 +80,26 @@ pub(crate) struct DispatchHandles<S: ShardStorage, N> {
     pub(crate) per_shard: ArcSwap<HashMap<ShardId, ShardDispatchHandles<S>>>,
 }
 
+impl<S: ShardStorage, N> DispatchHandles<S, N> {
+    /// Install the dispatch handles for a newly hosted `shard`. The
+    /// reconfiguring thread is the sole writer; readers keep their
+    /// loaded snapshot.
+    pub(crate) fn insert_shard(&self, shard: ShardId, handles: ShardDispatchHandles<S>) {
+        let mut map = (**self.per_shard.load()).clone();
+        map.insert(shard, handles);
+        self.per_shard.store(Arc::new(map));
+    }
+
+    /// Drop the dispatch handles for a no-longer-hosted `shard`.
+    /// In-flight dispatches keep the handles their loaded snapshot
+    /// carries until they complete.
+    pub(crate) fn remove_shard(&self, shard: ShardId) {
+        let mut map = (**self.per_shard.load()).clone();
+        map.remove(&shard);
+        self.per_shard.store(Arc::new(map));
+    }
+}
+
 /// Per-shard subset of [`DispatchHandles`]. One entry per hosted shard.
 pub(crate) struct ShardDispatchHandles<S: ShardStorage> {
     pub(crate) pending_chain: Arc<PendingChain<S>>,

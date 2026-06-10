@@ -283,6 +283,20 @@ impl HandlerRegistry {
         self.hosted_shards.store(Arc::new(hosted));
     }
 
+    /// Add one shard to the hosted set.
+    pub fn add_hosted_shard(&self, shard: ShardId) {
+        let mut set = (**self.hosted_shards.load()).clone();
+        set.insert(shard);
+        self.hosted_shards.store(Arc::new(set));
+    }
+
+    /// Remove one shard from the hosted set.
+    pub fn remove_hosted_shard(&self, shard: ShardId) {
+        let mut set = (**self.hosted_shards.load()).clone();
+        set.remove(&shard);
+        self.hosted_shards.store(Arc::new(set));
+    }
+
     /// Remove every request handler registered for `shard` — both the
     /// wire map and the in-process dispatch map — so a later re-join
     /// can register the shard afresh without tripping the duplicate-

@@ -34,6 +34,18 @@ pub struct VnodeInit {
     pub signing_key: Arc<Bls12381G1PrivateKey>,
 }
 
+impl VnodeInit {
+    /// Wrap the init bundle into a hosted [`Vnode`].
+    #[must_use]
+    pub fn into_vnode(self) -> Vnode {
+        Vnode {
+            validator_id: self.state.validator_id(),
+            state: self.state,
+            signing_key: self.signing_key,
+        }
+    }
+}
+
 /// Per-validator bundle hosted by the `NodeHost`.
 pub struct Vnode {
     /// Identity this vnode votes as. Stable for the vnode's lifetime;

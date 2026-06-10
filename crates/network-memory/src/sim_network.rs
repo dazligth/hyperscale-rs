@@ -214,6 +214,17 @@ impl Network for SimNetworkAdapter {
         self.registry.register_notification(handler);
     }
 
+    fn subscribe_shard(&self, shard: ShardId) {
+        // Delivery is harness-controlled, so participation is purely the
+        // registry's hosted set.
+        self.registry.add_hosted_shard(shard);
+    }
+
+    fn unsubscribe_shard(&self, shard: ShardId) {
+        self.registry.remove_hosted_shard(shard);
+        self.registry.unregister_requests_for_shard(shard);
+    }
+
     fn register_request_handler<R: Request + Send + 'static>(
         &self,
         shard: ShardId,

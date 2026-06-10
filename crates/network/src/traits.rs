@@ -215,6 +215,21 @@ pub trait Network: Send + Sync + 'static {
         handler: impl NotificationHandler<M>,
     );
 
+    // ── Shard participation ──
+
+    /// Begin serving `shard`: include it in gossip fan-out and accept
+    /// per-shard request-handler registrations for it. Transports with
+    /// per-shard wire state (gossipsub topics, request stream
+    /// protocols) bring that up as well.
+    fn subscribe_shard(&self, shard: ShardId);
+
+    /// Stop serving `shard`: exclude it from gossip fan-out, drop every
+    /// request handler registered for it (so a later
+    /// [`Self::subscribe_shard`] can register afresh), and tear down
+    /// per-shard wire state. Traffic already dispatched against the old
+    /// hosted set completes against the handlers it resolved.
+    fn unsubscribe_shard(&self, shard: ShardId);
+
     // ── Topology updates ──
 
     /// Update the topology snapshot used for peer selection and identity

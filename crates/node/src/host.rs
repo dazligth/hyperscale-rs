@@ -73,6 +73,11 @@ where
     /// own `now` via [`Self::set_time`] so off-thread handlers can read
     /// a consistent stamp without coordinating with this top-level cache.
     now: LocalTimestamp,
+
+    /// Node configuration retained so shards added at runtime build
+    /// their `ShardIo` and batch accumulators with the same knobs the
+    /// startup shards got.
+    config: NodeConfig,
 }
 
 impl<S, N, D> NodeHost<S, N, D>
@@ -139,97 +144,12 @@ where
             let inits = by_shard
                 .remove(shard)
                 .expect("hosted shard derived from vnodes — at least one vnode exists for it");
-            let rep = inits.first().expect("group non-empty by construction");
-            let initial_persisted_height = rep.state.shard_coordinator().committed_height();
-            let caches = SharedCaches::new(
-                Arc::clone(rep.state.provisions_coordinator().store()),
-                Arc::clone(rep.state.provisions_coordinator().verified_headers()),
-                Arc::clone(rep.state.mempool_coordinator().tx_store()),
-                Arc::clone(rep.state.execution_coordinator().exec_cert_store()),
-                Arc::clone(rep.state.execution_coordinator().finalized_wave_store()),
-            );
             let storage = storages
                 .remove(shard)
                 .unwrap_or_else(|| panic!("NodeHost: missing storage for hosted shard {shard:?}"));
-            let storage = Arc::new(storage);
-            let pending_chain = Arc::new(PendingChain::new(Arc::clone(&storage)));
-            let mut block_commit = BlockCommitCoordinator::new(*shard, initial_persisted_height);
-            {
-                // Seed the boundary memo from the committed tip so the
-                // first post-restart commit can adjudicate its parent.
-                let seed =
-                    storage
-                        .get_certified_header(initial_persisted_height)
-                        .map(|certified| {
-                            let header = certified.header();
-                            (
-                                header.hash(),
-                                header.height(),
-                                header.parent_qc().weighted_timestamp(),
-                            )
-                        });
-                // The chain's epoch duration, read from the projected
-                // schedule (sourced from the folded `BeaconState`'s chain
-                // config) — never from node-local configuration, which
-                // could silently diverge from the chain the beacon fold
-                // actually runs.
-                let epoch_duration_ms = rep
-                    .state
-                    .beacon_coordinator()
-                    .topology_schedule()
-                    .epoch_duration_ms();
-                let pin_storage = Arc::clone(&storage);
-                let pin_shard = *shard;
-                block_commit.set_boundary_trigger(
-                    epoch_duration_ms,
-                    Arc::new(move |height| {
-                        if let Err(error) = pin_storage.pin_boundary(height) {
-                            tracing::warn!(
-                                shard = ?pin_shard,
-                                %height,
-                                error,
-                                "epoch boundary pin failed; this node won't serve this boundary"
-                            );
-                        }
-                    }),
-                    seed,
-                );
-            }
-            per_shard_dispatch.insert(
-                *shard,
-                ShardDispatchHandles {
-                    pending_chain: Arc::clone(&pending_chain),
-                    prepared_commits: block_commit.prepared_commits_handle(),
-                },
-            );
-            let vnodes: Vec<Vnode> = inits
-                .into_iter()
-                .map(|init| Vnode {
-                    validator_id: init.state.validator_id(),
-                    state: init.state,
-                    signing_key: init.signing_key,
-                })
-                .collect();
-            let io = ShardIo {
-                storage,
-                pending_chain,
-                block_commit,
-                caches,
-                fetches: FetchHost::new(&config),
-                syncs: SyncHost::new(&config),
-                pending_validation: HashSet::new(),
-                locally_submitted: HashSet::new(),
-                validation_batch: BatchAccumulator::new(
-                    b.tx_validation_max,
-                    b.tx_validation_window,
-                ),
-                certified_header_batch: BatchAccumulator::new(
-                    b.certified_header_max,
-                    b.certified_header_window,
-                ),
-                tx_phase_times: TxPhaseTimesCache::default(),
-                last_slow_tx_warn: LocalTimestamp::ZERO,
-            };
+            let (io, handles) = build_shard_io(*shard, &inits, storage, &config);
+            per_shard_dispatch.insert(*shard, handles);
+            let vnodes: Vec<Vnode> = inits.into_iter().map(VnodeInit::into_vnode).collect();
             shard_builds.insert(*shard, (io, vnodes));
         }
 
@@ -290,7 +210,87 @@ where
             shards,
             process,
             now: LocalTimestamp::ZERO,
+            config,
         }
+    }
+
+    /// Begin hosting `shard` at runtime: install its event sender,
+    /// build its `ShardIo` + dispatch handles, include it in the
+    /// network's hosted set, seat its `ShardLoop`, and register its
+    /// request handlers. The caller supplies the shard's vnodes (state
+    /// machines constructed for that shard), its opened storage, and
+    /// the event sender whose receiver the runner drains.
+    ///
+    /// Events for the shard may queue on the channel from the moment
+    /// the sender is installed; they're processed once the loop steps.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `vnodes` is empty, targets mixed shards, or names a
+    /// shard this host already serves.
+    pub fn add_shard(&mut self, vnodes: Vec<VnodeInit>, storage: S, sender: Sender<ShardEvent>) {
+        let shard = vnodes
+            .first()
+            .expect("add_shard requires at least one vnode")
+            .state
+            .shard_id();
+        assert!(
+            vnodes.iter().all(|v| v.state.shard_id() == shard),
+            "add_shard vnodes must all target one shard"
+        );
+        assert!(
+            !self.shards.contains_key(&shard),
+            "shard {shard:?} already hosted"
+        );
+
+        self.process.insert_shard_sender(shard, sender.clone());
+        let (io, handles) = build_shard_io(shard, &vnodes, storage, &self.config);
+        self.process.dispatch_handles.insert_shard(shard, handles);
+        self.process.network.subscribe_shard(shard);
+
+        let b = &self.config.batch;
+        let shard_loop = ShardLoop {
+            shard,
+            event_tx: sender,
+            process: Arc::clone(&self.process),
+            io,
+            vnodes: vnodes.into_iter().map(VnodeInit::into_vnode).collect(),
+            now: self.now,
+            pending_timer_ops: Vec::new(),
+            emitted_statuses: Vec::new(),
+            actions_generated: 0,
+            outbound_gossip_batches: std::collections::BTreeMap::new(),
+            tx_gossip_max: b.tx_gossip_max,
+            tx_gossip_window: b.tx_gossip_window,
+        };
+        self.shards.insert(shard, shard_loop);
+        self.refresh_execution_cache_shards();
+        self.register_request_handlers_for(shard);
+    }
+
+    /// Stop hosting `shard`: exclude it from the network's hosted set,
+    /// drop its request handlers, event sender, and dispatch handles,
+    /// and return its `ShardLoop` for the caller to drain or drop.
+    /// Inbound traffic for the shard is rejected from the moment the
+    /// maps swap; events already queued die with the channel receiver.
+    ///
+    /// Returns `None` if the shard isn't hosted.
+    pub fn remove_shard(&mut self, shard: ShardId) -> Option<ShardLoop<S, N, D>> {
+        let shard_loop = self.shards.remove(&shard)?;
+        self.process.network.unsubscribe_shard(shard);
+        self.process.remove_shard_sender(shard);
+        self.process.dispatch_handles.remove_shard(shard);
+        self.refresh_execution_cache_shards();
+        Some(shard_loop)
+    }
+
+    /// Re-derive the execution cache's hosted set from the live shard
+    /// map after an add or remove.
+    fn refresh_execution_cache_shards(&self) {
+        self.process
+            .dispatch_handles
+            .execution_cache
+            .set_hosted_shards(self.shards.keys().copied().collect());
     }
 
     /// Consume the host and yield its constituent parts: the shared
@@ -528,4 +528,90 @@ where
             sl.flush_all_batches();
         }
     }
+}
+
+/// Build one shard's `ShardIo` plus its dispatch-handle entry from the
+/// shard's vnode group and opened storage. Shared by host construction
+/// and runtime shard addition so both paths produce identically wired
+/// shards.
+fn build_shard_io<S: ShardStorage>(
+    shard: ShardId,
+    inits: &[VnodeInit],
+    storage: S,
+    config: &NodeConfig,
+) -> (ShardIo<S>, ShardDispatchHandles<S>) {
+    let rep = inits.first().expect("shard group has at least one vnode");
+    let initial_persisted_height = rep.state.shard_coordinator().committed_height();
+    let caches = SharedCaches::new(
+        Arc::clone(rep.state.provisions_coordinator().store()),
+        Arc::clone(rep.state.provisions_coordinator().verified_headers()),
+        Arc::clone(rep.state.mempool_coordinator().tx_store()),
+        Arc::clone(rep.state.execution_coordinator().exec_cert_store()),
+        Arc::clone(rep.state.execution_coordinator().finalized_wave_store()),
+    );
+    let storage = Arc::new(storage);
+    let pending_chain = Arc::new(PendingChain::new(Arc::clone(&storage)));
+    let mut block_commit = BlockCommitCoordinator::new(shard, initial_persisted_height);
+    {
+        // Seed the boundary memo from the committed tip so the
+        // first post-restart commit can adjudicate its parent.
+        let seed = storage
+            .get_certified_header(initial_persisted_height)
+            .map(|certified| {
+                let header = certified.header();
+                (
+                    header.hash(),
+                    header.height(),
+                    header.parent_qc().weighted_timestamp(),
+                )
+            });
+        // The chain's epoch duration, read from the projected
+        // schedule (sourced from the folded `BeaconState`'s chain
+        // config) — never from node-local configuration, which
+        // could silently diverge from the chain the beacon fold
+        // actually runs.
+        let epoch_duration_ms = rep
+            .state
+            .beacon_coordinator()
+            .topology_schedule()
+            .epoch_duration_ms();
+        let pin_storage = Arc::clone(&storage);
+        block_commit.set_boundary_trigger(
+            epoch_duration_ms,
+            Arc::new(move |height| {
+                if let Err(error) = pin_storage.pin_boundary(height) {
+                    tracing::warn!(
+                        shard = ?shard,
+                        %height,
+                        error,
+                        "epoch boundary pin failed; this node won't serve this boundary"
+                    );
+                }
+            }),
+            seed,
+        );
+    }
+    let handles = ShardDispatchHandles {
+        pending_chain: Arc::clone(&pending_chain),
+        prepared_commits: block_commit.prepared_commits_handle(),
+    };
+    let b = &config.batch;
+    let io = ShardIo {
+        storage,
+        pending_chain,
+        block_commit,
+        caches,
+        fetches: FetchHost::new(config),
+        syncs: SyncHost::new(config),
+        pending_validation: HashSet::new(),
+        locally_submitted: HashSet::new(),
+        validation_batch: BatchAccumulator::new(b.tx_validation_max, b.tx_validation_window),
+        certified_header_batch: BatchAccumulator::new(
+            b.certified_header_max,
+            b.certified_header_window,
+        ),
+        tx_phase_times: TxPhaseTimesCache::default(),
+        last_slow_tx_warn: LocalTimestamp::ZERO,
+    };
+    (io, handles)
 }
