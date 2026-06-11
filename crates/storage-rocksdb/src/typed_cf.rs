@@ -308,6 +308,23 @@ where
     raw_iter_to_typed::<CF>(iter)
 }
 
+/// Typed forward iterator over a column family starting at `key`
+/// (inclusive). Yields decoded entries to the end of the CF; callers
+/// bound the scan with `take_while`.
+pub fn iter_from<'a, CF: TypedCf>(
+    db: &'a DB,
+    cf: &ColumnFamily,
+    key: &CF::Key,
+) -> impl Iterator<Item = (CF::Key, CF::Value)> + 'a
+where
+    CF::KeyCodec: DbCodec<CF::Key>,
+{
+    let key_bytes = CF::KeyCodec::default().encode(key);
+    let mut iter = db.raw_iterator_cf(cf);
+    iter.seek(&key_bytes);
+    raw_iter_to_typed::<CF>(iter)
+}
+
 /// Typed prefix-scan iterator over a column family.
 ///
 /// Seeks to `prefix` and yields decoded entries until the key leaves the

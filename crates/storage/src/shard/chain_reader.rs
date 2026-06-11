@@ -106,4 +106,11 @@ pub trait ShardChainReader: Send + Sync + 'static {
     /// an empty result signals that the anchor's leaves have all been
     /// pruned past the retention horizon.
     fn get_beacon_witness_payloads(&self, end: BeaconWitnessLeafCount) -> Vec<ShardWitnessPayload>;
+
+    /// Read retained beacon-witness payloads with leaf indices in
+    /// `[start, end)`, in ascending index order. Pruned indices are
+    /// absent from the result, so a result shorter than the requested
+    /// span signals the range overlaps pruned history. Bounded reads
+    /// keep page serving from materializing the whole accumulator.
+    fn get_beacon_witness_payload_range(&self, start: u64, end: u64) -> Vec<ShardWitnessPayload>;
 }

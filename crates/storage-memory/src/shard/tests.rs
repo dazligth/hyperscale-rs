@@ -758,6 +758,12 @@ fn test_ec_storage_batch() {
     test_helpers::test_ec_storage_batch(&storage);
 }
 
+#[test]
+fn witness_payload_range_reads() {
+    let storage = SimShardStorage::default();
+    test_helpers::test_witness_payload_range_reads(&storage);
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Persistence-lag determinism
 // ═══════════════════════════════════════════════════════════════════════

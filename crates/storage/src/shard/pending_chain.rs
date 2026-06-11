@@ -287,6 +287,16 @@ where
         self.base.get_beacon_witness_payloads(end)
     }
 
+    /// Beacon-witness payloads with leaf indices in `[start, end)`.
+    /// Pass-through to base storage.
+    pub fn get_beacon_witness_payload_range(
+        &self,
+        start: u64,
+        end: u64,
+    ) -> Vec<ShardWitnessPayload> {
+        self.base.get_beacon_witness_payload_range(start, end)
+    }
+
     /// Look up the pending entry at `height` that has a `certified_block`
     /// attached. Scoped so the read lock drops before the result is used —
     /// holding it across the caller's match arms would chain the lock
@@ -1011,6 +1021,13 @@ mod tests {
         fn get_beacon_witness_payloads(
             &self,
             _end: BeaconWitnessLeafCount,
+        ) -> Vec<ShardWitnessPayload> {
+            Vec::new()
+        }
+        fn get_beacon_witness_payload_range(
+            &self,
+            _start: u64,
+            _end: u64,
         ) -> Vec<ShardWitnessPayload> {
             Vec::new()
         }

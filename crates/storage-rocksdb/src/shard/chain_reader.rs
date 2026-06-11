@@ -11,7 +11,7 @@ use hyperscale_types::{
 
 use super::column_families::{BeaconWitnessesCf, ExecutionCertsCf};
 use super::core::RocksDbShardStorage;
-use crate::typed_cf::{TypedCf, get, iter_all};
+use crate::typed_cf::{TypedCf, get, iter_all, iter_from};
 
 impl ShardChainReader for RocksDbShardStorage {
     fn get_block(&self, height: BlockHeight) -> Option<Verified<CertifiedBlock>> {
@@ -102,5 +102,17 @@ impl ShardChainReader for RocksDbShardStorage {
             out.push(payload);
         }
         out
+    }
+
+    fn get_beacon_witness_payload_range(&self, start: u64, end: u64) -> Vec<ShardWitnessPayload> {
+        if start >= end {
+            return Vec::new();
+        }
+        let cfs = self.cf();
+        let beacon_witnesses_cf = BeaconWitnessesCf::handle(&cfs);
+        iter_from::<BeaconWitnessesCf>(&self.db, beacon_witnesses_cf, &start)
+            .take_while(|(leaf_index, _)| *leaf_index < end)
+            .map(|(_, payload)| payload)
+            .collect()
     }
 }

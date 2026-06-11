@@ -124,4 +124,12 @@ impl ShardChainReader for SimShardStorage {
             .map(|(_, payload)| payload.clone())
             .collect()
     }
+
+    fn get_beacon_witness_payload_range(&self, start: u64, end: u64) -> Vec<ShardWitnessPayload> {
+        let c = read_or_recover(&self.consensus);
+        c.beacon_witnesses
+            .range(start..end)
+            .map(|(_, payload)| payload.clone())
+            .collect()
+    }
 }

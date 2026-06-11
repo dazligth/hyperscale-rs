@@ -16,9 +16,10 @@ use hyperscale_types::{
     ExecutionOutcome, FeeSummary, FinalizedWave, GlobalReceiptHash, GlobalReceiptRoot, Hash,
     InFlightCount, LocalReceiptRoot, LogLevel, NodeId, PcQc2, PcQc3, PcSignerLengths, PcVector,
     PcXpProof, ProposerTimestamp, ProvisionsRoot, QuorumCertificate, Randomness, Round, ShardId,
-    ShardWitnessPayload, SignerBitfield, SpcCert, SpcView, StateRoot, StoredReceipt,
-    TransactionRoot, TxHash, TxOutcome, ValidatorId, Verified, WaveCertificate, WaveId,
-    WeightedTimestamp, compute_global_receipt_root, compute_merkle_root, zero_bls_signature,
+    ShardWitnessPayload, SignerBitfield, SpcCert, SpcView, Stake, StakePoolId, StateRoot,
+    StoredReceipt, TransactionRoot, TxHash, TxOutcome, ValidatorId, Verified, WaveCertificate,
+    WaveId, WeightedTimestamp, compute_global_receipt_root, compute_merkle_root,
+    zero_bls_signature,
 };
 use indexmap::IndexMap;
 use radix_common::math::Decimal;
@@ -525,6 +526,33 @@ pub fn commit_block_with_witnesses(
     };
     storage.commit_block(&make_test_certified(block), &witness);
     block_hash
+}
+
+/// Shared range-read test for `get_beacon_witness_payload_range`.
+///
+/// The range read must agree with the full prefix read on interior
+/// pages, clamp nothing (callers bound `end`), and return empty for
+/// degenerate or out-of-range spans.
+///
+/// # Panics
+///
+/// Panics if any assertion fails (this is a test helper).
+pub fn test_witness_payload_range_reads(storage: &(impl ShardChainReader + ShardChainWriter)) {
+    let leaves: Vec<ShardWitnessPayload> = (1u64..=5)
+        .map(|amount| ShardWitnessPayload::StakeDeposit {
+            pool_id: StakePoolId::new(1),
+            amount: Stake::from_whole_tokens(amount),
+        })
+        .collect();
+    commit_block_with_witnesses(storage, BlockHeight::new(1), &leaves);
+
+    let all = storage.get_beacon_witness_payloads(BeaconWitnessLeafCount::new(5));
+    assert_eq!(all.len(), 5);
+    assert_eq!(storage.get_beacon_witness_payload_range(0, 5), all);
+    assert_eq!(storage.get_beacon_witness_payload_range(1, 3), all[1..3]);
+    assert_eq!(storage.get_beacon_witness_payload_range(4, 9), all[4..]);
+    assert!(storage.get_beacon_witness_payload_range(3, 3).is_empty());
+    assert!(storage.get_beacon_witness_payload_range(7, 9).is_empty());
 }
 
 /// Shared EC roundtrip test: commit a block carrying an EC, then read it

@@ -262,6 +262,10 @@ impl ShardChainReader for SharedStorage {
     fn get_beacon_witness_payloads(&self, end: BeaconWitnessLeafCount) -> Vec<ShardWitnessPayload> {
         self.0.get_beacon_witness_payloads(end)
     }
+
+    fn get_beacon_witness_payload_range(&self, start: u64, end: u64) -> Vec<ShardWitnessPayload> {
+        self.0.get_beacon_witness_payload_range(start, end)
+    }
 }
 
 #[cfg(test)]

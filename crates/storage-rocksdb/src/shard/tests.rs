@@ -7,6 +7,7 @@ use hyperscale_storage::test_helpers::{
     make_test_certified, make_test_execution_certificate, make_test_qc, make_test_receipt,
     make_test_wave_certificate, test_ec_storage_batch as helpers_test_ec_storage_batch,
     test_ec_storage_roundtrip as helpers_test_ec_storage_roundtrip,
+    test_witness_payload_range_reads as helpers_test_witness_payload_range_reads,
 };
 use hyperscale_storage::{
     DatabaseUpdate, DatabaseUpdates, DbPartitionKey, DbSortKey, NodeDatabaseUpdates,
@@ -939,6 +940,13 @@ fn test_ec_storage_batch() {
     let temp_dir = TempDir::new().unwrap();
     let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
     helpers_test_ec_storage_batch(&storage);
+}
+
+#[test]
+fn witness_payload_range_reads() {
+    let temp_dir = TempDir::new().unwrap();
+    let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
+    helpers_test_witness_payload_range_reads(&storage);
 }
 
 #[test]

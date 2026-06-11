@@ -41,27 +41,25 @@ pub fn serve_witness_history_request<S: ShardStorage>(
         return unavailable;
     }
 
-    let count = header.beacon_witness_leaf_count();
-    let payloads = pending_chain.get_beacon_witness_payloads(count);
-    if (payloads.len() as u64) < count.inner() {
+    let count = header.beacon_witness_leaf_count().inner();
+    let start = req.start_index;
+    if start > count {
+        return unavailable;
+    }
+    let limit = (req.limit as usize).clamp(1, MAX_HASHES_PER_WITNESS_HISTORY) as u64;
+    let end = count.min(start.saturating_add(limit));
+    let payloads = pending_chain.get_beacon_witness_payload_range(start, end);
+    if (payloads.len() as u64) < end - start {
         debug!(
             height = req.height.inner(),
-            expected = count.inner(),
+            start,
+            end,
             retained = payloads.len(),
-            "Witness-history request: leaves pruned past retention horizon"
+            "Witness-history request: requested leaves pruned past retention horizon"
         );
         return unavailable;
     }
-
-    let limit = (req.limit as usize).clamp(1, MAX_HASHES_PER_WITNESS_HISTORY);
-    let Ok(start) = usize::try_from(req.start_index) else {
-        return unavailable;
-    };
-    if start > payloads.len() {
-        return unavailable;
-    }
-    let end = payloads.len().min(start + limit);
-    let leaf_hashes: Vec<Hash> = payloads[start..end]
+    let leaf_hashes: Vec<Hash> = payloads
         .iter()
         .map(ShardWitnessPayload::leaf_hash)
         .collect();
@@ -71,7 +69,7 @@ pub fn serve_witness_history_request<S: ShardStorage>(
         history: Some(WitnessHistoryChunk {
             header: header.clone(),
             leaf_hashes: leaf_hashes.into(),
-            more: end < payloads.len(),
+            more: end < count,
         }),
     }
 }
