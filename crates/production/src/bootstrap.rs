@@ -350,6 +350,7 @@ mod tests {
             HashMap::new(),
             HashMap::from([(shard, anchor)]),
             HashMap::new(),
+            HashMap::new(),
         );
         Arc::new(ArcSwap::from_pointee(snapshot))
     }

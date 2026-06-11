@@ -7,8 +7,17 @@
 
 mod common;
 
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
+use std::time::Duration;
+
 use common::ShardCoordinatorSim;
-use hyperscale_types::{ReshapeThresholds, ShardWitnessPayload};
+use hyperscale_shard::ready_signal_pool::MIN_READY_SIGNAL_DWELL;
+use hyperscale_types::{
+    BlockHeight, MAX_READY_WINDOW_BLOCKS, NetworkDefinition, ReshapeThresholds, ShardId,
+    ShardWitnessPayload, TopologySchedule, TopologySnapshot, ValidatorId, ValidatorInfo,
+    ValidatorSet,
+};
 
 const MAX_STEPS: usize = 5_000;
 
@@ -68,6 +77,83 @@ fn split_trigger_asserts_once_per_window_and_verifies() {
                 "replica {replica} diverged at commit {i}",
             );
         }
+    }
+}
+
+/// An observer's ready signal commits as a `ReshapeReady` witness leaf
+/// — never a `Ready` leaf — on every replica. The observer rides the
+/// committee for transport (signal admission, gossip) while the
+/// consensus subset excludes it, and each replica re-derives the leaf
+/// classification from its own schedule entry as part of beacon-witness
+/// root verification, so the byte-identical committed chains prove the
+/// classification is replica-deterministic, not proposer-trusted.
+#[test]
+fn observer_ready_signal_commits_as_reshape_ready_leaf() {
+    let mut sim = ShardCoordinatorSim::new(4, 0x7E5C);
+
+    // Reseat the schedule: full membership keeps all four, the
+    // consensus subset drops the last member, who instead holds an
+    // observer seat for the pending left child.
+    let validator_set = ValidatorSet::new(
+        sim.members
+            .iter()
+            .map(|(id, pk)| ValidatorInfo {
+                validator_id: *id,
+                public_key: *pk,
+            })
+            .collect(),
+    );
+    let all: Vec<ValidatorId> = sim.members.iter().map(|(id, _)| *id).collect();
+    let consensus = all[..3].to_vec();
+    let observer = all[3];
+    let (left, _) = ShardId::ROOT.children();
+    let snapshot = TopologySnapshot::from_explicit_committees(
+        NetworkDefinition::simulator(),
+        &validator_set,
+        HashMap::from([(ShardId::ROOT, all)]),
+        HashMap::from([(ShardId::ROOT, consensus)]),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::from([(ShardId::ROOT, BTreeMap::from([(observer, left)]))]),
+    );
+    sim.topology = TopologySchedule::single(Arc::new(snapshot));
+
+    sim.emit_ready_signal(
+        3,
+        BlockHeight::new(1),
+        BlockHeight::new(MAX_READY_WINDOW_BLOCKS),
+    );
+    sim.advance_clock(MIN_READY_SIGNAL_DWELL + Duration::from_millis(10));
+    sim.kick_off();
+    sim.run_until_committed(2, MAX_STEPS);
+
+    for (replica, commits) in sim.commits.iter().enumerate() {
+        assert!(
+            commits.len() >= 2,
+            "replica {replica} expected >= 2 commits within step budget; got {}",
+            commits.len(),
+        );
+        let leaves: Vec<&ShardWitnessPayload> =
+            commits.iter().flat_map(|c| &c.witness_leaves).collect();
+        assert!(
+            leaves.iter().any(|l| matches!(
+                l,
+                ShardWitnessPayload::ReshapeReady { validator } if *validator == observer
+            )),
+            "replica {replica}: observer signal never committed as ReshapeReady",
+        );
+        assert!(
+            !leaves
+                .iter()
+                .any(|l| matches!(l, ShardWitnessPayload::Ready { .. })),
+            "replica {replica}: an observer signal must never classify as Ready",
+        );
+    }
+    for replica in 1..4 {
+        assert_eq!(
+            sim.commits[0][0].block_hash, sim.commits[replica][0].block_hash,
+            "replica {replica} diverged at the signal-carrying commit",
+        );
     }
 }
 

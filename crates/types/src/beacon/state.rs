@@ -752,7 +752,7 @@ impl BeaconState {
         let consensus_members: HashMap<ShardId, Vec<ValidatorId>> =
             consensus_members.into_iter().collect();
 
-        // Project each shard's snap-sync anchor across the CQRS firewall.
+        // Project each shard's snap-sync anchor into the snapshot.
         // Genesis seeds zeroed placeholder boundaries until a shard's first
         // observed crossing; those aren't attested anchors, so they don't
         // project — `boundary(shard)` returns `None` and a joiner replays
@@ -776,6 +776,21 @@ impl BeaconState {
         let witness_bases: HashMap<ShardId, BeaconWitnessLeafCount> =
             witness_bases.into_iter().collect();
 
+        // Project each pending split's observer cohort so shard runtimes
+        // can classify cohort ready signals as `ReshapeReady` leaves and
+        // observers can resolve the child sub-prefix they sync.
+        let reshape_observers: HashMap<ShardId, BTreeMap<ValidatorId, ShardId>> = self
+            .pending_reshapes
+            .iter()
+            .filter_map(|(target, reshape)| match reshape {
+                PendingReshape::Split { cohort, .. } => Some((
+                    *target,
+                    cohort.iter().map(|(id, seat)| (*id, seat.child)).collect(),
+                )),
+                PendingReshape::Merge { .. } => None,
+            })
+            .collect();
+
         TopologySnapshot::from_explicit_committees(
             network,
             &validator_set,
@@ -783,6 +798,7 @@ impl BeaconState {
             consensus_members,
             boundaries,
             witness_bases,
+            reshape_observers,
         )
     }
 
@@ -1235,6 +1251,62 @@ mod tests {
             lookahead.witness_base(shard),
             BeaconWitnessLeafCount::new(7)
         );
+    }
+
+    // ─── reshape observer projection ──────────────────────────────────
+
+    /// A pending split's cohort projects into both the head and the
+    /// lookahead snapshot — and drops with the pending record, whether
+    /// execution consumed it or a cancel released it.
+    #[test]
+    fn pending_split_cohort_projects_into_snapshots() {
+        let mut state = single_pool_state(4);
+        let p = ShardId::ROOT;
+        let (left, right) = p.children();
+        let observer = ValidatorId::new(9);
+        state.validators.insert(
+            observer,
+            validator_record(
+                9,
+                0,
+                ValidatorStatus::Observing {
+                    shard: p,
+                    placed_at_epoch: Epoch::GENESIS,
+                },
+            ),
+        );
+        state
+            .next_shard_committees
+            .get_mut(&p)
+            .unwrap()
+            .members
+            .push(observer);
+        state.shard_committees = state.next_shard_committees.clone();
+        state.pending_reshapes.insert(
+            p,
+            PendingReshape::Split {
+                last_asserted: Epoch::GENESIS,
+                admitted_at: Epoch::GENESIS,
+                cohort: BTreeMap::from([(
+                    observer,
+                    CohortSeat {
+                        child: left,
+                        ready: false,
+                    },
+                )]),
+            },
+        );
+
+        let head = state.derive_topology_snapshot(NetworkDefinition::simulator());
+        assert_eq!(head.reshape_observer_child(p, observer), Some(left));
+        assert_eq!(head.reshape_observer_child(p, ValidatorId::new(0)), None);
+        assert_eq!(head.reshape_observer_child(right, observer), None);
+        let lookahead = state.derive_next_topology_snapshot(NetworkDefinition::simulator());
+        assert_eq!(lookahead.reshape_observer_child(p, observer), Some(left));
+
+        state.pending_reshapes.clear();
+        let head = state.derive_topology_snapshot(NetworkDefinition::simulator());
+        assert_eq!(head.reshape_observer_child(p, observer), None);
     }
 
     // ─── miss counter sanity ──────────────────────────────────────────

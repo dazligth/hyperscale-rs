@@ -171,6 +171,11 @@ pub fn derive_reshape_trigger(
 
 /// Canonical leaf-derivation rule used by both proposer and verifier.
 ///
+/// `shard` and `topology` are the block's own shard and the schedule
+/// entry its window resolves to — the same pair the missed-proposal
+/// walk reads — so every replica classifies ready signals against the
+/// same observer set.
+///
 /// Ordering (locked — every honest validator must produce the same
 /// `Vec<ShardWitnessPayload>` given the same inputs):
 ///
@@ -178,10 +183,14 @@ pub fn derive_reshape_trigger(
 ///    receipt, in the order the engine recorded them.
 /// 2. `MissedProposal` witnesses in ascending round order (the helper
 ///    already sorts; pass its output verbatim).
-/// 3. `Ready` witnesses in ascending `validator_id` order.
+/// 3. One readiness witness per ready signal, in ascending
+///    `validator_id` order — `ReshapeReady` for a sender holding an
+///    observer seat on this shard's pending split, `Ready` otherwise.
 /// 4. The block's reshape trigger, if asserted (at most one).
 #[must_use]
 pub fn derive_leaves(
+    shard: ShardId,
+    topology: &TopologySnapshot,
     receipts: &[StoredReceipt],
     missed: &[ShardWitnessPayload],
     ready_signals: &[ReadySignal],
@@ -203,8 +212,11 @@ pub fn derive_leaves(
     let mut sorted: Vec<&ReadySignal> = ready_signals.iter().collect();
     sorted.sort_by_key(|s| s.validator_id());
     for signal in sorted {
-        out.push(ShardWitnessPayload::Ready {
-            id: signal.validator_id(),
+        let id = signal.validator_id();
+        out.push(if topology.reshape_observer_child(shard, id).is_some() {
+            ShardWitnessPayload::ReshapeReady { validator: id }
+        } else {
+            ShardWitnessPayload::Ready { id }
         });
     }
     out.extend(reshape);
@@ -286,6 +298,8 @@ impl Verify<&BeaconWitnessRootContext<'_>> for BeaconWitnessRoot {
             });
         }
         let new_leaves = derive_leaves(
+            ctx.shard,
+            ctx.topology,
             ctx.receipts,
             &missed,
             ctx.ready_signals,
@@ -331,8 +345,13 @@ mod tests {
     };
 
     /// A snapshot whose `witness_base(shard)` answers `base` for one
-    /// validator's single-shard committee.
-    fn snapshot_with_base(shard: ShardId, base: u64) -> TopologySnapshot {
+    /// validator's single-shard committee, carrying `observers` as the
+    /// shard's pending-split cohort.
+    fn snapshot_with_observers(
+        shard: ShardId,
+        base: u64,
+        observers: std::collections::BTreeMap<ValidatorId, ShardId>,
+    ) -> TopologySnapshot {
         let validators = vec![ValidatorInfo {
             validator_id: ValidatorId::new(0),
             public_key: generate_bls_keypair().public_key(),
@@ -345,7 +364,13 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
             HashMap::from([(shard, BeaconWitnessLeafCount::new(base))]),
+            HashMap::from([(shard, observers)]),
         )
+    }
+
+    /// [`snapshot_with_observers`] with no cohort.
+    fn snapshot_with_base(shard: ShardId, base: u64) -> TopologySnapshot {
+        snapshot_with_observers(shard, base, std::collections::BTreeMap::new())
     }
 
     fn context_with(
@@ -476,6 +501,45 @@ mod tests {
         ctx.reshape_trigger = Some(ReshapeTrigger::Split);
 
         assert!(expected_root.verify(&ctx).is_ok());
+    }
+
+    /// A ready signal from a validator holding an observer seat derives
+    /// a `ReshapeReady` leaf — and the classification is
+    /// consensus-critical: the same signal against a topology without
+    /// the seat derives `Ready`, so the root no longer verifies.
+    #[test]
+    fn observer_signals_classify_as_reshape_ready_leaves() {
+        use std::collections::BTreeMap;
+
+        use crate::{BlockHeight as Height, ReadySignal, zero_bls_signature};
+
+        let shard = ShardId::ROOT;
+        let observer = ValidatorId::new(0);
+        let signals = vec![ReadySignal::new(
+            observer,
+            Height::new(0),
+            Height::new(10),
+            zero_bls_signature(),
+        )];
+        let leaf = ShardWitnessPayload::ReshapeReady {
+            validator: observer,
+        }
+        .leaf_hash();
+        let expected_root = BeaconWitnessRoot::from_raw(compute_merkle_root(&[leaf]));
+
+        let seated =
+            snapshot_with_observers(shard, 0, BTreeMap::from([(observer, ShardId::leaf(1, 0))]));
+        let mut ctx = context_with(&seated, shard, 0, Vec::new(), 1);
+        ctx.ready_signals = &signals;
+        assert!(expected_root.verify(&ctx).is_ok());
+
+        let unseated = snapshot_with_base(shard, 0);
+        let mut ctx = context_with(&unseated, shard, 0, Vec::new(), 1);
+        ctx.ready_signals = &signals;
+        assert!(matches!(
+            expected_root.verify(&ctx),
+            Err(BeaconWitnessRootVerifyError::Mismatch { .. }),
+        ));
     }
 
     /// A header whose claimed window base differs from the

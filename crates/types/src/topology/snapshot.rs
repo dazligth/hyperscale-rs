@@ -5,7 +5,7 @@
 //! All query methods are `&self`; mutations happen in `TopologyCoordinator`
 //! (in the `hyperscale-topology` crate) which builds new snapshots.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use blake3::hash as blake3_hash;
@@ -99,9 +99,16 @@ pub struct TopologySnapshot {
     shard_committees: HashMap<ShardId, ShardCommittee>,
     boundaries: HashMap<ShardId, ShardAnchor>,
     /// Per-shard beacon-witness window base for the window this snapshot
-    /// governs — `BeaconState.witness_window_bases` projected across the
-    /// CQRS firewall. Absent shards read as `ZERO` (nothing consumed).
+    /// governs, projected from `BeaconState.witness_window_bases`.
+    /// Absent shards read as `ZERO` (nothing consumed).
     witness_bases: HashMap<ShardId, BeaconWitnessLeafCount>,
+    /// Per-shard observer cohorts of pending splits — each splitting
+    /// shard's drawn observers and the pending child each one syncs,
+    /// projected from `BeaconState.pending_reshapes`. Observers ride
+    /// the splitting shard's committee in the networking view but never
+    /// its consensus subset; their ready signals classify as
+    /// `ReshapeReady` witness leaves.
+    reshape_observers: HashMap<ShardId, BTreeMap<ValidatorId, ShardId>>,
     validator_pubkeys: HashMap<ValidatorId, Bls12381G1PublicKey>,
     global_validator_set: Arc<ValidatorSet>,
 }
@@ -139,6 +146,7 @@ impl TopologySnapshot {
             shard_committees,
             boundaries: HashMap::new(),
             witness_bases: HashMap::new(),
+            reshape_observers: HashMap::new(),
             validator_pubkeys,
             global_validator_set: Arc::new(validator_set),
         }
@@ -176,6 +184,7 @@ impl TopologySnapshot {
             shard_committees,
             boundaries: HashMap::new(),
             witness_bases: HashMap::new(),
+            reshape_observers: HashMap::new(),
             validator_pubkeys,
             global_validator_set: Arc::new(validator_set),
         }
@@ -222,6 +231,7 @@ impl TopologySnapshot {
             shard_committees: committees,
             boundaries: HashMap::new(),
             witness_bases: HashMap::new(),
+            reshape_observers: HashMap::new(),
             validator_pubkeys,
             global_validator_set: Arc::new(global_validator_set.clone()),
         }
@@ -240,7 +250,11 @@ impl TopologySnapshot {
     /// committee. `boundaries` carries each shard's attested boundary anchor;
     /// shards with no attested boundary yet are simply absent.
     /// `witness_bases` carries each shard's beacon-witness window base;
-    /// shards absent from it read as `ZERO`.
+    /// shards absent from it read as `ZERO`. `reshape_observers` carries
+    /// the observer cohorts of pending splits — each splitting shard
+    /// mapped to its drawn observers and the pending child each one
+    /// syncs; empty cohorts are pruned so an absent shard and a shard
+    /// with no cohort answer queries identically.
     ///
     /// # Panics
     ///
@@ -255,6 +269,7 @@ impl TopologySnapshot {
         mut consensus_members: HashMap<ShardId, Vec<ValidatorId>>,
         boundaries: HashMap<ShardId, ShardAnchor>,
         witness_bases: HashMap<ShardId, BeaconWitnessLeafCount>,
+        mut reshape_observers: HashMap<ShardId, BTreeMap<ValidatorId, ShardId>>,
     ) -> Self {
         let validator_pubkeys = build_validator_pubkeys(global_validator_set);
         let shard_trie = ShardTrie::from_leaves(shard_committees.keys().copied());
@@ -284,12 +299,14 @@ impl TopologySnapshot {
             })
             .collect();
 
+        reshape_observers.retain(|_, cohort| !cohort.is_empty());
         Self {
             network,
             shard_trie,
             shard_committees: committees,
             boundaries,
             witness_bases,
+            reshape_observers,
             validator_pubkeys,
             global_validator_set: Arc::new(global_validator_set.clone()),
         }
@@ -322,6 +339,25 @@ impl TopologySnapshot {
     #[must_use]
     pub const fn shard_trie(&self) -> &ShardTrie {
         &self.shard_trie
+    }
+
+    /// The pending child assigned to `validator` as an observer of the
+    /// pending split of `shard`, or `None` when the validator holds no
+    /// observer seat there.
+    ///
+    /// A `Some` answer marks the validator's ready signals on `shard`
+    /// as `ReshapeReady` witness leaves and names the sub-prefix the
+    /// observer syncs.
+    #[must_use]
+    pub fn reshape_observer_child(
+        &self,
+        shard: ShardId,
+        validator: ValidatorId,
+    ) -> Option<ShardId> {
+        self.reshape_observers
+            .get(&shard)
+            .and_then(|cohort| cohort.get(&validator))
+            .copied()
     }
 
     /// Get the ordered committee members for a shard — full membership,
@@ -562,6 +598,45 @@ mod tests {
         }
     }
 
+    #[test]
+    fn reshape_observer_child_resolves_only_held_seats() {
+        let shard = ShardId::ROOT;
+        let (left, _) = shard.children();
+        let observer = ValidatorId::new(1);
+        let validators: Vec<_> = (0..4).map(make_test_validator).collect();
+        let vs = ValidatorSet::new(validators);
+        let members: Vec<ValidatorId> = vs.validators.iter().map(|v| v.validator_id).collect();
+        let snapshot = TopologySnapshot::from_explicit_committees(
+            NetworkDefinition::simulator(),
+            &vs,
+            HashMap::from([(shard, members.clone())]),
+            HashMap::from([(shard, members)]),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::from([
+                (shard, BTreeMap::from([(observer, left)])),
+                // Empty cohorts prune away — an absent shard and a shard
+                // with no cohort answer identically.
+                (ShardId::leaf(1, 1), BTreeMap::new()),
+            ]),
+        );
+
+        assert_eq!(snapshot.reshape_observer_child(shard, observer), Some(left));
+        assert_eq!(
+            snapshot.reshape_observer_child(shard, ValidatorId::new(0)),
+            None,
+        );
+        assert_eq!(
+            snapshot.reshape_observer_child(ShardId::leaf(1, 1), observer),
+            None,
+        );
+        // Default construction carries no seats at all.
+        assert_eq!(
+            make_snapshot(4).reshape_observer_child(shard, observer),
+            None
+        );
+    }
+
     fn make_snapshot(num_validators: u64) -> TopologySnapshot {
         let validators: Vec<_> = (0..num_validators).map(make_test_validator).collect();
         TopologySnapshot::new(
@@ -710,6 +785,7 @@ mod tests {
             committees,
             boundaries,
             witness_bases,
+            HashMap::new(),
         );
 
         assert_eq!(snapshot.boundary(ShardId::leaf(1, 0)), Some(anchor));
@@ -747,6 +823,7 @@ mod tests {
             &vs,
             committees,
             consensus,
+            HashMap::new(),
             HashMap::new(),
             HashMap::new(),
         );
@@ -793,6 +870,7 @@ mod tests {
             &vs,
             committees,
             consensus,
+            HashMap::new(),
             HashMap::new(),
             HashMap::new(),
         );

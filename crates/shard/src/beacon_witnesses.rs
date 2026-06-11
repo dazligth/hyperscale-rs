@@ -4,8 +4,8 @@
 //! [`BeaconWitnessRoot`](hyperscale_types::BeaconWitnessRoot) commitment
 //! on each [`BlockHeader`](hyperscale_types::BlockHeader): the in-memory
 //! accumulator, the canonical leaf-derivation rule (receipts →
-//! `MissedProposal` → `Ready`), and the post-execution verifier hook
-//! that downstream call sites delegate to.
+//! `MissedProposal` → readiness → reshape trigger), and the
+//! post-execution verifier hook that downstream call sites delegate to.
 //!
 //! The module is intentionally storage-agnostic. Reads and writes
 //! against the `beacon_witnesses` column family land alongside the
@@ -195,6 +195,8 @@ pub fn prospective_parent_witness_leaves(
             topology,
         );
         let new_leaves = derive_leaves(
+            local_shard,
+            topology,
             &receipts,
             &missed,
             pending.manifest().ready_signals().as_slice(),
@@ -220,10 +222,13 @@ pub fn prospective_parent_witness_leaves(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, HashMap};
+
     use hyperscale_test_helpers::TestCommittee;
     use hyperscale_types::{
-        BeaconWitnessRoot, BlockHeight, Bls12381G2Signature, ReadySignal, Round, Stake,
-        StakePoolId, TopologySnapshot, ValidatorId, compute_merkle_root,
+        BeaconWitnessRoot, BlockHeight, Bls12381G2Signature, NetworkDefinition, ReadySignal, Round,
+        Stake, StakePoolId, TopologySnapshot, ValidatorId, ValidatorInfo, ValidatorSet,
+        compute_merkle_root,
     };
 
     use super::*;
@@ -241,6 +246,32 @@ mod tests {
 
     fn topology() -> TopologySnapshot {
         TestCommittee::new(4, 7).topology_snapshot(1)
+    }
+
+    /// [`topology`]'s committee with `observer` holding a seat on
+    /// ROOT's pending left child.
+    fn topology_with_observer(observer: u64) -> TopologySnapshot {
+        let committee = TestCommittee::new(4, 7);
+        let infos: Vec<ValidatorInfo> = (0..committee.size())
+            .map(|i| ValidatorInfo {
+                validator_id: committee.validator_id(i),
+                public_key: *committee.public_key(i),
+            })
+            .collect();
+        let members: Vec<ValidatorId> = infos.iter().map(|v| v.validator_id).collect();
+        let (left, _) = ShardId::ROOT.children();
+        TopologySnapshot::from_explicit_committees(
+            NetworkDefinition::simulator(),
+            &ValidatorSet::new(infos),
+            HashMap::from([(ShardId::ROOT, members.clone())]),
+            HashMap::from([(ShardId::ROOT, members)]),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::from([(
+                ShardId::ROOT,
+                BTreeMap::from([(ValidatorId::new(observer), left)]),
+            )]),
+        )
     }
 
     fn ready_signal_for(validator: u64) -> ReadySignal {
@@ -402,7 +433,11 @@ mod tests {
         let ready = ready_signals(&[3, 1, 2]);
         let receipts: Vec<StoredReceipt> = Vec::new();
 
+        // Validator 2 holds an observer seat: its signal classifies as
+        // `ReshapeReady` in the same ascending-id position.
         let leaves = derive_leaves(
+            ShardId::ROOT,
+            &topology_with_observer(2),
             &receipts,
             &missed,
             &ready,
@@ -410,18 +445,24 @@ mod tests {
                 shard: ShardId::ROOT,
             }),
         );
-        // 1 MissedProposal + 3 Ready (sorted ascending by validator id)
-        // + the reshape trigger last.
+        // 1 MissedProposal + 3 readiness witnesses (sorted ascending by
+        // validator id, kind per sender) + the reshape trigger last.
         assert_eq!(leaves.len(), 5);
         assert!(matches!(
             &leaves[0],
             ShardWitnessPayload::MissedProposal { .. }
         ));
-        for (i, expected) in [1u64, 2, 3].iter().enumerate() {
-            match &leaves[1 + i] {
-                ShardWitnessPayload::Ready { id } => assert_eq!(id.inner(), *expected),
-                other => panic!("expected Ready, got {other:?}"),
-            }
+        match &leaves[1] {
+            ShardWitnessPayload::Ready { id } => assert_eq!(id.inner(), 1),
+            other => panic!("expected Ready, got {other:?}"),
+        }
+        match &leaves[2] {
+            ShardWitnessPayload::ReshapeReady { validator } => assert_eq!(validator.inner(), 2),
+            other => panic!("expected ReshapeReady, got {other:?}"),
+        }
+        match &leaves[3] {
+            ShardWitnessPayload::Ready { id } => assert_eq!(id.inner(), 3),
+            other => panic!("expected Ready, got {other:?}"),
         }
         assert!(matches!(
             &leaves[4],
@@ -442,8 +483,8 @@ mod tests {
         let ready = ready_signals(&[7, 2]);
         let receipts: Vec<StoredReceipt> = Vec::new();
 
-        let a = derive_leaves(&receipts, &missed, &ready, None);
-        let b = derive_leaves(&receipts, &missed, &ready, None);
+        let a = derive_leaves(ShardId::ROOT, &topo, &receipts, &missed, &ready, None);
+        let b = derive_leaves(ShardId::ROOT, &topo, &receipts, &missed, &ready, None);
         assert_eq!(a, b);
 
         let mut acc_a = BeaconWitnessAccumulator::new();

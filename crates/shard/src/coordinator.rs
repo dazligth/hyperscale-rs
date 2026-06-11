@@ -80,14 +80,15 @@ use std::time::Duration;
 
 use hyperscale_storage::RecoveredState;
 use hyperscale_types::{
-    BeaconWitnessCommit, BeaconWitnessRoot, BeaconWitnessRootVerifyError, Block, BlockHeader,
-    BlockHeight, BlockManifest, BlockVote, CertRootVerifyError, CertificateRoot, CertifiedBlock,
-    CertifiedBlockHeader, FinalizedWave, LocalReceiptRoot, LocalReceiptRootVerifyError,
-    MAX_ROUND_GAP, ProvisionRootVerifyError, ProvisionTxRootsMap, ProvisionTxRootsVerifyError,
-    Provisions, ProvisionsRoot, QcContext, QcVerifyError, QuorumCertificate, Round,
-    RoutableTransaction, StateRoot, StateRootVerifyError, Timeout, TopologySchedule,
-    TopologySnapshot, TransactionRoot, TxHash, TxRootVerifyError, ValidatorId, Verifiable,
-    Verified, Verify, VoteCount, derive_leaves, missed_proposals_since_prev_commit,
+    BeaconWitnessCommit, BeaconWitnessLeafCount, BeaconWitnessRoot, BeaconWitnessRootVerifyError,
+    Block, BlockHeader, BlockHeight, BlockManifest, BlockVote, CertRootVerifyError,
+    CertificateRoot, CertifiedBlock, CertifiedBlockHeader, FinalizedWave, LocalReceiptRoot,
+    LocalReceiptRootVerifyError, MAX_ROUND_GAP, ProvisionRootVerifyError, ProvisionTxRootsMap,
+    ProvisionTxRootsVerifyError, Provisions, ProvisionsRoot, QcContext, QcVerifyError,
+    QuorumCertificate, Round, RoutableTransaction, ShardWitnessPayload, StateRoot,
+    StateRootVerifyError, Timeout, TopologySchedule, TopologySnapshot, TransactionRoot, TxHash,
+    TxRootVerifyError, ValidatorId, Verifiable, Verified, Verify, VoteCount, derive_leaves,
+    missed_proposals_since_prev_commit,
 };
 use tracing::field::Empty;
 use tracing::{debug, info, instrument, trace, warn};
@@ -166,6 +167,17 @@ const MAX_PENDING_PER_HEIGHT: usize = 64;
 /// headers it can't yet vote on. Bounds the number of populated height buckets
 /// so the per-height cap bounds total pending storage.
 const MAX_HEADER_HEIGHT_LOOKAHEAD: u64 = 256;
+
+/// What [`ShardCoordinator::preview_witness_commitment`] resolves for a
+/// proposal: the drained ready signals, the reshape assertion, and the
+/// beacon-witness commitment trio the header carries.
+struct WitnessCommitmentPreview {
+    ready_signals: Vec<ReadySignal>,
+    reshape_trigger: Option<ReshapeTrigger>,
+    root: BeaconWitnessRoot,
+    leaf_count: BeaconWitnessLeafCount,
+    base: BeaconWitnessLeafCount,
+}
 
 /// Shard consensus state machine (HotStuff-2).
 ///
@@ -1110,6 +1122,87 @@ impl ShardCoordinator {
         }
     }
 
+    /// Drain dwell-eligible ready signals and preview the beacon-witness
+    /// commitment a proposal at `height` would carry — the parent-prefix
+    /// walk, the window-base trim, the reshape assertion, and the new
+    /// leaves appended — all resolved against the same schedule entry
+    /// verifiers use.
+    ///
+    /// The preview anchors on the prefix the parent block leaves behind,
+    /// not the committed accumulator: the parent may be certified but not
+    /// yet committed, so its own witness leaves (e.g. a missed-proposal
+    /// leaf after a view change) aren't folded into `committed` yet.
+    /// Every verifier reconstructs this same prefix via
+    /// [`prospective_parent_witness_leaves`], so previewing against the
+    /// committed accumulator alone would omit those leaves and produce a
+    /// root no validator accepts.
+    fn preview_witness_commitment(
+        &mut self,
+        topology: &TopologySchedule,
+        committee: &TopologySnapshot,
+        height: BlockHeight,
+        parent_block_hash: BlockHash,
+        receipts: &[StoredReceipt],
+        missed: &[ShardWitnessPayload],
+    ) -> WitnessCommitmentPreview {
+        let ready_signals = self.ready_signal_pool.drain_eligible(
+            height,
+            self.now,
+            MIN_READY_SIGNAL_DWELL,
+            MAX_READY_SIGNALS_PER_BLOCK,
+        );
+        let (parent_start, mut parent_leaves) = prospective_parent_witness_leaves(
+            &self.beacon_witness_accumulator,
+            self.committed_hash,
+            parent_block_hash,
+            &self.pending_blocks,
+            self.local_shard,
+            committee,
+        )
+        .unwrap_or_else(|blocking| {
+            warn!(
+                validator = ?self.me,
+                ?blocking,
+                "Beacon-witness ancestor walk blocked at proposal; previewing against committed prefix"
+            );
+            (
+                self.beacon_witness_accumulator.start_index(),
+                self.beacon_witness_accumulator.leaves().to_vec(),
+            )
+        });
+        // The window base resolves from the same schedule entry as the
+        // committee — verifiers check the header's claim against it.
+        // The root commits the window only, so parent leaves below the
+        // base trim off before the preview; the base never undercuts the
+        // parent window's start (it is bounded by a committed ancestor's
+        // count, and pruning follows commits).
+        let base = committee.witness_base(self.local_shard);
+        let trim = usize::try_from(base.inner().saturating_sub(parent_start.inner()))
+            .unwrap_or(usize::MAX)
+            .min(parent_leaves.len());
+        parent_leaves.drain(..trim);
+
+        let reshape_trigger =
+            self.derive_proposal_reshape_trigger(topology, parent_block_hash, &parent_leaves);
+        let new_leaves = derive_leaves(
+            self.local_shard,
+            committee,
+            receipts,
+            missed,
+            &ready_signals,
+            reshape_trigger.and_then(|t| t.to_payload(self.local_shard)),
+        );
+        let (root, leaf_count) =
+            BeaconWitnessAccumulator::from_leaves(base, parent_leaves).preview_append(&new_leaves);
+        WitnessCommitmentPreview {
+            ready_signals,
+            reshape_trigger,
+            root,
+            leaf_count,
+            base,
+        }
+    }
+
     fn build_and_dispatch_proposal(
         &mut self,
         topology: &TopologySchedule,
@@ -1141,66 +1234,14 @@ impl ShardCoordinator {
             round,
             committee,
         );
-        let ready_signals = self.ready_signal_pool.drain_eligible(
-            height,
-            self.now,
-            MIN_READY_SIGNAL_DWELL,
-            MAX_READY_SIGNALS_PER_BLOCK,
-        );
-        // Anchor the preview on the prefix the parent block leaves behind,
-        // not the committed accumulator: the parent may be certified but not
-        // yet committed, so its own witness leaves (e.g. a missed-proposal
-        // leaf after a view change) aren't folded into `committed` yet. Every
-        // verifier reconstructs this same prefix via
-        // `prospective_parent_witness_leaves`, so previewing against the
-        // committed accumulator alone would omit those leaves and produce a
-        // root no validator accepts.
-        let (parent_start, mut parent_leaves) = prospective_parent_witness_leaves(
-            &self.beacon_witness_accumulator,
-            self.committed_hash,
-            parent_block_hash,
-            &self.pending_blocks,
-            self.local_shard,
+        let preview = self.preview_witness_commitment(
+            topology,
             committee,
-        )
-        .unwrap_or_else(|blocking| {
-            warn!(
-                validator = ?self.me,
-                ?blocking,
-                "Beacon-witness ancestor walk blocked at proposal; previewing against committed prefix"
-            );
-            (
-                self.beacon_witness_accumulator.start_index(),
-                self.beacon_witness_accumulator.leaves().to_vec(),
-            )
-        });
-        // The window base resolves from the same schedule entry as the
-        // committee — verifiers check the header's claim against it.
-        // The root commits the window only, so parent leaves below the
-        // base trim off before the preview; the base never undercuts the
-        // parent window's start (it is bounded by a committed ancestor's
-        // count, and pruning follows commits).
-        let beacon_witness_base = committee.witness_base(self.local_shard);
-        let trim = usize::try_from(
-            beacon_witness_base
-                .inner()
-                .saturating_sub(parent_start.inner()),
-        )
-        .unwrap_or(usize::MAX)
-        .min(parent_leaves.len());
-        parent_leaves.drain(..trim);
-
-        let reshape_trigger =
-            self.derive_proposal_reshape_trigger(topology, parent_block_hash, &parent_leaves);
-        let new_leaves = derive_leaves(
+            height,
+            parent_block_hash,
             &receipts,
             &missed,
-            &ready_signals,
-            reshape_trigger.and_then(|t| t.to_payload(self.local_shard)),
         );
-        let (beacon_witness_root, beacon_witness_leaf_count) =
-            BeaconWitnessAccumulator::from_leaves(beacon_witness_base, parent_leaves)
-                .preview_append(&new_leaves);
 
         let plan = assemble_build_action(
             self.me,
@@ -1210,11 +1251,11 @@ impl ShardCoordinator {
             round,
             self.now,
             kind,
-            ready_signals,
-            reshape_trigger,
-            beacon_witness_root,
-            beacon_witness_leaf_count,
-            beacon_witness_base,
+            preview.ready_signals,
+            preview.reshape_trigger,
+            preview.root,
+            preview.leaf_count,
+            preview.base,
         );
 
         info!(
@@ -3241,6 +3282,8 @@ impl ShardCoordinator {
             committee,
         );
         let new_leaves = derive_leaves(
+            self.local_shard,
+            committee,
             &receipts,
             &missed,
             manifest.ready_signals().as_slice(),
@@ -6827,6 +6870,7 @@ mod tests {
             consensus,
             HashMap::new(),
             HashMap::new(),
+            HashMap::new(),
         );
         TopologySchedule::single(Arc::new(snapshot))
     }
@@ -6859,6 +6903,7 @@ mod tests {
             &vs,
             committees,
             consensus,
+            HashMap::new(),
             HashMap::new(),
             HashMap::new(),
         );
