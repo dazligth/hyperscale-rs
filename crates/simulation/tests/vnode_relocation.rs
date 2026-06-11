@@ -17,28 +17,18 @@
 use std::time::Duration;
 
 use hyperscale_core::ParticipationChange;
-use hyperscale_network_memory::{NetworkConfig, NodeIndex};
+use hyperscale_network_memory::NodeIndex;
 use hyperscale_simulation::{JoinKind, SimulationRunner};
 use hyperscale_storage::ShardChainReader;
 use hyperscale_storage_memory::SimShardStorage;
 use hyperscale_types::{
-    BeaconChainConfig, BlockHeight, READY_TIMEOUT_EPOCHS, SHUFFLE_INTERVAL_EPOCHS, ShardId,
-    ValidatorId, ValidatorStatus, shard_prefix_path,
+    BlockHeight, READY_TIMEOUT_EPOCHS, SHUFFLE_INTERVAL_EPOCHS, ShardId, ValidatorId,
+    ValidatorStatus, shard_prefix_path,
 };
 use tracing_test::traced_test;
 
-/// 2-second epochs: short enough to reach the shuffle within the run
-/// window, long enough that the beacon paces rather than stalling
-/// against its production-sized SPC/skip timeouts.
-const TEST_EPOCH_MS: u64 = 2000;
-
-/// Committee validators per shard. Seven keeps both committees above
-/// quorum through the rotation even where a replacement runs no host.
-const PER_SHARD: u32 = 7;
-
-/// Hostless `Pooled` validators registered in genesis — the shuffle
-/// only rotates a shard it can refill.
-const POOL_EXTRAS: u32 = 2;
+mod common;
+use common::{PER_SHARD, TEST_EPOCH_MS, rotation_config};
 
 /// Seed chosen so the epoch-16 shuffle produces a *direct* cross-shard
 /// move: one shard's rotation victim is drawn straight into the other
@@ -46,23 +36,22 @@ const POOL_EXTRAS: u32 = 2;
 /// both `join` and `leave` set on a hosted vnode.
 const SEED: u64 = 7;
 
-fn relocation_config() -> NetworkConfig {
-    NetworkConfig {
-        num_shards: 2,
-        validators_per_shard: PER_SHARD,
-        intra_shard_latency: Duration::from_millis(50),
-        cross_shard_latency: Duration::from_millis(50),
-        jitter_fraction: 0.1,
-        beacon_chain_config: Some(BeaconChainConfig {
-            epoch_duration_ms: TEST_EPOCH_MS,
-            num_shards: 2,
-            shard_size: PER_SHARD,
-            ..BeaconChainConfig::default()
-        }),
-        pool_extra_validators: POOL_EXTRAS,
-        ..Default::default()
-    }
-}
+/// Epochs past the shuffle boundary the placement delta gets to
+/// surface through `StepOutput`.
+const SHUFFLE_SLACK_EPOCHS: u64 = 4;
+
+/// Epochs the joiner gets to tail-sync and flip `ready: true` — far
+/// inside `READY_TIMEOUT_EPOCHS`, so the flip is signal-driven, not
+/// the timeout fallback.
+const READY_BUDGET_EPOCHS: u64 = 8;
+
+/// Epochs the seated mover gets to land a committed proposal in the
+/// destination shard.
+const PROPOSAL_BUDGET_EPOCHS: u64 = 12;
+
+/// Epochs the drained origin shard gets to demonstrate liveness
+/// without the mover.
+const DRAIN_BUDGET_EPOCHS: u64 = 4;
 
 /// Run in one-second slices until `predicate` holds or `deadline`
 /// passes, draining placement deltas into `moves` along the way.
@@ -99,12 +88,7 @@ fn mover_status(
 fn member_host(runner: &SimulationRunner, shard: ShardId, except: NodeIndex) -> NodeIndex {
     let hosts = 2 * PER_SHARD;
     (0..hosts)
-        .find(|&h| {
-            h != except
-                && runner
-                    .vnode_state_in(h, shard)
-                    .is_some_and(|state| state.shard_id() == shard)
-        })
+        .find(|&h| h != except && runner.vnode_state_in(h, shard).is_some())
         .expect("every shard has settled member hosts")
 }
 
@@ -112,11 +96,12 @@ fn member_host(runner: &SimulationRunner, shard: ShardId, except: NodeIndex) -> 
 #[test]
 #[allow(clippy::too_many_lines)] // one relocation lifecycle asserted end to end
 fn vnode_relocates_across_shards_at_the_shuffle() {
-    let mut runner = SimulationRunner::new(&relocation_config(), SEED);
+    let mut runner = SimulationRunner::new(&rotation_config(), SEED);
     runner.initialize_genesis();
 
     // ── Detection: the epoch-16 shuffle surfaces a direct move ──────
-    let shuffle = Duration::from_millis(TEST_EPOCH_MS * (SHUFFLE_INTERVAL_EPOCHS + 4));
+    let shuffle =
+        Duration::from_millis(TEST_EPOCH_MS * (SHUFFLE_INTERVAL_EPOCHS + SHUFFLE_SLACK_EPOCHS));
     let mut moves: Vec<(NodeIndex, ParticipationChange)> = Vec::new();
     run_until_or(&mut runner, shuffle, &mut moves, |_| false);
     let (node, change) = moves
@@ -153,7 +138,7 @@ fn vnode_relocates_across_shards_at_the_shuffle() {
     // The joiner's self-signed ReadySignal must flip `ready: true`
     // within a few epochs — far inside READY_TIMEOUT_EPOCHS, so the
     // flip is signal-driven, not the timeout fallback.
-    let ready_deadline = runner.now() + Duration::from_millis(TEST_EPOCH_MS * 8);
+    let ready_deadline = runner.now() + Duration::from_millis(TEST_EPOCH_MS * READY_BUDGET_EPOCHS);
     let became_ready = run_until_or(&mut runner, ready_deadline, &mut moves, |r| {
         matches!(
             mover_status(r, node, validator),
@@ -162,8 +147,8 @@ fn vnode_relocates_across_shards_at_the_shuffle() {
     });
     assert!(
         became_ready,
-        "joiner must flip ready:true via its ReadySignal within 8 epochs \
-         (READY_TIMEOUT is {READY_TIMEOUT_EPOCHS})"
+        "joiner must flip ready:true via its ReadySignal within \
+         {READY_BUDGET_EPOCHS} epochs (READY_TIMEOUT is {READY_TIMEOUT_EPOCHS})"
     );
 
     // ── Participation: the mover follows, votes, and proposes in B ──
@@ -173,7 +158,8 @@ fn vnode_relocates_across_shards_at_the_shuffle() {
         .shard_coordinator()
         .committed_height();
     let peer = member_host(&runner, to, node);
-    let proposed_deadline = runner.now() + Duration::from_millis(TEST_EPOCH_MS * 12);
+    let proposed_deadline =
+        runner.now() + Duration::from_millis(TEST_EPOCH_MS * PROPOSAL_BUDGET_EPOCHS);
     let proposed = run_until_or(&mut runner, proposed_deadline, &mut moves, |r| {
         let tip = r
             .vnode_state_in(peer, to)
@@ -229,7 +215,7 @@ fn vnode_relocates_across_shards_at_the_shuffle() {
         .expect("origin member host")
         .shard_coordinator()
         .committed_height();
-    let drain_deadline = runner.now() + Duration::from_millis(TEST_EPOCH_MS * 4);
+    let drain_deadline = runner.now() + Duration::from_millis(TEST_EPOCH_MS * DRAIN_BUDGET_EPOCHS);
     let origin_alive = run_until_or(&mut runner, drain_deadline, &mut moves, |r| {
         r.vnode_state_in(origin_peer, from)
             .expect("origin member host")

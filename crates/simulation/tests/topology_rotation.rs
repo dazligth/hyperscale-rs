@@ -15,43 +15,12 @@
 use std::ops::Range;
 use std::time::Duration;
 
-use hyperscale_network_memory::NetworkConfig;
 use hyperscale_simulation::SimulationRunner;
-use hyperscale_types::{BeaconChainConfig, BlockHeight, Epoch, SHUFFLE_INTERVAL_EPOCHS, ShardId};
+use hyperscale_types::{BlockHeight, Epoch, SHUFFLE_INTERVAL_EPOCHS, ShardId};
 use tracing_test::traced_test;
 
-/// 2-second epochs: short enough to reach the shuffle within the run window,
-/// long enough that the beacon paces (one epoch per `epoch_duration_ms`) rather
-/// than stalling against its production-sized SPC/skip timeouts.
-const TEST_EPOCH_MS: u64 = 2000;
-
-/// Committee validators per shard. The shuffle retires one member at the
-/// boundary; seven keeps the post-rotation committee above quorum even when
-/// the replacement drawn from the pool runs no host.
-const PER_SHARD: u32 = 7;
-
-/// Hostless `Pooled` validators registered in genesis. The shuffle only
-/// rotates a shard it can refill, so an empty pool would mean no rotation
-/// at all — these give each shard's draw stock.
-const POOL_EXTRAS: u32 = 2;
-
-fn rotation_config() -> NetworkConfig {
-    NetworkConfig {
-        num_shards: 2,
-        validators_per_shard: PER_SHARD,
-        intra_shard_latency: Duration::from_millis(50),
-        cross_shard_latency: Duration::from_millis(50),
-        jitter_fraction: 0.1,
-        beacon_chain_config: Some(BeaconChainConfig {
-            epoch_duration_ms: TEST_EPOCH_MS,
-            num_shards: 2,
-            shard_size: PER_SHARD,
-            ..BeaconChainConfig::default()
-        }),
-        pool_extra_validators: POOL_EXTRAS,
-        ..Default::default()
-    }
-}
+mod common;
+use common::{PER_SHARD, TEST_EPOCH_MS, rotation_config};
 
 /// Host index range for `shard`. Under `SameShardBundled` with one vnode per
 /// host, shard `s`'s committee validators occupy hosts

@@ -24,6 +24,10 @@ use hyperscale_types::ShardAnchor;
 #[allow(clippy::wildcard_imports)] // parent-module split; shares runner.rs's imports
 use super::*;
 
+/// Drive cap for the snap-sync pump — generous over the dozens of
+/// rounds a small-state bootstrap takes, so exhaustion means a wedge.
+const MAX_BOOTSTRAP_ROUNDS: usize = 100_000;
+
 /// Which join path [`SimulationRunner::join_shard`] took. Mirrors the
 /// production supervisor's branching on the store's recovered state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,7 +149,7 @@ impl SimulationRunner {
 
         let mut bootstrap = ShardBootstrap::new(shard, anchor);
         let mut peer = 0usize;
-        for _ in 0..100_000 {
+        for _ in 0..MAX_BOOTSTRAP_ROUNDS {
             if bootstrap.is_complete() {
                 break;
             }

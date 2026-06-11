@@ -231,14 +231,12 @@ mod tests {
     use arc_swap::ArcSwap;
     use hyperscale_network::{GossipHandler, NotificationHandler, RequestHandler};
     use hyperscale_node::{serve_state_range_request, serve_witness_history_request};
-    use hyperscale_storage::test_helpers::{
-        commit_block_with_updates, commit_block_with_witnesses, make_database_update,
-    };
-    use hyperscale_storage::{BoundaryStore, PendingChain, SubstateStore};
+    use hyperscale_storage::test_helpers::pin_snap_sync_replica;
+    use hyperscale_storage::{PendingChain, SubstateStore};
     use hyperscale_storage_memory::SimShardStorage;
     use hyperscale_types::network::request::{GetStateRangeRequest, GetWitnessHistoryRequest};
     use hyperscale_types::{
-        BlockHeight, GossipMessage, MessageClass, NetworkDefinition, NetworkMessage, ShardAnchor,
+        GossipMessage, MessageClass, NetworkDefinition, NetworkMessage, ShardAnchor,
         TopologySnapshot, ValidatorId, ValidatorSet,
     };
     use sbor::{basic_decode, basic_encode};
@@ -246,28 +244,13 @@ mod tests {
     use super::*;
 
     const ENTRIES: u8 = 12;
-    const ANCHOR_HEIGHT: u64 = ENTRIES as u64 + 1;
 
     /// A committed replica: `ENTRIES` substate blocks, then a boundary
     /// block whose header carries the (empty) witness commitment, pinned
     /// for serving.
     fn replica() -> (Arc<SimShardStorage>, ShardAnchor) {
         let storage = SimShardStorage::default();
-        for seed in 1..=ENTRIES {
-            let updates =
-                make_database_update(vec![seed; 50], 0, vec![seed], vec![seed, seed, seed]);
-            commit_block_with_updates(&storage, BlockHeight::new(u64::from(seed)), &updates);
-        }
-        let block_hash =
-            commit_block_with_witnesses(&storage, BlockHeight::new(ANCHOR_HEIGHT), &[]);
-        storage
-            .pin_boundary(BlockHeight::new(ANCHOR_HEIGHT))
-            .unwrap();
-        let anchor = ShardAnchor {
-            state_root: storage.state_root(),
-            block_hash,
-            height: BlockHeight::new(ANCHOR_HEIGHT),
-        };
+        let anchor = pin_snap_sync_replica(&storage, ENTRIES, &[]);
         (Arc::new(storage), anchor)
     }
 

@@ -170,24 +170,15 @@ impl WitnessHistorySync {
 mod tests {
     use std::sync::Arc;
 
-    use hyperscale_storage::test_helpers::commit_block_with_witnesses;
+    use hyperscale_storage::test_helpers::{commit_block_with_witnesses, stake_deposit};
     use hyperscale_storage::{PendingChain, RecoveredState};
     use hyperscale_storage_memory::SimShardStorage;
-    use hyperscale_types::{
-        BlockHash, BlockHeight, ShardWitnessPayload, Stake, StakePoolId, StateRoot,
-    };
+    use hyperscale_types::{BlockHash, BlockHeight, ShardWitnessPayload, StateRoot};
 
     use super::*;
     use crate::shard_io::fetch::witness_history_serve::serve_witness_history_request;
 
     const HEIGHT: u64 = 1;
-
-    fn deposit(amount: u64) -> ShardWitnessPayload {
-        ShardWitnessPayload::StakeDeposit {
-            pool_id: StakePoolId::new(1),
-            amount: Stake::from_whole_tokens(amount),
-        }
-    }
 
     /// A serving replica with `leaves` committed at `HEIGHT`, plus the
     /// anchor naming its boundary.
@@ -216,7 +207,7 @@ mod tests {
 
     #[test]
     fn assembles_and_verifies_a_paginated_history() {
-        let leaves: Vec<_> = (1u64..=5).map(deposit).collect();
+        let leaves: Vec<_> = (1u64..=5).map(stake_deposit).collect();
         let (peer, anchor) = replica(&leaves);
 
         let mut sync = WitnessHistorySync::new(anchor, 2);
@@ -254,7 +245,7 @@ mod tests {
 
     #[test]
     fn header_not_matching_the_anchor_is_rejected() {
-        let leaves: Vec<_> = (1u64..=3).map(deposit).collect();
+        let leaves: Vec<_> = (1u64..=3).map(stake_deposit).collect();
         let (peer, anchor) = replica(&leaves);
 
         // A peer on a different chain: same height, different block.
@@ -282,7 +273,7 @@ mod tests {
 
     #[test]
     fn tampered_hash_fails_the_final_root_check_and_retry_heals() {
-        let leaves: Vec<_> = (1u64..=4).map(deposit).collect();
+        let leaves: Vec<_> = (1u64..=4).map(stake_deposit).collect();
         let (peer, anchor) = replica(&leaves);
 
         let mut sync = WitnessHistorySync::new(anchor, 16);
@@ -301,7 +292,7 @@ mod tests {
 
     #[test]
     fn short_final_page_is_rejected() {
-        let leaves: Vec<_> = (1u64..=4).map(deposit).collect();
+        let leaves: Vec<_> = (1u64..=4).map(stake_deposit).collect();
         let (peer, anchor) = replica(&leaves);
 
         let mut sync = WitnessHistorySync::new(anchor, 16);
@@ -317,7 +308,7 @@ mod tests {
 
     #[test]
     fn empty_continuation_page_is_rejected() {
-        let leaves: Vec<_> = (1u64..=4).map(deposit).collect();
+        let leaves: Vec<_> = (1u64..=4).map(stake_deposit).collect();
         let (peer, anchor) = replica(&leaves);
 
         let mut sync = WitnessHistorySync::new(anchor, 16);
@@ -334,7 +325,7 @@ mod tests {
 
     #[test]
     fn unavailable_peer_rearms() {
-        let leaves: Vec<_> = (1u64..=2).map(deposit).collect();
+        let leaves: Vec<_> = (1u64..=2).map(stake_deposit).collect();
         let (peer, anchor) = replica(&leaves);
 
         let mut sync = WitnessHistorySync::new(anchor, 16);
@@ -350,7 +341,7 @@ mod tests {
 
     #[test]
     fn unsolicited_response_is_rejected_without_reset() {
-        let leaves: Vec<_> = (1u64..=2).map(deposit).collect();
+        let leaves: Vec<_> = (1u64..=2).map(stake_deposit).collect();
         let (peer, anchor) = replica(&leaves);
 
         let mut sync = WitnessHistorySync::new(anchor, 16);

@@ -15,11 +15,11 @@ use hyperscale_types::{
     CertifiedBlock, ConsensusReceipt, Epoch, EventData, ExecutionCertificate, ExecutionMetadata,
     ExecutionOutcome, FeeSummary, FinalizedWave, GlobalReceiptHash, GlobalReceiptRoot, Hash,
     InFlightCount, LocalReceiptRoot, LogLevel, NodeId, PcQc2, PcQc3, PcSignerLengths, PcVector,
-    PcXpProof, ProposerTimestamp, ProvisionsRoot, QuorumCertificate, Randomness, Round, ShardId,
-    ShardWitnessPayload, SignerBitfield, SpcCert, SpcView, Stake, StakePoolId, StateRoot,
-    StoredReceipt, TransactionRoot, TxHash, TxOutcome, ValidatorId, Verified, WaveCertificate,
-    WaveId, WeightedTimestamp, compute_global_receipt_root, compute_merkle_root,
-    zero_bls_signature,
+    PcXpProof, ProposerTimestamp, ProvisionsRoot, QuorumCertificate, Randomness, Round,
+    ShardAnchor, ShardId, ShardWitnessPayload, SignerBitfield, SpcCert, SpcView, Stake,
+    StakePoolId, StateRoot, StoredReceipt, TransactionRoot, TxHash, TxOutcome, ValidatorId,
+    Verified, WaveCertificate, WaveId, WeightedTimestamp, compute_global_receipt_root,
+    compute_merkle_root, zero_bls_signature,
 };
 use indexmap::IndexMap;
 use radix_common::math::Decimal;
@@ -28,8 +28,8 @@ use radix_common::types::{NodeId as RadixNodeId, PartitionNumber};
 use radix_substate_store_interface::db_key_mapper::{DatabaseKeyMapper, SpreadPrefixKeyMapper};
 
 use crate::{
-    DatabaseUpdates, DbSortKey, NodeDatabaseUpdates, PartitionDatabaseUpdates, ShardChainReader,
-    ShardChainWriter,
+    BoundaryStore, DatabaseUpdates, DbSortKey, NodeDatabaseUpdates, PartitionDatabaseUpdates,
+    ShardChainReader, ShardChainWriter, SubstateStore,
 };
 
 /// Build a `DatabaseUpdates` containing a single `Set` operation.
@@ -528,6 +528,51 @@ pub fn commit_block_with_witnesses(
     block_hash
 }
 
+/// A `ShardWitnessPayload::StakeDeposit` fixture.
+#[must_use]
+pub const fn stake_deposit(amount: u64) -> ShardWitnessPayload {
+    ShardWitnessPayload::StakeDeposit {
+        pool_id: StakePoolId::new(1),
+        amount: Stake::from_whole_tokens(amount),
+    }
+}
+
+/// Seed `entries` single-substate block commits at heights
+/// `1..=entries`, each writing one distinct node keyed by its seed
+/// byte.
+pub fn seed_substate_commits(storage: &(impl ShardChainReader + ShardChainWriter), entries: u8) {
+    for seed in 1..=entries {
+        let updates = make_database_update(vec![seed; 50], 0, vec![seed], vec![seed, seed, seed]);
+        commit_block_with_updates(storage, BlockHeight::new(u64::from(seed)), &updates);
+    }
+}
+
+/// A snap-sync serving replica.
+///
+/// Seeds `entries` substate commits, then a boundary block at
+/// `entries + 1` whose header carries the witness commitment over
+/// `leaves`, pinned for serving. Returns the anchor a joiner verifies
+/// against.
+///
+/// # Panics
+///
+/// Panics if pinning fails (this is a test helper).
+pub fn pin_snap_sync_replica(
+    storage: &(impl ShardChainReader + ShardChainWriter + BoundaryStore + SubstateStore),
+    entries: u8,
+    leaves: &[ShardWitnessPayload],
+) -> ShardAnchor {
+    seed_substate_commits(storage, entries);
+    let anchor_height = BlockHeight::new(u64::from(entries) + 1);
+    let block_hash = commit_block_with_witnesses(storage, anchor_height, leaves);
+    storage.pin_boundary(anchor_height).unwrap();
+    ShardAnchor {
+        state_root: storage.state_root(),
+        block_hash,
+        height: anchor_height,
+    }
+}
+
 /// Shared range-read test for `get_beacon_witness_payload_range`.
 ///
 /// The range read must agree with the full prefix read on interior
@@ -538,12 +583,7 @@ pub fn commit_block_with_witnesses(
 ///
 /// Panics if any assertion fails (this is a test helper).
 pub fn test_witness_payload_range_reads(storage: &(impl ShardChainReader + ShardChainWriter)) {
-    let leaves: Vec<ShardWitnessPayload> = (1u64..=5)
-        .map(|amount| ShardWitnessPayload::StakeDeposit {
-            pool_id: StakePoolId::new(1),
-            amount: Stake::from_whole_tokens(amount),
-        })
-        .collect();
+    let leaves: Vec<ShardWitnessPayload> = (1u64..=5).map(stake_deposit).collect();
     commit_block_with_witnesses(storage, BlockHeight::new(1), &leaves);
 
     let all = storage.get_beacon_witness_payloads(BeaconWitnessLeafCount::new(5));

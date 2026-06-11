@@ -251,40 +251,23 @@ impl ShardBootstrap {
 mod tests {
     use std::sync::Arc;
 
-    use hyperscale_storage::test_helpers::{
-        commit_block_with_updates, commit_block_with_witnesses, make_database_update,
-    };
+    use hyperscale_storage::test_helpers::{pin_snap_sync_replica, stake_deposit};
     use hyperscale_storage::{BoundaryStore, PendingChain, SubstateStore};
     use hyperscale_storage_memory::SimShardStorage;
-    use hyperscale_types::{BlockHeight, ShardWitnessPayload, Stake, StakePoolId};
+    use hyperscale_types::ShardWitnessPayload;
 
     use super::*;
     use crate::shard_io::fetch::state_range_serve::serve_state_range_request;
     use crate::shard_io::fetch::witness_history_serve::serve_witness_history_request;
 
     const ENTRIES: u8 = 12;
-    const ANCHOR_HEIGHT: u64 = ENTRIES as u64 + 1;
 
     /// A committed replica: `ENTRIES` substate blocks, then a boundary
     /// block whose header carries the witness commitment over `leaves`,
     /// pinned for serving.
     fn replica(leaves: &[ShardWitnessPayload]) -> (Arc<SimShardStorage>, ShardAnchor) {
         let storage = SimShardStorage::default();
-        for seed in 1..=ENTRIES {
-            let updates =
-                make_database_update(vec![seed; 50], 0, vec![seed], vec![seed, seed, seed]);
-            commit_block_with_updates(&storage, BlockHeight::new(u64::from(seed)), &updates);
-        }
-        let block_hash =
-            commit_block_with_witnesses(&storage, BlockHeight::new(ANCHOR_HEIGHT), leaves);
-        storage
-            .pin_boundary(BlockHeight::new(ANCHOR_HEIGHT))
-            .unwrap();
-        let anchor = ShardAnchor {
-            state_root: storage.state_root(),
-            block_hash,
-            height: BlockHeight::new(ANCHOR_HEIGHT),
-        };
+        let anchor = pin_snap_sync_replica(&storage, ENTRIES, leaves);
         (Arc::new(storage), anchor)
     }
 
@@ -327,12 +310,7 @@ mod tests {
     }
 
     fn witness_leaves() -> Vec<ShardWitnessPayload> {
-        (1u64..=5)
-            .map(|amount| ShardWitnessPayload::StakeDeposit {
-                pool_id: StakePoolId::new(1),
-                amount: Stake::from_whole_tokens(amount),
-            })
-            .collect()
+        (1u64..=5).map(stake_deposit).collect()
     }
 
     /// The full sequencing: state fan-out, import + root check against

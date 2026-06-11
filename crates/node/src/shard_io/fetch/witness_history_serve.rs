@@ -79,18 +79,11 @@ mod tests {
     use std::sync::Arc;
 
     use hyperscale_storage::PendingChain;
-    use hyperscale_storage::test_helpers::commit_block_with_witnesses;
+    use hyperscale_storage::test_helpers::{commit_block_with_witnesses, stake_deposit};
     use hyperscale_storage_memory::SimShardStorage;
-    use hyperscale_types::{BlockHash, BlockHeight, Stake, StakePoolId};
+    use hyperscale_types::{BlockHash, BlockHeight};
 
     use super::*;
-
-    fn deposit(amount: u64) -> ShardWitnessPayload {
-        ShardWitnessPayload::StakeDeposit {
-            pool_id: StakePoolId::new(1),
-            amount: Stake::from_whole_tokens(amount),
-        }
-    }
 
     fn request(
         height: u64,
@@ -109,7 +102,7 @@ mod tests {
     #[test]
     fn serves_pages_that_assemble_to_the_header_commitment() {
         let storage = SimShardStorage::default();
-        let leaves: Vec<_> = (1u64..=5).map(deposit).collect();
+        let leaves: Vec<_> = (1u64..=5).map(stake_deposit).collect();
         let block_hash = commit_block_with_witnesses(&storage, BlockHeight::new(1), &leaves);
         let pending_chain = PendingChain::new(Arc::new(storage));
 
@@ -132,7 +125,7 @@ mod tests {
     #[test]
     fn unknown_height_and_divergent_hash_are_unavailable() {
         let storage = SimShardStorage::default();
-        let leaves: Vec<_> = (1u64..=3).map(deposit).collect();
+        let leaves: Vec<_> = (1u64..=3).map(stake_deposit).collect();
         let block_hash = commit_block_with_witnesses(&storage, BlockHeight::new(1), &leaves);
         let pending_chain = PendingChain::new(Arc::new(storage));
 
@@ -159,7 +152,7 @@ mod tests {
     #[test]
     fn out_of_range_start_is_unavailable() {
         let storage = SimShardStorage::default();
-        let leaves: Vec<_> = (1u64..=3).map(deposit).collect();
+        let leaves: Vec<_> = (1u64..=3).map(stake_deposit).collect();
         let block_hash = commit_block_with_witnesses(&storage, BlockHeight::new(1), &leaves);
         let pending_chain = PendingChain::new(Arc::new(storage));
 

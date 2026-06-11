@@ -251,37 +251,26 @@ fn verify_chunk(
 mod tests {
     use std::sync::Arc;
 
-    use hyperscale_storage::test_helpers::{commit_block_with_updates, make_database_update};
-    use hyperscale_storage::{BoundaryStore, SubstateStore};
+    use hyperscale_storage::BoundaryStore;
+    use hyperscale_storage::test_helpers::{
+        commit_block_with_updates, commit_block_with_witnesses, make_database_update,
+        pin_snap_sync_replica,
+    };
     use hyperscale_storage_memory::SimShardStorage;
-    use hyperscale_types::{BlockHash, BlockHeight};
+    use hyperscale_types::BlockHeight;
 
     use super::*;
     use crate::shard_io::fetch::state_range_serve::serve_state_range_request;
 
     const ENTRIES: u8 = 12;
-    const HEIGHT: u64 = ENTRIES as u64;
 
     /// A serving replica: `ENTRIES` substates committed through the
     /// production path, pinned at the boundary. Identical commits yield
-    /// identical replicas.
-    fn replica() -> Arc<SimShardStorage> {
+    /// identical replicas and anchors.
+    fn replica() -> (Arc<SimShardStorage>, ShardAnchor) {
         let storage = SimShardStorage::default();
-        for seed in 1..=ENTRIES {
-            let updates =
-                make_database_update(vec![seed; 50], 0, vec![seed], vec![seed, seed, seed]);
-            commit_block_with_updates(&storage, BlockHeight::new(u64::from(seed)), &updates);
-        }
-        storage.pin_boundary(BlockHeight::new(HEIGHT)).unwrap();
-        Arc::new(storage)
-    }
-
-    fn anchor_for(storage: &SimShardStorage) -> ShardAnchor {
-        ShardAnchor {
-            state_root: storage.state_root(),
-            block_hash: BlockHash::ZERO,
-            height: BlockHeight::new(HEIGHT),
-        }
+        let anchor = pin_snap_sync_replica(&storage, ENTRIES, &[]);
+        (Arc::new(storage), anchor)
     }
 
     /// Drive the assembly to completion, serving each request from the
@@ -311,9 +300,8 @@ mod tests {
     /// serving peers and reaches the attested root.
     #[test]
     fn reconstructs_state_from_two_peers() {
-        let peer_a = replica();
-        let peer_b = replica();
-        let anchor = anchor_for(&peer_a);
+        let (peer_a, anchor) = replica();
+        let (peer_b, _) = replica();
 
         // Four sub-ranges, chunks of two: pagination and fan-out both
         // exercised; requests alternate between the two peers.
@@ -332,9 +320,7 @@ mod tests {
         assert_eq!(leaves.len(), usize::from(ENTRIES));
 
         let fresh = SimShardStorage::default();
-        let imported_root = fresh
-            .import_boundary_state(BlockHeight::new(HEIGHT), leaves)
-            .unwrap();
+        let imported_root = fresh.import_boundary_state(anchor.height, leaves).unwrap();
         assert_eq!(imported_root, anchor.state_root);
     }
 
@@ -342,7 +328,7 @@ mod tests {
     /// anchor; retries against an honest peer heal the assembly.
     #[test]
     fn byzantine_peer_is_rejected_and_healed_by_retry() {
-        let honest = replica();
+        let (honest, anchor) = replica();
         let byzantine = {
             let storage = SimShardStorage::default();
             for seed in 1..=ENTRIES {
@@ -355,10 +341,10 @@ mod tests {
                 let updates = make_database_update(vec![seed; 50], 0, vec![seed], value);
                 commit_block_with_updates(&storage, BlockHeight::new(u64::from(seed)), &updates);
             }
-            storage.pin_boundary(BlockHeight::new(HEIGHT)).unwrap();
+            commit_block_with_witnesses(&storage, anchor.height, &[]);
+            storage.pin_boundary(anchor.height).unwrap();
             Arc::new(storage)
         };
-        let anchor = anchor_for(&honest);
 
         let mut sync = SnapSync::new(anchor, NibblePath::empty(), 1, 100);
         let outcomes = drive(&mut sync, |_, attempt| {
@@ -377,7 +363,7 @@ mod tests {
 
         let fresh = SimShardStorage::default();
         let imported_root = fresh
-            .import_boundary_state(BlockHeight::new(HEIGHT), sync.take_leaves())
+            .import_boundary_state(anchor.height, sync.take_leaves())
             .unwrap();
         assert_eq!(imported_root, anchor.state_root);
     }
@@ -385,8 +371,7 @@ mod tests {
     /// A tampered raw value breaks the recomputed value hash.
     #[test]
     fn tampered_value_is_rejected() {
-        let peer = replica();
-        let anchor = anchor_for(&peer);
+        let (peer, anchor) = replica();
 
         let mut sync = SnapSync::new(anchor, NibblePath::empty(), 0, 100);
         let (id, request) = sync.next_requests().pop().expect("one sub-range");
@@ -404,8 +389,7 @@ mod tests {
     /// though the proof itself still verifies.
     #[test]
     fn swapped_storage_key_is_rejected() {
-        let peer = replica();
-        let anchor = anchor_for(&peer);
+        let (peer, anchor) = replica();
 
         let mut sync = SnapSync::new(anchor, NibblePath::empty(), 0, 100);
         let (id, request) = sync.next_requests().pop().expect("one sub-range");
@@ -423,8 +407,7 @@ mod tests {
     /// An unavailable peer re-arms the sub-range instead of wedging it.
     #[test]
     fn unavailable_peer_rearms_the_sub_range() {
-        let peer = replica();
-        let anchor = anchor_for(&peer);
+        let (peer, anchor) = replica();
 
         let mut sync = SnapSync::new(anchor, NibblePath::empty(), 0, 100);
         let (id, _) = sync.next_requests().pop().expect("one sub-range");

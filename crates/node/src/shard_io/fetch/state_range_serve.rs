@@ -110,7 +110,7 @@ pub fn serve_state_range_request<S: ShardStorage>(
 #[cfg(test)]
 mod tests {
     use hyperscale_jmt::{MultiProof, NibblePath, RangeChunk, next_key};
-    use hyperscale_storage::test_helpers::{commit_block_with_updates, make_database_update};
+    use hyperscale_storage::test_helpers::seed_substate_commits;
     use hyperscale_storage::tree::hash_value;
     use hyperscale_storage::{BoundaryStore, SubstateStore};
     use hyperscale_storage_memory::SimShardStorage;
@@ -120,11 +120,7 @@ mod tests {
 
     fn populated_storage(entries: u8) -> Arc<SimShardStorage> {
         let storage = SimShardStorage::default();
-        for seed in 1..=entries {
-            let updates =
-                make_database_update(vec![seed; 50], 0, vec![seed], vec![seed, seed, seed]);
-            commit_block_with_updates(&storage, BlockHeight::new(u64::from(seed)), &updates);
-        }
+        seed_substate_commits(&storage, entries);
         Arc::new(storage)
     }
 
