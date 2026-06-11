@@ -410,7 +410,7 @@ where
                 set_bits(prefix, depth, ARITY_BITS, bucket_u8);
                 let low = *prefix;
                 let mut high = *prefix;
-                fill_from(&mut high, child_depth, true);
+                fill_ones_from(&mut high, child_depth);
                 set_bits(prefix, depth, ARITY_BITS, 0);
                 if high >= *span.0 && low <= *span.1 {
                     return Err(ProofError::RangeIncomplete);
@@ -443,7 +443,7 @@ fn subtree_high(path: &NibblePath, bucket: u8, arity_bits: u8) -> Key {
     let mut key = [0u8; 32];
     key[..path.as_bytes().len()].copy_from_slice(path.as_bytes());
     set_bits(&mut key, path.len(), arity_bits, bucket);
-    fill_from(&mut key, path.len() + u16::from(arity_bits), true);
+    fill_ones_from(&mut key, path.len() + u16::from(arity_bits));
     key
 }
 
@@ -477,7 +477,7 @@ pub fn subspan(path: &NibblePath, split_bits: u8, index: u64) -> (Key, Key) {
         u8::try_from(index).expect("index < 2^split_bits <= 256"),
     );
     let mut high = low;
-    fill_from(&mut high, path.len() + u16::from(split_bits), true);
+    fill_ones_from(&mut high, path.len() + u16::from(split_bits));
     (low, high)
 }
 
@@ -503,22 +503,17 @@ fn set_bits(key: &mut Key, at: u16, count: u8, val: u8) {
     }
 }
 
-/// Set every bit of `key` at offsets `>= from` to one (or zero).
-fn fill_from(key: &mut Key, from: u16, ones: bool) {
+/// Set every bit of `key` at offsets `>= from` to one.
+fn fill_ones_from(key: &mut Key, from: u16) {
     let from = usize::from(from);
     if from >= 256 {
         return;
     }
     let byte = from / 8;
     let off = from % 8;
-    let mask = u8::MAX >> off;
-    if ones {
-        key[byte] |= mask;
-    } else {
-        key[byte] &= !mask;
-    }
+    key[byte] |= u8::MAX >> off;
     for b in key.iter_mut().skip(byte + 1) {
-        *b = if ones { u8::MAX } else { 0 };
+        *b = u8::MAX;
     }
 }
 

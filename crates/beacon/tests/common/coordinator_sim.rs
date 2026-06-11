@@ -621,14 +621,16 @@ impl CoordinatorSim {
     }
 
     /// Fire the wall-clock timers on every replica: the
-    /// proposal-collection dwell (a no-op wherever full coverage
-    /// already fed the view-1 input — it matters when a peer's
-    /// proposal was dropped, e.g. as unverifiable) and the
-    /// committee-start timer. In production these fire as wall-clock
-    /// passes the dwell and the upcoming epoch's boundary; here the
-    /// sim kicks all replicas in lockstep so SPC instances bootstrap,
-    /// feed, and `try_propose` emits the initial
-    /// `BuildAndBroadcastBeaconProposal` actions.
+    /// proposal-collection dwell and the committee-start timer. The
+    /// dwell is a no-op until an SPC instance is up, and wherever the
+    /// quorum fast path already fed the view-1 input — but on the
+    /// quiescence re-kick from `run_until_committed` it is the only
+    /// way forward when peers' proposals were dropped (e.g. as
+    /// unverifiable) and the pool can't reach quorum. In production
+    /// these fire as wall-clock passes the dwell and the upcoming
+    /// epoch's boundary; here the sim kicks all replicas in lockstep
+    /// so SPC instances bootstrap, feed, and `try_propose` emits the
+    /// initial `BuildAndBroadcastBeaconProposal` actions.
     pub fn kick_off(&mut self) {
         for idx in 0..self.n() {
             let actions = self.coordinators[idx].on_spc_input_dwell_timer();

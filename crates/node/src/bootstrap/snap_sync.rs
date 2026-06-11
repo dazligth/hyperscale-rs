@@ -328,9 +328,8 @@ mod tests {
         outcomes
     }
 
-    /// The Phase 2 exit criterion: a joiner reconstructs the shard's
-    /// full committed state from two serving peers and reaches the
-    /// attested root.
+    /// A joiner reconstructs the shard's full committed state from two
+    /// serving peers and reaches the attested root.
     #[test]
     fn reconstructs_state_from_two_peers() {
         let peer_a = replica();

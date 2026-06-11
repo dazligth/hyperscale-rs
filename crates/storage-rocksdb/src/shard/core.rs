@@ -374,7 +374,7 @@ impl RocksDbShardStorage {
         // Leaf associations — keep the hashed-key → raw-key mapping in
         // lockstep with the live leaf set.
         let leaf_assoc_cf = LeafAssociationsCf::handle(&cf);
-        for assoc in &snapshot.leaf_substate_associations {
+        for assoc in &snapshot.leaf_associations {
             let key = Hash::from_hash_bytes(&assoc.leaf_key);
             match &assoc.storage_key {
                 Some(storage_key) => {

@@ -400,7 +400,6 @@ impl ProductionRunnerBuilder {
                 ShardChannels {
                     timer_tx,
                     timer_rx,
-                    callback_tx,
                     callback_rx,
                     shutdown_tx,
                     shutdown_rx,
@@ -608,7 +607,6 @@ impl ProductionRunnerBuilder {
             storages,
             dispatch,
             rpc_status: self.rpc_status,
-            mempool_snapshot: self.mempool_snapshot,
             sync_status: self.sync_status,
             genesis_config: self.genesis_config,
             local_shards,
@@ -673,17 +671,11 @@ pub struct ProductionRunner {
     storages: Arc<std::sync::Mutex<HashMap<ShardId, Arc<RocksDbShardStorage>>>>,
     /// Thread pool dispatch.
     dispatch: Arc<PooledDispatch>,
-    /// Every shard this runner hosts vnodes for.
-    #[allow(dead_code)]
+    /// Every shard this runner hosts vnodes for at startup.
     local_shards: HashSet<ShardId>,
 
     /// Shared RPC `NodeStatusState` updated by the metrics tick.
     rpc_status: Option<Arc<ArcSwap<NodeStatusState>>>,
-    /// Shared mempool snapshot handle. Read by the RPC submission
-    /// backpressure check; per-shard write path lives outside the
-    /// runner's tokio loop.
-    #[allow(dead_code)]
-    mempool_snapshot: Option<Arc<ArcSwap<MempoolSnapshot>>>,
     /// Shared sync status updated by the metrics tick.
     sync_status: Option<Arc<ArcSwap<SyncStatus>>>,
 
@@ -1250,7 +1242,6 @@ pub type ProdShardLoop = ShardLoop<SharedStorage, Libp2pNetwork, PooledDispatch>
 pub struct ShardChannels {
     pub(crate) timer_tx: Sender<ShardEvent>,
     pub(crate) timer_rx: Receiver<ShardEvent>,
-    pub(crate) callback_tx: Sender<ShardEvent>,
     pub(crate) callback_rx: Receiver<ShardEvent>,
     pub(crate) shutdown_tx: Sender<()>,
     pub(crate) shutdown_rx: Receiver<()>,

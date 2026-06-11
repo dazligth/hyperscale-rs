@@ -237,8 +237,8 @@ where
 pub struct HandlerRegistry {
     /// Shards hosted by the owning process. Drives the per-vnode
     /// fan-out inside [`TypedGossipDispatcher`], which loads it per
-    /// message; swapped via [`Self::set_hosted_shards`] when shard
-    /// participation changes.
+    /// message; swapped via [`Self::add_hosted_shard`] /
+    /// [`Self::remove_hosted_shard`] when shard participation changes.
     hosted_shards: Arc<ArcSwap<BTreeSet<ShardId>>>,
     gossip: ArcSwap<HashMap<&'static str, Arc<RawGossipHandler>>>,
     request: ArcSwap<HashMap<(&'static str, ShardId), Arc<RawRequestHandler>>>,
@@ -276,14 +276,9 @@ impl HandlerRegistry {
         self.hosted_shards.load_full()
     }
 
-    /// Replace the hosted-shard set. Every gossip dispatcher observes
-    /// the new set on its next message; in-flight dispatches finish
-    /// against the snapshot they loaded.
-    pub fn set_hosted_shards(&self, hosted: BTreeSet<ShardId>) {
-        self.hosted_shards.store(Arc::new(hosted));
-    }
-
-    /// Add one shard to the hosted set.
+    /// Add one shard to the hosted set. Every gossip dispatcher
+    /// observes the new set on its next message; in-flight dispatches
+    /// finish against the snapshot they loaded.
     pub fn add_hosted_shard(&self, shard: ShardId) {
         let mut set = (**self.hosted_shards.load()).clone();
         set.insert(shard);
@@ -739,7 +734,8 @@ mod tests {
 
         // After the swap the same registered handler receives shard B and
         // no longer receives shard A.
-        registry.set_hosted_shards(std::iter::once(shard_b).collect());
+        registry.add_hosted_shard(shard_b);
+        registry.remove_hosted_shard(shard_a);
         let _ = handler(encoded.clone(), Some(shard_b));
         assert_eq!(hits.load(Ordering::SeqCst), 1);
         let _ = handler(encoded, Some(shard_a));

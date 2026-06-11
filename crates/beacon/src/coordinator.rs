@@ -33,7 +33,7 @@ use hyperscale_types::{
     SkipEpochCert, SkipRequest, SkipRequestVerifyError, SpcCert, SpcEmptyViewMsg,
     SpcEmptyViewMsgVerifyError, SpcNewCommitMsg, SpcNewCommitMsgVerifyError, SpcProposalObject,
     SpcProposalObjectVerifyError, SpcView, TopologySchedule, TopologySnapshot, ValidatorId,
-    ValidatorStatus, Verifiable, Verified, Verify, WeightedTimestamp,
+    ValidatorStatus, Verifiable, Verified, Verify, WeightedTimestamp, byzantine_threshold,
 };
 use tracing::{trace, warn};
 
@@ -709,7 +709,7 @@ impl BeaconCoordinator {
                 .filter(|member| self.proposal_pool.contains(**member))
                 .count();
             let n = self.state.committee.len();
-            let quorum = n - n.saturating_sub(1) / 3;
+            let quorum = n - byzantine_threshold(n);
             if pooled >= quorum && self.proposal_pool.contains(self.me) {
                 return self.feed_view_one_input(epoch);
             }
@@ -860,10 +860,9 @@ impl BeaconCoordinator {
     /// Arms the proposal-collection dwell: members bootstrap
     /// near-simultaneously at the epoch boundary, so the view-1 PC
     /// input must wait for peers' proposals to arrive — disjoint
-    /// single-element inputs share only the empty prefix. The
-    /// full-coverage fast path in
-    /// [`Self::on_beacon_proposal_received`] usually feeds first; the
-    /// timer covers a committee member that never shows.
+    /// single-element inputs share only the empty prefix. The quorum
+    /// fast path in [`Self::on_beacon_proposal_received`] usually
+    /// feeds first; the timer covers the laggard tail.
     fn bootstrap_spc_with_committee(
         &mut self,
         committee: Vec<(ValidatorId, Bls12381G1PublicKey)>,
@@ -878,8 +877,8 @@ impl BeaconCoordinator {
 
     /// `TimerId::BeaconSpcInputDwell` fired: the proposal-collection
     /// dwell elapsed. Feed the view-1 input from whatever the pool
-    /// holds. A no-op when the full-coverage fast path already fed it,
-    /// or when no instance is up (off-committee, or the epoch already
+    /// holds. A no-op when the quorum fast path already fed it, or
+    /// when no instance is up (off-committee, or the epoch already
     /// adopted).
     pub fn on_spc_input_dwell_timer(&mut self) -> Vec<Action> {
         let epoch = self.state.current_epoch.next();
@@ -2905,7 +2904,7 @@ mod tests {
         let in_flight = Epoch::GENESIS.next();
         let committee = coord.state.committee.clone();
         let n = committee.len();
-        let quorum = n - (n - 1) / 3;
+        let quorum = n - byzantine_threshold(n);
 
         let mut fed_at = None;
         let mut admitted = 0usize;

@@ -121,8 +121,9 @@ impl SimShardStorage {
 
     /// Load recovered state for restarting a state machine on this
     /// store — the in-memory analogue of
-    /// `RocksDbShardStorage::load_recovered_state`. Returns
-    /// `RecoveredState::default()` for a fresh store.
+    /// `RocksDbShardStorage::load_recovered_state`. A fresh store
+    /// reads back at genesis with `jmt_root` pinned to the empty
+    /// root.
     ///
     /// # Panics
     ///

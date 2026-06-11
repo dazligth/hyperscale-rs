@@ -99,7 +99,7 @@ impl Display for WeightedTimestamp {
 /// (`k × epoch_duration_ms` for the greatest `k ≥ 1`), or `None` when no
 /// boundary lies below it.
 #[must_use]
-pub const fn epoch_boundary_below(wt: u64, epoch_duration_ms: u64) -> Option<u64> {
+const fn epoch_boundary_below(wt: u64, epoch_duration_ms: u64) -> Option<u64> {
     if epoch_duration_ms == 0 || wt == 0 {
         return None;
     }

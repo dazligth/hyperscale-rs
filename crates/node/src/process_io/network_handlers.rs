@@ -767,10 +767,11 @@ pub fn register_shard_request_handlers<S, N, D>(
     const MAX_WAITERS_PER_KEY: usize = 64;
 
     // Each handler closure captures this shard's `PendingChain` and
-    // per-protocol caches. No raw `&S` flows into a serve function:
-    // every chain read goes through `PendingChain` so the
-    // shard-committed / JMT-persisted window is reachable from one
-    // place.
+    // per-protocol caches. Every CHAIN read goes through
+    // `PendingChain` so the shard-committed / JMT-persisted window is
+    // reachable from one place; the snap-sync handler is the one
+    // exception, reading raw storage because it serves pinned
+    // boundary state, not the chain.
     // ── block.request → sync protocol ────────────────────────────
 
     let pending_chain = Arc::clone(&io.pending_chain);

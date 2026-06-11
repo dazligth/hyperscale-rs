@@ -20,9 +20,7 @@ use hyperscale_jmt::{
     Key, NibblePath, Node as JmtNode, NodeKey as JmtNodeKey, TreeReader, ValueHash,
 };
 use hyperscale_storage::tree::{Jmt, hash_value};
-use hyperscale_storage::{
-    BoundaryStore, DbPartitionKey, DbSortKey, ImportLeaf, ResolveLeaf, SubstateLookup,
-};
+use hyperscale_storage::{BoundaryStore, ImportLeaf, ResolveLeaf};
 use hyperscale_types::{BlockHeight, Hash, StateRoot};
 use rocksdb::checkpoint::Checkpoint;
 use rocksdb::{DB, Options, WriteBatch};
@@ -120,12 +118,6 @@ impl CheckpointRing {
         entries
     }
 
-    /// The newest checkpoint, if any.
-    #[must_use]
-    pub fn latest(&self) -> Option<(BlockHeight, PathBuf)> {
-        self.entries().into_iter().next_back()
-    }
-
     /// Remove the oldest entries beyond the ring size.
     fn evict(&self) {
         let entries = self.entries();
@@ -186,18 +178,6 @@ impl CheckpointStore {
     pub fn read_jmt_metadata(&self) -> (u64, StateRoot) {
         read_jmt_metadata(&self.db)
     }
-
-    /// Read a raw substate value at the checkpoint's pinned state.
-    #[must_use]
-    pub fn get_substate(
-        &self,
-        partition_key: &DbPartitionKey,
-        sort_key: &DbSortKey,
-    ) -> Option<Vec<u8>> {
-        let cf = CfHandles::resolve(&self.db);
-        let state_key = (partition_key.clone(), sort_key.clone());
-        get::<StateCf>(&self.db, StateCf::handle(&cf), &state_key)
-    }
 }
 
 impl TreeReader for CheckpointStore {
@@ -215,16 +195,6 @@ impl TreeReader for CheckpointStore {
 
     fn root_path(&self) -> NibblePath {
         self.root_path.clone()
-    }
-}
-
-impl SubstateLookup for CheckpointStore {
-    fn lookup_substate(
-        &self,
-        partition_key: &DbPartitionKey,
-        sort_key: &DbSortKey,
-    ) -> Option<Vec<u8>> {
-        self.get_substate(partition_key, sort_key)
     }
 }
 
@@ -263,10 +233,6 @@ impl BoundaryStore for RocksDbShardStorage {
             .into_iter()
             .find(|(h, _)| *h == height)?;
         CheckpointStore::open(&path, self.root_path.clone()).ok()
-    }
-
-    fn latest_boundary(&self) -> Option<BlockHeight> {
-        self.checkpoints.latest().map(|(h, _)| h)
     }
 
     fn import_boundary_state(
@@ -441,9 +407,10 @@ mod tests {
                 .exists()
         );
         assert!(storage.open_boundary(BlockHeight::new(2)).is_some());
-        assert_eq!(
-            storage.latest_boundary(),
-            Some(BlockHeight::new(BOUNDARY_RETAIN as u64 + 1)),
+        assert!(
+            storage
+                .open_boundary(BlockHeight::new(BOUNDARY_RETAIN as u64 + 1))
+                .is_some()
         );
     }
 
@@ -456,7 +423,7 @@ mod tests {
         storage.pin_boundary(BlockHeight::new(1)).unwrap();
         storage.pin_boundary(BlockHeight::new(1)).unwrap();
         assert_eq!(storage.checkpoints.entries().len(), 1);
-        assert_eq!(storage.latest_boundary(), Some(BlockHeight::new(1)));
+        assert!(storage.open_boundary(BlockHeight::new(1)).is_some());
     }
 
     #[test]
@@ -470,7 +437,6 @@ mod tests {
 
         // A fresh storage over the same directory sees the existing pin.
         let revived = open_storage(temp.path());
-        assert_eq!(revived.latest_boundary(), Some(BlockHeight::new(1)));
         assert!(revived.open_boundary(BlockHeight::new(1)).is_some());
     }
 
@@ -487,7 +453,6 @@ mod tests {
         let storage = open_storage(temp.path());
         commit_one(&storage, 1);
         assert!(storage.open_boundary(BlockHeight::new(1)).is_none());
-        assert_eq!(storage.latest_boundary(), None);
     }
 
     /// Full serve → import round trip: leaves enumerated and resolved

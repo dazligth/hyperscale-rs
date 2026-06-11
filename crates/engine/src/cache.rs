@@ -118,9 +118,10 @@ pub struct ProcessExecutionCache {
     /// Shards this process hosts. Used to narrow each tx's participating
     /// shard set down to the slice this cache can actually observe
     /// finalising via [`Self::on_finalized_wave`]. Loaded per acquire;
-    /// swapped via [`Self::set_hosted_shards`] when shard participation
-    /// changes, with the retention sweep covering entries whose claims
-    /// were stamped under the old set.
+    /// swapped via [`Self::add_hosted_shard`] /
+    /// [`Self::remove_hosted_shard`] when shard participation changes,
+    /// with the retention sweep covering entries whose claims were
+    /// stamped under the old set.
     hosted_shards: ArcSwap<HashSet<ShardId>>,
     entries: DashMap<TxHash, Entry>,
     timeline: Mutex<Timeline>,
@@ -143,15 +144,9 @@ impl ProcessExecutionCache {
         }
     }
 
-    /// Replace the hosted-shard set. New entries stamp their pending
-    /// claims from the new set on the next acquire; existing entries
-    /// keep the claims they were inserted with — a dropped shard can no
-    /// longer decrement them, so the retention sweep reaps those.
-    pub fn set_hosted_shards(&self, hosted: HashSet<ShardId>) {
-        self.hosted_shards.store(Arc::new(hosted));
-    }
-
-    /// Add one shard to the hosted set.
+    /// Add one shard to the hosted set. New entries stamp their pending
+    /// claims from the set as it stands at acquire time; existing
+    /// entries keep the claims they were inserted with.
     pub fn add_hosted_shard(&self, shard: ShardId) {
         let mut set = (**self.hosted_shards.load()).clone();
         set.insert(shard);
@@ -422,7 +417,8 @@ mod tests {
     #[test]
     fn hosted_shard_swap_governs_new_entries() {
         let cache = ProcessExecutionCache::new(hosted(&[0]));
-        cache.set_hosted_shards(hosted(&[1]));
+        cache.add_hosted_shard(shard(1));
+        cache.remove_hosted_shard(shard(0));
         populate(&cache, tx_hash(1), [shard(0), shard(1)]);
 
         // Shard 0 is no longer hosted — its wave can't decrement.

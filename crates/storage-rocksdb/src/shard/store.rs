@@ -169,7 +169,7 @@ impl RocksDbShardStorage {
 
         let nodes_count = jmt_snapshot.nodes.len();
         let stale_count = jmt_snapshot.stale_node_keys.len();
-        let associations_count = jmt_snapshot.leaf_substate_associations.len();
+        let associations_count = jmt_snapshot.leaf_associations.len();
         let new_version = jmt_snapshot.new_height.inner();
         let new_root = jmt_snapshot.result_root;
 

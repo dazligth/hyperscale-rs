@@ -46,8 +46,10 @@ pub struct JmtSnapshot {
     pub nodes: Vec<(NodeKey, Arc<Node>)>,
     /// Keys of nodes that became stale.
     pub stale_node_keys: Vec<NodeKey>,
-    /// Leaf-to-substate associations for historical queries.
-    pub leaf_substate_associations: Vec<LeafSubstateKeyAssociation>,
+    /// Hashed-leaf-key → raw-storage-key associations for this
+    /// computation's writes, persisted so snap-sync serving can
+    /// resolve enumerated leaves back to raw substate pairs.
+    pub leaf_associations: Vec<LeafSubstateKeyAssociation>,
 }
 
 impl JmtSnapshot {
@@ -66,7 +68,7 @@ impl JmtSnapshot {
             new_height,
             nodes: collected.nodes,
             stale_node_keys: collected.stale_node_keys,
-            leaf_substate_associations: collected.leaf_associations,
+            leaf_associations: collected.leaf_associations,
         }
     }
 }

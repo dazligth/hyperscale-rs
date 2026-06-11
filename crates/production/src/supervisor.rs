@@ -26,7 +26,6 @@ use hyperscale_mempool::MempoolConfig;
 use hyperscale_network_libp2p::Libp2pNetwork;
 use hyperscale_node::host::{attach_shard, detach_shard};
 use hyperscale_node::process_io::ProcessIo;
-use hyperscale_node::shard_loop::ShardEvent;
 use hyperscale_node::{NodeConfig, SeatVnodeGroup, TimerOp, VnodeInit, seat_vnode_group};
 use hyperscale_provisions::ProvisionConfig;
 use hyperscale_shard::ShardConsensusConfig;
@@ -94,9 +93,6 @@ pub struct CompletedBootstrap {
 struct ShardThread {
     join: std::thread::JoinHandle<()>,
     shutdown_tx: Sender<()>,
-    /// Keeps the shard's callback channel alive for off-thread senders.
-    #[allow(dead_code)]
-    callback_tx: Sender<ShardEvent>,
     /// Local vnodes participating in this shard. The shard tears down
     /// when this reaches zero.
     vnode_count: usize,
@@ -207,7 +203,6 @@ impl ShardSupervisor {
     ) {
         let shard = shard_loop.shard;
         let shutdown_tx = channels.shutdown_tx.clone();
-        let callback_tx = channels.callback_tx.clone();
         let validator_ids = shard_loop
             .vnodes
             .iter()
@@ -220,7 +215,6 @@ impl ShardSupervisor {
             ShardThread {
                 join,
                 shutdown_tx,
-                callback_tx,
                 vnode_count,
                 validator_ids,
             },
@@ -348,7 +342,7 @@ impl ShardSupervisor {
             &self.node_config,
             inits,
             SharedStorage::new(Arc::clone(&storage)),
-            callback_tx.clone(),
+            callback_tx,
         );
         shard_loop.set_time(wall_clock_local());
         self.insert_tx_status_cache(shard, Arc::clone(&shard_loop.io.caches.tx_status));
@@ -361,7 +355,6 @@ impl ShardSupervisor {
         let channels = ShardChannels {
             timer_tx,
             timer_rx,
-            callback_tx: callback_tx.clone(),
             callback_rx,
             shutdown_tx: shutdown_tx.clone(),
             shutdown_rx,
@@ -374,7 +367,6 @@ impl ShardSupervisor {
             ShardThread {
                 join,
                 shutdown_tx,
-                callback_tx,
                 vnode_count,
                 validator_ids,
             },

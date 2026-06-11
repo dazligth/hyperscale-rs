@@ -85,7 +85,6 @@ enum Phase {
 
 /// Sequencing state for one shard bootstrap.
 pub struct ShardBootstrap {
-    shard: ShardId,
     anchor: ShardAnchor,
     phase: Phase,
 }
@@ -95,7 +94,6 @@ impl ShardBootstrap {
     #[must_use]
     pub fn new(shard: ShardId, anchor: ShardAnchor) -> Self {
         Self {
-            shard,
             anchor,
             phase: Phase::State(SnapSync::new(
                 anchor,
@@ -247,12 +245,6 @@ impl ShardBootstrap {
     #[must_use]
     pub const fn is_complete(&self) -> bool {
         matches!(self.phase, Phase::Complete(..))
-    }
-
-    /// The shard this bootstrap targets.
-    #[must_use]
-    pub const fn shard(&self) -> ShardId {
-        self.shard
     }
 
     /// The [`RecoveredState`] a snap-synced joiner boots from: tip at

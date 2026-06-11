@@ -384,12 +384,6 @@ impl TopologySnapshot {
 
     // ── Derived committee queries ────────────────────────────────────────
 
-    /// Get the number of committee members for a shard.
-    #[must_use]
-    pub fn committee_size_for_shard(&self, shard: ShardId) -> usize {
-        self.committee_for_shard(shard).len()
-    }
-
     /// Get the index of a validator in a shard's consensus committee —
     /// the position vote/QC signer bitfields encode. `None` for
     /// non-members and for members that have not signalled Ready.
@@ -558,7 +552,7 @@ mod tests {
     fn test_committee_basics() {
         let snapshot = make_snapshot(4);
 
-        assert_eq!(snapshot.committee_size_for_shard(ShardId::ROOT), 4);
+        assert_eq!(snapshot.committee_for_shard(ShardId::ROOT).len(), 4);
         assert_eq!(snapshot.num_shards(), 1);
     }
 
@@ -613,7 +607,7 @@ mod tests {
             ValidatorSet::new(validators),
         );
 
-        assert_eq!(snapshot.committee_size_for_shard(shard), 4);
+        assert_eq!(snapshot.committee_for_shard(shard).len(), 4);
         // Other shard should be empty.
         assert_eq!(snapshot.committee_for_shard(ShardId::leaf(1, 0)).len(), 0);
     }

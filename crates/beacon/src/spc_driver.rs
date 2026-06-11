@@ -158,8 +158,8 @@ impl SpcDriver {
 
     /// Feed view 1's local input vector into the instance. Caller gates on
     /// [`Self::should_feed_view_one_input`]. Not skip-quorum gated — the
-    /// own-proposal feedback that triggers it is the local node's entry
-    /// into the round, independent of the skip path.
+    /// input is the local node's entry into the round, independent of
+    /// the skip path.
     pub fn feed_view_one_input(&mut self, input: PcVector) -> Vec<SpcEffect> {
         let Some(spc) = self.spc.as_mut() else {
             return Vec::new();

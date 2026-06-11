@@ -11,12 +11,8 @@ use std::sync::{Arc, RwLock};
 
 use hyperscale_jmt::{Key, NibblePath, Node, NodeKey, TreeReader, ValueHash};
 use hyperscale_storage::lock_recover::{read_or_recover, write_or_recover};
-use hyperscale_storage::shard::keys;
 use hyperscale_storage::tree::{Jmt, hash_value};
-use hyperscale_storage::{
-    BOUNDARY_RETAIN, BoundaryStore, DbPartitionKey, DbSortKey, ImportLeaf, ResolveLeaf,
-    SubstateLookup,
-};
+use hyperscale_storage::{BOUNDARY_RETAIN, BoundaryStore, ImportLeaf, ResolveLeaf};
 use hyperscale_types::{BlockHeight, Hash, StateRoot};
 
 use super::core::SimShardStorage;
@@ -46,24 +42,6 @@ impl TreeReader for SimBoundary {
 
     fn root_path(&self) -> NibblePath {
         read_or_recover(&self.state).tree_store.root_path()
-    }
-}
-
-impl SubstateLookup for SimBoundary {
-    fn lookup_substate(
-        &self,
-        partition_key: &DbPartitionKey,
-        sort_key: &DbSortKey,
-    ) -> Option<Vec<u8>> {
-        let storage_key = keys::to_storage_key(partition_key, sort_key);
-        let state = read_or_recover(&self.state);
-        value_at_version(
-            &state.current_state,
-            &state.state_history,
-            &storage_key,
-            self.version,
-            state.current_block_height.inner(),
-        )
     }
 }
 
@@ -103,10 +81,6 @@ impl BoundaryStore for SimShardStorage {
                 state: Arc::clone(&self.state),
                 version: height.inner(),
             })
-    }
-
-    fn latest_boundary(&self) -> Option<BlockHeight> {
-        read_or_recover(&self.boundary_pins).last().copied()
     }
 
     fn import_boundary_state(
@@ -205,7 +179,7 @@ mod tests {
     }
 
     #[test]
-    fn boundary_substate_reads_resolve_at_pinned_version() {
+    fn boundary_leaf_reads_resolve_at_pinned_version() {
         let storage = SimShardStorage::default();
         let node_key = vec![7u8; 50];
         let old = make_database_update(node_key.clone(), 0, vec![7], vec![1]);
@@ -213,16 +187,15 @@ mod tests {
         storage.pin_boundary(BlockHeight::new(1)).unwrap();
 
         // Overwrite the same substate at height 2.
-        let new = make_database_update(node_key.clone(), 0, vec![7], vec![2]);
+        let new = make_database_update(node_key, 0, vec![7], vec![2]);
         storage.commit_shared(&new);
 
         let boundary = storage.open_boundary(BlockHeight::new(1)).expect("pinned");
-        let partition_key = DbPartitionKey {
-            node_key,
-            partition_num: 0,
-        };
-        let value = boundary.lookup_substate(&partition_key, &DbSortKey(vec![7]));
-        assert_eq!(value, Some(vec![1]));
+        let root_key = boundary.get_root_key(1).expect("pinned root resolves");
+        let chunk = Jmt::collect_range(&boundary, &root_key, &[0u8; 32], 10).unwrap();
+        let (leaf, _) = chunk.leaves.first().expect("one substate committed");
+        let (_, value) = boundary.resolve_leaf(leaf).expect("leaf resolves");
+        assert_eq!(value, vec![1]);
     }
 
     #[test]
@@ -234,7 +207,7 @@ mod tests {
         }
         assert!(storage.open_boundary(BlockHeight::new(1)).is_none());
         assert!(storage.open_boundary(BlockHeight::new(2)).is_some());
-        assert_eq!(storage.latest_boundary(), Some(BlockHeight::new(4)));
+        assert!(storage.open_boundary(BlockHeight::new(4)).is_some());
     }
 
     #[test]
@@ -242,7 +215,6 @@ mod tests {
         let storage = SimShardStorage::default();
         commit_one(&storage, 1);
         assert!(storage.open_boundary(BlockHeight::new(1)).is_none());
-        assert_eq!(storage.latest_boundary(), None);
     }
 
     /// Full serve → import round trip: leaves enumerated and resolved
@@ -273,6 +245,11 @@ mod tests {
             })
             .collect();
         assert_eq!(leaves.len(), 6);
+        let probe = leaves
+            .iter()
+            .find(|l| l.value == vec![3, 3, 3])
+            .map(|l| (l.leaf_key, l.storage_key.clone()))
+            .expect("seed-3 leaf present");
 
         let fresh = SimShardStorage::default();
         let imported_root = fresh
@@ -281,18 +258,14 @@ mod tests {
         assert_eq!(imported_root, source_root);
         assert_eq!(fresh.state_root(), source_root);
 
-        // Imported raw substates read back at the current tip.
-        let partition_key = DbPartitionKey {
-            node_key: vec![3u8; 50],
-            partition_num: 0,
-        };
+        // Imported raw substates read back at the imported state.
         let fresh_boundary = {
             fresh.pin_boundary(BlockHeight::new(6)).unwrap();
             fresh.open_boundary(BlockHeight::new(6)).expect("pinned")
         };
         assert_eq!(
-            fresh_boundary.lookup_substate(&partition_key, &DbSortKey(vec![3])),
-            Some(vec![3, 3, 3]),
+            fresh_boundary.resolve_leaf(&probe.0),
+            Some((probe.1, vec![3, 3, 3])),
         );
 
         // A second import is rejected — the store is no longer empty.

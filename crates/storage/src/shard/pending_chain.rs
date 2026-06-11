@@ -1070,7 +1070,7 @@ mod tests {
             new_height: BlockHeight::GENESIS,
             nodes: vec![],
             stale_node_keys: vec![],
-            leaf_substate_associations: vec![],
+            leaf_associations: vec![],
         })
     }
 

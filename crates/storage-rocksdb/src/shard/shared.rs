@@ -162,10 +162,6 @@ impl BoundaryStore for SharedStorage {
         self.0.open_boundary(height)
     }
 
-    fn latest_boundary(&self) -> Option<BlockHeight> {
-        self.0.latest_boundary()
-    }
-
     fn import_boundary_state(
         &self,
         height: BlockHeight,

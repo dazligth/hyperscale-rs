@@ -81,7 +81,7 @@ impl SharedState {
         // the tree at past block heights. In production, RocksDB GC handles
         // pruning after `jmt_history_length` blocks (default 256). In
         // simulation, we retain all nodes (tests are short-lived).
-        for a in snapshot.leaf_substate_associations {
+        for a in snapshot.leaf_associations {
             if let Some(storage_key) = a.storage_key {
                 self.associations.insert(a.leaf_key, storage_key);
             }

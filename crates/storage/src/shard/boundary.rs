@@ -12,8 +12,6 @@
 use hyperscale_jmt::{Key, TreeReader};
 use hyperscale_types::{BlockHeight, StateRoot};
 
-use super::overlay::SubstateLookup;
-
 /// How many boundary pins a backend retains before evicting the oldest.
 pub const BOUNDARY_RETAIN: usize = 3;
 
@@ -49,8 +47,8 @@ pub struct ImportLeaf {
 /// Pin and serve committed state at epoch boundary heights.
 pub trait BoundaryStore {
     /// A pinned boundary opened for serving: the JMT at the pinned
-    /// version plus raw substate reads at that same state.
-    type Boundary: TreeReader + SubstateLookup + ResolveLeaf + Send;
+    /// version plus leaf resolution at that same state.
+    type Boundary: TreeReader + ResolveLeaf + Send;
 
     /// Pin the committed state at `height` — the shard's epoch boundary
     /// block — keeping the newest [`BOUNDARY_RETAIN`] pins. Idempotent
@@ -66,9 +64,6 @@ pub trait BoundaryStore {
     /// Open the pin at exactly `height`, or `None` if it was never
     /// pinned or has been evicted from the ring.
     fn open_boundary(&self, height: BlockHeight) -> Option<Self::Boundary>;
-
-    /// The newest pinned height, if any.
-    fn latest_boundary(&self) -> Option<BlockHeight>;
 
     /// Install a snap-synced boundary state at `height` into this
     /// (empty) store: raw substates, the JMT rebuilt from the shipped

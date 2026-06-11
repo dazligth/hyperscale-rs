@@ -171,7 +171,7 @@ pub fn noop_jmt_snapshot<S: TreeReader>(
         new_height: block_height,
         nodes,
         stale_node_keys: Vec::new(),
-        leaf_substate_associations: Vec::new(),
+        leaf_associations: Vec::new(),
     }
 }
 

@@ -53,9 +53,9 @@ pub const SPC_VIEW_TIMEOUT: Duration = Duration::from_secs(15);
 /// boundary, so feeding on own-proposal feedback alone would hand PC
 /// disjoint singleton vectors whose only common prefix is empty — the
 /// dwell gives peers' proposals one propagation window to arrive. The
-/// fast path feeds early once every committee member's proposal is
-/// pooled; this timer is the laggard fallback, sized well under any
-/// practical epoch duration.
+/// fast path feeds early once a quorum (`2f+1`, including the local
+/// proposal) is pooled; this timer is the laggard fallback, sized
+/// well under any practical epoch duration.
 pub const SPC_INPUT_DWELL: Duration = Duration::from_millis(500);
 
 // ─── Committee sizing ──────────────────────────────────────────────────────

@@ -162,7 +162,7 @@ pub use time::timeouts::{
     VIEW_CHANGE_TIMEOUT, VIEW_CHANGE_TIMEOUT_INCREMENT, VIEW_CHANGE_TIMEOUT_MAX, WAVE_TIMEOUT,
 };
 pub use time::timestamp::{
-    LocalTimestamp, ProposerTimestamp, WeightedTimestamp, epoch_boundary_below, is_epoch_crossing,
+    LocalTimestamp, ProposerTimestamp, WeightedTimestamp, is_epoch_crossing,
 };
 pub use topology::awaiting::AwaitingTopologyBuffer;
 pub use topology::schedule::{ScheduleLookup, TopologySchedule};
