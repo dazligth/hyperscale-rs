@@ -15,7 +15,7 @@
 //! vnodes on one shard share storage and a thread, and a departing one
 //! must not tear the other down.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
@@ -103,6 +103,9 @@ struct ShardThread {
     /// Local vnodes participating in this shard. The shard tears down
     /// when this reaches zero.
     vnode_count: usize,
+    /// Hosted vnodes' validator ids, recorded so teardown can scrub
+    /// their slots from the validator-keyed RPC state maps.
+    validator_ids: Vec<u64>,
 }
 
 /// Owns the per-shard pinned threads and executes runtime membership
@@ -130,14 +133,17 @@ pub struct ShardSupervisor {
     /// leave.
     tx_status_caches: SharedTxStatusCaches,
     shards: HashMap<ShardId, ShardThread>,
-    /// Shards whose join is parked on an in-flight snap-sync bootstrap.
-    /// Guards against a second `Join` racing a double import.
-    bootstrapping: HashSet<ShardId>,
-    /// Completed bootstraps land here; the runner's select loop drains
-    /// the paired receiver and calls [`Self::finish_join`].
-    bootstrap_done_tx: mpsc::UnboundedSender<CompletedBootstrap>,
+    /// Shards whose join is parked on an in-flight snap-sync bootstrap,
+    /// mapped to the count of vnodes still pending. Guards against a
+    /// second `Join` racing a double import; a `Leave` during bootstrap
+    /// decrements, abandoning the join at zero.
+    bootstrapping: HashMap<ShardId, usize>,
+    /// Bootstrap outcomes land here (`Err` carries the failed shard);
+    /// the runner's select loop drains the paired receiver and calls
+    /// [`Self::finish_join`].
+    bootstrap_done_tx: mpsc::UnboundedSender<Result<CompletedBootstrap, ShardId>>,
     /// Receiver side, taken by the runner's `run()` loop.
-    bootstrap_done_rx: Option<mpsc::UnboundedReceiver<CompletedBootstrap>>,
+    bootstrap_done_rx: Option<mpsc::UnboundedReceiver<Result<CompletedBootstrap, ShardId>>>,
 }
 
 impl ShardSupervisor {
@@ -176,7 +182,7 @@ impl ShardSupervisor {
             participation_tx,
             tx_status_caches,
             shards: HashMap::new(),
-            bootstrapping: HashSet::new(),
+            bootstrapping: HashMap::new(),
             bootstrap_done_tx,
             bootstrap_done_rx: Some(bootstrap_done_rx),
         }
@@ -187,7 +193,7 @@ impl ShardSupervisor {
     /// [`Self::finish_join`].
     pub(crate) const fn take_bootstrap_done_rx(
         &mut self,
-    ) -> Option<mpsc::UnboundedReceiver<CompletedBootstrap>> {
+    ) -> Option<mpsc::UnboundedReceiver<Result<CompletedBootstrap, ShardId>>> {
         self.bootstrap_done_rx.take()
     }
 
@@ -205,6 +211,11 @@ impl ShardSupervisor {
         let shard = shard_loop.shard;
         let shutdown_tx = channels.shutdown_tx.clone();
         let callback_tx = channels.callback_tx.clone();
+        let validator_ids = shard_loop
+            .vnodes
+            .iter()
+            .map(|v| v.validator_id.inner())
+            .collect();
         let cfg = self.loop_config(channels, initial_timer_ops);
         let join = spawn_shard_loop(shard_loop, cfg);
         self.shards.insert(
@@ -214,6 +225,7 @@ impl ShardSupervisor {
                 shutdown_tx,
                 callback_tx,
                 vnode_count,
+                validator_ids,
             },
         );
     }
@@ -240,7 +252,7 @@ impl ShardSupervisor {
     /// - **fresh store, no anchor** — seat directly and replay from
     ///   genesis through block sync.
     fn join(&mut self, shard: ShardId, vnodes: &[VnodeConfig]) {
-        if self.shards.contains_key(&shard) || self.bootstrapping.contains(&shard) {
+        if self.shards.contains_key(&shard) || self.bootstrapping.contains_key(&shard) {
             warn!(shard = ?shard, "Join rejected: shard already hosted or bootstrapping");
             return;
         }
@@ -260,7 +272,7 @@ impl ShardSupervisor {
         let fresh_store = recovered.committed_height == BlockHeight::GENESIS;
         let anchor = self.process.topology().load().boundary(shard);
         if fresh_store && anchor.is_some() {
-            self.bootstrapping.insert(shard);
+            self.bootstrapping.insert(shard, vnodes.len());
             let process = Arc::clone(&self.process);
             let done_tx = self.bootstrap_done_tx.clone();
             let vnodes = vnodes.to_vec();
@@ -271,15 +283,16 @@ impl ShardSupervisor {
                     Ok(recovered) => {
                         // Send failure means the runner is shutting
                         // down; the join dies with it.
-                        let _ = done_tx.send(CompletedBootstrap {
+                        let _ = done_tx.send(Ok(CompletedBootstrap {
                             shard,
                             vnodes,
                             storage,
                             recovered,
-                        });
+                        }));
                     }
                     Err(error) => {
                         warn!(shard = ?shard, error, "Shard bootstrap failed; join abandoned");
+                        let _ = done_tx.send(Err(shard));
                     }
                 }
             });
@@ -288,15 +301,34 @@ impl ShardSupervisor {
         self.seat_shard(shard, vnodes, storage, &recovered);
     }
 
-    /// Seat a bootstrap-completed shard. Runs on the runner's loop via
-    /// the completion channel — never on the bootstrap task.
-    pub(crate) fn finish_join(&mut self, done: CompletedBootstrap) {
-        self.bootstrapping.remove(&done.shard);
-        if self.shards.contains_key(&done.shard) {
-            warn!(shard = ?done.shard, "Bootstrap completed for an already-hosted shard; dropped");
+    /// Settle a finished bootstrap: seat the shard on success, clear
+    /// the bootstrapping entry on failure (so a later placement delta
+    /// can retry the join), drop the outcome when every pending vnode
+    /// left during the bootstrap. Runs on the runner's loop via the
+    /// completion channel — never on the bootstrap task.
+    pub(crate) fn finish_join(&mut self, done: Result<CompletedBootstrap, ShardId>) {
+        let shard = match &done {
+            Ok(done) => done.shard,
+            Err(shard) => *shard,
+        };
+        let Some(pending) = self.bootstrapping.remove(&shard) else {
+            info!(shard = ?shard, "Bootstrap finished for an abandoned join; dropped");
+            return;
+        };
+        let Ok(done) = done else {
+            // Failure already logged by the bootstrap task.
+            return;
+        };
+        if self.shards.contains_key(&shard) {
+            warn!(shard = ?shard, "Bootstrap completed for an already-hosted shard; dropped");
             return;
         }
-        self.seat_shard(done.shard, &done.vnodes, done.storage, &done.recovered);
+        self.seat_shard(
+            shard,
+            &done.vnodes[..pending],
+            done.storage,
+            &done.recovered,
+        );
     }
 
     /// Wire a shard's vnodes into the process maps and spawn its pinned
@@ -337,6 +369,7 @@ impl ShardSupervisor {
             shutdown_tx: shutdown_tx.clone(),
             shutdown_rx,
         };
+        let validator_ids = vnodes.iter().map(|v| v.validator_id.inner()).collect();
         let cfg = self.loop_config(channels, Vec::new());
         let join = spawn_shard_loop(shard_loop, cfg);
         self.shards.insert(
@@ -346,13 +379,32 @@ impl ShardSupervisor {
                 shutdown_tx,
                 callback_tx,
                 vnode_count,
+                validator_ids,
             },
         );
         info!(shard = ?shard, vnodes = vnode_count, "Shard joined at runtime");
     }
 
-    /// Release one vnode's membership; tear the shard down at zero.
+    /// Release one vnode's membership; tear the shard down at zero. A
+    /// leave that lands while the shard's join is still bootstrapping
+    /// releases a pending membership instead, abandoning the join when
+    /// the last one goes.
     fn leave(&mut self, shard: ShardId) {
+        if let Some(pending) = self.bootstrapping.get_mut(&shard) {
+            *pending -= 1;
+            let remaining = *pending;
+            if remaining == 0 {
+                self.bootstrapping.remove(&shard);
+                info!(shard = ?shard, "Last pending vnode left during bootstrap; join abandoned");
+            } else {
+                info!(
+                    shard = ?shard,
+                    remaining,
+                    "Vnode left during bootstrap; join continues for remaining vnodes"
+                );
+            }
+            return;
+        }
         let Some(entry) = self.shards.get_mut(&shard) else {
             warn!(shard = ?shard, "Leave rejected: shard not hosted");
             return;
@@ -379,7 +431,35 @@ impl ShardSupervisor {
         let mut caches = (**self.tx_status_caches.load()).clone();
         caches.remove(&shard);
         self.tx_status_caches.store(Arc::new(caches));
+        self.scrub_rpc_state(shard, &entry.validator_ids);
         info!(shard = ?shard, "Shard left and torn down");
+    }
+
+    /// Remove a departed shard's slots from the shared RPC state maps.
+    /// Each slot is otherwise written only by the shard's own (now
+    /// joined) thread, so a stale entry would persist forever — worst
+    /// case a mempool slot frozen at `at_pending_limit: true` vetoing
+    /// every RPC submission. A vnode still hosted elsewhere (relocation
+    /// overlap) republishes its mempool slot on that shard's next tick.
+    fn scrub_rpc_state(&self, shard: ShardId, validator_ids: &[u64]) {
+        let shard_key = shard.inner();
+        if let Some(ref rpc_status) = self.rpc_status {
+            let mut updated = (**rpc_status.load()).clone();
+            updated.vnodes.retain(|v| v.shard != shard_key);
+            rpc_status.store(Arc::new(updated));
+        }
+        if let Some(ref sync_status) = self.sync_status {
+            let mut updated = (**sync_status.load()).clone();
+            updated.shards.remove(&shard_key);
+            sync_status.store(Arc::new(updated));
+        }
+        if let Some(ref mempool_snapshot) = self.mempool_snapshot {
+            let mut updated = (**mempool_snapshot.load()).clone();
+            for id in validator_ids {
+                updated.vnodes.remove(id);
+            }
+            mempool_snapshot.store(Arc::new(updated));
+        }
     }
 
     /// Publish a runtime-joined shard's tx status cache to the RPC
