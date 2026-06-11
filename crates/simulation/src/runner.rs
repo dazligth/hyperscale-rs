@@ -44,6 +44,7 @@ use tracing::{debug, info, trace};
 
 use crate::event_queue::EventKey;
 
+pub mod observer;
 pub mod relocation;
 
 /// Type alias for the simulation's concrete `NodeHost`.

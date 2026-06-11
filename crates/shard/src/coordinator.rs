@@ -2198,11 +2198,16 @@ impl ShardCoordinator {
         // Membership admission gate — "is this validator on our committee
         // now?" — answered on the routing head against full membership: a
         // Ready signal's sender is by definition not yet in the consensus
-        // subset.
-        if !topology
-            .head()
-            .committee_for_shard(self.local_shard)
-            .contains(&signal.validator_id())
+        // subset. An observer seat on this shard's pending split admits
+        // too: a freshly drawn cohort sits in the lookahead committee for
+        // its first window, but its sync can complete inside that window
+        // and the signal must not be dropped on the floor.
+        let head = topology.head();
+        let sender = signal.validator_id();
+        if !head.committee_for_shard(self.local_shard).contains(&sender)
+            && head
+                .reshape_observer_child(self.local_shard, sender)
+                .is_none()
         {
             return;
         }

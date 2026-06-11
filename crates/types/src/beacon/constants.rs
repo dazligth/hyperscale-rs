@@ -140,7 +140,14 @@ pub const JAIL_COOLDOWN_EPOCHS: u64 = 16;
 /// re-asserting and its record drops once `current_epoch −
 /// last_asserted` reaches this bound. The same bound expires a lone
 /// merge half whose sibling never asserts.
-pub const RESHAPE_TRIGGER_TTL_EPOCHS: u64 = 2;
+///
+/// A live trigger's folded re-assertions land roughly every third
+/// epoch, not every epoch: the asserted leaf is consumed one fold
+/// after its window, and the once-per-window dedup clears one window
+/// after that (window bases freeze pre-fold). The bound sits above
+/// that cadence with one epoch of slack, so a continuously held
+/// condition never churns through cancel-and-readmit.
+pub const RESHAPE_TRIGGER_TTL_EPOCHS: u64 = 4;
 
 /// How long an admitted reshape may wait for readiness before being
 /// abandoned.

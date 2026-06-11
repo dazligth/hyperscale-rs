@@ -34,7 +34,7 @@ use super::SimulationRunner;
 
 /// Drive cap for the snap-sync pump — generous over the dozens of
 /// rounds a small-state bootstrap takes, so exhaustion means a wedge.
-const MAX_BOOTSTRAP_ROUNDS: usize = 100_000;
+pub(super) const MAX_BOOTSTRAP_ROUNDS: usize = 100_000;
 
 /// Which join path [`SimulationRunner::join_shard`] took. Mirrors the
 /// production supervisor's branching on the store's recovered state.

@@ -1829,12 +1829,12 @@ mod tests {
         assert_eq!(*last_asserted, Epoch::new(6));
         assert_eq!(*admitted_at, Epoch::new(5));
 
-        // One quiet epoch survives the sweep; the second cancels and
-        // releases the cohort.
-        state.current_epoch = Epoch::new(7);
+        // Quiet epochs inside the bound survive the sweep; reaching it
+        // cancels and releases the cohort.
+        state.current_epoch = Epoch::new(6 + RESHAPE_TRIGGER_TTL_EPOCHS - 1);
         prune_stale_reshapes(&mut state);
         assert!(state.pending_reshapes.contains_key(&p));
-        state.current_epoch = Epoch::new(8);
+        state.current_epoch = Epoch::new(6 + RESHAPE_TRIGGER_TTL_EPOCHS);
         prune_stale_reshapes(&mut state);
         assert!(state.pending_reshapes.is_empty());
         assert_eq!(state.pooled_validators().len(), 4);
@@ -1894,7 +1894,7 @@ mod tests {
         // A fresh lone half goes quiet and expires.
         let mut lone = reshape_state(&[left, right], 0);
         apply_shard_payload(&mut lone, left, &payload);
-        lone.current_epoch = Epoch::new(7);
+        lone.current_epoch = Epoch::new(5 + RESHAPE_TRIGGER_TTL_EPOCHS);
         prune_stale_reshapes(&mut lone);
         assert!(lone.pending_reshapes.is_empty());
     }

@@ -22,10 +22,36 @@
 
 use hyperscale_storage::ImportLeaf;
 use hyperscale_types::network::response::GetStateRangeResponse;
-use hyperscale_types::{BlockHeight, ShardAnchor, ShardId, StateRoot, shard_prefix_path};
+use hyperscale_types::{
+    BlockHeight, Bls12381G1PrivateKey, MAX_READY_WINDOW_BLOCKS, NetworkDefinition, ReadySignal,
+    ShardAnchor, ShardId, StateRoot, ValidatorId, ready_signal_message, shard_prefix_path,
+};
 
 use super::snap_sync::SnapSync;
 use super::{BootstrapOutcome, BootstrapRequest, SPLIT_BITS, STATE_CHUNK_LIMIT};
+
+/// The self-signed ready signal an observer broadcasts to the
+/// splitting shard's committee on completing its child-span bootstrap.
+///
+/// Windowed from the splitting shard's attested anchor — the freshest
+/// committed height the observer holds an authenticated view of. The
+/// anchor refreshes every epoch boundary, so the window comfortably
+/// covers the chain's progress since; a signal that somehow passes
+/// uncollected is re-emitted against a newer anchor. At the committee,
+/// the signal classifies as a `ReshapeReady` witness leaf — the
+/// sender's observer seat rides the window's topology snapshot.
+#[must_use]
+pub fn observer_ready_signal(
+    network: &NetworkDefinition,
+    validator: ValidatorId,
+    signing_key: &Bls12381G1PrivateKey,
+    anchor: ShardAnchor,
+) -> ReadySignal {
+    let start = anchor.height + 1;
+    let end = start + (MAX_READY_WINDOW_BLOCKS - 1);
+    let msg = ready_signal_message(network, validator, start, end);
+    ReadySignal::new(validator, start, end, signing_key.sign_v1(&msg))
+}
 
 enum Phase {
     /// Assembling the child span of the parent's committed state.
