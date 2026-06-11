@@ -1088,7 +1088,7 @@ impl ShardCoordinator {
             MIN_READY_SIGNAL_DWELL,
             MAX_READY_SIGNALS_PER_BLOCK,
         );
-        let new_leaves = derive_leaves(&receipts, &missed, &ready_signals);
+        let new_leaves = derive_leaves(&receipts, &missed, &ready_signals, None);
 
         // Anchor the preview on the prefix the parent block leaves behind,
         // not the committed accumulator: the parent may be certified but not
@@ -3118,7 +3118,14 @@ impl ShardCoordinator {
             block.header().round(),
             committee,
         );
-        let new_leaves = derive_leaves(&receipts, &missed, manifest.ready_signals().as_slice());
+        let new_leaves = derive_leaves(
+            &receipts,
+            &missed,
+            manifest.ready_signals().as_slice(),
+            manifest
+                .reshape_trigger()
+                .and_then(|t| t.to_payload(self.local_shard)),
+        );
         let starting_leaf_index = self.beacon_witness_accumulator.leaf_count();
         self.beacon_witness_accumulator.commit_append(&new_leaves);
         let leaf_count_at_block_end = self.beacon_witness_accumulator.leaf_count();

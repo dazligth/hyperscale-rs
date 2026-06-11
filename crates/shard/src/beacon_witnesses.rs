@@ -198,6 +198,10 @@ pub fn prospective_parent_witness_leaves(
             &receipts,
             &missed,
             pending.manifest().ready_signals().as_slice(),
+            pending
+                .manifest()
+                .reshape_trigger()
+                .and_then(|t| t.to_payload(local_shard)),
         );
         chain_deltas.push(
             new_leaves
@@ -398,9 +402,17 @@ mod tests {
         let ready = ready_signals(&[3, 1, 2]);
         let receipts: Vec<StoredReceipt> = Vec::new();
 
-        let leaves = derive_leaves(&receipts, &missed, &ready);
+        let leaves = derive_leaves(
+            &receipts,
+            &missed,
+            &ready,
+            Some(ShardWitnessPayload::ScheduleSplit {
+                shard: ShardId::ROOT,
+            }),
+        );
         // 1 MissedProposal + 3 Ready (sorted ascending by validator id)
-        assert_eq!(leaves.len(), 4);
+        // + the reshape trigger last.
+        assert_eq!(leaves.len(), 5);
         assert!(matches!(
             &leaves[0],
             ShardWitnessPayload::MissedProposal { .. }
@@ -411,6 +423,10 @@ mod tests {
                 other => panic!("expected Ready, got {other:?}"),
             }
         }
+        assert!(matches!(
+            &leaves[4],
+            ShardWitnessPayload::ScheduleSplit { .. }
+        ));
     }
 
     #[test]
@@ -426,8 +442,8 @@ mod tests {
         let ready = ready_signals(&[7, 2]);
         let receipts: Vec<StoredReceipt> = Vec::new();
 
-        let a = derive_leaves(&receipts, &missed, &ready);
-        let b = derive_leaves(&receipts, &missed, &ready);
+        let a = derive_leaves(&receipts, &missed, &ready, None);
+        let b = derive_leaves(&receipts, &missed, &ready, None);
         assert_eq!(a, b);
 
         let mut acc_a = BeaconWitnessAccumulator::new();

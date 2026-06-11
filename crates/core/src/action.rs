@@ -12,11 +12,11 @@ use hyperscale_types::{
     ExecutionCertificate, ExecutionVote, FinalizedWave, GlobalReceiptRoot, Hash, InFlightCount,
     LocalReceiptRoot, NodeId, PcQc1, PcQc2, PcVector, PcVote1, PcVote2, PcVote3,
     PcVoteEquivocation, ProposerTimestamp, ProvisionHash, ProvisionTxRootsMap, Provisions,
-    ProvisionsRoot, QuorumCertificate, ReadySignal, Round, RoutableTransaction, ShardId,
-    SharedCertificates, SharedTransactions, SkipRequest, SpcEmptyViewMsg, SpcHighTriple,
-    SpcNewCommitMsg, SpcProposalObject, SpcView, StateRoot, SubstateEntry, Timeout,
-    TopologySnapshot, TransactionRoot, TransactionStatus, TxHash, TxOutcome, ValidatorId,
-    Verifiable, Verified, VoteCount, WaveId, WeightedTimestamp,
+    ProvisionsRoot, QuorumCertificate, ReadySignal, ReshapeThresholds, ReshapeTrigger, Round,
+    RoutableTransaction, ShardId, SharedCertificates, SharedTransactions, SkipRequest,
+    SpcEmptyViewMsg, SpcHighTriple, SpcNewCommitMsg, SpcProposalObject, SpcView, StateRoot,
+    SubstateEntry, Timeout, TopologySnapshot, TransactionRoot, TransactionStatus, TxHash,
+    TxOutcome, ValidatorId, Verifiable, Verified, VoteCount, WaveId, WeightedTimestamp,
 };
 
 use crate::{CommitSource, FetchAbandon, FetchRequest, ProtocolEvent, TimerId};
@@ -532,6 +532,14 @@ pub enum Action {
         round: Round,
         /// Ready signals the proposer drained into the manifest.
         ready_signals: Vec<ReadySignal>,
+        /// The manifest's reshape assertion, validated against the
+        /// locally recomputed load predicate.
+        reshape_trigger: Option<ReshapeTrigger>,
+        /// Committed substate count behind the parent block's
+        /// post-state — the load the reshape predicate evaluates.
+        substate_count: u64,
+        /// Reshape thresholds in force for this network.
+        thresholds: ReshapeThresholds,
         /// Finalized waves whose receipts contribute receipt-sourced
         /// witness events.
         finalized_waves: Vec<Arc<Verifiable<FinalizedWave>>>,

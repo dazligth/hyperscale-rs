@@ -128,12 +128,14 @@ pub use shard::limits::{
 };
 pub use shard::manifest::{BlockManifest, BlockMetadata};
 pub use shard::quorum_certificate::{QcContext, QcVerifyError, QuorumCertificate};
+pub use shard::reshape::{ReshapeThresholds, ReshapeTrigger};
 pub use shard::roots::{
     BeaconWitnessRootContext, BeaconWitnessRootVerifyError, CertRootVerifyError,
     CertificateRootContext, LocalReceiptRootContext, LocalReceiptRootVerifyError,
     ProvisionRootVerifyError, ProvisionTxRootsContext, ProvisionTxRootsMap,
     ProvisionTxRootsVerifyError, ProvisionsRootContext, StateRootContext, StateRootVerifyError,
-    TransactionRootContext, TxRootVerifyError, derive_leaves, missed_proposals_since_prev_commit,
+    TransactionRootContext, TxRootVerifyError, derive_leaves, derive_reshape_trigger,
+    missed_proposals_since_prev_commit,
 };
 pub use shard::storage_commit::{BeaconWitnessCommit, PreparedCommit, SyncHint};
 pub use shard::timeout::{Timeout, TimeoutContext, TimeoutVerifyError};

@@ -24,6 +24,7 @@ pub mod inventory;
 pub mod limits;
 pub mod manifest;
 pub mod quorum_certificate;
+pub mod reshape;
 pub mod roots;
 pub mod storage_commit;
 pub mod timeout;

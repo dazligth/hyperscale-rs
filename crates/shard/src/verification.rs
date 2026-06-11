@@ -15,8 +15,8 @@ use hyperscale_core::Action;
 use hyperscale_types::{
     BeaconWitnessRoot, Block, BlockHash, BlockHeader, BlockHeight, BlockManifest, CertificateRoot,
     CertifiedBlock, FinalizedWave, InFlightCount, LinkageError, LocalReceiptRoot,
-    ProvisionTxRootsMap, ProvisionsRoot, QuorumCertificate, ShardId, StateRoot, TopologySnapshot,
-    TransactionRoot, Verifiable, Verified, VerifiedBlockAssembleError,
+    ProvisionTxRootsMap, ProvisionsRoot, QuorumCertificate, ReshapeThresholds, ShardId, StateRoot,
+    TopologySnapshot, TransactionRoot, Verifiable, Verified, VerifiedBlockAssembleError,
 };
 use thiserror::Error;
 use tracing::{debug, trace, warn};
@@ -1204,11 +1204,15 @@ impl VerificationPipeline {
                 return Vec::new();
             }
         };
-        let ready_signals = pending_blocks
-            .get(block_hash)
-            .map_or_else(Vec::new, |pending| {
-                pending.manifest().ready_signals().as_slice().to_vec()
-            });
+        let (ready_signals, reshape_trigger) = pending_blocks.get(block_hash).map_or_else(
+            || (Vec::new(), None),
+            |pending| {
+                (
+                    pending.manifest().ready_signals().as_slice().to_vec(),
+                    pending.manifest().reshape_trigger(),
+                )
+            },
+        );
         let finalized_waves: Vec<Arc<Verifiable<FinalizedWave>>> =
             block.certificates().iter().cloned().collect();
         debug!(
@@ -1229,6 +1233,9 @@ impl VerificationPipeline {
             height: header.height(),
             round: header.round(),
             ready_signals,
+            reshape_trigger,
+            substate_count: 0,
+            thresholds: ReshapeThresholds::DISABLED,
             finalized_waves,
             topology_snapshot: topology.clone(),
         }]

@@ -270,7 +270,7 @@ mod tests {
             BlockHeight::new(2),
             std::collections::BTreeSet::new(),
         );
-        let manifest = BlockManifest::new(vec![], vec![wave.clone()], vec![], vec![]);
+        let manifest = BlockManifest::new(vec![], vec![wave.clone()], vec![], vec![], None);
         let pending_block = PendingBlock::from_manifest(header, manifest, LocalTimestamp::ZERO);
         let mut pending = PendingBlocks::new();
         pending.insert(pending_block);

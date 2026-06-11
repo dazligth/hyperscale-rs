@@ -112,6 +112,26 @@ pub enum ShardWitnessPayload {
         /// Round the missed proposer was scheduled for.
         round: Round,
     },
+    /// The shard's committed substate count reached the split
+    /// threshold. Derived from the manifest's reshape assertion, which
+    /// replicas validate against their own count — so the witness
+    /// arrives committee-attested. The beacon admits it (pool gate,
+    /// `MAX_SHARDS`, active-leaf target) and schedules the split.
+    ScheduleSplit {
+        /// Shard asserting the split — always the witness's source
+        /// shard today; explicit so the payload stays valid if
+        /// emission ever moves off-shard.
+        shard: ShardId,
+    },
+    /// The shard's committed substate count fell below the merge
+    /// threshold. The beacon parks the assertion until the sibling's
+    /// matching half folds, then schedules the merge under `parent`.
+    ScheduleMerge {
+        /// Parent the merged shard reforms under — always the source
+        /// shard's own parent today; explicit for the same reason as
+        /// [`Self::ScheduleSplit::shard`].
+        parent: ShardId,
+    },
 }
 
 impl ShardWitnessPayload {
@@ -396,6 +416,12 @@ mod tests {
                 proposer_id: ValidatorId::new(12),
                 height: BlockHeight::new(99),
                 round: Round::new(3),
+            },
+            ShardWitnessPayload::ScheduleSplit {
+                shard: ShardId::leaf(2, 0b01),
+            },
+            ShardWitnessPayload::ScheduleMerge {
+                parent: ShardId::leaf(1, 0b1),
             },
         ];
         for p in payloads {

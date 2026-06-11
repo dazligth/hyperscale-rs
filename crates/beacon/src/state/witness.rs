@@ -368,6 +368,11 @@ pub(super) fn apply_shard_payload(
             );
             Some(ShardEvent::Jailed(*proposer_id))
         }
+        ShardWitnessPayload::ScheduleSplit { .. } | ShardWitnessPayload::ScheduleMerge { .. } => {
+            // Reshape triggers are inert to the fold: the beacon does
+            // not admit reshape scheduling.
+            None
+        }
     }
 }
 

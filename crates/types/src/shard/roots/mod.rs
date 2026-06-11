@@ -28,7 +28,7 @@ pub mod state;
 pub mod transaction;
 
 pub use beacon_witness::{
-    BeaconWitnessRootContext, BeaconWitnessRootVerifyError, derive_leaves,
+    BeaconWitnessRootContext, BeaconWitnessRootVerifyError, derive_leaves, derive_reshape_trigger,
     missed_proposals_since_prev_commit,
 };
 pub use certificate::{CertRootVerifyError, CertificateRootContext};

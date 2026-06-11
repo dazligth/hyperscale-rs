@@ -5,8 +5,8 @@ use thiserror::Error;
 
 use crate::{
     BeaconWitnessLeafCount, BeaconWitnessRoot, BlockHeight, ConsensusReceipt, Hash, ReadySignal,
-    Round, ShardId, ShardWitnessPayload, StoredReceipt, TopologySnapshot, Verified, Verify,
-    compute_merkle_root,
+    ReshapeThresholds, ReshapeTrigger, Round, ShardId, ShardWitnessPayload, StoredReceipt,
+    TopologySnapshot, Verified, Verify, compute_merkle_root,
 };
 
 /// Inputs the [`BeaconWitnessRoot`] verifier reads against.
@@ -46,6 +46,17 @@ pub struct BeaconWitnessRootContext<'a> {
     pub receipts: &'a [StoredReceipt],
     /// Ready signals carried on the block's manifest.
     pub ready_signals: &'a [ReadySignal],
+    /// The manifest's reshape assertion. Verification recomputes the
+    /// load predicate from `substate_count` + `thresholds` and rejects
+    /// the block when the claim diverges — a committed trigger
+    /// therefore carries the committee's quorum behind the load fact.
+    pub reshape_trigger: Option<ReshapeTrigger>,
+    /// Committed substate count behind the parent block's post-state —
+    /// the load the predicate evaluates. A function of the block's
+    /// ancestry, never of the local commit frontier.
+    pub substate_count: u64,
+    /// Reshape thresholds in force for this network.
+    pub thresholds: ReshapeThresholds,
     /// Topology snapshot anchoring the proposer-rotation rule the
     /// missed-round walk reads.
     pub topology: &'a TopologySnapshot,
@@ -78,6 +89,17 @@ pub enum BeaconWitnessRootVerifyError {
         claimed: u64,
         /// Base resolved from the block's schedule entry.
         expected: u64,
+    },
+    /// The manifest's reshape assertion diverges from the locally
+    /// recomputed load predicate — a claimed trigger the load doesn't
+    /// justify, an omitted trigger the load demands, or a duplicate of
+    /// one already in the window.
+    #[error("manifest reshape trigger {claimed:?} ≠ derived {derived:?}")]
+    ReshapeTriggerMismatch {
+        /// The manifest's claim.
+        claimed: Option<ReshapeTrigger>,
+        /// The locally derived assertion.
+        derived: Option<ReshapeTrigger>,
     },
 }
 
@@ -112,6 +134,41 @@ pub fn missed_proposals_since_prev_commit(
     missed
 }
 
+/// Evaluate the load predicate behind a block's reshape assertion.
+///
+/// Fires `Split` when the committed substate count behind the block's
+/// parent state reaches the split threshold, `Merge` when it falls
+/// below the merge threshold — except when the would-be trigger's leaf
+/// already sits in `window_leaves` (the block's witness window, i.e.
+/// this epoch's leaves): the window bases re-freeze each epoch, so an
+/// over-threshold shard re-asserts exactly once per epoch until the
+/// beacon acts. A merge on the root shard never fires — there is no
+/// parent to merge under.
+///
+/// Pure over its inputs; the proposer fills the manifest from it and
+/// every replica recomputes it in [`BeaconWitnessRoot`] verification,
+/// so a committed assertion is quorum-backed.
+#[must_use]
+pub fn derive_reshape_trigger(
+    shard: ShardId,
+    substate_count: u64,
+    thresholds: &ReshapeThresholds,
+    window_leaves: &[Hash],
+) -> Option<ReshapeTrigger> {
+    let kind = if substate_count >= thresholds.split_substates {
+        ReshapeTrigger::Split
+    } else if substate_count < thresholds.merge_substates() {
+        ReshapeTrigger::Merge
+    } else {
+        return None;
+    };
+    let leaf = kind.to_payload(shard)?.leaf_hash();
+    if window_leaves.contains(&leaf) {
+        return None;
+    }
+    Some(kind)
+}
+
 /// Canonical leaf-derivation rule used by both proposer and verifier.
 ///
 /// Ordering (locked — every honest validator must produce the same
@@ -122,11 +179,13 @@ pub fn missed_proposals_since_prev_commit(
 /// 2. `MissedProposal` witnesses in ascending round order (the helper
 ///    already sorts; pass its output verbatim).
 /// 3. `Ready` witnesses in ascending `validator_id` order.
+/// 4. The block's reshape trigger, if asserted (at most one).
 #[must_use]
 pub fn derive_leaves(
     receipts: &[StoredReceipt],
     missed: &[ShardWitnessPayload],
     ready_signals: &[ReadySignal],
+    reshape: Option<ShardWitnessPayload>,
 ) -> Vec<ShardWitnessPayload> {
     let mut out = Vec::new();
     for receipt in receipts {
@@ -148,6 +207,7 @@ pub fn derive_leaves(
             id: signal.validator_id(),
         });
     }
+    out.extend(reshape);
     out
 }
 
@@ -192,7 +252,6 @@ impl Verify<&BeaconWitnessRootContext<'_>> for BeaconWitnessRoot {
             ctx.round,
             ctx.topology,
         );
-        let new_leaves = derive_leaves(ctx.receipts, &missed, ctx.ready_signals);
 
         // The root commits the block's window only: drop parent leaves
         // below the validated base. The base never undercuts the parent
@@ -207,6 +266,31 @@ impl Verify<&BeaconWitnessRootContext<'_>> for BeaconWitnessRoot {
         )
         .unwrap_or(usize::MAX);
         let window = ctx.parent_witness_leaves.get(trim..).unwrap_or(&[]);
+
+        // The manifest's reshape assertion must equal the locally
+        // recomputed load predicate — including the once-per-window
+        // dedup, which scans the same trimmed window the root commits.
+        let derived =
+            derive_reshape_trigger(ctx.shard, ctx.substate_count, &ctx.thresholds, window);
+        if derived != ctx.reshape_trigger {
+            tracing::warn!(
+                claimed = ?ctx.reshape_trigger,
+                ?derived,
+                substate_count = ctx.substate_count,
+                height = ctx.height.inner(),
+                "Reshape trigger verification FAILED"
+            );
+            return Err(BeaconWitnessRootVerifyError::ReshapeTriggerMismatch {
+                claimed: ctx.reshape_trigger,
+                derived,
+            });
+        }
+        let new_leaves = derive_leaves(
+            ctx.receipts,
+            &missed,
+            ctx.ready_signals,
+            derived.and_then(|t| t.to_payload(ctx.shard)),
+        );
 
         let mut leaves = window.to_vec();
         leaves.reserve(new_leaves.len());
@@ -284,8 +368,114 @@ mod tests {
             round: Round::INITIAL.next(),
             receipts: &[],
             ready_signals: &[],
+            reshape_trigger: None,
+            substate_count: 0,
+            thresholds: ReshapeThresholds::DISABLED,
             topology,
         }
+    }
+
+    /// The load predicate: split at the threshold, merge below an
+    /// eighth of it (never on the root shard), nothing in between, and
+    /// at most one assertion per witness window.
+    #[test]
+    fn reshape_predicate_fires_on_load_and_dedups_per_window() {
+        let thresholds = ReshapeThresholds {
+            split_substates: 100,
+        };
+        let child = ShardId::leaf(1, 0);
+
+        assert_eq!(
+            derive_reshape_trigger(child, 100, &thresholds, &[]),
+            Some(ReshapeTrigger::Split),
+        );
+        // merge_substates() == 12; the bound is strict.
+        assert_eq!(
+            derive_reshape_trigger(child, 11, &thresholds, &[]),
+            Some(ReshapeTrigger::Merge),
+        );
+        assert_eq!(derive_reshape_trigger(child, 12, &thresholds, &[]), None);
+        assert_eq!(derive_reshape_trigger(child, 50, &thresholds, &[]), None);
+        // The root shard has no parent to merge under.
+        assert_eq!(
+            derive_reshape_trigger(ShardId::ROOT, 0, &thresholds, &[]),
+            None,
+        );
+        // Disabled thresholds never fire.
+        assert_eq!(
+            derive_reshape_trigger(child, u64::MAX - 1, &ReshapeThresholds::DISABLED, &[]),
+            None,
+        );
+
+        // A like trigger already in the window suppresses re-assertion;
+        // an unrelated leaf does not.
+        let split_leaf = ReshapeTrigger::Split.to_payload(child).unwrap().leaf_hash();
+        assert_eq!(
+            derive_reshape_trigger(child, 100, &thresholds, &[split_leaf]),
+            None,
+        );
+        assert_eq!(
+            derive_reshape_trigger(child, 100, &thresholds, &[Hash::from_bytes(b"other")]),
+            Some(ReshapeTrigger::Split),
+        );
+    }
+
+    /// A manifest asserting a trigger the load doesn't justify fails
+    /// verification before any root recomputation.
+    #[test]
+    fn unjustified_reshape_claim_is_rejected() {
+        let shard = ShardId::ROOT;
+        let topology = snapshot_with_base(shard, 0);
+        let mut ctx = context_with(&topology, shard, 0, Vec::new(), 0);
+        ctx.reshape_trigger = Some(ReshapeTrigger::Split);
+
+        assert_eq!(
+            BeaconWitnessRoot::ZERO.verify(&ctx).unwrap_err(),
+            BeaconWitnessRootVerifyError::ReshapeTriggerMismatch {
+                claimed: Some(ReshapeTrigger::Split),
+                derived: None,
+            }
+        );
+    }
+
+    /// A manifest omitting a trigger the load demands fails the same way.
+    #[test]
+    fn omitted_due_reshape_is_rejected() {
+        let shard = ShardId::ROOT;
+        let topology = snapshot_with_base(shard, 0);
+        let mut ctx = context_with(&topology, shard, 0, Vec::new(), 0);
+        ctx.thresholds = ReshapeThresholds {
+            split_substates: 10,
+        };
+        ctx.substate_count = 10;
+
+        assert_eq!(
+            BeaconWitnessRoot::ZERO.verify(&ctx).unwrap_err(),
+            BeaconWitnessRootVerifyError::ReshapeTriggerMismatch {
+                claimed: None,
+                derived: Some(ReshapeTrigger::Split),
+            }
+        );
+    }
+
+    /// A justified assertion verifies, with the trigger leaf appended
+    /// last and counted.
+    #[test]
+    fn asserted_reshape_lands_in_the_root() {
+        let shard = ShardId::ROOT;
+        let topology = snapshot_with_base(shard, 2);
+        let trigger_leaf = ReshapeTrigger::Split.to_payload(shard).unwrap().leaf_hash();
+        let expected_root = BeaconWitnessRoot::from_raw(compute_merkle_root(&[trigger_leaf]));
+
+        let mut ctx = context_with(&topology, shard, 2, Vec::new(), 3);
+        ctx.parent_leaves_start = BeaconWitnessLeafCount::new(2);
+        ctx.thresholds = ReshapeThresholds {
+            split_substates: 10,
+        };
+        ctx.substate_count = 11;
+        ctx.reshape_trigger = Some(ReshapeTrigger::Split);
+
+        assert!(expected_root.verify(&ctx).is_ok());
     }
 
     /// A header whose claimed window base differs from the

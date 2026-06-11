@@ -758,7 +758,7 @@ mod tests {
         // single-tx manifest so the projection cleanly fits.
         let TestNode { mut node, .. } = TestNode::new();
 
-        let manifest = BlockManifest::new(vec![TxHash::ZERO], vec![], vec![], vec![]);
+        let manifest = BlockManifest::new(vec![TxHash::ZERO], vec![], vec![], vec![], None);
 
         // `make_live_block` stamps round 0, and proposer_for(r=0) =
         // committee[0] = ValidatorId::new(0). The shard coordinator's header

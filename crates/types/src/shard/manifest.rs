@@ -6,7 +6,8 @@ use sbor::prelude::*;
 use crate::{
     BeaconWitnessLeafCount, Block, BlockHash, BlockHeader, BlockHeight, BoundedVec,
     MAX_FINALIZED_TX_PER_BLOCK, MAX_PROVISIONS_PER_BLOCK, MAX_READY_SIGNALS_PER_BLOCK,
-    MAX_TXS_PER_BLOCK, ProvisionHash, QuorumCertificate, ReadySignal, TxHash, Verifiable, WaveId,
+    MAX_TXS_PER_BLOCK, ProvisionHash, QuorumCertificate, ReadySignal, ReshapeTrigger, TxHash,
+    Verifiable, WaveId,
 };
 
 /// Hash-level description of a block's contents (transactions and certificates).
@@ -23,6 +24,7 @@ pub struct BlockManifest {
     cert_ids: BoundedVec<WaveId, MAX_FINALIZED_TX_PER_BLOCK>,
     provision_hashes: BoundedVec<ProvisionHash, MAX_PROVISIONS_PER_BLOCK>,
     ready_signals: BoundedVec<ReadySignal, MAX_READY_SIGNALS_PER_BLOCK>,
+    reshape_trigger: Option<ReshapeTrigger>,
 }
 
 impl BlockManifest {
@@ -37,12 +39,14 @@ impl BlockManifest {
         cert_ids: Vec<WaveId>,
         provision_hashes: Vec<ProvisionHash>,
         ready_signals: Vec<ReadySignal>,
+        reshape_trigger: Option<ReshapeTrigger>,
     ) -> Self {
         Self {
             tx_hashes: tx_hashes.into(),
             cert_ids: cert_ids.into(),
             provision_hashes: provision_hashes.into(),
             ready_signals: ready_signals.into(),
+            reshape_trigger,
         }
     }
 
@@ -74,6 +78,16 @@ impl BlockManifest {
         &self.ready_signals
     }
 
+    /// The proposer's reshape assertion, if any. Replicas validate it
+    /// against their own load predicate before voting; the witness
+    /// derivation projects it into a trigger leaf at block-assembly
+    /// time, so the sync path replays it from the manifest under QC
+    /// trust without needing historical substate counts.
+    #[must_use]
+    pub const fn reshape_trigger(&self) -> Option<ReshapeTrigger> {
+        self.reshape_trigger
+    }
+
     /// Get total transaction count.
     #[must_use]
     pub const fn transaction_count(&self) -> usize {
@@ -87,6 +101,8 @@ impl BlockManifest {
     /// responsible for only invoking this on `Live` blocks (or accepting
     /// the empty result) when provision-hash fidelity matters — e.g. the
     /// commit-bookkeeping path that populates `CommitDedupIndex`.
+    /// `ready_signals` and `reshape_trigger` are likewise unrecoverable
+    /// from a `Block` alone and come back empty/`None`.
     #[must_use]
     pub fn from_block(block: &Block) -> Self {
         // The source `Block` collections are themselves `BoundedVec`s capped
@@ -99,7 +115,7 @@ impl BlockManifest {
             .map(|c| c.wave_id().clone())
             .collect();
         let provision_hashes = block.provision_hashes();
-        Self::new(tx_hashes, cert_ids, provision_hashes, Vec::new())
+        Self::new(tx_hashes, cert_ids, provision_hashes, Vec::new(), None)
     }
 }
 
@@ -235,7 +251,7 @@ mod tests {
             enc.write_payload_prefix(BASIC_SBOR_V1_PAYLOAD_PREFIX)
                 .unwrap();
             enc.write_value_kind(ValueKind::Tuple).unwrap();
-            enc.write_size(4).unwrap();
+            enc.write_size(5).unwrap();
             enc.write_value_kind(ValueKind::Array).unwrap();
             enc.write_value_kind(TxHash::value_kind()).unwrap();
             enc.write_size(MAX_TXS_PER_BLOCK + 1).unwrap();
@@ -256,7 +272,7 @@ mod tests {
             enc.write_payload_prefix(BASIC_SBOR_V1_PAYLOAD_PREFIX)
                 .unwrap();
             enc.write_value_kind(ValueKind::Tuple).unwrap();
-            enc.write_size(4).unwrap();
+            enc.write_size(5).unwrap();
             // Empty tx_hashes.
             enc.encode(&Vec::<TxHash>::new()).unwrap();
             // Oversized cert_ids.
@@ -281,7 +297,7 @@ mod tests {
             enc.write_payload_prefix(BASIC_SBOR_V1_PAYLOAD_PREFIX)
                 .unwrap();
             enc.write_value_kind(ValueKind::Tuple).unwrap();
-            enc.write_size(4).unwrap();
+            enc.write_size(5).unwrap();
             enc.encode(&Vec::<TxHash>::new()).unwrap();
             enc.encode(&Vec::<WaveId>::new()).unwrap();
             // Oversized provision_hashes.

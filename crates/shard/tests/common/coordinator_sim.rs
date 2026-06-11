@@ -1161,6 +1161,9 @@ impl ShardCoordinatorSim {
                 height,
                 round,
                 ready_signals,
+                reshape_trigger,
+                substate_count,
+                thresholds,
                 finalized_waves,
                 topology_snapshot,
             } => {
@@ -1179,6 +1182,9 @@ impl ShardCoordinatorSim {
                     round,
                     receipts: &receipts,
                     ready_signals: &ready_signals,
+                    reshape_trigger,
+                    substate_count,
+                    thresholds,
                     topology: &topology_snapshot,
                 };
                 let result = expected_root.verify(&bw_ctx);
