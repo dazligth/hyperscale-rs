@@ -21,7 +21,6 @@ use hyperscale_engine::{ProcessExecutionCache, RadixExecutor, TransactionValidat
 use hyperscale_network::Network;
 use hyperscale_storage::{BeaconStorage, PendingChain, ShardStorage};
 use hyperscale_types::{BlockHeight, LocalTimestamp, ShardId, TransactionStatus, TxHash};
-use quick_cache::sync::Cache as QuickCache;
 
 use crate::NodeStateMachine;
 use crate::batch_accumulator::BatchAccumulator;
@@ -366,32 +365,17 @@ where
         &self.process.beacon_storage
     }
 
-    /// Look up the latest emitted status for a transaction across every
-    /// hosted shard.
+    /// Look up the latest merged status for a transaction.
     ///
-    /// Returns the most recent status notification for the given transaction
-    /// hash, if any status has been emitted on any hosted shard. Unlike the
-    /// per-step `StepOutput::emitted_statuses`, this cache persists across
-    /// steps and survives mempool eviction.
+    /// Reads the process-wide [`TxStatusCache`], which every hosted
+    /// shard writes into. Unlike the per-step
+    /// `StepOutput::emitted_statuses`, this cache persists across steps
+    /// and survives mempool eviction.
+    ///
+    /// [`TxStatusCache`]: crate::process_io::TxStatusCache
     #[must_use]
     pub fn tx_status(&self, hash: &TxHash) -> Option<TransactionStatus> {
-        self.shards
-            .values()
-            .find_map(|group| group.io.caches.tx_status.get(hash))
-    }
-
-    /// Per-shard transaction status caches.
-    ///
-    /// Each cache is an `Arc<QuickCache>` so external consumers (e.g. RPC
-    /// handlers) can share lock-free reads across threads. RPC layers
-    /// typically hold the full set so a single-hash lookup can fan out
-    /// across every hosted shard without re-entering the pinned thread.
-    #[must_use]
-    pub fn tx_status_caches(&self) -> HashMap<ShardId, Arc<QuickCache<TxHash, TransactionStatus>>> {
-        self.shards
-            .iter()
-            .map(|(shard, group)| (*shard, Arc::clone(&group.io.caches.tx_status)))
-            .collect()
+        self.process.tx_status.get(hash).map(|(status, _)| status)
     }
 
     // ─── Event Processing ───────────────────────────────────────────────

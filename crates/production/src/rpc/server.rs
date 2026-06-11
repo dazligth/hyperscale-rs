@@ -7,15 +7,14 @@ use std::time::Instant;
 
 use arc_swap::ArcSwap;
 use axum::serve;
+use hyperscale_node::TxStatusCache;
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::task::{JoinError, JoinHandle, spawn};
 use tracing::{error, info};
 
 use super::routes::create_router;
-use super::state::{
-    MempoolSnapshot, NodeStatusState, RpcState, SharedTxStatusCaches, TxSubmissionSender,
-};
+use super::state::{MempoolSnapshot, NodeStatusState, RpcState, TxSubmissionSender};
 use crate::status::SyncStatus;
 
 /// Errors from the RPC server.
@@ -64,9 +63,6 @@ pub struct RpcServerHandle {
     sync_status: Arc<ArcSwap<SyncStatus>>,
     /// Node status provider for updates.
     node_status: Arc<ArcSwap<NodeStatusState>>,
-    /// Per-shard transaction status caches (one per hosted shard,
-    /// swapped by the supervisor on runtime membership changes).
-    tx_status_caches: SharedTxStatusCaches,
     /// Mempool snapshot for updates.
     mempool_snapshot: Arc<ArcSwap<MempoolSnapshot>>,
 }
@@ -87,12 +83,6 @@ impl RpcServerHandle {
     #[must_use]
     pub const fn node_status(&self) -> &Arc<ArcSwap<NodeStatusState>> {
         &self.node_status
-    }
-
-    /// Get a reference to the per-shard transaction status caches.
-    #[must_use]
-    pub const fn tx_status_caches(&self) -> &SharedTxStatusCaches {
-        &self.tx_status_caches
     }
 
     /// Get a reference to the mempool snapshot for updates.
@@ -129,12 +119,12 @@ impl RpcServer {
     ///
     /// * `config` - Server configuration
     /// * `tx_submission_tx` - Crossbeam channel to submit transactions directly to `IoLoop`
-    /// * `tx_status_caches` - Per-shard transaction status caches shared from `IoLoop`
+    /// * `tx_status` - Process-wide transaction status cache shared from the runner
     #[must_use]
     pub fn new(
         config: RpcServerConfig,
         tx_submission_tx: TxSubmissionSender,
-        tx_status_caches: SharedTxStatusCaches,
+        tx_status: Arc<TxStatusCache>,
     ) -> Self {
         let sync_backpressure_threshold = config.sync_backpressure_threshold;
         let state = RpcState {
@@ -143,7 +133,7 @@ impl RpcServer {
             node_status: Arc::new(ArcSwap::new(Arc::new(NodeStatusState::default()))),
             tx_submission_tx,
             start_time: Instant::now(),
-            tx_status_caches,
+            tx_status,
             mempool_snapshot: Arc::new(ArcSwap::new(Arc::new(MempoolSnapshot::default()))),
             sync_backpressure_threshold,
         };
@@ -162,7 +152,7 @@ impl RpcServer {
         sync_status: Arc<ArcSwap<SyncStatus>>,
         node_status: Arc<ArcSwap<NodeStatusState>>,
         tx_submission_tx: TxSubmissionSender,
-        tx_status_caches: SharedTxStatusCaches,
+        tx_status: Arc<TxStatusCache>,
         mempool_snapshot: Arc<ArcSwap<MempoolSnapshot>>,
     ) -> Self {
         let sync_backpressure_threshold = config.sync_backpressure_threshold;
@@ -172,7 +162,7 @@ impl RpcServer {
             node_status,
             tx_submission_tx,
             start_time: Instant::now(),
-            tx_status_caches,
+            tx_status,
             mempool_snapshot,
             sync_backpressure_threshold,
         };
@@ -191,7 +181,6 @@ impl RpcServer {
         let ready_flag = self.state.ready.clone();
         let sync_status = self.state.sync_status.clone();
         let node_status = self.state.node_status.clone();
-        let tx_status_caches = self.state.tx_status_caches.clone();
         let mempool_snapshot = self.state.mempool_snapshot.clone();
 
         let router = create_router(self.state);
@@ -210,7 +199,6 @@ impl RpcServer {
             ready_flag,
             sync_status,
             node_status,
-            tx_status_caches,
             mempool_snapshot,
         })
     }
@@ -230,9 +218,6 @@ impl RpcServer {
 
 #[cfg(test)]
 mod tests {
-    use hyperscale_types::ShardId;
-    use quick_cache::sync::Cache as QuickCache;
-
     use super::*;
 
     #[test]
@@ -246,10 +231,7 @@ mod tests {
     async fn test_server_creation() {
         let config = RpcServerConfig::default();
         let tx_submission_tx: TxSubmissionSender = Arc::new(|_tx| true);
-        let tx_status_caches = Arc::new(ArcSwap::from_pointee(
-            std::iter::once((ShardId::ROOT, Arc::new(QuickCache::new(1000)))).collect(),
-        ));
-        let server = RpcServer::new(config, tx_submission_tx, tx_status_caches);
+        let server = RpcServer::new(config, tx_submission_tx, Arc::new(TxStatusCache::new()));
 
         // Server should be created successfully
         assert!(!server.state.ready.load(Ordering::SeqCst));

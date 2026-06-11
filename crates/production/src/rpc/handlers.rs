@@ -407,10 +407,9 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use axum::http::Request;
     use axum::routing::{get, post};
-    use hyperscale_node::BlockSyncStateKind;
+    use hyperscale_node::{BlockSyncStateKind, TxStatusCache};
     use hyperscale_types::test_utils::test_transaction;
     use hyperscale_types::{BlockHeight, ShardId, TransactionDecision};
-    use quick_cache::sync::Cache;
     use sbor::prelude::basic_encode;
     use serde_json::{from_slice, to_string};
     use tower::ServiceExt;
@@ -428,9 +427,7 @@ mod tests {
             node_status: Arc::new(ArcSwap::new(Arc::new(NodeStatusState::default()))),
             tx_submission_tx,
             start_time: Instant::now(),
-            tx_status_caches: Arc::new(ArcSwap::from_pointee(
-                std::iter::once((ShardId::ROOT, Arc::new(Cache::new(1000)))).collect(),
-            )),
+            tx_status: Arc::new(TxStatusCache::new()),
             mempool_snapshot: Arc::new(ArcSwap::new(Arc::new(MempoolSnapshot::default()))),
             sync_backpressure_threshold: Some(10),
         }
@@ -596,14 +593,9 @@ mod tests {
         let tx_hash = TxHash::from_raw(Hash::from_bytes(&[0x12; 32]));
         let tx_hash_hex = hex_encode(tx_hash.as_raw().as_bytes());
 
-        // Insert a transaction into the (single hosted shard's) cache.
         state
-            .tx_status_caches
-            .load()
-            .values()
-            .next()
-            .expect("test fixture inserts a shard 0 cache")
-            .insert(tx_hash, TransactionStatus::Pending);
+            .tx_status
+            .record(tx_hash, TransactionStatus::Pending, ShardId::ROOT);
 
         let app = Router::new()
             .route("/tx/{hash}", get(get_transaction_handler))
@@ -664,9 +656,7 @@ mod tests {
             node_status: Arc::new(ArcSwap::new(Arc::new(NodeStatusState::default()))),
             tx_submission_tx,
             start_time: Instant::now(),
-            tx_status_caches: Arc::new(ArcSwap::from_pointee(
-                std::iter::once((ShardId::ROOT, Arc::new(Cache::new(1000)))).collect(),
-            )),
+            tx_status: Arc::new(TxStatusCache::new()),
             mempool_snapshot: Arc::new(ArcSwap::new(Arc::new(MempoolSnapshot::default()))),
             sync_backpressure_threshold: Some(10),
         };
@@ -719,9 +709,7 @@ mod tests {
             node_status: Arc::new(ArcSwap::new(Arc::new(NodeStatusState::default()))),
             tx_submission_tx,
             start_time: Instant::now(),
-            tx_status_caches: Arc::new(ArcSwap::from_pointee(
-                std::iter::once((ShardId::ROOT, Arc::new(Cache::new(1000)))).collect(),
-            )),
+            tx_status: Arc::new(TxStatusCache::new()),
             mempool_snapshot: Arc::new(ArcSwap::new(Arc::new(MempoolSnapshot::default()))),
             sync_backpressure_threshold: Some(10),
         };

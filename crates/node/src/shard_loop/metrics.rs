@@ -346,7 +346,7 @@ where
             prov_queued_provisions: prov_mem.queued_provisions,
             // Node (io_loop, per-shard)
             node_tx_store: self.shard_io(primary_shard).caches.tx_store.len(),
-            node_tx_status_cache: self.shard_io(primary_shard).caches.tx_status.len(),
+            node_tx_status_cache: self.process.tx_status.len(),
             node_finalized_wave_cache: self.shard_io(primary_shard).caches.finalized_wave.len(),
             node_provision_cache: self.shard_io(primary_shard).caches.provision_store.len(),
             node_exec_cert_cache: self.shard_io(primary_shard).caches.exec_cert_store.len(),

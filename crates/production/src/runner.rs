@@ -42,7 +42,8 @@ use hyperscale_network_libp2p::{
 };
 use hyperscale_node::shard_loop::{ShardEvent, ShardLoop, TimerOp, timer_event};
 use hyperscale_node::{
-    NodeConfig, NodeHost, SeatVnodeGroup, SharedTopologySnapshot, VnodeInit, seat_vnode_group,
+    NodeConfig, NodeHost, SeatVnodeGroup, SharedTopologySnapshot, TxStatusCache, VnodeInit,
+    seat_vnode_group,
 };
 use hyperscale_provisions::ProvisionConfig;
 use hyperscale_shard::ShardConsensusConfig;
@@ -67,8 +68,7 @@ use tracing::{debug, info, warn};
 use crate::drain::{DRAIN_GRACE, DRAIN_POLL_INTERVAL, drain_after_window_close};
 use crate::rpc::state::VnodeMempoolSnapshot;
 use crate::rpc::{
-    MempoolSnapshot, NodeStatusState, SharedTxStatusCaches, TxSubmissionSender, VnodeMempoolStats,
-    VnodeStatusEntry,
+    MempoolSnapshot, NodeStatusState, TxSubmissionSender, VnodeMempoolStats, VnodeStatusEntry,
 };
 use crate::status::{ShardSyncState, SyncStatus};
 use crate::supervisor::{ShardCommand, ShardSupervisor, StorageFactory};
@@ -558,13 +558,7 @@ impl ProductionRunnerBuilder {
             tx_validator,
         );
 
-        // The status RPC surface probes every hosted shard's cache so a
-        // tx that lands on any of them shows up — cross-shard packed has
-        // a vnode in every shard, and a single primary entry would hide
-        // half the txs. Behind a swap so the supervisor can update the
-        // hosted set on runtime membership changes.
-        let tx_status_caches: SharedTxStatusCaches =
-            Arc::new(ArcSwap::from_pointee(host.tx_status_caches()));
+        let tx_status = Arc::clone(host.process().tx_status());
 
         // Per-shard vnode counts seed the supervisor's membership
         // refcounts for the startup shards.
@@ -590,7 +584,6 @@ impl ProductionRunnerBuilder {
             Arc::clone(&storages),
             self.storage_factory,
             participation_tx,
-            Arc::clone(&tx_status_caches),
         );
 
         Ok(ProductionRunner {
@@ -610,7 +603,7 @@ impl ProductionRunnerBuilder {
             sync_status: self.sync_status,
             genesis_config: self.genesis_config,
             local_shards,
-            tx_status_caches,
+            tx_status,
             shutdown_rx: Some(shutdown_rx),
             shutdown_tx: Some(shutdown_tx),
         })
@@ -682,12 +675,10 @@ pub struct ProductionRunner {
     /// Optional genesis configuration for initial state.
     genesis_config: Option<GenesisConfig>,
 
-    /// Per-shard transaction status caches, shared from `NodeHost` for
-    /// lock-free RPC queries. One entry per hosted shard; the RPC
-    /// handler probes every entry on a status lookup since a tx may
-    /// have landed on any of the hosted shards. The supervisor swaps
-    /// the map as shards join and leave at runtime.
-    tx_status_caches: SharedTxStatusCaches,
+    /// Process-wide transaction status cache, shared from `NodeHost`
+    /// for lock-free RPC queries. Every hosted shard writes into it;
+    /// shard membership changes don't touch it.
+    tx_status: Arc<TxStatusCache>,
 
     /// Shutdown signal receiver (external shutdown request).
     shutdown_rx: Option<oneshot::Receiver<()>>,
@@ -734,16 +725,12 @@ impl ProductionRunner {
         &self.network
     }
 
-    /// Get the per-shard transaction status caches shared from `NodeHost`.
-    ///
-    /// One `Arc<QuickCache>` per hosted shard, same instances used by
-    /// `NodeHost` on the pinned thread. Passed directly to the RPC
-    /// server, which probes every entry on a status lookup since a tx
-    /// may have landed on any of the hosted shards; the supervisor
-    /// swaps the map as shards join and leave at runtime.
+    /// Get the process-wide transaction status cache shared from
+    /// `NodeHost`. Same instance every shard thread writes into;
+    /// passed directly to the RPC server for lock-free status lookups.
     #[must_use]
-    pub fn tx_status_caches(&self) -> SharedTxStatusCaches {
-        Arc::clone(&self.tx_status_caches)
+    pub fn tx_status_cache(&self) -> Arc<TxStatusCache> {
+        Arc::clone(&self.tx_status)
     }
 
     /// Build a transaction-submission closure for RPC handlers.

@@ -42,6 +42,7 @@ mod vnode;
 
 pub use config::NodeConfig;
 pub use host::NodeHost;
+pub use process_io::TxStatusCache;
 pub use shard_io::ShardIo;
 pub use shard_io::fetch::state_range_serve::serve_state_range_request;
 pub use shard_io::fetch::witness_history_serve::serve_witness_history_request;

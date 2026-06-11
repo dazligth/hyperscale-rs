@@ -17,16 +17,13 @@ use std::sync::Arc;
 use hyperscale_execution::{ExecCertStore, FinalizedWaveStore};
 use hyperscale_mempool::TxStore;
 use hyperscale_provisions::{ProvisionStore, VerifiedHeaderBuffer};
-use hyperscale_types::{FinalizedWave, TransactionStatus, TxHash, Verifiable, WaveId};
+use hyperscale_types::{FinalizedWave, Verifiable, WaveId};
 use quick_cache::sync::Cache as QuickCache;
 
 /// Default certificate cache capacity.
 pub(super) const DEFAULT_CERT_CACHE_SIZE: usize = 10_000;
-/// Default transaction status cache capacity.
-pub(super) const DEFAULT_TX_STATUS_CACHE_SIZE: usize = 100_000;
 
-/// Inbound request-serving caches plus the cross-thread transaction-status
-/// view exposed to external RPC consumers.
+/// Inbound request-serving caches.
 pub struct SharedCaches {
     /// Shared transaction body store. Populated by mempool admission;
     /// pruned alongside tombstones when validity windows expire. Queried
@@ -35,9 +32,6 @@ pub struct SharedCaches {
     /// — both hold `Arc<TxStore>` pointing at the same map, so the network
     /// worker can read bodies without contending on a mempool lock.
     pub tx_store: Arc<TxStore>,
-    /// Latest emitted status per transaction. Survives mempool eviction so
-    /// RPC `tx_status` lookups can answer for finalized/expired txs.
-    pub tx_status: Arc<QuickCache<TxHash, TransactionStatus>>,
     /// Finalized waves, keyed by `WaveId`. Populated by `io_loop`'s
     /// `Continuation(FinalizedWavesAdmitted)` interception; queried by the
     /// inbound finalized-wave handler.
@@ -84,7 +78,6 @@ impl SharedCaches {
     ) -> Self {
         Self {
             tx_store,
-            tx_status: Arc::new(QuickCache::new(DEFAULT_TX_STATUS_CACHE_SIZE)),
             finalized_wave: Arc::new(QuickCache::new(DEFAULT_CERT_CACHE_SIZE)),
             provision_store,
             verified_headers,

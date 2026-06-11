@@ -6,8 +6,8 @@ use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 use arc_swap::ArcSwap;
+use hyperscale_node::TxStatusCache;
 use hyperscale_types::{InFlightCount, RoutableTransaction, ShardId, TransactionStatus, TxHash};
-use quick_cache::sync::Cache as QuickCache;
 use serde::{Deserialize, Serialize};
 
 use crate::status::SyncStatus;
@@ -21,15 +21,6 @@ use crate::status::SyncStatus;
 /// lock-free topology snapshot and pushes admit/admit-and-gossip
 /// envelopes onto the relevant per-shard event channels.
 pub type TxSubmissionSender = Arc<dyn Fn(Arc<RoutableTransaction>) -> bool + Send + Sync + 'static>;
-
-/// Per-shard transaction status caches behind a lock-free swap.
-///
-/// Writers are the pinned shard threads (each shard's own
-/// `QuickCache`); the map itself is swapped by the supervisor as
-/// shards join and leave at runtime, so RPC lookups always see the
-/// currently hosted set.
-pub type SharedTxStatusCaches =
-    Arc<ArcSwap<HashMap<ShardId, Arc<QuickCache<TxHash, TransactionStatus>>>>>;
 
 /// Shared state for RPC handlers.
 #[derive(Clone)]
@@ -50,16 +41,12 @@ pub struct RpcState {
     pub tx_submission_tx: TxSubmissionSender,
     /// Server start time for uptime calculation.
     pub start_time: Instant,
-    /// Per-shard transaction status caches for querying transaction state.
-    ///
-    /// One entry per hosted shard, shared directly from each shard
-    /// loop's internal `QuickCache` — writes happen on the pinned
-    /// thread, reads happen here on the RPC thread, no locking needed.
-    /// The supervisor swaps the map as shards join and leave at
-    /// runtime. Status lookup probes every entry: a tx may have landed
-    /// on any hosted shard, and under cross-shard packed a single
-    /// primary entry would hide half the txs.
-    pub tx_status_caches: SharedTxStatusCaches,
+    /// Process-wide transaction status cache for querying transaction
+    /// state. Every shard thread writes through its monotonic merge;
+    /// reads here on the RPC threads are lock-free. Shard membership
+    /// changes don't touch it — a departed shard's entries age out by
+    /// LRU.
+    pub tx_status: Arc<TxStatusCache>,
     /// Mempool snapshot for querying mempool stats.
     pub mempool_snapshot: Arc<ArcSwap<MempoolSnapshot>>,
     /// Number of blocks behind before rejecting transaction submissions.
@@ -70,15 +57,10 @@ pub struct RpcState {
 }
 
 impl RpcState {
-    /// Look up `hash` in every hosted shard's status cache. Returns the
-    /// first match. A given tx hash lives in at most one shard's cache,
-    /// so iteration order doesn't matter.
+    /// Look up the latest merged status for `hash`.
     #[must_use]
     pub fn lookup_tx_status(&self, hash: &TxHash) -> Option<TransactionStatus> {
-        self.tx_status_caches
-            .load()
-            .values()
-            .find_map(|c| c.get(hash))
+        self.tx_status.get(hash).map(|(status, _)| status)
     }
 }
 
@@ -176,68 +158,4 @@ pub struct VnodeMempoolStats {
     pub pending_count: usize,
     pub in_flight_count: usize,
     pub total_count: usize,
-}
-
-#[cfg(test)]
-mod tests {
-    use hyperscale_types::{BlockHeight, Hash, TransactionDecision};
-
-    use super::*;
-
-    fn new_cache() -> QuickCache<TxHash, TransactionStatus> {
-        QuickCache::new(100)
-    }
-
-    fn tx(bytes: &[u8]) -> TxHash {
-        TxHash::from_raw(Hash::from_bytes(bytes))
-    }
-
-    #[test]
-    fn test_cache_new() {
-        let cache = new_cache();
-        let tx_hash = tx(&[1u8; 32]);
-        assert!(cache.get(&tx_hash).is_none());
-    }
-
-    #[test]
-    fn test_cache_update_and_get() {
-        let cache = new_cache();
-        let tx_hash = tx(&[1u8; 32]);
-
-        cache.insert(tx_hash, TransactionStatus::Pending);
-
-        let status = cache.get(&tx_hash).unwrap();
-        assert!(matches!(status, TransactionStatus::Pending));
-    }
-
-    #[test]
-    fn test_cache_status_transitions() {
-        let cache = new_cache();
-        let tx_hash = tx(&[2u8; 32]);
-
-        // Pending -> Committed
-        cache.insert(tx_hash, TransactionStatus::Pending);
-        cache.insert(tx_hash, TransactionStatus::Committed(BlockHeight::new(10)));
-
-        let status = cache.get(&tx_hash).unwrap();
-        assert!(matches!(status, TransactionStatus::Committed(h) if h == BlockHeight::new(10)));
-
-        // Committed -> Completed
-        cache.insert(
-            tx_hash,
-            TransactionStatus::Completed(TransactionDecision::Accept),
-        );
-        let status = cache.get(&tx_hash).unwrap();
-        assert!(matches!(
-            status,
-            TransactionStatus::Completed(TransactionDecision::Accept)
-        ));
-    }
-
-    #[test]
-    fn test_cache_get_unknown() {
-        let cache = new_cache();
-        let tx_hash = tx(&[7u8; 32]);
-        assert!(cache.get(&tx_hash).is_none());
-    }
 }

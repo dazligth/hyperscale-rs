@@ -10,6 +10,7 @@
 
 mod beacon_commit;
 mod network_handlers;
+mod tx_status;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -23,6 +24,7 @@ use hyperscale_engine::TransactionValidation;
 use hyperscale_storage::{BeaconStorage, ShardStorage};
 use hyperscale_types::{RoutableTransaction, ShardId};
 pub(crate) use network_handlers::register_shard_request_handlers;
+pub use tx_status::TxStatusCache;
 
 use crate::event::{ShardEvent, ShardScopedInput};
 use crate::shard_loop::{DispatchHandles, SharedTopologySnapshot};
@@ -100,6 +102,11 @@ where
     /// writes (admit / reset) come only from the shard pinned thread,
     /// reads from the network worker are wait-free.
     pub(crate) beacon_proposal_pool: Arc<BeaconProposalPool>,
+
+    /// Process-wide latest-status-per-transaction view. Every shard
+    /// thread writes through its monotonic merge; RPC threads read
+    /// lock-free.
+    pub(crate) tx_status: Arc<TxStatusCache>,
 }
 
 impl<S, N, D> ProcessIo<S, N, D>
@@ -131,6 +138,7 @@ where
             beacon_storage,
             beacon_commit: BeaconCommitCoordinator::new(),
             beacon_proposal_pool,
+            tx_status: Arc::new(TxStatusCache::new()),
         }
     }
 
@@ -144,6 +152,13 @@ where
     #[must_use]
     pub const fn beacon_proposal_pool(&self) -> &Arc<BeaconProposalPool> {
         &self.beacon_proposal_pool
+    }
+
+    /// Process-wide transaction status cache, shared with external RPC
+    /// consumers.
+    #[must_use]
+    pub const fn tx_status(&self) -> &Arc<TxStatusCache> {
+        &self.tx_status
     }
 
     /// Shared network handle. Runner-level drivers (e.g. the shard

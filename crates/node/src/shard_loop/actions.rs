@@ -300,7 +300,9 @@ where
             }
             record_transaction_finalized(latency_secs, cross_shard);
         }
-        self.io.caches.tx_status.insert(tx_hash, status.clone());
+        self.process
+            .tx_status
+            .record(tx_hash, status.clone(), self.shard);
         self.emitted_statuses.push((tx_hash, status));
     }
 

@@ -31,16 +31,13 @@ use hyperscale_provisions::ProvisionConfig;
 use hyperscale_shard::ShardConsensusConfig;
 use hyperscale_storage::RecoveredState;
 use hyperscale_storage_rocksdb::{RocksDbShardStorage, SharedStorage};
-use hyperscale_types::{
-    BlockHeight, GenesisConfigHash, NetworkDefinition, ShardId, TransactionStatus, TxHash,
-};
-use quick_cache::sync::Cache as QuickCache;
+use hyperscale_types::{BlockHeight, GenesisConfigHash, NetworkDefinition, ShardId};
 use tokio::runtime::Handle as TokioHandle;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::bootstrap::bootstrap_shard_state;
-use crate::rpc::{MempoolSnapshot, NodeStatusState, SharedTxStatusCaches};
+use crate::rpc::{MempoolSnapshot, NodeStatusState};
 use crate::runner::{
     ProdShardLoop, ShardChannels, ShardLoopConfig, VnodeConfig, spawn_shard_loop, wall_clock_local,
 };
@@ -121,10 +118,6 @@ pub struct ShardSupervisor {
     /// Cloned into every spawned shard loop's config so placement
     /// deltas reach the runner's reconfiguration loop.
     participation_tx: mpsc::UnboundedSender<ParticipationChange>,
-    /// Per-shard tx status caches read by the RPC layer; this is the
-    /// sole writer of the map, swapping entries as shards join and
-    /// leave.
-    tx_status_caches: SharedTxStatusCaches,
     shards: HashMap<ShardId, ShardThread>,
     /// Shards whose join is parked on an in-flight snap-sync bootstrap,
     /// mapped to the count of vnodes still pending. Guards against a
@@ -155,7 +148,6 @@ impl ShardSupervisor {
         storages: Arc<Mutex<HashMap<ShardId, Arc<RocksDbShardStorage>>>>,
         storage_factory: StorageFactory,
         participation_tx: mpsc::UnboundedSender<ParticipationChange>,
-        tx_status_caches: SharedTxStatusCaches,
     ) -> Self {
         let (bootstrap_done_tx, bootstrap_done_rx) = mpsc::unbounded_channel();
         Self {
@@ -173,7 +165,6 @@ impl ShardSupervisor {
             storages,
             storage_factory,
             participation_tx,
-            tx_status_caches,
             shards: HashMap::new(),
             bootstrapping: HashMap::new(),
             bootstrap_done_tx,
@@ -345,7 +336,6 @@ impl ShardSupervisor {
             callback_tx,
         );
         shard_loop.set_time(wall_clock_local());
-        self.insert_tx_status_cache(shard, Arc::clone(&shard_loop.io.caches.tx_status));
 
         self.storages
             .lock()
@@ -417,9 +407,6 @@ impl ShardSupervisor {
         }
         detach_shard(&self.process, shard);
         self.storages.lock().expect("storages lock").remove(&shard);
-        let mut caches = (**self.tx_status_caches.load()).clone();
-        caches.remove(&shard);
-        self.tx_status_caches.store(Arc::new(caches));
         self.scrub_rpc_state(shard, &entry.validator_ids);
         info!(shard = ?shard, "Shard left and torn down");
     }
@@ -449,19 +436,6 @@ impl ShardSupervisor {
             }
             mempool_snapshot.store(Arc::new(updated));
         }
-    }
-
-    /// Publish a runtime-joined shard's tx status cache to the RPC
-    /// layer. The supervisor is the map's only writer, so the
-    /// clone-modify-store needs no CAS retry.
-    fn insert_tx_status_cache(
-        &self,
-        shard: ShardId,
-        cache: Arc<QuickCache<TxHash, TransactionStatus>>,
-    ) {
-        let mut caches = (**self.tx_status_caches.load()).clone();
-        caches.insert(shard, cache);
-        self.tx_status_caches.store(Arc::new(caches));
     }
 
     /// Stop every shard thread: fan the shutdown signals first so the
