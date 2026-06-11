@@ -117,7 +117,10 @@ impl BoundaryStore for SimShardStorage {
 mod tests {
     use hyperscale_jmt::{Blake3Hasher, Tree};
     use hyperscale_storage::SubstateStore;
-    use hyperscale_storage::test_helpers::make_database_update;
+    use hyperscale_storage::test_helpers::{
+        make_database_update, test_boundary_import_roundtrip,
+        test_boundary_retention_evicts_oldest, test_boundary_unpinned_height_not_served,
+    };
 
     use super::*;
 
@@ -181,20 +184,13 @@ mod tests {
     #[test]
     fn retention_evicts_oldest_pin() {
         let storage = SimShardStorage::default();
-        for height in 1..=4u64 {
-            commit_one(&storage, u8::try_from(height).unwrap());
-            storage.pin_boundary(BlockHeight::new(height)).unwrap();
-        }
-        assert!(storage.open_boundary(BlockHeight::new(1)).is_none());
-        assert!(storage.open_boundary(BlockHeight::new(2)).is_some());
-        assert!(storage.open_boundary(BlockHeight::new(4)).is_some());
+        test_boundary_retention_evicts_oldest(&storage, |seed| commit_one(&storage, seed));
     }
 
     #[test]
     fn unpinned_height_is_not_served() {
         let storage = SimShardStorage::default();
-        commit_one(&storage, 1);
-        assert!(storage.open_boundary(BlockHeight::new(1)).is_none());
+        test_boundary_unpinned_height_not_served(&storage, |seed| commit_one(&storage, seed));
     }
 
     /// Full serve → import round trip: leaves enumerated and resolved
@@ -203,57 +199,7 @@ mod tests {
     #[test]
     fn imported_boundary_state_reproduces_the_root() {
         let storage = SimShardStorage::default();
-        for seed in 1..=6u8 {
-            commit_one(&storage, seed);
-        }
-        let source_root = storage.state_root();
-        storage.pin_boundary(BlockHeight::new(6)).unwrap();
-
-        let boundary = storage.open_boundary(BlockHeight::new(6)).expect("pinned");
-        let root_key = boundary.get_root_key(6).expect("root resolves");
-        let chunk =
-            Jmt::collect_range(&boundary, &root_key, &[0u8; 32], &[0xFF; 32], 1_000).unwrap();
-        let leaves: Vec<ImportLeaf> = chunk
-            .leaves
-            .iter()
-            .map(|(leaf_key, _)| {
-                let (storage_key, value) = boundary.resolve_leaf(leaf_key).expect("resolves");
-                ImportLeaf {
-                    leaf_key: *leaf_key,
-                    storage_key,
-                    value,
-                }
-            })
-            .collect();
-        assert_eq!(leaves.len(), 6);
-        let probe = leaves
-            .iter()
-            .find(|l| l.value == vec![3, 3, 3])
-            .map(|l| (l.leaf_key, l.storage_key.clone()))
-            .expect("seed-3 leaf present");
-
         let fresh = SimShardStorage::default();
-        let imported_root = fresh
-            .import_boundary_state(BlockHeight::new(6), leaves)
-            .unwrap();
-        assert_eq!(imported_root, source_root);
-        assert_eq!(fresh.state_root(), source_root);
-
-        // Imported raw substates read back at the imported state.
-        let fresh_boundary = {
-            fresh.pin_boundary(BlockHeight::new(6)).unwrap();
-            fresh.open_boundary(BlockHeight::new(6)).expect("pinned")
-        };
-        assert_eq!(
-            fresh_boundary.resolve_leaf(&probe.0),
-            Some((probe.1, vec![3, 3, 3])),
-        );
-
-        // A second import is rejected — the store is no longer empty.
-        assert!(
-            fresh
-                .import_boundary_state(BlockHeight::new(6), Vec::new())
-                .is_err()
-        );
+        test_boundary_import_roundtrip(&storage, &fresh, |seed| commit_one(&storage, seed));
     }
 }

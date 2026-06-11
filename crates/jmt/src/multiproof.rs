@@ -882,19 +882,10 @@ mod tests {
     use crate::hasher::Blake3Hasher;
     use crate::node::NibblePath;
     use crate::storage::MemoryStore;
+    use crate::test_utils::{build_store, k, v};
     use crate::tree::Tree;
 
     type Jmt = Tree<Blake3Hasher, 1>;
-
-    fn k(b: u8) -> Key {
-        let mut key = [0u8; 32];
-        key[0] = b;
-        key
-    }
-
-    fn v(b: u8) -> ValueHash {
-        [b; 32]
-    }
 
     /// Co-terminal claims must agree on the terminal node's content.
     /// The reconstruction hashes one claim of the group; without the
@@ -929,16 +920,6 @@ mod tests {
         // The untampered group still verifies.
         let clean = Jmt::prove(&store, &root, &[k(0), x]).unwrap();
         Jmt::verify(&clean, root_hash, &[(k(0), Some(v(0)))]).unwrap();
-    }
-
-    fn build_store(entries: &[(Key, ValueHash)]) -> (MemoryStore, NodeKey, Hash) {
-        let mut store = MemoryStore::new();
-        let updates: BTreeMap<Key, Option<ValueHash>> =
-            entries.iter().map(|(k, v)| (*k, Some(*v))).collect();
-        let res = Jmt::apply_updates(&store, None, 1, &updates).unwrap();
-        store.apply(&res);
-        let root = store.get_root_key(1).unwrap();
-        (store, root, res.root_hash)
     }
 
     #[test]

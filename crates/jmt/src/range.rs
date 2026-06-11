@@ -509,28 +509,9 @@ mod tests {
     use super::*;
     use crate::hasher::Blake3Hasher;
     use crate::storage::MemoryStore;
+    use crate::test_utils::{build_store, k, v};
 
     type Jmt = Tree<Blake3Hasher, 1>;
-
-    fn k(b: u8) -> Key {
-        let mut key = [0u8; 32];
-        key[0] = b;
-        key
-    }
-
-    fn v(b: u8) -> ValueHash {
-        [b; 32]
-    }
-
-    fn build_store(entries: &[(Key, ValueHash)]) -> (MemoryStore, NodeKey, Hash) {
-        let mut store = MemoryStore::new();
-        let updates: BTreeMap<Key, Option<ValueHash>> =
-            entries.iter().map(|(k, v)| (*k, Some(*v))).collect();
-        let res = Jmt::apply_updates(&store, None, 1, &updates).unwrap();
-        store.apply(&res);
-        let root = store.get_root_key(1).unwrap();
-        (store, root, res.root_hash)
-    }
 
     /// Entries under the 4-bit prefix 0xA, in a tree rooted at that prefix.
     fn build_prefix_store(

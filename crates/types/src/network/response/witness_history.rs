@@ -55,3 +55,65 @@ impl NetworkMessage for GetWitnessHistoryResponse {
         MessageClass::Bulk
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use sbor::{basic_decode, basic_encode};
+
+    use super::*;
+    use crate::{
+        BeaconWitnessLeafCount, BeaconWitnessRoot, BlockHash, BlockHeight, CertificateRoot,
+        InFlightCount, LocalReceiptRoot, ProposerTimestamp, ProvisionsRoot, QuorumCertificate,
+        Round, ShardId, StateRoot, TransactionRoot, ValidatorId,
+    };
+
+    fn make_header() -> BlockHeader {
+        BlockHeader::new(
+            ShardId::ROOT,
+            BlockHeight::new(7),
+            BlockHash::from_raw(Hash::from_bytes(b"parent")),
+            QuorumCertificate::genesis(ShardId::ROOT),
+            ValidatorId::new(0),
+            ProposerTimestamp::from_millis(1_234_567_890),
+            Round::INITIAL,
+            false,
+            StateRoot::ZERO,
+            TransactionRoot::ZERO,
+            CertificateRoot::ZERO,
+            LocalReceiptRoot::ZERO,
+            ProvisionsRoot::ZERO,
+            Vec::new(),
+            BTreeMap::new(),
+            InFlightCount::ZERO,
+            BeaconWitnessRoot::ZERO,
+            BeaconWitnessLeafCount::new(2),
+            BeaconWitnessLeafCount::ZERO,
+        )
+    }
+
+    #[test]
+    fn test_sbor_roundtrip_unavailable() {
+        let response = GetWitnessHistoryResponse { history: None };
+
+        let encoded = basic_encode(&response).unwrap();
+        let decoded: GetWitnessHistoryResponse = basic_decode(&encoded).unwrap();
+        assert_eq!(response, decoded);
+    }
+
+    #[test]
+    fn test_sbor_roundtrip_chunk() {
+        let response = GetWitnessHistoryResponse {
+            history: Some(WitnessHistoryChunk {
+                header: make_header(),
+                leaf_hashes: vec![Hash::from_bytes(b"leaf-0"), Hash::from_bytes(b"leaf-1")].into(),
+                more: true,
+            }),
+        };
+
+        let encoded = basic_encode(&response).unwrap();
+        let decoded: GetWitnessHistoryResponse = basic_decode(&encoded).unwrap();
+        assert_eq!(response, decoded);
+    }
+}

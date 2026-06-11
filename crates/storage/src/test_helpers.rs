@@ -7,6 +7,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use hyperscale_jmt::TreeReader;
 use hyperscale_types::test_utils::test_event_type_identifier;
 use hyperscale_types::{
     ApplicationEvent, BeaconBlock, BeaconBlockHash, BeaconCert, BeaconChainConfig, BeaconState,
@@ -18,7 +19,7 @@ use hyperscale_types::{
     PcXpProof, ProposerTimestamp, ProvisionsRoot, QuorumCertificate, Randomness, Round,
     ShardAnchor, ShardId, ShardWitnessPayload, SignerBitfield, SpcCert, SpcView, Stake,
     StakePoolId, StateRoot, StoredReceipt, TransactionRoot, TxHash, TxOutcome, ValidatorId,
-    Verified, WaveCertificate, WaveId, WeightedTimestamp, compute_global_receipt_root,
+    Verifiable, Verified, WaveCertificate, WaveId, WeightedTimestamp, compute_global_receipt_root,
     compute_merkle_root, zero_bls_signature,
 };
 use indexmap::IndexMap;
@@ -27,9 +28,10 @@ use radix_common::prelude::DatabaseUpdate;
 use radix_common::types::{NodeId as RadixNodeId, PartitionNumber};
 use radix_substate_store_interface::db_key_mapper::{DatabaseKeyMapper, SpreadPrefixKeyMapper};
 
+use crate::tree::Jmt;
 use crate::{
-    BoundaryStore, DatabaseUpdates, DbSortKey, NodeDatabaseUpdates, PartitionDatabaseUpdates,
-    ShardChainReader, ShardChainWriter, SubstateStore,
+    BOUNDARY_RETAIN, BoundaryStore, DatabaseUpdates, DbSortKey, ImportLeaf, NodeDatabaseUpdates,
+    PartitionDatabaseUpdates, ResolveLeaf, ShardChainReader, ShardChainWriter, SubstateStore,
 };
 
 /// Build a `DatabaseUpdates` containing a single `Set` operation.
@@ -365,7 +367,15 @@ fn make_test_block_with_ecs(height: BlockHeight, ecs: Vec<Arc<ExecutionCertifica
         return block;
     }
     let certificate = Arc::new(WaveCertificate::new(ecs[0].wave_id().clone(), ecs));
-    let new_fw = Arc::new(FinalizedWave::new(certificate, vec![]).into());
+    push_certificate(
+        block,
+        Arc::new(FinalizedWave::new(certificate, vec![]).into()),
+    )
+}
+
+/// Append a finalized wave to `block`'s certificate list, preserving
+/// the block variant.
+fn push_certificate(block: Block, fw: Arc<Verifiable<FinalizedWave>>) -> Block {
     match block {
         Block::Live {
             header,
@@ -374,7 +384,7 @@ fn make_test_block_with_ecs(height: BlockHeight, ecs: Vec<Arc<ExecutionCertifica
             provisions,
         } => {
             let mut certificates = (*certificates).clone();
-            certificates.push(new_fw);
+            certificates.push(fw);
             Block::Live {
                 header,
                 transactions,
@@ -389,7 +399,7 @@ fn make_test_block_with_ecs(height: BlockHeight, ecs: Vec<Arc<ExecutionCertifica
             provision_hashes,
         } => {
             let mut certificates = (*certificates).clone();
-            certificates.push(new_fw);
+            certificates.push(fw);
             Block::Sealed {
                 header,
                 transactions,
@@ -401,10 +411,7 @@ fn make_test_block_with_ecs(height: BlockHeight, ecs: Vec<Arc<ExecutionCertifica
 }
 
 /// Helper to commit empty blocks up to (but not including) the target height.
-fn commit_empty_blocks_up_to(
-    storage: &(impl ShardChainReader + ShardChainWriter),
-    target: BlockHeight,
-) {
+fn commit_empty_blocks_up_to(storage: &impl ShardChainWriter, target: BlockHeight) {
     let witness = empty_witness();
     for h in 0..target.inner() {
         let certified = make_test_certified(make_test_block(BlockHeight::new(h)));
@@ -419,7 +426,7 @@ fn commit_empty_blocks_up_to(
 /// exactly as a live commit writes them. Returns the resulting state
 /// root.
 pub fn commit_block_with_updates(
-    storage: &(impl ShardChainReader + ShardChainWriter),
+    storage: &impl ShardChainWriter,
     height: BlockHeight,
     updates: &DatabaseUpdates,
 ) -> StateRoot {
@@ -439,39 +446,7 @@ pub fn commit_block_with_updates(
         vec![],
     ));
     let finalized = Arc::new(FinalizedWave::new(certificate, vec![receipt]).into());
-
-    let block = match make_test_block(height) {
-        Block::Live {
-            header,
-            transactions,
-            certificates,
-            provisions,
-        } => {
-            let mut certificates = (*certificates).clone();
-            certificates.push(finalized);
-            Block::Live {
-                header,
-                transactions,
-                certificates: Arc::new(certificates),
-                provisions,
-            }
-        }
-        Block::Sealed {
-            header,
-            transactions,
-            certificates,
-            provision_hashes,
-        } => {
-            let mut certificates = (*certificates).clone();
-            certificates.push(finalized);
-            Block::Sealed {
-                header,
-                transactions,
-                certificates: Arc::new(certificates),
-                provision_hashes,
-            }
-        }
-    };
+    let block = push_certificate(make_test_block(height), finalized);
     storage.commit_block(&make_test_certified(block), &empty_witness())
 }
 
@@ -486,7 +461,7 @@ const fn empty_witness() -> BeaconWitnessCommit {
 /// the leaves fold into the same atomic write. Returns the committed
 /// block hash.
 pub fn commit_block_with_witnesses(
-    storage: &(impl ShardChainReader + ShardChainWriter),
+    storage: &impl ShardChainWriter,
     height: BlockHeight,
     leaves: &[ShardWitnessPayload],
 ) -> BlockHash {
@@ -546,7 +521,7 @@ pub fn commit_block_with_witnesses(
 /// Panics if `appended` is longer than `window` — the appended tail
 /// must lie inside the committed window.
 pub fn commit_block_with_witness_window(
-    storage: &(impl ShardChainReader + ShardChainWriter),
+    storage: &impl ShardChainWriter,
     height: BlockHeight,
     base: u64,
     window: &[ShardWitnessPayload],
@@ -608,7 +583,7 @@ pub const fn stake_deposit(amount: u64) -> ShardWitnessPayload {
 /// Seed `entries` single-substate block commits at heights
 /// `1..=entries`, each writing one distinct node keyed by its seed
 /// byte.
-pub fn seed_substate_commits(storage: &(impl ShardChainReader + ShardChainWriter), entries: u8) {
+pub fn seed_substate_commits(storage: &impl ShardChainWriter, entries: u8) {
     for seed in 1..=entries {
         let updates = make_database_update(vec![seed; 50], 0, vec![seed], vec![seed, seed, seed]);
         commit_block_with_updates(storage, BlockHeight::new(u64::from(seed)), &updates);
@@ -626,7 +601,7 @@ pub fn seed_substate_commits(storage: &(impl ShardChainReader + ShardChainWriter
 ///
 /// Panics if pinning fails (this is a test helper).
 pub fn pin_snap_sync_replica(
-    storage: &(impl ShardChainReader + ShardChainWriter + BoundaryStore + SubstateStore),
+    storage: &(impl ShardChainWriter + BoundaryStore + SubstateStore),
     entries: u8,
     leaves: &[ShardWitnessPayload],
 ) -> ShardAnchor {
@@ -730,4 +705,104 @@ pub fn test_ec_storage_batch(storage: &(impl ShardChainReader + ShardChainWriter
         storage.get_execution_certificates_batch(&[ec3.wave_id().clone(), missing_wave_id]);
     assert_eq!(partial.len(), 1);
     assert_eq!(partial[0].wave_id(), ec3.wave_id());
+}
+
+/// Shared boundary retention test: pin one height past
+/// [`BOUNDARY_RETAIN`] and check eviction stops serving only the
+/// oldest pin.
+///
+/// `commit_one` performs one backend-native substate commit for the
+/// given seed — backends differ in their raw commit entry points.
+///
+/// # Panics
+///
+/// Panics if any assertion fails (this is a test helper).
+pub fn test_boundary_retention_evicts_oldest<S: BoundaryStore>(
+    storage: &S,
+    commit_one: impl Fn(u8),
+) {
+    let last = u64::try_from(BOUNDARY_RETAIN).expect("small const") + 1;
+    for height in 1..=last {
+        commit_one(u8::try_from(height).expect("small loop bound"));
+        storage.pin_boundary(BlockHeight::new(height)).unwrap();
+    }
+    assert!(storage.open_boundary(BlockHeight::new(1)).is_none());
+    assert!(storage.open_boundary(BlockHeight::new(2)).is_some());
+    assert!(storage.open_boundary(BlockHeight::new(last)).is_some());
+}
+
+/// Shared boundary gating test: a committed but never-pinned height is
+/// not served.
+///
+/// # Panics
+///
+/// Panics if any assertion fails (this is a test helper).
+pub fn test_boundary_unpinned_height_not_served<S: BoundaryStore>(
+    storage: &S,
+    commit_one: impl Fn(u8),
+) {
+    commit_one(1);
+    assert!(storage.open_boundary(BlockHeight::new(1)).is_none());
+}
+
+/// Shared serve → import round trip: leaves enumerated and resolved
+/// from `serving`'s pinned boundary rebuild an identical store in
+/// `fresh`, with the raw substates readable and a second import
+/// rejected.
+///
+/// # Panics
+///
+/// Panics if any assertion fails (this is a test helper).
+pub fn test_boundary_import_roundtrip<S>(serving: &S, fresh: &S, commit_one: impl Fn(u8))
+where
+    S: BoundaryStore + SubstateStore,
+{
+    for seed in 1..=6u8 {
+        commit_one(seed);
+    }
+    let source_root = serving.state_root();
+    serving.pin_boundary(BlockHeight::new(6)).unwrap();
+
+    let boundary = serving.open_boundary(BlockHeight::new(6)).expect("pinned");
+    let root_key = boundary.get_root_key(6).expect("root resolves");
+    let chunk = Jmt::collect_range(&boundary, &root_key, &[0u8; 32], &[0xFF; 32], 1_000).unwrap();
+    let leaves: Vec<ImportLeaf> = chunk
+        .leaves
+        .iter()
+        .map(|(leaf_key, _)| {
+            let (storage_key, value) = boundary.resolve_leaf(leaf_key).expect("resolves");
+            ImportLeaf {
+                leaf_key: *leaf_key,
+                storage_key,
+                value,
+            }
+        })
+        .collect();
+    assert_eq!(leaves.len(), 6);
+    let probe = leaves
+        .iter()
+        .find(|l| l.value == [3, 3, 3])
+        .map(|l| (l.leaf_key, l.storage_key.clone()))
+        .expect("seed-3 leaf present");
+
+    let imported_root = fresh
+        .import_boundary_state(BlockHeight::new(6), leaves)
+        .unwrap();
+    assert_eq!(imported_root, source_root);
+    assert_eq!(fresh.state_root(), source_root);
+
+    // Imported raw substates read back at the imported state.
+    fresh.pin_boundary(BlockHeight::new(6)).unwrap();
+    let fresh_boundary = fresh.open_boundary(BlockHeight::new(6)).expect("pinned");
+    assert_eq!(
+        fresh_boundary.resolve_leaf(&probe.0),
+        Some((probe.1, vec![3, 3, 3])),
+    );
+
+    // A second import is rejected — the store is no longer empty.
+    assert!(
+        fresh
+            .import_boundary_state(BlockHeight::new(6), Vec::new())
+            .is_err()
+    );
 }

@@ -288,7 +288,10 @@ fn parse_entry_name(name: &str) -> Option<BlockHeight> {
 #[cfg(test)]
 mod tests {
     use hyperscale_jmt::{Blake3Hasher, Tree};
-    use hyperscale_storage::test_helpers::make_database_update;
+    use hyperscale_storage::test_helpers::{
+        make_database_update, test_boundary_import_roundtrip,
+        test_boundary_retention_evicts_oldest, test_boundary_unpinned_height_not_served,
+    };
     use hyperscale_storage::{BOUNDARY_RETAIN, SubstateStore};
     use tempfile::TempDir;
 
@@ -362,26 +365,25 @@ mod tests {
     fn retention_evicts_oldest() {
         let temp = TempDir::new().unwrap();
         let storage = open_storage(temp.path());
+        test_boundary_retention_evicts_oldest(&storage, |seed| commit_one(&storage, seed));
+    }
 
-        // One past the ring size: the oldest pin is evicted.
+    /// Eviction removes the checkpoint's on-disk directory, not just
+    /// its serving entry.
+    #[test]
+    fn eviction_removes_the_checkpoint_directory() {
+        let temp = TempDir::new().unwrap();
+        let storage = open_storage(temp.path());
         for height in 1..=(BOUNDARY_RETAIN as u64 + 1) {
             commit_one(&storage, u8::try_from(height).unwrap());
             storage.pin_boundary(BlockHeight::new(height)).unwrap();
         }
-
-        assert!(storage.open_boundary(BlockHeight::new(1)).is_none());
         assert!(
             !temp
                 .path()
                 .join("checkpoints")
                 .join(entry_name(BlockHeight::new(1)))
                 .exists()
-        );
-        assert!(storage.open_boundary(BlockHeight::new(2)).is_some());
-        assert!(
-            storage
-                .open_boundary(BlockHeight::new(BOUNDARY_RETAIN as u64 + 1))
-                .is_some()
         );
     }
 
@@ -422,8 +424,7 @@ mod tests {
     fn unpinned_height_is_not_served() {
         let temp = TempDir::new().unwrap();
         let storage = open_storage(temp.path());
-        commit_one(&storage, 1);
-        assert!(storage.open_boundary(BlockHeight::new(1)).is_none());
+        test_boundary_unpinned_height_not_served(&storage, |seed| commit_one(&storage, seed));
     }
 
     /// Full serve → import round trip: leaves enumerated and resolved
@@ -432,42 +433,8 @@ mod tests {
     fn imported_boundary_state_reproduces_the_root() {
         let temp = TempDir::new().unwrap();
         let storage = open_storage(temp.path());
-        for seed in 1..=6u8 {
-            commit_one(&storage, seed);
-        }
-        let source_root = storage.state_root();
-        storage.pin_boundary(BlockHeight::new(6)).unwrap();
-
-        let boundary = storage.open_boundary(BlockHeight::new(6)).expect("pinned");
-        let root_key = boundary.get_root_key(6).expect("root resolves");
-        let chunk =
-            Jmt::collect_range(&boundary, &root_key, &[0u8; 32], &[0xFF; 32], 1_000).unwrap();
-        let leaves: Vec<ImportLeaf> = chunk
-            .leaves
-            .iter()
-            .map(|(leaf_key, _)| {
-                let (storage_key, value) = boundary.resolve_leaf(leaf_key).expect("resolves");
-                ImportLeaf {
-                    leaf_key: *leaf_key,
-                    storage_key,
-                    value,
-                }
-            })
-            .collect();
-
         let fresh_dir = TempDir::new().unwrap();
         let fresh = open_storage(fresh_dir.path());
-        let imported_root = fresh
-            .import_boundary_state(BlockHeight::new(6), leaves)
-            .unwrap();
-        assert_eq!(imported_root, source_root);
-        assert_eq!(fresh.state_root(), source_root);
-
-        // A second import is rejected — the store is no longer empty.
-        assert!(
-            fresh
-                .import_boundary_state(BlockHeight::new(6), Vec::new())
-                .is_err()
-        );
+        test_boundary_import_roundtrip(&storage, &fresh, |seed| commit_one(&storage, seed));
     }
 }

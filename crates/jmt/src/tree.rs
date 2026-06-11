@@ -804,18 +804,9 @@ mod tests {
     use super::*;
     use crate::hasher::Blake3Hasher;
     use crate::storage::MemoryStore;
+    use crate::test_utils::{k, v};
 
     type Jmt = Tree<Blake3Hasher, 1>;
-
-    fn k(b: u8) -> Key {
-        let mut key = [0u8; 32];
-        key[0] = b;
-        key
-    }
-
-    fn v(b: u8) -> ValueHash {
-        [b; 32]
-    }
 
     #[test]
     fn single_insert_produces_leaf_root() {

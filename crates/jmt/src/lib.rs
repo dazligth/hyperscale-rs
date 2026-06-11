@@ -41,3 +41,6 @@ pub use node::{
 pub use range::{RangeChunk, next_key, subspan};
 pub use storage::{MemoryStore, TreeReader, TreeWriter};
 pub use tree::{Tree, UpdateError, UpdateResult};
+
+#[cfg(test)]
+pub(crate) mod test_utils;
