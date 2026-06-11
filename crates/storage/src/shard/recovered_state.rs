@@ -57,6 +57,11 @@ pub struct RecoveredState {
     /// to the on-disk count without re-deriving from receipts +
     /// historical topology. Empty on a fresh start.
     pub beacon_witness_leaf_hashes: Vec<Hash>,
+
+    /// Committed substate count behind the committed tip — seeds the
+    /// coordinator's count frontier for reshape-trigger derivation.
+    /// Zero on a fresh start.
+    pub substate_count: u64,
 }
 
 impl RecoveredState {
@@ -77,6 +82,7 @@ impl RecoveredState {
         anchor: &ShardAnchor,
         boundary_header: &BlockHeader,
         witness_leaf_hashes: Vec<Hash>,
+        substate_count: u64,
     ) -> Self {
         Self {
             committed_height: anchor.height,
@@ -86,6 +92,7 @@ impl RecoveredState {
             jmt_root: Some(anchor.state_root),
             beacon_witness_start: boundary_header.beacon_witness_base(),
             beacon_witness_leaf_hashes: witness_leaf_hashes,
+            substate_count,
         }
     }
 

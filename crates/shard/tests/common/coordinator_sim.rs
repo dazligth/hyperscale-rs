@@ -39,10 +39,10 @@ use hyperscale_types::{
     LocalReceiptRootContext, LocalReceiptRootVerifyError, LocalTimestamp, NetworkDefinition,
     ProposerTimestamp, ProvisionRootVerifyError, ProvisionTxRootsContext, ProvisionTxRootsMap,
     ProvisionTxRootsVerifyError, Provisions, ProvisionsRoot, ProvisionsRootContext, QcContext,
-    QcVerifyError, QuorumCertificate, ReadySignal, Round, RoutableTransaction, ShardId, StateRoot,
-    StateRootContext, StateRootVerifyError, StoredReceipt, Timeout, TimeoutContext,
-    TopologySchedule, TransactionRoot, TransactionRootContext, TxHash, TxRootVerifyError,
-    ValidatorId, Verifiable, Verified, Verify, VoteCount, ready_signal_message,
+    QcVerifyError, QuorumCertificate, ReadySignal, Round, RoutableTransaction, ShardId,
+    ShardWitnessPayload, StateRoot, StateRootContext, StateRootVerifyError, StoredReceipt, Timeout,
+    TimeoutContext, TopologySchedule, TransactionRoot, TransactionRootContext, TxHash,
+    TxRootVerifyError, ValidatorId, Verifiable, Verified, Verify, VoteCount, ready_signal_message,
 };
 
 use crate::common::fixtures::build_genesis_block;
@@ -61,6 +61,9 @@ pub struct CapturedCommit {
     /// The certified block payload, threaded so tests can assert on
     /// block contents (tx set, certs, etc.).
     pub certified: Arc<Verified<CertifiedBlock>>,
+    /// Beacon-witness leaves the commit appended, so tests can assert
+    /// on derived witnesses (missed proposals, reshape triggers).
+    pub witness_leaves: Vec<ShardWitnessPayload>,
 }
 
 /// `(to_idx, event)` envelope queued for delivery on a later `step()`.
@@ -166,6 +169,7 @@ enum SimEvent {
         manifest: BlockManifest,
         finalized_waves: Vec<Arc<Verifiable<FinalizedWave>>>,
         provisions: Vec<Arc<Verifiable<Provisions>>>,
+        substate_delta: i64,
     },
     QcResult {
         block_hash: BlockHash,
@@ -203,6 +207,7 @@ enum SimEvent {
     StateRootVerified {
         block_hash: BlockHash,
         result: Result<Verified<StateRoot>, StateRootVerifyError>,
+        substate_delta: i64,
     },
     BlockReadyToCommit {
         certified: Arc<Verified<CertifiedBlock>>,
@@ -421,7 +426,7 @@ impl ShardCoordinatorSim {
     /// of sync mode.
     pub fn deliver_block_persisted(&mut self, replica: ValidatorId, height: BlockHeight) {
         let idx = self.idx_of(replica);
-        let actions = self.coordinators[idx].on_block_persisted(&self.topology, height);
+        let actions = self.coordinators[idx].on_block_persisted(&self.topology, height, 0);
         self.absorb(idx, actions);
     }
 
@@ -748,6 +753,7 @@ impl ShardCoordinatorSim {
                 manifest,
                 finalized_waves,
                 provisions,
+                substate_delta,
             } => coord.on_proposal_built(
                 topology,
                 height,
@@ -757,6 +763,7 @@ impl ShardCoordinatorSim {
                 &manifest,
                 finalized_waves,
                 provisions,
+                substate_delta,
             ),
             SimEvent::QcResult {
                 block_hash,
@@ -784,9 +791,11 @@ impl ShardCoordinatorSim {
             SimEvent::BeaconWitnessRootVerified { block_hash, result } => {
                 coord.on_beacon_witness_root_verified(topology, block_hash, result)
             }
-            SimEvent::StateRootVerified { block_hash, result } => {
-                coord.on_state_root_verified(topology, block_hash, result)
-            }
+            SimEvent::StateRootVerified {
+                block_hash,
+                result,
+                substate_delta,
+            } => coord.on_state_root_verified(topology, block_hash, result, substate_delta),
             SimEvent::BlockReadyToCommit { certified, source } => {
                 coord.on_block_ready_to_commit(topology, certified, source)
             }
@@ -980,6 +989,7 @@ impl ShardCoordinatorSim {
                 parent_in_flight,
                 finalized_tx_count,
                 ready_signals,
+                reshape_trigger,
                 beacon_witness_root,
                 beacon_witness_leaf_count,
                 beacon_witness_base,
@@ -1006,12 +1016,14 @@ impl ShardCoordinatorSim {
                     parent_in_flight,
                     finalized_tx_count,
                     ready_signals,
+                    reshape_trigger,
                     beacon_witness_root,
                     beacon_witness_leaf_count,
                     beacon_witness_base,
                     &pending_snapshots,
                 );
                 let block_hash = result.block_hash;
+                let substate_delta = result.jmt_snapshot.leaf_delta;
                 // Mirror `make_commit_prepared`: stash the JMT
                 // snapshot into `pending_chain` so subsequent
                 // child verifications see the overlay.
@@ -1035,6 +1047,7 @@ impl ShardCoordinatorSim {
                         manifest: result.manifest,
                         finalized_waves,
                         provisions,
+                        substate_delta,
                     },
                 });
             }
@@ -1238,6 +1251,7 @@ impl ShardCoordinatorSim {
                 let verify_result = expected_root.verify(&StateRootContext {
                     computed_root: &computed_root,
                 });
+                let substate_delta = jmt_snapshot.leaf_delta;
                 if verify_result.is_ok() {
                     self.pending_chains[emitter_idx].insert(
                         block_hash,
@@ -1261,6 +1275,7 @@ impl ShardCoordinatorSim {
                     event: SimEvent::StateRootVerified {
                         block_hash,
                         result: verify_result,
+                        substate_delta,
                     },
                 });
             }
@@ -1288,14 +1303,14 @@ impl ShardCoordinatorSim {
             Action::CommitBlock {
                 certified,
                 source: _,
-                witness: _,
+                witness,
             }
             | Action::CommitBlockByQcOnly {
                 certified,
                 parent_state_root: _,
                 parent_block_height: _,
                 source: _,
-                witness: _,
+                witness,
             } => {
                 let block = certified.block();
                 self.commits[emitter_idx].push(CapturedCommit {
@@ -1303,6 +1318,7 @@ impl ShardCoordinatorSim {
                     block_hash: block.hash(),
                     state_root: block.header().state_root(),
                     certified,
+                    witness_leaves: witness.leaves,
                 });
             }
             Action::StartBlockSync { target } => {

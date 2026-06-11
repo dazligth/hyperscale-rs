@@ -14,7 +14,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::{Epoch, TopologySnapshot, WeightedTimestamp};
+use crate::{Epoch, ReshapeThresholds, TopologySnapshot, WeightedTimestamp};
 
 /// Per-epoch committee snapshots keyed by the epoch each governs, plus the
 /// active head used for routing.
@@ -34,6 +34,11 @@ pub struct TopologySchedule {
     /// Window length in milliseconds; `epoch = floor(wt / epoch_duration_ms)`.
     /// Zero means a single fixed committee (every timestamp maps to genesis).
     epoch_duration_ms: u64,
+    /// Substate-count thresholds for automatic shard reshaping, sourced
+    /// from the folded `BeaconState`'s chain config like
+    /// `epoch_duration_ms`. Consensus-critical; `DISABLED` unless the
+    /// network configured reshaping.
+    reshape_thresholds: ReshapeThresholds,
     /// Active committee for routing / gossip ("who is in the committee now?").
     head: Arc<TopologySnapshot>,
     /// Committee snapshots keyed by the epoch each governs.
@@ -63,9 +68,25 @@ impl TopologySchedule {
         by_epoch.insert(head_epoch, Arc::clone(&head));
         Self {
             epoch_duration_ms,
+            reshape_thresholds: ReshapeThresholds::DISABLED,
             head,
             by_epoch,
         }
+    }
+
+    /// Set the network's reshape thresholds (from the folded
+    /// `BeaconState`'s chain config). Construction-time only — the
+    /// thresholds are a chain constant, not per-epoch state.
+    #[must_use]
+    pub const fn with_reshape_thresholds(mut self, thresholds: ReshapeThresholds) -> Self {
+        self.reshape_thresholds = thresholds;
+        self
+    }
+
+    /// Substate-count thresholds for automatic shard reshaping.
+    #[must_use]
+    pub const fn reshape_thresholds(&self) -> ReshapeThresholds {
+        self.reshape_thresholds
     }
 
     /// The chain's epoch window length in milliseconds — the constant the
@@ -88,6 +109,7 @@ impl TopologySchedule {
         by_epoch.insert(Epoch::GENESIS, Arc::clone(&snapshot));
         Self {
             epoch_duration_ms: 0,
+            reshape_thresholds: ReshapeThresholds::DISABLED,
             head: snapshot,
             by_epoch,
         }

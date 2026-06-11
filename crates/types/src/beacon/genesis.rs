@@ -15,7 +15,8 @@ use sbor::prelude::*;
 
 use crate::{
     BEACON_SIGNER_COUNT, Bls12381G1PublicKey, EPOCH_DURATION, GenesisConfigHash, Hash,
-    NetworkDefinition, Randomness, SHARD_CAPACITY, ShardId, Stake, StakePoolId, ValidatorId,
+    NetworkDefinition, Randomness, ReshapeThresholds, SHARD_CAPACITY, ShardId, Stake, StakePoolId,
+    ValidatorId,
 };
 
 /// Domain tag for the genesis-config hash. Binds the digest to "beacon
@@ -41,6 +42,11 @@ pub struct BeaconChainConfig {
     pub shard_size: u32,
     /// Beacon committee size cap. PC requires `>= 4`.
     pub beacon_committee_size: u32,
+    /// Substate-count thresholds for automatic shard reshaping.
+    /// Consensus-critical: replicas reject blocks whose reshape
+    /// assertion diverges from their own predicate, so every validator
+    /// must run the same values. Disabled by default.
+    pub reshape_thresholds: ReshapeThresholds,
 }
 
 impl BeaconChainConfig {
@@ -60,6 +66,7 @@ impl Default for BeaconChainConfig {
             num_shards: 2,
             shard_size: u32::try_from(SHARD_CAPACITY).unwrap_or(u32::MAX),
             beacon_committee_size: u32::try_from(BEACON_SIGNER_COUNT).unwrap_or(u32::MAX),
+            reshape_thresholds: ReshapeThresholds::DISABLED,
         }
     }
 }

@@ -173,7 +173,7 @@ fn on_block_persisted_returns_no_actions_when_not_syncing() {
     let (mut coordinator, topology) =
         fresh_coordinator_with_topology(ShardConsensusConfig::default());
 
-    let actions = coordinator.on_block_persisted(&topology, BlockHeight::new(1));
+    let actions = coordinator.on_block_persisted(&topology, BlockHeight::new(1), 0);
     assert!(actions.is_empty());
     assert!(!coordinator.is_block_syncing());
 }

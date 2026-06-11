@@ -352,7 +352,7 @@ where
                 self.handle_transaction_validations_failed(&hashes);
             }
             ShardScopedInput::Protocol(event) => match *event {
-                ProtocolEvent::BlockPersisted { height } => self.handle_block_persisted(height),
+                ProtocolEvent::BlockPersisted { height, .. } => self.handle_block_persisted(height),
                 other => self.handle_protocol_passthrough(other),
             },
 

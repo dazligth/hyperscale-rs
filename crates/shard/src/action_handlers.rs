@@ -21,7 +21,7 @@ use hyperscale_types::{
     FinalizedWave, Hash, InFlightCount, LocalReceiptRoot, LocalReceiptRootContext,
     NetworkDefinition, PreparedCommit, ProposerTimestamp, ProvisionHash, ProvisionTxRootsContext,
     ProvisionTxRootsMap, Provisions, ProvisionsRoot, ProvisionsRootContext, QcContext,
-    QuorumCertificate, ReadySignal, Round, RoutableTransaction, ShardId, StateRoot,
+    QuorumCertificate, ReadySignal, ReshapeTrigger, Round, RoutableTransaction, ShardId, StateRoot,
     StateRootContext, StoredReceipt, Timeout, TimeoutContext, TopologySnapshot, TransactionRoot,
     TransactionRootContext, ValidatorId, Verifiable, Verified, Verify, VoteCount,
     WeightedTimestamp, block_header_message, block_vote_message, certified_block_header_message,
@@ -206,6 +206,7 @@ pub fn build_proposal<S: ShardChainWriter>(
     parent_in_flight: InFlightCount,
     finalized_tx_count: u32,
     ready_signals: Vec<ReadySignal>,
+    reshape_trigger: Option<ReshapeTrigger>,
     beacon_witness_root: BeaconWitnessRoot,
     beacon_witness_leaf_count: BeaconWitnessLeafCount,
     beacon_witness_base: BeaconWitnessLeafCount,
@@ -284,16 +285,23 @@ pub fn build_proposal<S: ShardChainWriter>(
     };
 
     // Manifest mirrors `BlockManifest::from_block` but carries the
-    // proposer's drained `ready_signals` — the manifest field can't be
-    // recovered from a `Block` alone, so the proposer threads it forward
-    // here for the downstream gossip + pending-block pathway.
+    // proposer's drained `ready_signals` and reshape assertion — neither
+    // manifest field can be recovered from a `Block` alone, so the
+    // proposer threads them forward here for the downstream gossip +
+    // pending-block pathway.
     let tx_hashes: Vec<_> = block.transactions().iter().map(|tx| tx.hash()).collect();
     let cert_ids: Vec<_> = block
         .certificates()
         .iter()
         .map(|c| c.wave_id().clone())
         .collect();
-    let manifest = BlockManifest::new(tx_hashes, cert_ids, provision_hashes, ready_signals, None);
+    let manifest = BlockManifest::new(
+        tx_hashes,
+        cert_ids,
+        provision_hashes,
+        ready_signals,
+        reshape_trigger,
+    );
 
     let block_hash = block.hash();
 
@@ -615,6 +623,7 @@ where
                 computed_root: &computed_root,
             });
             record_signature_verification_latency("state_root", start.elapsed().as_secs_f64());
+            let substate_delta = jmt_snapshot.leaf_delta;
             if verify_result.is_ok() {
                 // SAFETY: `prepared` belongs to the same JMT replay that just
                 // produced the matching `computed_root` — only routed when
@@ -639,6 +648,7 @@ where
             ctx.notify_protocol(ProtocolEvent::StateRootVerified {
                 block_hash,
                 result: verify_result,
+                substate_delta,
             });
         }
 
@@ -659,6 +669,7 @@ where
             parent_in_flight,
             finalized_tx_count,
             ready_signals,
+            reshape_trigger,
             beacon_witness_root,
             beacon_witness_leaf_count,
             beacon_witness_base,
@@ -686,12 +697,14 @@ where
                 parent_in_flight,
                 finalized_tx_count,
                 ready_signals,
+                reshape_trigger,
                 beacon_witness_root,
                 beacon_witness_leaf_count,
                 beacon_witness_base,
                 &pending_snapshots,
             );
             let block_hash = result.block_hash;
+            let substate_delta = result.jmt_snapshot.leaf_delta;
             (ctx.commit_prepared)(PreparedBlock {
                 block_hash,
                 parent_block_hash,
@@ -708,6 +721,7 @@ where
                 manifest: result.manifest,
                 finalized_waves,
                 provisions,
+                substate_delta,
             });
         }
 

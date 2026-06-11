@@ -69,6 +69,9 @@ impl RocksDbShardStorage {
             jmt_root: jmt_root_opt,
             beacon_witness_start,
             beacon_witness_leaf_hashes,
+            substate_count: self
+                .substate_count_at_version(committed_height.inner())
+                .unwrap_or(0),
         }
     }
 

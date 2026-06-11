@@ -219,13 +219,16 @@ impl NodeStateMachine {
                     result,
                 )
             }
-            ProtocolEvent::StateRootVerified { block_hash, result } => {
-                self.shard_coordinator.on_state_root_verified(
-                    self.beacon_coordinator.topology_schedule(),
-                    block_hash,
-                    result,
-                )
-            }
+            ProtocolEvent::StateRootVerified {
+                block_hash,
+                result,
+                substate_delta,
+            } => self.shard_coordinator.on_state_root_verified(
+                self.beacon_coordinator.topology_schedule(),
+                block_hash,
+                result,
+                substate_delta,
+            ),
             ProtocolEvent::ProposalBuilt {
                 height,
                 round,
@@ -234,6 +237,7 @@ impl NodeStateMachine {
                 manifest,
                 finalized_waves,
                 provisions,
+                substate_delta,
             } => self.shard_coordinator.on_proposal_built(
                 self.beacon_coordinator.topology_schedule(),
                 height,
@@ -243,6 +247,7 @@ impl NodeStateMachine {
                 &manifest,
                 finalized_waves,
                 provisions,
+                substate_delta,
             ),
             ProtocolEvent::BlockCommitted { certified } => self.on_block_committed(&certified),
             // `BlockPersisted` advances `last_persisted_height`, a fallback
@@ -251,10 +256,15 @@ impl NodeStateMachine {
             // boot-time catch-up (freshly-booted node has persisted state
             // but an empty in-memory set, so child verifications of just-
             // persisted parents unblock here) and for auto-resume-from-sync.
-            ProtocolEvent::BlockPersisted { height, .. } => {
-                let mut actions = self
-                    .shard_coordinator
-                    .on_block_persisted(self.beacon_coordinator.topology_schedule(), height);
+            ProtocolEvent::BlockPersisted {
+                height,
+                substate_count,
+            } => {
+                let mut actions = self.shard_coordinator.on_block_persisted(
+                    self.beacon_coordinator.topology_schedule(),
+                    height,
+                    substate_count,
+                );
                 // If shard consensus just resumed from sync, reschedule the cleanup timer.
                 if !actions.is_empty() {
                     actions.push(Action::SetTimer {
@@ -632,6 +642,7 @@ mod tests {
             LocalTimestamp::ZERO,
             ProtocolEvent::BlockPersisted {
                 height: BlockHeight::new(10),
+                substate_count: 0,
             },
         );
 

@@ -14,9 +14,10 @@
 
 use hyperscale_core::{Action, CommitSource, ProtocolEvent, TimerId};
 use hyperscale_types::{
-    BlockHash, LocalTimestamp, MAX_FINALIZED_TX_PER_BLOCK, MAX_PROGRESS_WAIT,
+    BlockHash, Hash, LocalTimestamp, MAX_FINALIZED_TX_PER_BLOCK, MAX_PROGRESS_WAIT,
     MAX_READY_SIGNALS_PER_BLOCK, MAX_READY_WINDOW_BLOCKS, MAX_TXS_PER_BLOCK, ProposerTimestamp,
-    ProvisionHash, ReadySignal, ScheduleLookup, ShardId, StoredReceipt, WaveId, WeightedTimestamp,
+    ProvisionHash, ReadySignal, ReshapeThresholds, ReshapeTrigger, ScheduleLookup, ShardId,
+    StoredReceipt, WaveId, WeightedTimestamp, derive_reshape_trigger,
 };
 
 /// Shard consensus statistics for monitoring.
@@ -73,6 +74,7 @@ pub struct ShardMemoryStats {
     pub pending_assemblies: usize,
 }
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -112,7 +114,8 @@ use crate::validation::{
     validate_header,
 };
 use crate::verification::{
-    InFlightCheck, ReadyStateRootVerification, VerificationKind, VerificationPipeline,
+    InFlightCheck, ReadyStateRootVerification, SubstateCountSource, VerificationKind,
+    VerificationPipeline,
 };
 use crate::view_change::ViewChangeController;
 use crate::vote_keeper::VoteKeeper;
@@ -206,6 +209,15 @@ pub struct ShardCoordinator {
     /// Updated synchronously at commit time (not dependent on async JMT).
     committed_state_root: StateRoot,
 
+    /// Substate-count frontier: the highest height with a known
+    /// committed substate count, and that count. Advances at commit
+    /// when the committed block's delta is known (the live path —
+    /// deltas arrive with build / state-root verification) and
+    /// reconciles from storage via `BlockPersisted`, which heals the
+    /// sync path where blocks commit QC-trusted with no local
+    /// verification delta. Feeds reshape-trigger derivation.
+    substate_count_frontier: (BlockHeight, u64),
+
     /// Latest QC (certifies the latest certified block). Verified at
     /// every adoption gate; the typestate makes that invariant local.
     latest_qc: Option<Verified<QuorumCertificate>>,
@@ -219,6 +231,10 @@ pub struct ShardCoordinator {
     // ═══════════════════════════════════════════════════════════════════════════
     /// Pending blocks being assembled (hash -> pending block).
     pending_blocks: PendingBlocks,
+
+    /// Net substate delta per uncommitted block. Entries retire into
+    /// the count frontier at commit and are pruned with their blocks.
+    pending_substate_deltas: HashMap<BlockHash, i64>,
 
     /// Vote accounting: per-block vote sets and received-vote equivocation
     /// tracking. The safe-vote lock itself lives on the coordinator
@@ -345,6 +361,8 @@ impl ShardCoordinator {
             committed_ts: committed_anchor_ts,
             committed_anchor_ts,
             committed_state_root: recovered.jmt_root.unwrap_or(StateRoot::ZERO),
+            substate_count_frontier: (recovered.committed_height, recovered.substate_count),
+            pending_substate_deltas: HashMap::new(),
             latest_qc: recovered.latest_qc,
             deferred_qc: DeferredQc::new(),
             pending_blocks: PendingBlocks::new(),
@@ -1051,6 +1069,47 @@ impl ShardCoordinator {
     /// action whose payload/timestamp/`is_fallback` bits come from `kind`,
     /// and dispatches via the `proposal` tracker (or defers via the
     /// verification pipeline when the parent JMT isn't ready yet).
+    /// The reshape assertion for a proposal: the load predicate over
+    /// the substate count behind the parent state, deduped against the
+    /// same trimmed window the witness root commits. Every replica
+    /// recomputes this in verification, so an assertion the local walk
+    /// can't justify would be rejected — when the count is unavailable
+    /// (it shouldn't be: proposals wait for the parent JMT, which
+    /// implies the deltas), the assertion is omitted rather than
+    /// guessed.
+    fn derive_proposal_reshape_trigger(
+        &self,
+        topology: &TopologySchedule,
+        parent_block_hash: BlockHash,
+        window: &[Hash],
+    ) -> Option<ReshapeTrigger> {
+        let thresholds = topology.reshape_thresholds();
+        if thresholds == ReshapeThresholds::DISABLED {
+            return None;
+        }
+        let count_source = SubstateCountSource {
+            thresholds,
+            frontier: self.substate_count_frontier,
+            committed_height: self.committed_height,
+            deltas: &self.pending_substate_deltas,
+        };
+        match count_source.count_behind(
+            self.committed_hash,
+            parent_block_hash,
+            &self.pending_blocks,
+        ) {
+            Ok(count) => derive_reshape_trigger(self.local_shard, count, &thresholds, window),
+            Err(blocking) => {
+                warn!(
+                    validator = ?self.me,
+                    ?blocking,
+                    "Substate count unavailable at proposal; omitting reshape assertion"
+                );
+                None
+            }
+        }
+    }
+
     fn build_and_dispatch_proposal(
         &mut self,
         topology: &TopologySchedule,
@@ -1088,8 +1147,6 @@ impl ShardCoordinator {
             MIN_READY_SIGNAL_DWELL,
             MAX_READY_SIGNALS_PER_BLOCK,
         );
-        let new_leaves = derive_leaves(&receipts, &missed, &ready_signals, None);
-
         // Anchor the preview on the prefix the parent block leaves behind,
         // not the committed accumulator: the parent may be certified but not
         // yet committed, so its own witness leaves (e.g. a missed-proposal
@@ -1132,6 +1189,15 @@ impl ShardCoordinator {
         .unwrap_or(usize::MAX)
         .min(parent_leaves.len());
         parent_leaves.drain(..trim);
+
+        let reshape_trigger =
+            self.derive_proposal_reshape_trigger(topology, parent_block_hash, &parent_leaves);
+        let new_leaves = derive_leaves(
+            &receipts,
+            &missed,
+            &ready_signals,
+            reshape_trigger.and_then(|t| t.to_payload(self.local_shard)),
+        );
         let (beacon_witness_root, beacon_witness_leaf_count) =
             BeaconWitnessAccumulator::from_leaves(beacon_witness_base, parent_leaves)
                 .preview_append(&new_leaves);
@@ -1145,6 +1211,7 @@ impl ShardCoordinator {
             self.now,
             kind,
             ready_signals,
+            reshape_trigger,
             beacon_witness_root,
             beacon_witness_leaf_count,
             beacon_witness_base,
@@ -1874,6 +1941,12 @@ impl ShardCoordinator {
                 self.committed_hash,
                 block_hash,
                 block,
+                SubstateCountSource {
+                    thresholds: topology.reshape_thresholds(),
+                    frontier: self.substate_count_frontier,
+                    committed_height: self.committed_height,
+                    deltas: &self.pending_substate_deltas,
+                },
             );
 
             // Wait for initiated verifications, or exit early when we're
@@ -2396,11 +2469,14 @@ impl ShardCoordinator {
         topology: &TopologySchedule,
         block_hash: BlockHash,
         result: Result<Verified<StateRoot>, StateRootVerifyError>,
+        substate_delta: i64,
     ) -> Vec<Action> {
         let valid = result.is_ok();
         if let Ok(verified) = result {
             self.verification
                 .record_state_root_result(block_hash, verified);
+            self.pending_substate_deltas
+                .insert(block_hash, substate_delta);
         }
         self.on_root_verified_impl(topology, VerificationKind::StateRoot, block_hash, valid)
     }
@@ -2433,7 +2509,13 @@ impl ShardCoordinator {
         }
 
         let mut actions = Vec::new();
-        if kind == VerificationKind::BeaconWitnessRoot {
+        if matches!(
+            kind,
+            VerificationKind::BeaconWitnessRoot | VerificationKind::StateRoot
+        ) {
+            // StateRoot completion also supplies the block's substate
+            // delta, which children's reshape predicates may be
+            // deferred on.
             actions.extend(self.retry_deferred_beacon_witness(topology, block_hash));
         }
 
@@ -2566,6 +2648,12 @@ impl ShardCoordinator {
                 self.committed_hash,
                 self.local_shard,
                 committee,
+                SubstateCountSource {
+                    thresholds: topology.reshape_thresholds(),
+                    frontier: self.substate_count_frontier,
+                    committed_height: self.committed_height,
+                    deltas: &self.pending_substate_deltas,
+                },
             ));
         }
         actions
@@ -2588,6 +2676,7 @@ impl ShardCoordinator {
         manifest: &BlockManifest,
         finalized_waves: Vec<Arc<Verifiable<FinalizedWave>>>,
         provisions: Vec<Arc<Verifiable<Provisions>>>,
+        substate_delta: i64,
     ) -> Vec<Action> {
         match self.proposal.take_matching(height, round) {
             TakeResult::Matched => {}
@@ -2622,6 +2711,7 @@ impl ShardCoordinator {
         let mut pending_block = PendingBlock::from_complete_block(
             block,
             ready_signals,
+            manifest.reshape_trigger(),
             finalized_waves,
             provisions,
             self.now,
@@ -2647,6 +2737,8 @@ impl ShardCoordinator {
         let manifest = pending_block.manifest().clone();
 
         self.pending_blocks.insert(pending_block);
+        self.pending_substate_deltas
+            .insert(block_hash, substate_delta);
         self.record_leader_activity();
 
         // The proposer built the block, so all roots are inherently correct.
@@ -2684,8 +2776,23 @@ impl ShardCoordinator {
         &mut self,
         topology: &TopologySchedule,
         block_height: BlockHeight,
+        substate_count: u64,
     ) -> Vec<Action> {
         self.verification.on_block_persisted(block_height);
+
+        // Reconcile the count frontier from storage. Strictly newer
+        // heights only: live commits already advanced the frontier via
+        // their deltas, so this is the catch-up path for sync commits
+        // (which carry no delta) and boot-time backlogs.
+        let mut actions = Vec::new();
+        if block_height > self.substate_count_frontier.0 {
+            self.substate_count_frontier = (block_height, substate_count);
+            if topology.reshape_thresholds() != ReshapeThresholds::DISABLED {
+                for parent in self.verification.deferred_beacon_witness_parents() {
+                    actions.extend(self.retry_deferred_beacon_witness(topology, parent));
+                }
+            }
+        }
 
         // Auto-resume from sync the moment persistence catches up to the
         // sync target: a single event carries the signal, so there's no
@@ -2694,9 +2801,9 @@ impl ShardCoordinator {
             && let Some(target) = self.block_sync.sync_target_height()
             && block_height >= target
         {
-            return self.on_block_sync_complete(topology);
+            actions.extend(self.on_block_sync_complete(topology));
         }
-        vec![]
+        actions
     }
 
     /// A block has been committed by consensus — mark its state root as
@@ -3059,6 +3166,21 @@ impl ShardCoordinator {
         // committee after it is pruned from `pending_blocks`.
         self.committed_anchor_ts = block.header().parent_qc().weighted_timestamp();
         self.committed_state_root = block.header().state_root();
+
+        // Retire the committed block's substate delta into the count
+        // frontier. Sync commits carry no delta (QC-trusted, never
+        // verified locally); `BlockPersisted` reconciles the frontier
+        // from storage for those.
+        if let Some(delta) = self.pending_substate_deltas.remove(&block_hash)
+            && self.substate_count_frontier.0 + 1 == height
+        {
+            let count = self
+                .substate_count_frontier
+                .1
+                .checked_add_signed(delta)
+                .expect("substate count must not go negative");
+            self.substate_count_frontier = (height, count);
+        }
 
         // Register committed artifacts synchronously. The retention maps
         // are populated here so the just-committed block's contents are
@@ -4128,6 +4250,8 @@ impl ShardCoordinator {
         self.block_sync.cleanup(committed_height);
         self.verification
             .cleanup(&self.pending_blocks, committed_height);
+        self.pending_substate_deltas
+            .retain(|hash, _| self.pending_blocks.get(*hash).is_some());
 
         orphaned.into_abandon_actions()
     }
@@ -4461,8 +4585,14 @@ mod tests {
     use crate::validation::validate_no_duplicate_transactions;
 
     fn install_complete_block(state: &mut ShardCoordinator, block: &Block) {
-        let mut pending =
-            PendingBlock::from_complete_block(block, vec![], vec![], vec![], LocalTimestamp::ZERO);
+        let mut pending = PendingBlock::from_complete_block(
+            block,
+            vec![],
+            None,
+            vec![],
+            vec![],
+            LocalTimestamp::ZERO,
+        );
         pending
             .construct_block()
             .expect("complete block constructs cleanly");
@@ -5511,13 +5641,10 @@ mod tests {
         );
 
         // State root completes — beacon witness root still pending.
-        let after_state = state.on_state_root_verified(
-            &topology,
-            block_hash,
-            Ok(Verified::<StateRoot>::new_unchecked_for_test(
-                StateRoot::ZERO,
-            )),
-        );
+        let state_root_ok = Ok(Verified::<StateRoot>::new_unchecked_for_test(
+            StateRoot::ZERO,
+        ));
+        let after_state = state.on_state_root_verified(&topology, block_hash, state_root_ok, 0);
         assert!(
             !after_state
                 .iter()

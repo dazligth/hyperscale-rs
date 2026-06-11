@@ -9,8 +9,8 @@ use std::time::Duration;
 use hyperscale_core::{Action, FetchAbandon, FetchRequest};
 use hyperscale_types::{
     Block, BlockHash, BlockHeader, BlockHeight, BlockManifest, FinalizedWave, LocalTimestamp,
-    ProvisionHash, Provisions, ReadySignal, Round, RoutableTransaction, ShardId, TxHash,
-    ValidatorId, Verifiable, WaveId,
+    ProvisionHash, Provisions, ReadySignal, ReshapeTrigger, Round, RoutableTransaction, ShardId,
+    TxHash, ValidatorId, Verifiable, WaveId,
 };
 use tracing::{debug, warn};
 
@@ -547,12 +547,16 @@ impl PendingBlock {
     /// resulting `PendingBlock` is self-contained: both the manifest hashes and
     /// `received_provisions` are populated from the same source.
     ///
-    /// `ready_signals` carries whatever the proposer drained from their
-    /// local pool — the manifest stores them alongside the derived
-    /// tx/cert/provision hashes.
+    /// `ready_signals` and `reshape_trigger` carry what the proposer
+    /// put on the wire manifest — the manifest stores them alongside
+    /// the derived tx/cert/provision hashes, and neither is recoverable
+    /// from the `Block` alone. The block's witness root commits to
+    /// both, so the rebuilt manifest must mirror them exactly or every
+    /// replica rejects the broadcast.
     pub fn from_complete_block(
         block: &Block,
         ready_signals: Vec<ReadySignal>,
+        reshape_trigger: Option<ReshapeTrigger>,
         finalized_waves: Vec<Arc<Verifiable<FinalizedWave>>>,
         provisions: Vec<Arc<Verifiable<Provisions>>>,
         created_at: LocalTimestamp,
@@ -566,8 +570,13 @@ impl PendingBlock {
             .iter()
             .map(|c| c.wave_id().clone())
             .collect();
-        let manifest =
-            BlockManifest::new(tx_hashes, cert_ids, provision_hashes, ready_signals, None);
+        let manifest = BlockManifest::new(
+            tx_hashes,
+            cert_ids,
+            provision_hashes,
+            ready_signals,
+            reshape_trigger,
+        );
         let mut received_provisions: BTreeMap<ProvisionHash, Arc<Verifiable<Provisions>>> =
             BTreeMap::new();
         for p in provisions {
@@ -1031,6 +1040,7 @@ mod tests {
         let pending = PendingBlock::from_complete_block(
             &block,
             vec![],
+            None,
             vec![verified_fw],
             vec![],
             LocalTimestamp::ZERO,

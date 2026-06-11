@@ -236,7 +236,7 @@ mod tests {
         assert_eq!(hashes, expected);
 
         // The verified parts seed a snap-synced bootstrap's recovery.
-        let recovered = RecoveredState::from_snap_synced_boundary(&anchor, &header, hashes);
+        let recovered = RecoveredState::from_snap_synced_boundary(&anchor, &header, hashes, 0);
         assert_eq!(recovered.committed_height, anchor.height);
         assert_eq!(recovered.committed_hash, Some(anchor.block_hash));
         assert_eq!(recovered.jmt_root, Some(anchor.state_root));
@@ -293,7 +293,7 @@ mod tests {
         let expected: Vec<Hash> = window.iter().map(ShardWitnessPayload::leaf_hash).collect();
         assert_eq!(hashes, expected);
 
-        let recovered = RecoveredState::from_snap_synced_boundary(&anchor, &header, hashes);
+        let recovered = RecoveredState::from_snap_synced_boundary(&anchor, &header, hashes, 0);
         assert_eq!(
             recovered.beacon_witness_start,
             BeaconWitnessLeafCount::new(3)

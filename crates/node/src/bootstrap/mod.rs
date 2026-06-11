@@ -86,6 +86,10 @@ enum Phase {
 pub struct ShardBootstrap {
     anchor: ShardAnchor,
     phase: Phase,
+    /// Leaves handed to the driver for the store import — the imported
+    /// substate population, identical to the count the store seeds at
+    /// the anchor height. Seeds the recovered state's count frontier.
+    imported_substate_count: u64,
 }
 
 impl ShardBootstrap {
@@ -100,6 +104,7 @@ impl ShardBootstrap {
                 SPLIT_BITS,
                 STATE_CHUNK_LIMIT,
             )),
+            imported_substate_count: 0,
         }
     }
 
@@ -163,6 +168,7 @@ impl ShardBootstrap {
         };
         let leaves = std::mem::take(leaves);
         self.phase = Phase::Importing;
+        self.imported_substate_count = leaves.len() as u64;
         Some((self.anchor.height, leaves))
     }
 
@@ -243,7 +249,12 @@ impl ShardBootstrap {
         let Phase::Complete(header, hashes) = self.phase else {
             panic!("bootstrap recovery taken before completion");
         };
-        RecoveredState::from_snap_synced_boundary(&self.anchor, &header, hashes)
+        RecoveredState::from_snap_synced_boundary(
+            &self.anchor,
+            &header,
+            hashes,
+            self.imported_substate_count,
+        )
     }
 }
 

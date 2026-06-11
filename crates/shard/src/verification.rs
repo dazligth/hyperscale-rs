@@ -1180,6 +1180,7 @@ impl VerificationPipeline {
         committed_hash: BlockHash,
         local_shard: ShardId,
         topology: &TopologySnapshot,
+        count_source: SubstateCountSource<'_>,
     ) -> Vec<Action> {
         let header = block.header();
         let (parent_leaves_start, parent_witness_leaves) = match prospective_parent_witness_leaves(
@@ -1202,6 +1203,36 @@ impl VerificationPipeline {
                     .or_default()
                     .push(block_hash);
                 return Vec::new();
+            }
+        };
+        // The reshape predicate reads the substate count behind the
+        // block's parent state. With reshaping disabled the predicate
+        // can never fire, so the count is irrelevant and verification
+        // proceeds without it — bit-identical to a network without the
+        // feature. Enabled, a missing ancestor delta parks the
+        // verification exactly like a missing witness ancestor.
+        let thresholds = count_source.thresholds;
+        let substate_count = if thresholds == ReshapeThresholds::DISABLED {
+            0
+        } else {
+            match count_source.count_behind(
+                committed_hash,
+                header.parent_block_hash(),
+                pending_blocks,
+            ) {
+                Ok(count) => count,
+                Err(blocking_hash) => {
+                    debug!(
+                        ?block_hash,
+                        ?blocking_hash,
+                        "Deferring beacon-witness verification — substate count not yet known"
+                    );
+                    self.deferred_beacon_witness_verifications
+                        .entry(blocking_hash)
+                        .or_default()
+                        .push(block_hash);
+                    return Vec::new();
+                }
             }
         };
         let (ready_signals, reshape_trigger) = pending_blocks.get(block_hash).map_or_else(
@@ -1234,11 +1265,22 @@ impl VerificationPipeline {
             round: header.round(),
             ready_signals,
             reshape_trigger,
-            substate_count: 0,
-            thresholds: ReshapeThresholds::DISABLED,
+            substate_count,
+            thresholds,
             finalized_waves,
             topology_snapshot: topology.clone(),
         }]
+    }
+
+    /// Parents with children parked on them. The coordinator retries
+    /// every entry when the count frontier reconciles from persistence
+    /// — the blocker for a frontier-lagged park is the committed tip,
+    /// which no per-block completion event names.
+    pub(crate) fn deferred_beacon_witness_parents(&self) -> Vec<BlockHash> {
+        self.deferred_beacon_witness_verifications
+            .keys()
+            .copied()
+            .collect()
     }
 
     /// Drain children deferred on `parent_hash`. Caller re-initiates
@@ -1283,7 +1325,61 @@ impl VerificationPipeline {
             .values()
             .any(|children| children.contains(&block_hash))
     }
+}
 
+/// Inputs for resolving the substate count behind a block's parent —
+/// the load the reshape predicate evaluates. Borrowed from the shard
+/// coordinator's count frontier and per-block delta tracking.
+#[derive(Clone, Copy)]
+pub struct SubstateCountSource<'a> {
+    /// Network reshape thresholds, from the schedule's chain config.
+    pub thresholds: ReshapeThresholds,
+    /// Highest height with a known committed substate count, and that
+    /// count.
+    pub frontier: (BlockHeight, u64),
+    /// The committed tip the pending chain hangs off.
+    pub committed_height: BlockHeight,
+    /// Net substate delta per uncommitted block.
+    pub deltas: &'a HashMap<BlockHash, i64>,
+}
+
+impl SubstateCountSource<'_> {
+    /// Substate count behind `parent_hash`'s post-state: the frontier
+    /// count plus pending deltas along the chain from the committed tip
+    /// up to and including `parent_hash`. `Err` names the block whose
+    /// delta (or, for a frontier lagging the tip, the tip itself whose
+    /// persistence reconcile) is still outstanding — the caller parks
+    /// on it.
+    pub fn count_behind(
+        &self,
+        committed_hash: BlockHash,
+        parent_hash: BlockHash,
+        pending_blocks: &PendingBlocks,
+    ) -> Result<u64, BlockHash> {
+        let mut total: i64 = 0;
+        let mut current = parent_hash;
+        while current != committed_hash {
+            let Some(pending) = pending_blocks.get(current) else {
+                return Err(current);
+            };
+            let Some(delta) = self.deltas.get(&current) else {
+                return Err(current);
+            };
+            total += delta;
+            current = pending.header().parent_block_hash();
+        }
+        if self.frontier.0 != self.committed_height {
+            return Err(committed_hash);
+        }
+        Ok(self
+            .frontier
+            .1
+            .checked_add_signed(total)
+            .expect("substate count must not go negative"))
+    }
+}
+
+impl VerificationPipeline {
     // ═══════════════════════════════════════════════════════════════════════
     // Async verification dispatch
     // ═══════════════════════════════════════════════════════════════════════
@@ -1309,6 +1405,7 @@ impl VerificationPipeline {
         committed_hash: BlockHash,
         block_hash: BlockHash,
         block: &Block,
+        count_source: SubstateCountSource<'_>,
     ) -> Vec<Action> {
         let mut actions = Vec::new();
         let h = block.header();
@@ -1367,6 +1464,7 @@ impl VerificationPipeline {
                 committed_hash,
                 local_shard,
                 topology,
+                count_source,
             ));
         }
 
@@ -1748,6 +1846,16 @@ impl VerificationPipeline {
 
 #[cfg(test)]
 mod tests {
+
+    fn disabled_count_source() -> SubstateCountSource<'static> {
+        static EMPTY: std::sync::OnceLock<HashMap<BlockHash, i64>> = std::sync::OnceLock::new();
+        SubstateCountSource {
+            thresholds: ReshapeThresholds::DISABLED,
+            frontier: (BlockHeight::GENESIS, 0),
+            committed_height: BlockHeight::GENESIS,
+            deltas: EMPTY.get_or_init(HashMap::new),
+        }
+    }
     use hyperscale_types::{
         BeaconWitnessLeafCount, BoundedVec, CertificateRoot, Hash, LocalReceiptRoot,
         LocalTimestamp, ProposerTimestamp, QuorumCertificate, Round, RoutableTransaction, ShardId,
@@ -1938,8 +2046,14 @@ mod tests {
 
         vp.initiate_state_root_verification(block_hash, &block, BlockHeight::GENESIS);
 
-        let mut pb =
-            PendingBlock::from_complete_block(&block, vec![], vec![], vec![], LocalTimestamp::ZERO);
+        let mut pb = PendingBlock::from_complete_block(
+            &block,
+            vec![],
+            None,
+            vec![],
+            vec![],
+            LocalTimestamp::ZERO,
+        );
         pb.construct_block()
             .expect("complete block constructs cleanly");
         let mut pending_with_block = PendingBlocks::new();
@@ -2014,6 +2128,7 @@ mod tests {
             BlockHash::ZERO,
             ShardId::ROOT,
             &topology,
+            disabled_count_source(),
         );
 
         assert!(
@@ -2054,6 +2169,7 @@ mod tests {
                 BlockHash::ZERO,
                 ShardId::ROOT,
                 &topology,
+                disabled_count_source(),
             );
         }
 
@@ -2094,6 +2210,7 @@ mod tests {
             BlockHash::ZERO,
             ShardId::ROOT,
             &topology,
+            disabled_count_source(),
         );
         assert!(vp.is_beacon_witness_deferred(child_hash));
 

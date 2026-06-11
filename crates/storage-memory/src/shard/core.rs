@@ -165,6 +165,11 @@ impl SimShardStorage {
             jmt_root: Some(self.state_root()),
             beacon_witness_start,
             beacon_witness_leaf_hashes,
+            substate_count: read_or_recover(&self.state)
+                .substate_counts
+                .get(&committed_height.inner())
+                .copied()
+                .unwrap_or(0),
         }
     }
 

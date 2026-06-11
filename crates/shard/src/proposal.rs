@@ -20,8 +20,8 @@ use std::sync::Arc;
 use hyperscale_core::Action;
 use hyperscale_types::{
     BeaconWitnessLeafCount, BeaconWitnessRoot, BlockHash, BlockHeight, FinalizedWave,
-    LocalTimestamp, ProposerTimestamp, ProvisionHash, Provisions, ReadySignal, Round,
-    RoutableTransaction, ShardId, TxHash, ValidatorId, Verifiable, Verified, WaveId,
+    LocalTimestamp, ProposerTimestamp, ProvisionHash, Provisions, ReadySignal, ReshapeTrigger,
+    Round, RoutableTransaction, ShardId, TxHash, ValidatorId, Verifiable, Verified, WaveId,
     WeightedTimestamp,
 };
 use tracing::debug;
@@ -312,6 +312,7 @@ pub fn assemble_build_action(
     now: LocalTimestamp,
     kind: ProposalKind,
     ready_signals: Vec<ReadySignal>,
+    reshape_trigger: Option<ReshapeTrigger>,
     beacon_witness_root: BeaconWitnessRoot,
     beacon_witness_leaf_count: BeaconWitnessLeafCount,
     beacon_witness_base: BeaconWitnessLeafCount,
@@ -389,6 +390,7 @@ pub fn assemble_build_action(
         parent_in_flight,
         finalized_tx_count,
         ready_signals,
+        reshape_trigger,
         beacon_witness_root,
         beacon_witness_leaf_count,
         beacon_witness_base,

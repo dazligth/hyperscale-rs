@@ -667,6 +667,10 @@ pub enum Action {
         /// for inclusion in the block's manifest. Beacon's `Ready` witness
         /// derives one entry per included signal at block-assembly time.
         ready_signals: Vec<ReadySignal>,
+        /// The proposer's reshape assertion for the manifest, derived
+        /// from the load predicate over the parent state's substate
+        /// count.
+        reshape_trigger: Option<ReshapeTrigger>,
         /// Pre-derived beacon-witness accumulator root after this block's
         /// witnesses are appended. The coordinator owns the accumulator
         /// and computes both this and `beacon_witness_leaf_count` before

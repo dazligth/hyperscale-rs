@@ -162,6 +162,24 @@ fn substate_count_tracks_commits_and_survives_reopen() {
     assert_eq!(reopened.substate_count_at(BlockHeight::new(4)), None);
 }
 
+/// Recovery seeds the coordinator's count frontier with the substate
+/// count behind the committed tip.
+#[test]
+fn recovered_state_carries_substate_count() {
+    let temp_dir = TempDir::new().unwrap();
+    let storage = RocksDbShardStorage::open(temp_dir.path(), NibblePath::empty()).unwrap();
+
+    for h in 1..=3u64 {
+        let block = make_test_block(BlockHeight::new(h));
+        let qc = make_test_qc(&block);
+        let updates =
+            make_mapped_database_update(u8::try_from(h).unwrap_or(u8::MAX), 0, vec![1], vec![1]);
+        rocks_commit_with(&storage, &updates, &block, &qc);
+    }
+
+    assert_eq!(storage.load_recovered_state().substate_count, 3);
+}
+
 #[test]
 fn test_basic_substate_operations() {
     let temp_dir = TempDir::new().unwrap();

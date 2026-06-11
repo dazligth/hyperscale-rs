@@ -221,8 +221,14 @@ mod tests {
     }
 
     fn pending_from_block(block: &Block) -> PendingBlock {
-        let mut pb =
-            PendingBlock::from_complete_block(block, vec![], vec![], vec![], LocalTimestamp::ZERO);
+        let mut pb = PendingBlock::from_complete_block(
+            block,
+            vec![],
+            None,
+            vec![],
+            vec![],
+            LocalTimestamp::ZERO,
+        );
         pb.construct_block().expect("construct block");
         pb
     }

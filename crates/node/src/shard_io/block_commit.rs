@@ -813,6 +813,7 @@ impl BlockCommitCoordinator {
                 shard,
                 ProtocolEvent::BlockPersisted {
                     height: max_persisted,
+                    substate_count: 0,
                 },
             );
         });

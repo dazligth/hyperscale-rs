@@ -250,7 +250,8 @@ impl BeaconCoordinator {
         // so the skip drops only a redundant re-derivation.
         let head = Arc::new(latest.derive_topology_snapshot(network.clone()));
         let mut topology =
-            TopologySchedule::new(epoch_duration_ms, latest_epoch, Arc::clone(&head));
+            TopologySchedule::new(epoch_duration_ms, latest_epoch, Arc::clone(&head))
+                .with_reshape_thresholds(latest.chain_config.reshape_thresholds);
         for state in &history {
             if state.current_epoch != latest_epoch {
                 topology.insert(
