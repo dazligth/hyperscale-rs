@@ -57,6 +57,21 @@ fn test_bind_args(validator_id: ValidatorId) -> (Arc<Bls12381G1PrivateKey>, Arc<
     (Arc::new(bls_key), Arc::new(keys))
 }
 
+/// Storage factory rooted in the test's temp dir. Runtime-joined shards
+/// get `shard-{path}` directories, mirroring the validator binary's
+/// data-dir convention.
+fn temp_storage_factory(dir: &TempDir) -> StorageFactory {
+    let root = dir.path().to_path_buf();
+    Arc::new(move |shard: ShardId| {
+        RocksDbShardStorage::open(
+            root.join(format!("shard-{}", shard.path())),
+            shard_prefix_path(shard),
+        )
+        .map(Arc::new)
+        .map_err(|e| format!("{e:?}"))
+    })
+}
+
 #[tokio::test]
 #[serial]
 async fn test_network_adapter_starts() {
@@ -487,6 +502,7 @@ async fn test_production_runner_with_network() {
         HashMap::from([(ShardId::ROOT, storage)]),
         beacon_storage,
         network_config,
+        temp_storage_factory(&temp_dir),
     )
     .build();
 
@@ -554,6 +570,7 @@ async fn test_graceful_shutdown() {
         HashMap::from([(ShardId::ROOT, storage)]),
         beacon_storage,
         network_config,
+        temp_storage_factory(&temp_dir),
     )
     .build()
     .unwrap();
@@ -601,16 +618,6 @@ async fn test_runtime_shard_join_and_leave() {
         RocksDbShardStorage::open(temp_dir.path().join("shard_a"), shard_prefix_path(shard_a))
             .unwrap(),
     );
-    let factory_dir = temp_dir.path().to_path_buf();
-    let storage_factory: StorageFactory = Arc::new(move |shard: ShardId| {
-        RocksDbShardStorage::open(
-            factory_dir.join(format!("shard_{}", shard.inner())),
-            shard_prefix_path(shard),
-        )
-        .map(Arc::new)
-        .map_err(|e| format!("{e:?}"))
-    });
-
     let network_config = Libp2pConfig {
         listen_addresses: vec!["/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()],
         bootstrap_peers: vec![],
@@ -632,8 +639,8 @@ async fn test_runtime_shard_join_and_leave() {
         HashMap::from([(shard_a, storage_a)]),
         beacon_storage,
         network_config,
+        temp_storage_factory(&temp_dir),
     )
-    .storage_factory(storage_factory)
     .build()
     .unwrap();
 
@@ -758,6 +765,7 @@ async fn test_v2_same_shard_production_runner_binds_all_vnodes() {
         HashMap::from([(ShardId::ROOT, storage0)]),
         beacon_storage0,
         network_config0,
+        temp_storage_factory(&temp_dir0),
     )
     .build()
     .expect("host 0 builder");
@@ -801,6 +809,7 @@ async fn test_v2_same_shard_production_runner_binds_all_vnodes() {
         HashMap::from([(ShardId::ROOT, storage1)]),
         beacon_storage1,
         network_config1,
+        temp_storage_factory(&temp_dir1),
     )
     .build()
     .expect("host 1 builder");
@@ -943,6 +952,7 @@ async fn test_v2_different_shard_production_runner_binds_all_vnodes() {
         ]),
         beacon_storage0,
         network_config0,
+        temp_storage_factory(&temp_dir0),
     )
     .build()
     .expect("host 0 builder");
@@ -989,6 +999,7 @@ async fn test_v2_different_shard_production_runner_binds_all_vnodes() {
         ]),
         beacon_storage1,
         network_config1,
+        temp_storage_factory(&temp_dir1),
     )
     .build()
     .expect("host 1 builder");

@@ -168,6 +168,8 @@ pub struct VnodeConfig {
 /// - `storages` - One `RocksDB` storage per hosted shard. Every shard
 ///   referenced by a vnode must have a matching entry.
 /// - `network` - libp2p configuration for peer-to-peer communication
+/// - `storage_factory` - Opens storage for shards joined at runtime
+///   (beacon-driven placement changes).
 ///
 /// Optional fields:
 /// - `dispatch` - Dispatch implementation (defaults to auto-configured)
@@ -181,9 +183,8 @@ pub struct ProductionRunnerBuilder {
     network_config: Libp2pConfig,
     dispatch: Option<Arc<PooledDispatch>>,
     channel_capacity: usize,
-    /// Opens a runtime-joined shard's `RocksDB` storage. Without one,
-    /// `ShardCommand::Join` is rejected.
-    storage_factory: Option<StorageFactory>,
+    /// Opens a runtime-joined shard's `RocksDB` storage.
+    storage_factory: StorageFactory,
     rpc_status: Option<Arc<ArcSwap<NodeStatusState>>>,
     mempool_snapshot: Option<Arc<ArcSwap<MempoolSnapshot>>>,
     sync_status: Option<Arc<ArcSwap<SyncStatus>>>,
@@ -214,6 +215,7 @@ impl ProductionRunnerBuilder {
         storages: HashMap<ShardId, Arc<RocksDbShardStorage>>,
         beacon_storage: Arc<dyn BeaconStorage>,
         network_config: Libp2pConfig,
+        storage_factory: StorageFactory,
     ) -> Self {
         assert!(
             !vnodes.is_empty(),
@@ -235,16 +237,8 @@ impl ProductionRunnerBuilder {
             network_definition: None,
             mempool_config: MempoolConfig::default(),
             provision_config: ProvisionConfig::default(),
-            storage_factory: None,
+            storage_factory,
         }
-    }
-
-    /// Set the storage factory that opens a runtime-joined shard's
-    /// `RocksDB` storage. Without one, `ShardCommand::Join` is rejected.
-    #[must_use]
-    pub fn storage_factory(mut self, factory: StorageFactory) -> Self {
-        self.storage_factory = Some(factory);
-        self
     }
 
     /// Set the Radix network definition for transaction validation.
@@ -797,6 +791,7 @@ impl ProductionRunner {
         storages: HashMap<ShardId, Arc<RocksDbShardStorage>>,
         beacon_storage: Arc<dyn BeaconStorage>,
         network_config: Libp2pConfig,
+        storage_factory: StorageFactory,
     ) -> ProductionRunnerBuilder {
         ProductionRunnerBuilder::new(
             vnodes,
@@ -805,6 +800,7 @@ impl ProductionRunner {
             storages,
             beacon_storage,
             network_config,
+            storage_factory,
         )
     }
 

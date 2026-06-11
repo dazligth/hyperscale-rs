@@ -63,7 +63,8 @@ use hyperscale_mempool::MempoolConfig;
 use hyperscale_network_libp2p::{Libp2pConfig, VersionInteroperabilityMode};
 use hyperscale_production::rpc::{MempoolSnapshot, NodeStatusState, RpcServer, RpcServerConfig};
 use hyperscale_production::{
-    ProductionRunner, SyncStatus, TelemetryConfig, TelemetryGuard, VnodeConfig, init_telemetry,
+    ProductionRunner, StorageFactory, SyncStatus, TelemetryConfig, TelemetryGuard, VnodeConfig,
+    init_telemetry,
 };
 use hyperscale_provisions::ProvisionConfig;
 use hyperscale_shard::ShardConsensusConfig;
@@ -1179,6 +1180,22 @@ async fn async_main(cli: Cli, config: ValidatorConfig) -> Result<()> {
         storages.insert(shard_id, Arc::new(storage));
     }
 
+    // Opens storage for shards joined at runtime (beacon-driven placement
+    // changes), at the same directory convention as the startup loop above
+    // so a restart reopens what a runtime join created.
+    let factory_data_dir = config.node.data_dir.clone();
+    let factory_rocksdb_config = rocksdb_config.clone();
+    let storage_factory: StorageFactory = Arc::new(move |shard: ShardId| {
+        let shard_dir = factory_data_dir.join(format!("shard-{}", shard.path()));
+        RocksDbShardStorage::open_with_config(
+            &shard_dir,
+            &factory_rocksdb_config,
+            shard_prefix_path(shard),
+        )
+        .map(Arc::new)
+        .map_err(|e| format!("failed to open database at {}: {e:?}", shard_dir.display()))
+    });
+
     // Process-level beacon storage, shared across every hosted vnode's
     // `BeaconCoordinator`. One DB under `{data_dir}/beacon/db`.
     let beacon_db_path = config.node.data_dir.join("beacon").join("db");
@@ -1258,6 +1275,7 @@ async fn async_main(cli: Cli, config: ValidatorConfig) -> Result<()> {
         storages,
         beacon_storage,
         network_config,
+        storage_factory,
     )
     .dispatch(dispatch)
     .rpc_status(rpc_node_status.clone())

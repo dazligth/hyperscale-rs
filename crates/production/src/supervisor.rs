@@ -55,7 +55,7 @@ type ProdProcessIo = ProcessIo<SharedStorage, Libp2pNetwork, PooledDispatch>;
 
 /// Opens (or creates) one shard's `RocksDB` storage at the host's
 /// data-dir convention. Supplied by the validator binary, which owns
-/// the directory layout; without one, `Join` commands are rejected.
+/// the directory layout.
 pub type StorageFactory =
     Arc<dyn Fn(ShardId) -> Result<Arc<RocksDbShardStorage>, String> + Send + Sync>;
 
@@ -121,7 +121,7 @@ pub struct ShardSupervisor {
     mempool_snapshot: Option<Arc<ArcSwap<MempoolSnapshot>>>,
     /// Per-shard `RocksDB` handles, shared with the runner's GC tick.
     storages: Arc<Mutex<HashMap<ShardId, Arc<RocksDbShardStorage>>>>,
-    storage_factory: Option<StorageFactory>,
+    storage_factory: StorageFactory,
     /// Cloned into every spawned shard loop's config so placement
     /// deltas reach the runner's reconfiguration loop.
     participation_tx: mpsc::UnboundedSender<ParticipationChange>,
@@ -154,7 +154,7 @@ impl ShardSupervisor {
         sync_status: Option<Arc<ArcSwap<SyncStatus>>>,
         mempool_snapshot: Option<Arc<ArcSwap<MempoolSnapshot>>>,
         storages: Arc<Mutex<HashMap<ShardId, Arc<RocksDbShardStorage>>>>,
-        storage_factory: Option<StorageFactory>,
+        storage_factory: StorageFactory,
         participation_tx: mpsc::UnboundedSender<ParticipationChange>,
         tx_status_caches: SharedTxStatusCaches,
     ) -> Self {
@@ -248,11 +248,7 @@ impl ShardSupervisor {
             warn!(shard = ?shard, "Join rejected: vnodes must be non-empty and target the shard");
             return;
         }
-        let Some(factory) = &self.storage_factory else {
-            warn!(shard = ?shard, "Join rejected: no storage factory configured");
-            return;
-        };
-        let storage = match factory(shard) {
+        let storage = match (self.storage_factory)(shard) {
             Ok(storage) => storage,
             Err(error) => {
                 warn!(shard = ?shard, error, "Join rejected: storage open failed");
