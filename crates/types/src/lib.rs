@@ -49,7 +49,7 @@ pub use beacon::{
     PcVote3VerifyError, PcVoteEquivocation, PcVoteEquivocationContext,
     PcVoteEquivocationVerifyError, PcVoteRound, PcVoteVerifyContext, PcXpProof, PendingWithdrawal,
     READY_TIMEOUT_EPOCHS, ReadySignal, SHARD_CAPACITY, SHARD_WITNESS_LEAF_DOMAIN_TAG,
-    SHUFFLE_INTERVAL_EPOCHS, SPC_VIEW_TIMEOUT, ShardBoundary, ShardCommittee,
+    SHUFFLE_INTERVAL_EPOCHS, SPC_INPUT_DWELL, SPC_VIEW_TIMEOUT, ShardBoundary, ShardCommittee,
     ShardEpochContribution, ShardWitness, ShardWitnessPayload, ShardWitnessProof,
     ShardWitnessVerifyError, SkipEpochCert, SkipEpochCertVerifyError, SkipReport, SkipRequest,
     SkipRequestVerifyError, SkipVerifyContext, SlotEffects, SpcCert, SpcCertVerifyError,

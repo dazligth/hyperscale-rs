@@ -992,6 +992,11 @@ pub enum ProtocolEvent {
     /// view's leader hasn't surfaced one.
     BeaconSpcViewTimer,
 
+    /// `TimerId::BeaconSpcInputDwell` fired: the proposal-collection
+    /// dwell after SPC bootstrap elapsed — feed the view-1 PC input
+    /// from the pool if the fast path hasn't already.
+    BeaconSpcInputDwellTimer,
+
     /// A committed beacon block + its state have been persisted to
     /// `BeaconStorage`. `BeaconCoordinator` can now drop in-memory
     /// state tied to the pre-commit world.

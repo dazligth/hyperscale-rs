@@ -352,6 +352,7 @@ impl StateMachine for NodeStateMachine {
             | ProtocolEvent::BeaconCommitteeStartTimer
             | ProtocolEvent::BeaconSkipTimer
             | ProtocolEvent::BeaconSpcViewTimer
+            | ProtocolEvent::BeaconSpcInputDwellTimer
             | ProtocolEvent::BeaconBlockPersisted { .. }
             | ProtocolEvent::BeaconBlockSyncReadyToApply { .. }) => self.handle_beacon(evt),
         };

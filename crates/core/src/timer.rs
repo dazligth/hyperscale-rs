@@ -27,4 +27,9 @@ pub enum TimerId {
     /// PC instance with the current view's input even if the view's
     /// leader hasn't surfaced one. Process-scoped.
     BeaconSpcView,
+    /// Beacon SPC proposal-collection dwell. Armed at SPC bootstrap;
+    /// on fire, the coordinator feeds the view-1 PC input from
+    /// whatever proposals the pool holds, unless the full-coverage
+    /// fast path already fed it. Process-scoped.
+    BeaconSpcInputDwell,
 }

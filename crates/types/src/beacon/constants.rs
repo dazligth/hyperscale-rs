@@ -45,6 +45,19 @@ use crate::Stake;
 /// [`SKIP_TIMEOUT`](crate::SKIP_TIMEOUT) trigger.
 pub const SPC_VIEW_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// How long a beacon committee member collects peer proposals after
+/// bootstrapping an epoch's SPC instance before feeding the view-1 PC
+/// input from whatever the pool holds.
+///
+/// Members bootstrap near-simultaneously at the epoch's wall-clock
+/// boundary, so feeding on own-proposal feedback alone would hand PC
+/// disjoint singleton vectors whose only common prefix is empty — the
+/// dwell gives peers' proposals one propagation window to arrive. The
+/// fast path feeds early once every committee member's proposal is
+/// pooled; this timer is the laggard fallback, sized well under any
+/// practical epoch duration.
+pub const SPC_INPUT_DWELL: Duration = Duration::from_millis(500);
+
 // ─── Committee sizing ──────────────────────────────────────────────────────
 
 /// Target signer count for the global (beacon) committee.

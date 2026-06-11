@@ -29,11 +29,11 @@ use hyperscale_types::{
     LeafIndex, LocalTimestamp, MAX_EQUIVOCATIONS_PER_PROPOSER, MAX_WITNESSES_PER_FETCH,
     NetworkDefinition, PcValueElement, PcVector, PcVote1, PcVote1VerifyError, PcVote2,
     PcVote2VerifyError, PcVote3, PcVote3VerifyError, PcVoteEquivocation, PcVoteEquivocationContext,
-    RETENTION_HORIZON, SKIP_TIMEOUT, ShardCommittee, ShardId, ShardWitness, SkipEpochCert,
-    SkipRequest, SkipRequestVerifyError, SpcCert, SpcEmptyViewMsg, SpcEmptyViewMsgVerifyError,
-    SpcNewCommitMsg, SpcNewCommitMsgVerifyError, SpcProposalObject, SpcProposalObjectVerifyError,
-    SpcView, TopologySchedule, TopologySnapshot, ValidatorId, ValidatorStatus, Verifiable,
-    Verified, Verify, WeightedTimestamp,
+    RETENTION_HORIZON, SKIP_TIMEOUT, SPC_INPUT_DWELL, ShardCommittee, ShardId, ShardWitness,
+    SkipEpochCert, SkipRequest, SkipRequestVerifyError, SpcCert, SpcEmptyViewMsg,
+    SpcEmptyViewMsgVerifyError, SpcNewCommitMsg, SpcNewCommitMsgVerifyError, SpcProposalObject,
+    SpcProposalObjectVerifyError, SpcView, TopologySchedule, TopologySnapshot, ValidatorId,
+    ValidatorStatus, Verifiable, Verified, Verify, WeightedTimestamp,
 };
 use tracing::{trace, warn};
 
@@ -615,11 +615,17 @@ impl BeaconCoordinator {
     /// proposal's VRF reveal against `(network.id, epoch)` under
     /// `from`'s pubkey, so admission here is a pure pool insert.
     ///
-    /// When the local validator's own proposal arrives back via the
-    /// action handler's feedback, this is also the trigger that
-    /// feeds SPC's view-1 PC instance — `compute_view_one_input`
-    /// reads the pool's current view of committee proposals and
-    /// `SpcEvent::Input` kicks the FSM into outbound traffic.
+    /// Once a quorum (`2f+1`) of committee proposals — including the
+    /// local one, which arrives back via the action handler's
+    /// feedback — is pooled, this is the fast-path trigger that feeds
+    /// SPC's view-1 PC instance: `compute_view_one_input` reads the
+    /// pool's view of committee proposals and `SpcEvent::Input` kicks
+    /// the FSM into outbound traffic. Quorum rather than full
+    /// coverage keeps one faulty or lagging member from pushing every
+    /// epoch onto the dwell timer; requiring the local proposal keeps
+    /// a fast peer wave from feeding an input that omits it. The
+    /// post-bootstrap dwell ([`Self::on_spc_input_dwell_timer`])
+    /// covers the rest.
     pub fn on_beacon_proposal_received(
         &mut self,
         from: ValidatorId,
@@ -695,8 +701,18 @@ impl BeaconCoordinator {
             );
             return Vec::new();
         }
-        if from == self.me && self.spc.should_feed_view_one_input(epoch) {
-            return self.feed_view_one_input(epoch);
+        if self.spc.should_feed_view_one_input(epoch) {
+            let pooled = self
+                .state
+                .committee
+                .iter()
+                .filter(|member| self.proposal_pool.contains(**member))
+                .count();
+            let n = self.state.committee.len();
+            let quorum = n - n.saturating_sub(1) / 3;
+            if pooled >= quorum && self.proposal_pool.contains(self.me) {
+                return self.feed_view_one_input(epoch);
+            }
         }
         Vec::new()
     }
@@ -824,24 +840,53 @@ impl BeaconCoordinator {
             trace!("BeaconCommitteeStart fired but local validator not on committee");
             return Vec::new();
         }
-        self.bootstrap_spc_for_next_epoch();
-        self.try_propose()
+        let mut actions = self.bootstrap_spc_for_next_epoch();
+        actions.extend(self.try_propose());
+        actions
     }
 
     /// Stand up a fresh SPC instance for the upcoming epoch under the
     /// current beacon committee, derived from `state`.
-    fn bootstrap_spc_for_next_epoch(&mut self) {
+    fn bootstrap_spc_for_next_epoch(&mut self) -> Vec<Action> {
         let committee = self.state.derive_beacon_committee();
-        self.bootstrap_spc_with_committee(committee);
+        self.bootstrap_spc_with_committee(committee)
     }
 
     /// Stand up the per-epoch SPC instance for the next epoch from an
     /// explicit committee. The BFT-minimum gate (declining the bootstrap
     /// when the committee can't tolerate a fault, so the skip path carries
     /// the epoch) lives in [`SpcDriver::bootstrap`].
-    fn bootstrap_spc_with_committee(&mut self, committee: Vec<(ValidatorId, Bls12381G1PublicKey)>) {
+    ///
+    /// Arms the proposal-collection dwell: members bootstrap
+    /// near-simultaneously at the epoch boundary, so the view-1 PC
+    /// input must wait for peers' proposals to arrive — disjoint
+    /// single-element inputs share only the empty prefix. The
+    /// full-coverage fast path in
+    /// [`Self::on_beacon_proposal_received`] usually feeds first; the
+    /// timer covers a committee member that never shows.
+    fn bootstrap_spc_with_committee(
+        &mut self,
+        committee: Vec<(ValidatorId, Bls12381G1PublicKey)>,
+    ) -> Vec<Action> {
         self.spc
             .bootstrap(self.state.current_epoch.next(), committee);
+        vec![Action::SetTimer {
+            id: TimerId::BeaconSpcInputDwell,
+            duration: SPC_INPUT_DWELL,
+        }]
+    }
+
+    /// `TimerId::BeaconSpcInputDwell` fired: the proposal-collection
+    /// dwell elapsed. Feed the view-1 input from whatever the pool
+    /// holds. A no-op when the full-coverage fast path already fed it,
+    /// or when no instance is up (off-committee, or the epoch already
+    /// adopted).
+    pub fn on_spc_input_dwell_timer(&mut self) -> Vec<Action> {
+        let epoch = self.state.current_epoch.next();
+        if !self.spc.should_feed_view_one_input(epoch) {
+            return Vec::new();
+        }
+        self.feed_view_one_input(epoch)
     }
 
     /// Whether the skip tracker has accumulated quorum to abandon
@@ -1494,7 +1539,7 @@ impl BeaconCoordinator {
         // ahead at SPC-round speed.
         if self.is_on_committee() {
             if self.committee_start_due(self.next_epoch_boundary()) {
-                self.bootstrap_spc_for_next_epoch();
+                actions.extend(self.bootstrap_spc_for_next_epoch());
                 actions.extend(self.try_propose());
             } else {
                 actions.push(Action::SetTimer {
@@ -2847,14 +2892,79 @@ mod tests {
         assert!(coord.equivocations.is_empty());
     }
 
+    /// The view-1 input feeds once a quorum of committee proposals is
+    /// pooled — members bootstrap near-simultaneously, so any earlier
+    /// feed would hand PC near-disjoint vectors whose only common
+    /// prefix is empty; waiting for more than a quorum would let one
+    /// faulty member push every epoch onto the dwell timer.
     #[test]
-    fn own_proposal_feedback_feeds_spc_view_one_input() {
+    fn quorum_proposal_coverage_feeds_spc_view_one_input() {
         let mut coord = fresh_coord();
         coord.bootstrap_spc_for_next_epoch();
         let me = coord.me;
         let in_flight = Epoch::GENESIS.next();
-        assert!(!coord.spc.view_one_input_fed());
+        let committee = coord.state.committee.clone();
+        let n = committee.len();
+        let quorum = n - (n - 1) / 3;
+
+        let mut fed_at = None;
+        let mut admitted = 0usize;
+        let mut peers = committee.iter().filter(|&&v| v != me);
+        // Own proposal first, then peers until the feed triggers —
+        // with own in hand, the trigger is pure quorum coverage.
+        let mut next = Some(me);
+        while let Some(member) = next {
+            let actions = coord.on_beacon_proposal_received(
+                member,
+                in_flight,
+                sample_proposal(u8::try_from(admitted).unwrap_or(0)),
+            );
+            admitted += 1;
+            if actions
+                .iter()
+                .any(|a| matches!(a, Action::SignAndBroadcastPcVote1 { .. }))
+            {
+                fed_at = Some(admitted);
+                break;
+            }
+            assert!(
+                !coord.spc.view_one_input_fed(),
+                "fed without emitting vote1",
+            );
+            next = peers.next().copied();
+        }
+        assert_eq!(
+            fed_at,
+            Some(quorum),
+            "the feed must trigger at exactly quorum coverage",
+        );
+        assert!(coord.spc.view_one_input_fed());
+    }
+
+    /// The post-bootstrap dwell timer feeds the view-1 input from
+    /// whatever the pool holds, covering a committee member that never
+    /// delivers; a second fire is a no-op.
+    #[test]
+    fn input_dwell_timer_feeds_from_partial_pool() {
+        let mut coord = fresh_coord();
+        let actions = coord.bootstrap_spc_for_next_epoch();
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                Action::SetTimer {
+                    id: TimerId::BeaconSpcInputDwell,
+                    ..
+                }
+            )),
+            "bootstrap arms the proposal-collection dwell",
+        );
+        let me = coord.me;
+        let in_flight = Epoch::GENESIS.next();
         let actions = coord.on_beacon_proposal_received(me, in_flight, sample_proposal(0xAB));
+        assert!(actions.is_empty(), "own proposal alone doesn't kick PC");
+        assert!(!coord.spc.view_one_input_fed());
+
+        let actions = coord.on_spc_input_dwell_timer();
         assert!(
             actions
                 .iter()
@@ -2862,19 +2972,7 @@ mod tests {
             "expected SignAndBroadcastPcVote1 in {actions:?}",
         );
         assert!(coord.spc.view_one_input_fed());
-    }
-
-    #[test]
-    fn peer_proposal_does_not_trigger_view_one_input_feed() {
-        let mut coord = fresh_coord();
-        coord.bootstrap_spc_for_next_epoch();
-        let actions = coord.on_beacon_proposal_received(
-            ValidatorId::new(1),
-            Epoch::GENESIS.next(),
-            sample_proposal(0xAB),
-        );
-        assert!(actions.is_empty(), "peer proposal alone doesn't kick PC");
-        assert!(!coord.spc.view_one_input_fed());
+        assert!(coord.on_spc_input_dwell_timer().is_empty());
     }
 
     /// Drive `signer_positions` of `committee`'s keys through one

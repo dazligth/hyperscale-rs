@@ -159,6 +159,9 @@ pub fn timer_event(id: &TimerId, shard: ShardId) -> ShardEvent {
         }
         TimerId::BeaconSkipTrigger => ShardEvent::protocol(shard, ProtocolEvent::BeaconSkipTimer),
         TimerId::BeaconSpcView => ShardEvent::protocol(shard, ProtocolEvent::BeaconSpcViewTimer),
+        TimerId::BeaconSpcInputDwell => {
+            ShardEvent::protocol(shard, ProtocolEvent::BeaconSpcInputDwellTimer)
+        }
     }
 }
 

@@ -620,12 +620,20 @@ impl CoordinatorSim {
         self.coordinators.len()
     }
 
-    /// Fire the committee-start timer on every replica. In production
-    /// this happens once wall-clock reaches the upcoming epoch's
-    /// boundary; here the sim just kicks all replicas in lockstep so
-    /// the first epoch's SPC instances bootstrap and `try_propose`
-    /// emits the initial `BuildAndBroadcastBeaconProposal` actions.
+    /// Fire the wall-clock timers on every replica: the
+    /// proposal-collection dwell (a no-op wherever full coverage
+    /// already fed the view-1 input — it matters when a peer's
+    /// proposal was dropped, e.g. as unverifiable) and the
+    /// committee-start timer. In production these fire as wall-clock
+    /// passes the dwell and the upcoming epoch's boundary; here the
+    /// sim kicks all replicas in lockstep so SPC instances bootstrap,
+    /// feed, and `try_propose` emits the initial
+    /// `BuildAndBroadcastBeaconProposal` actions.
     pub fn kick_off(&mut self) {
+        for idx in 0..self.n() {
+            let actions = self.coordinators[idx].on_spc_input_dwell_timer();
+            self.absorb(idx, actions);
+        }
         for idx in 0..self.n() {
             let actions = self.coordinators[idx].on_beacon_committee_start_timer();
             self.absorb(idx, actions);

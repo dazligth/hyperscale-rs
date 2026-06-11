@@ -159,6 +159,9 @@ impl NodeStateMachine {
             }
             ProtocolEvent::BeaconSkipTimer => self.beacon_coordinator.on_beacon_skip_timer(),
             ProtocolEvent::BeaconSpcViewTimer => self.beacon_coordinator.on_beacon_spc_view_timer(),
+            ProtocolEvent::BeaconSpcInputDwellTimer => {
+                self.beacon_coordinator.on_spc_input_dwell_timer()
+            }
             ProtocolEvent::BeaconBlockPersisted { .. } => {
                 // Beacon advanced an epoch — replay any cross-shard artifacts
                 // buffered because their committee epoch wasn't yet in the
