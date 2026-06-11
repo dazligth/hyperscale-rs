@@ -142,6 +142,17 @@ pub const JAIL_COOLDOWN_EPOCHS: u64 = 16;
 /// merge half whose sibling never asserts.
 pub const RESHAPE_TRIGGER_TTL_EPOCHS: u64 = 2;
 
+/// How long an admitted reshape may wait for readiness before being
+/// abandoned.
+///
+/// Execution needs each pending child's ready membership at quorum; a
+/// cohort that never gets there (stalled sync, member attrition) holds
+/// a committee's worth of validators out of the pool, so the reshape
+/// is abandoned and the cohort released once this many epochs pass
+/// after admission. Re-emission retries while the load condition
+/// holds.
+pub const RESHAPE_READY_TTL_EPOCHS: u64 = 8;
+
 /// How long a stake-pool withdrawal request remains pending before its
 /// amount is released and any resulting auto-deactivations apply.
 ///

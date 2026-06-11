@@ -2,7 +2,7 @@
 //! place them on a shard, plus the inverse [`exit_placement`] cascade
 //! that tears a validator off their shard placement.
 
-use hyperscale_types::{BeaconState, ShardId, ValidatorId, ValidatorStatus};
+use hyperscale_types::{BeaconState, PendingReshape, ShardId, ValidatorId, ValidatorStatus};
 
 use crate::sampling::draw_from_pool;
 
@@ -62,22 +62,39 @@ pub fn pool_draw(state: &mut BeaconState, shard: ShardId) -> Option<ValidatorId>
 /// pool refill onto it via [`pool_draw`].
 ///
 /// The caller writes the validator's new status first and passes the
-/// status it held immediately before as `prior`. A validator that
-/// wasn't `OnShard` only sheds its (already-absent) miss counter,
-/// leaving committees untouched. The miss-counter clear and the refill
-/// are independent — `pool_draw` never reads `miss_counters` — so the
-/// caller-visible order between them doesn't matter.
+/// status it held immediately before as `prior`. An `Observing`
+/// validator leaves the committee and sheds its cohort seat instead —
+/// with no refill, since a cohort seat is not a committee slot;
+/// attrition is absorbed by the execution gate, the staleness cancel,
+/// or the readiness TTL. A validator that was neither only sheds its
+/// (already-absent) miss counter, leaving committees untouched. The
+/// miss-counter clear and the refill are independent — `pool_draw`
+/// never reads `miss_counters` — so the caller-visible order between
+/// them doesn't matter.
 pub(super) fn exit_placement(
     state: &mut BeaconState,
     validator: ValidatorId,
     prior: ValidatorStatus,
 ) {
     state.miss_counters.remove(&validator);
-    if let ValidatorStatus::OnShard { shard, .. } = prior {
-        if let Some(committee) = state.next_shard_committees.get_mut(&shard) {
-            committee.members.retain(|v| *v != validator);
+    match prior {
+        ValidatorStatus::OnShard { shard, .. } => {
+            if let Some(committee) = state.next_shard_committees.get_mut(&shard) {
+                committee.members.retain(|v| *v != validator);
+            }
+            pool_draw(state, shard);
         }
-        pool_draw(state, shard);
+        ValidatorStatus::Observing { shard, .. } => {
+            if let Some(committee) = state.next_shard_committees.get_mut(&shard) {
+                committee.members.retain(|v| *v != validator);
+            }
+            if let Some(PendingReshape::Split { cohort, .. }) =
+                state.pending_reshapes.get_mut(&shard)
+            {
+                cohort.remove(&validator);
+            }
+        }
+        _ => {}
     }
 }
 

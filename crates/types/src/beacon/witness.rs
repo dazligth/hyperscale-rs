@@ -132,6 +132,17 @@ pub enum ShardWitnessPayload {
         /// [`Self::ScheduleSplit::shard`].
         parent: ShardId,
     },
+    /// A cohort observer finished syncing its assigned pending child
+    /// of the source shard and is ready for the reshape to execute.
+    /// Rides the source shard's chain like [`Self::Ready`]; the beacon
+    /// folds it into the pending reshape's per-child readiness, which
+    /// gates execution. The target child is implied — reshapes never
+    /// overlap, so the source shard names the pending record and the
+    /// cohort seat names the child.
+    ReshapeReady {
+        /// Observer signalling sync completion.
+        validator: ValidatorId,
+    },
 }
 
 impl ShardWitnessPayload {
@@ -422,6 +433,9 @@ mod tests {
             },
             ShardWitnessPayload::ScheduleMerge {
                 parent: ShardId::leaf(1, 0b1),
+            },
+            ShardWitnessPayload::ReshapeReady {
+                validator: ValidatorId::new(13),
             },
         ];
         for p in payloads {

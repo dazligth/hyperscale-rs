@@ -6,11 +6,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use hyperscale_types::{
     BeaconProposal, BeaconState, BlockHeader, JAIL_COOLDOWN_EPOCHS, JailReason, MAX_SHARDS,
     MISSED_PROPOSAL_JAIL_THRESHOLD, NetworkDefinition, PendingReshape, PendingWithdrawal,
-    RESHAPE_TRIGGER_TTL_EPOCHS, ShardId, ShardWitness, ShardWitnessPayload, Stake, StakePool,
-    ValidatorId, ValidatorRecord, ValidatorStatus, verify_vote_equivocation,
+    RESHAPE_READY_TTL_EPOCHS, RESHAPE_TRIGGER_TTL_EPOCHS, ShardId, ShardWitness,
+    ShardWitnessPayload, Stake, StakePool, ValidatorId, ValidatorRecord, ValidatorStatus,
+    verify_vote_equivocation,
 };
 
 use crate::rules;
+use crate::state::reshape::{draw_split_cohort, release_cohort};
 use crate::state::vrf::jail_validator;
 use crate::state::withdrawals::deactivate_to_insufficient_stake;
 
@@ -375,7 +377,7 @@ pub(super) fn apply_shard_payload(
             }
             // Re-assertion of an in-flight split refreshes the
             // staleness clock and nothing else.
-            if let Some(PendingReshape::Split { last_asserted }) =
+            if let Some(PendingReshape::Split { last_asserted, .. }) =
                 state.pending_reshapes.get_mut(shard)
             {
                 *last_asserted = state.current_epoch;
@@ -404,10 +406,13 @@ pub(super) fn apply_shard_payload(
                 return None;
             }
             tracing::info!(?shard, "Shard split admitted; reshape pending");
+            let cohort = draw_split_cohort(state, *shard);
             state.pending_reshapes.insert(
                 *shard,
                 PendingReshape::Split {
                     last_asserted: state.current_epoch,
+                    admitted_at: state.current_epoch,
+                    cohort,
                 },
             );
             None
@@ -450,37 +455,70 @@ pub(super) fn apply_shard_payload(
             );
             None
         }
+        ShardWitnessPayload::ReshapeReady { validator } => {
+            // Source pinning: only the splitting shard's own chain
+            // carries its observers' readiness signals, and only a
+            // drawn cohort member holds a seat to mark. Anything else
+            // is silently dropped.
+            let Some(PendingReshape::Split { cohort, .. }) =
+                state.pending_reshapes.get_mut(&source_shard)
+            else {
+                return None;
+            };
+            let seat = cohort.get_mut(validator)?;
+            seat.ready = true;
+            None
+        }
     }
 }
 
-/// Cancel pending reshapes whose triggers went quiet.
+/// Cancel pending reshapes whose triggers went quiet or whose
+/// readiness gate never fired.
 ///
 /// Triggers re-derive once per witness window while the load condition
 /// holds, so every live assertion refreshes each epoch. A split whose
 /// target stopped asserting (it drained below the threshold), or a
 /// merge half whose child stopped (it regrew), drops once the silence
 /// reaches [`RESHAPE_TRIGGER_TTL_EPOCHS`]; a merge record with no live
-/// halves left drops entirely. Runs after the epoch's witnesses apply,
-/// so an assertion folded this epoch is never swept.
+/// halves left drops entirely. A split still pending
+/// [`RESHAPE_READY_TTL_EPOCHS`] after admission is abandoned — a
+/// stalled grow must not park a committee's worth of validators
+/// indefinitely. Either way the observer cohort returns to the pool.
+/// Runs after the epoch's witnesses apply, so an assertion folded this
+/// epoch is never swept.
 pub(super) fn prune_stale_reshapes(state: &mut BeaconState) {
     let current = state.current_epoch.inner();
-    state.pending_reshapes.retain(|target, reshape| {
-        let keep = match reshape {
-            PendingReshape::Split { last_asserted } => {
-                current.saturating_sub(last_asserted.inner()) < RESHAPE_TRIGGER_TTL_EPOCHS
+    let mut cancelled: Vec<(ShardId, &str)> = Vec::new();
+    for (target, reshape) in &mut state.pending_reshapes {
+        match reshape {
+            PendingReshape::Split {
+                last_asserted,
+                admitted_at,
+                ..
+            } => {
+                if current.saturating_sub(last_asserted.inner()) >= RESHAPE_TRIGGER_TTL_EPOCHS {
+                    cancelled.push((*target, "trigger went quiet"));
+                } else if current.saturating_sub(admitted_at.inner()) >= RESHAPE_READY_TTL_EPOCHS {
+                    cancelled.push((*target, "readiness TTL elapsed"));
+                }
             }
             PendingReshape::Merge { halves } => {
                 halves.retain(|_, last| {
                     current.saturating_sub(last.inner()) < RESHAPE_TRIGGER_TTL_EPOCHS
                 });
-                !halves.is_empty()
+                if halves.is_empty() {
+                    cancelled.push((*target, "trigger went quiet"));
+                }
             }
-        };
-        if !keep {
-            tracing::info!(?target, "Pending reshape cancelled — trigger went quiet");
         }
-        keep
-    });
+    }
+    for (target, cause) in cancelled {
+        let Some(reshape) = state.pending_reshapes.remove(&target) else {
+            continue;
+        };
+        release_cohort(state, target, &reshape);
+        tracing::info!(?target, cause, "Pending reshape cancelled");
+    }
 }
 
 #[cfg(test)]
@@ -488,9 +526,10 @@ mod tests {
 
     // ─── witness fold framework + stake variants ─────────────────────────
     use hyperscale_types::{
-        BlockHeight, EMISSIONS_PER_EPOCH, Epoch, JAIL_COOLDOWN_EPOCHS, JailReason, MAX_SHARDS,
-        MIN_STAKE_FLOOR, MISSED_PROPOSAL_JAIL_THRESHOLD, PendingReshape, Round, ShardCommittee,
-        ShardId, ShardWitnessPayload, Stake, StakePool, StakePoolId, ValidatorId, ValidatorStatus,
+        BlockHeight, CohortSeat, EMISSIONS_PER_EPOCH, Epoch, JAIL_COOLDOWN_EPOCHS, JailReason,
+        MAX_SHARDS, MIN_STAKE_FLOOR, MISSED_PROPOSAL_JAIL_THRESHOLD, PendingReshape, Round,
+        ShardCommittee, ShardId, ShardWitnessPayload, Stake, StakePool, StakePoolId, ValidatorId,
+        ValidatorStatus,
     };
 
     use super::*;
@@ -1562,18 +1601,160 @@ mod tests {
     }
 
     /// Admission records the pending split when the target is an active
-    /// leaf and the pool can staff a full observer cohort.
+    /// leaf and the pool can staff a full observer cohort — and draws
+    /// the cohort on the spot: each drawn validator flips to
+    /// `Observing`, joins the target's lookahead committee, and gets a
+    /// seat split evenly across the two children.
     #[test]
-    fn split_admission_records_pending_when_pool_can_staff() {
+    fn split_admission_draws_the_observer_cohort() {
         let p = ShardId::leaf(1, 0);
         let mut state = reshape_state(&[p], 4);
         apply_shard_payload(&mut state, p, &split_payload(p));
+
+        let Some(PendingReshape::Split {
+            last_asserted,
+            admitted_at,
+            cohort,
+        }) = state.pending_reshapes.get(&p)
+        else {
+            panic!("split not recorded");
+        };
+        assert_eq!(*last_asserted, Epoch::new(5));
+        assert_eq!(*admitted_at, Epoch::new(5));
+        assert_eq!(cohort.len(), 4);
+
+        // The pool drained into Observing placements carried on the
+        // target's lookahead committee, none ready yet.
+        assert!(state.pooled_validators().is_empty());
+        let members = &state.next_shard_committees[&p].members;
+        let (left, right) = p.children();
+        let mut seats_per_child = (0usize, 0usize);
+        for (id, seat) in cohort {
+            assert!(members.contains(id));
+            assert!(!seat.ready);
+            assert_eq!(
+                state.validators[id].status,
+                ValidatorStatus::Observing {
+                    shard: p,
+                    placed_at_epoch: Epoch::new(5),
+                },
+            );
+            if seat.child == left {
+                seats_per_child.0 += 1;
+            } else {
+                assert_eq!(seat.child, right);
+                seats_per_child.1 += 1;
+            }
+        }
+        assert_eq!(seats_per_child, (2, 2));
+    }
+
+    /// Two replicas with byte-identical state draw byte-identical
+    /// cohorts — the draw is seeded from `(randomness, epoch, shard)`
+    /// under a reshape-specific domain tag.
+    #[test]
+    fn cohort_draw_is_deterministic_across_replicas() {
+        let p = ShardId::leaf(1, 0);
+        let mut a = reshape_state(&[p], 8);
+        let mut b = reshape_state(&[p], 8);
+        apply_shard_payload(&mut a, p, &split_payload(p));
+        apply_shard_payload(&mut b, p, &split_payload(p));
+        assert_eq!(a.pending_reshapes, b.pending_reshapes);
+        assert_eq!(a.next_shard_committees, b.next_shard_committees);
+        assert_eq!(a.pooled_validators(), b.pooled_validators());
+    }
+
+    /// A `ReshapeReady` witness from the splitting shard marks the
+    /// observer's seat; one from any other shard, or naming a validator
+    /// without a seat, is silently dropped. Re-marking is idempotent.
+    #[test]
+    fn reshape_ready_marks_only_a_held_seat() {
+        let p = ShardId::leaf(1, 0);
+        let elsewhere = ShardId::leaf(1, 1);
+        let mut state = reshape_state(&[p, elsewhere], 4);
+        apply_shard_payload(&mut state, p, &split_payload(p));
+        let observer = *cohort_of(&state, p).keys().next().unwrap();
+        let ready = |v: ValidatorId| ShardWitnessPayload::ReshapeReady { validator: v };
+
+        // Wrong source shard: no seat marked.
+        apply_shard_payload(&mut state, elsewhere, &ready(observer));
+        assert!(!cohort_of(&state, p)[&observer].ready);
+
+        // No seat held: dropped.
+        apply_shard_payload(&mut state, p, &ready(ValidatorId::new(9_999)));
+
+        // The shard's own chain marks the seat; re-marking holds.
+        apply_shard_payload(&mut state, p, &ready(observer));
+        assert!(cohort_of(&state, p)[&observer].ready);
+        apply_shard_payload(&mut state, p, &ready(observer));
+        assert!(cohort_of(&state, p)[&observer].ready);
+        let ready_count = cohort_of(&state, p).values().filter(|s| s.ready).count();
+        assert_eq!(ready_count, 1);
+    }
+
+    /// The observer cohort never enters the consensus subset: the
+    /// ready-filtered members of the splitting shard are exactly its
+    /// `OnShard` members, before and after admission, so the shard's
+    /// quorum stays at target size for the whole grow.
+    #[test]
+    fn observers_join_the_committee_but_not_the_consensus_subset() {
+        let p = ShardId::leaf(1, 0);
+        let mut state = single_pool_state(4);
+        state.current_epoch = Epoch::new(5);
+        state.chain_config.shard_size = 4;
+        state.shard_committees = state.next_shard_committees.clone();
+        for i in 0..4u64 {
+            let id = 1000 + i;
+            state.validators.insert(
+                ValidatorId::new(id),
+                validator_record(id, 0, ValidatorStatus::Pooled),
+            );
+        }
+        let consensus_before = state.ready_consensus_members(&state.next_shard_committees);
+
+        apply_shard_payload(&mut state, p, &split_payload(p));
+
+        assert_eq!(state.next_shard_committees[&p].members.len(), 8);
         assert_eq!(
-            state.pending_reshapes.get(&p),
-            Some(&PendingReshape::Split {
-                last_asserted: Epoch::new(5),
-            }),
+            state.ready_consensus_members(&state.next_shard_committees),
+            consensus_before,
         );
+    }
+
+    /// A jailed or deactivated observer sheds its cohort seat and its
+    /// committee slot without a refill draw — attrition is absorbed by
+    /// the execution gate, the staleness cancel, or the readiness TTL.
+    #[test]
+    fn observer_attrition_drops_the_seat_without_refill() {
+        let p = ShardId::leaf(1, 0);
+        let mut state = reshape_state(&[p], 4);
+        apply_shard_payload(&mut state, p, &split_payload(p));
+        let victim = *cohort_of(&state, p).keys().next().unwrap();
+
+        apply_shard_payload(
+            &mut state,
+            p,
+            &ShardWitnessPayload::DeactivateValidator {
+                validator_id: victim,
+            },
+        );
+
+        assert_eq!(
+            state.validators[&victim].status,
+            ValidatorStatus::InsufficientStake,
+        );
+        assert!(!cohort_of(&state, p).contains_key(&victim));
+        assert_eq!(cohort_of(&state, p).len(), 3);
+        assert!(!state.next_shard_committees[&p].members.contains(&victim));
+        assert_eq!(state.next_shard_committees[&p].members.len(), 3);
+    }
+
+    /// The cohort seats of `state`'s pending split of `target`.
+    fn cohort_of(state: &BeaconState, target: ShardId) -> &BTreeMap<ValidatorId, CohortSeat> {
+        let Some(PendingReshape::Split { cohort, .. }) = state.pending_reshapes.get(&target) else {
+            panic!("no pending split for {target:?}");
+        };
+        cohort
     }
 
     /// The pool gate refuses what it can't staff; admission resumes
@@ -1627,7 +1808,8 @@ mod tests {
     }
 
     /// Re-assertion refreshes the staleness clock; silence for
-    /// `RESHAPE_TRIGGER_TTL_EPOCHS` cancels the pending reshape.
+    /// `RESHAPE_TRIGGER_TTL_EPOCHS` cancels the pending reshape and
+    /// returns the cohort to the pool.
     #[test]
     fn split_reassertion_refreshes_and_silence_cancels() {
         let p = ShardId::leaf(1, 0);
@@ -1636,20 +1818,53 @@ mod tests {
 
         state.current_epoch = Epoch::new(6);
         apply_shard_payload(&mut state, p, &split_payload(p));
-        assert_eq!(
-            state.pending_reshapes.get(&p),
-            Some(&PendingReshape::Split {
-                last_asserted: Epoch::new(6),
-            }),
-        );
+        let Some(PendingReshape::Split {
+            last_asserted,
+            admitted_at,
+            ..
+        }) = state.pending_reshapes.get(&p)
+        else {
+            panic!("split not recorded");
+        };
+        assert_eq!(*last_asserted, Epoch::new(6));
+        assert_eq!(*admitted_at, Epoch::new(5));
 
-        // One quiet epoch survives the sweep; the second cancels.
+        // One quiet epoch survives the sweep; the second cancels and
+        // releases the cohort.
         state.current_epoch = Epoch::new(7);
         prune_stale_reshapes(&mut state);
         assert!(state.pending_reshapes.contains_key(&p));
         state.current_epoch = Epoch::new(8);
         prune_stale_reshapes(&mut state);
         assert!(state.pending_reshapes.is_empty());
+        assert_eq!(state.pooled_validators().len(), 4);
+        assert!(state.next_shard_committees[&p].members.is_empty());
+    }
+
+    /// A split whose gate never fires is abandoned once
+    /// `RESHAPE_READY_TTL_EPOCHS` pass after admission, even while the
+    /// trigger keeps re-asserting; the cohort returns to the pool.
+    #[test]
+    fn stalled_split_abandons_at_the_readiness_ttl() {
+        let p = ShardId::leaf(1, 0);
+        let mut state = reshape_state(&[p], 4);
+        apply_shard_payload(&mut state, p, &split_payload(p));
+
+        for epoch in 6..(5 + RESHAPE_READY_TTL_EPOCHS) {
+            state.current_epoch = Epoch::new(epoch);
+            apply_shard_payload(&mut state, p, &split_payload(p));
+            prune_stale_reshapes(&mut state);
+            assert!(
+                state.pending_reshapes.contains_key(&p),
+                "abandoned early at epoch {epoch}",
+            );
+        }
+        state.current_epoch = Epoch::new(5 + RESHAPE_READY_TTL_EPOCHS);
+        apply_shard_payload(&mut state, p, &split_payload(p));
+        prune_stale_reshapes(&mut state);
+        assert!(state.pending_reshapes.is_empty());
+        assert_eq!(state.pooled_validators().len(), 4);
+        assert!(state.next_shard_committees[&p].members.is_empty());
     }
 
     /// Merge halves pair across the two children; a lone half expires

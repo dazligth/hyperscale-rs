@@ -130,6 +130,19 @@ pub enum ValidatorStatus {
         /// Epoch when the placement happened.
         placed_at_epoch: Epoch,
     },
+    /// Drawn from the pool into a pending split's observer cohort.
+    /// Carried in `shard`'s committee for the networking view (serving,
+    /// gossip, ready-signal admission) but never in its consensus
+    /// subset: the observer syncs its assigned pending child and joins
+    /// that child's committee when the reshape executes. The child
+    /// assignment and sync readiness live on the
+    /// [`PendingReshape::Split`] record's cohort.
+    Observing {
+        /// The splitting shard whose committee carries the observer.
+        shard: ShardId,
+        /// Epoch the cohort draw placed the observer.
+        placed_at_epoch: Epoch,
+    },
     /// Jailed and removed from any prior shard. `Unjail` (after
     /// cooldown) returns the validator to `Pooled` iff the pool can
     /// still support the additional active epoch; otherwise the unjail
@@ -177,14 +190,16 @@ pub struct ValidatorRecord {
 
 /// Per-shard committee.
 ///
-/// Every member's status is `OnShard { shard: this_shard, .. }`. Jail,
-/// deactivation, and withdrawal-completion auto-deactivation
-/// transitions remove the validator from `members` synchronously.
-/// Order is incidental — the active signer set is filtered from
-/// `members` by status, not by position. `members.len() ≤
-/// SHARD_CAPACITY` at every epoch boundary; the list shrinks
-/// transiently when an epoch opens, then refills via `pool_draw`
-/// within the same step.
+/// Every member's status is `OnShard { shard: this_shard, .. }` —
+/// or `Observing { shard: this_shard, .. }` while a split of this
+/// shard pends, carrying the observer cohort in the networking view
+/// without touching the consensus subset. Jail, deactivation, and
+/// withdrawal-completion auto-deactivation transitions remove the
+/// validator from `members` synchronously. Order is incidental — the
+/// active signer set is filtered from `members` by status, not by
+/// position. `members.len() ≤ SHARD_CAPACITY` plus any observer
+/// cohort at every epoch boundary; the list shrinks transiently when
+/// an epoch opens, then refills via `pool_draw` within the same step.
 #[derive(Debug, Default, Clone, PartialEq, Eq, BasicSbor)]
 pub struct ShardCommittee {
     /// Ordered list of validators on this shard.
@@ -226,6 +241,15 @@ pub struct ShardBoundary {
     pub consecutive_misses: u32,
 }
 
+/// One observer drawn into a pending split's cohort.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BasicSbor)]
+pub struct CohortSeat {
+    /// Pending child the observer syncs and joins at execution.
+    pub child: ShardId,
+    /// Whether the observer's `ReshapeReady` witness has folded.
+    pub ready: bool,
+}
+
 /// An admitted, not-yet-executed shard reshape, keyed in
 /// [`BeaconState::pending_reshapes`] by its target: the splitting shard
 /// itself, or the parent a merge reforms under.
@@ -235,13 +259,23 @@ pub struct ShardBoundary {
 /// the recorded epoch. A record whose every required assertion goes
 /// quiet for [`RESHAPE_TRIGGER_TTL_EPOCHS`](crate::RESHAPE_TRIGGER_TTL_EPOCHS)
 /// epochs cancels — a drained split target or regrown merge child
-/// self-cancels by falling silent.
+/// self-cancels by falling silent. A split additionally cancels when
+/// its readiness gate isn't met within
+/// [`RESHAPE_READY_TTL_EPOCHS`](crate::RESHAPE_READY_TTL_EPOCHS) of
+/// admission. Either way the cohort returns to the pool.
 #[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
 pub enum PendingReshape {
     /// The target shard splits into its two children.
     Split {
         /// Epoch the shard's trigger last folded.
         last_asserted: Epoch,
+        /// Epoch the split was admitted — starts the readiness TTL.
+        admitted_at: Epoch,
+        /// Observer cohort drawn at admission, each seat assigned the
+        /// child it syncs. Seats drop with the validator's jail or
+        /// deactivation; the execution gate reads ready seats per
+        /// child.
+        cohort: BTreeMap<ValidatorId, CohortSeat>,
     },
     /// The target parent's two children merge back under it. The merge
     /// is paired — eligible for scheduling — once both children hold a
@@ -299,9 +333,10 @@ pub struct BeaconState {
     /// This is the live set the epoch pipeline mutates: membership
     /// evolves via the trickled shuffle (slow per-interval churn),
     /// jail/exit/deactivate (immediate removal), and pool draws (filling
-    /// slots that just opened). The `members ⇔ status == OnShard{shard}`
-    /// invariant holds here. At the start of the next `apply_epoch` this
-    /// value is promoted into `shard_committees`.
+    /// slots that just opened). The `members ⇔ status ==
+    /// OnShard{shard} ∨ Observing{shard}` invariant holds here. At the
+    /// start of the next `apply_epoch` this value is promoted into
+    /// `shard_committees`.
     pub next_shard_committees: BTreeMap<ShardId, ShardCommittee>,
     /// Ready-filtered consensus subset of `shard_committees`, frozen at
     /// promotion: each shard's members whose status was `OnShard { shard,
@@ -483,10 +518,11 @@ impl StakePool {
     /// How many of this pool's validators are currently consuming an
     /// activation epoch under `state`.
     ///
-    /// Counts `Pooled` and `OnShard`; excludes `Jailed` (epoch may stay
-    /// jailed indefinitely; locking stake against an uncertain return is
-    /// wrong) and `InsufficientStake` (already represents "not consuming
-    /// an epoch").
+    /// Counts `Pooled`, `OnShard`, and `Observing` (a cohort seat is a
+    /// stake-backed placement like any other); excludes `Jailed` (epoch
+    /// may stay jailed indefinitely; locking stake against an uncertain
+    /// return is wrong) and `InsufficientStake` (already represents
+    /// "not consuming an epoch").
     #[must_use]
     pub fn current_active_count(&self, state: &BeaconState) -> usize {
         self.validators
@@ -494,7 +530,11 @@ impl StakePool {
             .filter(|id| {
                 matches!(
                     state.validators.get(id).map(|r| &r.status),
-                    Some(ValidatorStatus::Pooled | ValidatorStatus::OnShard { .. })
+                    Some(
+                        ValidatorStatus::Pooled
+                            | ValidatorStatus::OnShard { .. }
+                            | ValidatorStatus::Observing { .. }
+                    )
                 )
             })
             .count()
