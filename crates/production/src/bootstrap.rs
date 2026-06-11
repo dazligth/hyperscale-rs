@@ -17,9 +17,10 @@ use std::time::Duration;
 
 use hyperscale_network::{Network, RequestError, ResponseVerdict};
 use hyperscale_node::SharedTopologySnapshot;
+use hyperscale_node::bootstrap::observer::ObserverBootstrap;
 use hyperscale_node::bootstrap::{BootstrapOutcome, BootstrapRequest, ShardBootstrap};
 use hyperscale_storage::{RecoveredState, ShardStorage};
-use hyperscale_types::{Request, ShardId};
+use hyperscale_types::{Request, ShardAnchor, ShardId, StateRoot};
 use tokio::sync::oneshot;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
@@ -123,6 +124,142 @@ where
     }
 }
 
+/// Bootstrap an observer's pending-child span against the splitting
+/// shard's beacon-attested boundary anchor, returning the anchor the
+/// assembly completed against, the imported child subtree root, and
+/// the imported substate count. Requests route to `via`'s committee;
+/// pacing and the starved-assembly anchor refresh mirror
+/// [`bootstrap_shard_state`].
+///
+/// # Errors
+///
+/// Returns a description of the failure. Errors are terminal for this
+/// duty — the import wrote into `storage`, or the store wasn't fresh
+/// to begin with.
+pub async fn bootstrap_observer_state<S, N>(
+    network: &Arc<N>,
+    topology: &SharedTopologySnapshot,
+    storage: &Arc<S>,
+    via: ShardId,
+    child: ShardId,
+) -> Result<(ShardAnchor, StateRoot, u64), String>
+where
+    S: ShardStorage,
+    N: Network,
+{
+    'anchor: loop {
+        let Some(anchor) = topology.load().boundary(via) else {
+            return Err(format!("splitting shard {via:?} has no attested anchor"));
+        };
+        info!(
+            ?via,
+            ?child,
+            height = anchor.height.inner(),
+            "Observer bootstrap starting against the splitting shard's anchor"
+        );
+        let bootstrap = Arc::new(Mutex::new(ObserverBootstrap::new(via, anchor, child)));
+        let mut fruitless = 0u32;
+        while !lock(&bootstrap).is_complete() {
+            let import = lock(&bootstrap).take_import();
+            if let Some((height, leaves)) = import {
+                let root = storage
+                    .import_boundary_state(height, leaves)
+                    .map_err(|error| format!("child-span import failed: {error}"))?;
+                lock(&bootstrap).on_imported(root);
+                continue;
+            }
+
+            let requests = lock(&bootstrap).next_requests();
+            let accepted = run_observer_round(network, via, &bootstrap, requests).await;
+            if accepted == 0 {
+                fruitless += 1;
+                if fruitless >= ROUNDS_BEFORE_ANCHOR_REFRESH {
+                    fruitless = 0;
+                    // A restart is sound only while nothing has been
+                    // imported; past that, the duty stands on its anchor.
+                    if lock(&bootstrap).is_assembling_state()
+                        && topology
+                            .load()
+                            .boundary(via)
+                            .is_some_and(|latest| latest != anchor)
+                    {
+                        warn!(
+                            ?via,
+                            ?child,
+                            stale = anchor.height.inner(),
+                            "Observer assembly starved; restarting against the advanced anchor"
+                        );
+                        continue 'anchor;
+                    }
+                    warn!(
+                        ?via,
+                        ?child,
+                        height = anchor.height.inner(),
+                        "Observer bootstrap making no progress; continuing"
+                    );
+                }
+                sleep(FRUITLESS_ROUND_PAUSE).await;
+            } else {
+                fruitless = 0;
+            }
+        }
+
+        let bootstrap = Arc::try_unwrap(bootstrap)
+            .map_err(|_| ())
+            .expect("all request callbacks resolved before completion")
+            .into_inner()
+            .expect("bootstrap mutex unpoisoned");
+        let root = bootstrap.imported_root().expect("complete bootstrap");
+        info!(
+            ?via,
+            ?child,
+            height = anchor.height.inner(),
+            substates = bootstrap.imported_substate_count(),
+            "Observer bootstrap complete; child span imported"
+        );
+        return Ok((anchor, root, bootstrap.imported_substate_count()));
+    }
+}
+
+/// Dispatch one round of an observer's state-range requests and await
+/// every response callback. Returns how many responses the sequencer
+/// accepted.
+async fn run_observer_round<N: Network>(
+    network: &Arc<N>,
+    via: ShardId,
+    bootstrap: &Arc<Mutex<ObserverBootstrap>>,
+    requests: Vec<BootstrapRequest>,
+) -> usize {
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let mut waiters = Vec::with_capacity(requests.len());
+    for request in requests {
+        let BootstrapRequest::StateRange(id, request) = request else {
+            unreachable!("observer bootstrap emits only state ranges");
+        };
+        let sequencer = Arc::clone(bootstrap);
+        let accepted = Arc::clone(&accepted);
+        waiters.push(send(network, via, request, move |result| {
+            result.map_or_else(
+                |_| {
+                    lock(&sequencer).on_state_range_failure(id);
+                    ResponseVerdict::Accept
+                },
+                |response| {
+                    judge(
+                        &lock(&sequencer).on_state_range(id, &response),
+                        &accepted,
+                        via,
+                    )
+                },
+            )
+        }));
+    }
+    for waiter in waiters {
+        let _ = waiter.await;
+    }
+    accepted.load(Ordering::Relaxed)
+}
+
 /// Dispatch one round of requests and await every response callback.
 /// Returns how many responses the sequencer accepted.
 async fn run_round<N: Network>(
@@ -220,7 +357,7 @@ fn judge(outcome: &BootstrapOutcome, accepted: &AtomicUsize, shard: ShardId) -> 
     }
 }
 
-fn lock(bootstrap: &Mutex<ShardBootstrap>) -> std::sync::MutexGuard<'_, ShardBootstrap> {
+fn lock<B>(bootstrap: &Mutex<B>) -> std::sync::MutexGuard<'_, B> {
     bootstrap.lock().expect("bootstrap mutex unpoisoned")
 }
 
@@ -353,6 +490,35 @@ mod tests {
             HashMap::new(),
         );
         Arc::new(ArcSwap::from_pointee(snapshot))
+    }
+
+    /// The observer pump end to end: both child spans import from the
+    /// splitting shard's replica into child-rooted stores — healing
+    /// transport failures on the way — and together they partition the
+    /// parent's population at the anchor the assembly completed against.
+    #[tokio::test]
+    async fn observer_pump_imports_the_child_span() {
+        use hyperscale_types::shard_prefix_path;
+
+        let (serving, anchor) = replica();
+        let via = ShardId::ROOT;
+        let children: [ShardId; 2] = via.children().into();
+        let network = Arc::new(StubNetwork::new(Arc::clone(&serving), 3));
+        let topology = shared_topology(anchor, via);
+
+        let mut total = 0u64;
+        for child in children {
+            let store: Arc<SimShardStorage> =
+                Arc::new(SimShardStorage::new(shard_prefix_path(child)));
+            let (used_anchor, root, count) =
+                bootstrap_observer_state(&network, &topology, &store, via, child)
+                    .await
+                    .expect("observer bootstrap succeeds");
+            assert_eq!(used_anchor, anchor);
+            assert_eq!(store.state_root(), root);
+            total += count;
+        }
+        assert_eq!(total, u64::from(ENTRIES));
     }
 
     /// The pump end to end over the sequencer: request dispatch with

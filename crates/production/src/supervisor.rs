@@ -22,7 +22,9 @@ use crossbeam::channel::{Sender, unbounded};
 use hyperscale_core::ParticipationChange;
 use hyperscale_dispatch_pooled::PooledDispatch;
 use hyperscale_mempool::MempoolConfig;
+use hyperscale_network::Network;
 use hyperscale_network_libp2p::Libp2pNetwork;
+use hyperscale_node::bootstrap::observer::observer_ready_signal;
 use hyperscale_node::host::{attach_shard, detach_shard};
 use hyperscale_node::process_io::ProcessIo;
 use hyperscale_node::{NodeConfig, SeatVnodeGroup, TimerOp, VnodeInit, seat_vnode_group};
@@ -30,12 +32,17 @@ use hyperscale_provisions::ProvisionConfig;
 use hyperscale_shard::ShardConsensusConfig;
 use hyperscale_storage::RecoveredState;
 use hyperscale_storage_rocksdb::{RocksDbShardStorage, SharedStorage};
-use hyperscale_types::{BlockHeight, GenesisConfigHash, NetworkDefinition, ShardId};
+use hyperscale_types::network::notification::ReadySignalNotification;
+use hyperscale_types::{
+    BlockHeight, Bls12381G1PrivateKey, GenesisConfigHash, NetworkDefinition, ShardId, StateRoot,
+    ValidatorId,
+};
 use tokio::runtime::Handle as TokioHandle;
 use tokio::sync::mpsc;
+use tokio::task::{JoinHandle, spawn_blocking};
 use tracing::{info, warn};
 
-use crate::bootstrap::bootstrap_shard_state;
+use crate::bootstrap::{bootstrap_observer_state, bootstrap_shard_state};
 use crate::rpc::RpcPublishers;
 use crate::runner::{
     ProdShardLoop, ShardChannels, ShardLoopConfig, VnodeConfig, spawn_shard_loop, wall_clock_local,
@@ -71,6 +78,28 @@ pub enum ShardCommand {
         /// Shard to release one membership of.
         shard: ShardId,
     },
+    /// Begin a reshape-observer duty: open a store rooted at `child`'s
+    /// prefix, sync the child's span from `via`'s committee, and
+    /// broadcast the ready signal on completion. The synced store
+    /// stays on disk for the boundary handoff.
+    Observe {
+        /// The splitting shard whose committee serves and carries the
+        /// observer.
+        via: ShardId,
+        /// The pending child the observer syncs.
+        child: ShardId,
+        /// The local vnode holding the observer seat.
+        validator: ValidatorId,
+        /// Its signing key, for the self-signed ready signal.
+        signing_key: Arc<Bls12381G1PrivateKey>,
+    },
+    /// Abandon an observer duty — the seat was released without
+    /// executing. Aborts an in-flight sync; a completed one just drops
+    /// its registry entry.
+    Unobserve {
+        /// The pending child whose duty ends.
+        child: ShardId,
+    },
 }
 
 /// A finished snap-sync bootstrap, ready for the supervisor to seat:
@@ -81,6 +110,15 @@ pub struct CompletedBootstrap {
     vnodes: Vec<VnodeConfig>,
     storage: Arc<RocksDbShardStorage>,
     recovered: RecoveredState,
+}
+
+/// A finished observer duty: the child-rooted store on disk holds the
+/// child's span as of `root`, and the ready signal is broadcast. The
+/// store handle is dropped — the boundary handoff reopens it from disk.
+pub struct CompletedObservation {
+    child: ShardId,
+    root: StateRoot,
+    substate_count: u64,
 }
 
 /// A background-work completion fed back into the supervisor by the
@@ -100,6 +138,8 @@ pub enum SupervisorEvent {
     },
     /// A snap-sync bootstrap settled (`Err` carries the failed shard).
     Bootstrapped(Result<CompletedBootstrap, ShardId>),
+    /// An observer duty settled (`Err` carries the failed child).
+    Observed(Result<CompletedObservation, ShardId>),
     /// A departing shard's thread joined; the unwire can finish.
     TornDown {
         /// Shard whose thread exited.
@@ -107,6 +147,22 @@ pub enum SupervisorEvent {
         /// The departed vnodes' validator ids, for the RPC scrub.
         validator_ids: Vec<u64>,
     },
+}
+
+/// One observer duty, keyed by its pending child in
+/// [`ShardSupervisor::observers`].
+struct ObserverDuty {
+    /// The splitting shard serving the sync.
+    via: ShardId,
+    /// The local vnode holding the seat.
+    validator: ValidatorId,
+    /// The duty task while the sync is in flight; aborted by
+    /// `Unobserve`. `None` once complete.
+    task: Option<JoinHandle<()>>,
+    /// The imported child subtree root, once complete. The synced
+    /// store itself lives on disk, closed until the boundary handoff
+    /// reopens it.
+    synced: Option<StateRoot>,
 }
 
 /// One hosted shard's runtime: its pinned thread plus the handles the
@@ -147,6 +203,8 @@ pub struct ShardSupervisor {
     /// racing a double import; a `Leave` meanwhile decrements,
     /// abandoning the join at zero.
     bootstrapping: HashMap<ShardId, usize>,
+    /// Observer duties, in flight or complete, keyed by pending child.
+    observers: HashMap<ShardId, ObserverDuty>,
     /// Shards whose teardown is parked on the off-loop thread join.
     /// A `Join` arriving meanwhile queues in [`Self::pending_joins`].
     draining: HashSet<ShardId>,
@@ -192,6 +250,7 @@ impl ShardSupervisor {
             participation_tx,
             shards: HashMap::new(),
             bootstrapping: HashMap::new(),
+            observers: HashMap::new(),
             draining: HashSet::new(),
             pending_joins: HashMap::new(),
             events_tx,
@@ -216,6 +275,7 @@ impl ShardSupervisor {
                 outcome,
             } => self.on_opened(shard, vnodes, outcome),
             SupervisorEvent::Bootstrapped(done) => self.finish_join(done),
+            SupervisorEvent::Observed(done) => self.finish_observation(done),
             SupervisorEvent::TornDown {
                 shard,
                 validator_ids,
@@ -259,6 +319,13 @@ impl ShardSupervisor {
         match command {
             ShardCommand::Join { shard, vnodes } => self.join(shard, &vnodes),
             ShardCommand::Leave { shard } => self.leave(shard),
+            ShardCommand::Observe {
+                via,
+                child,
+                validator,
+                signing_key,
+            } => self.observe(via, child, validator, &signing_key),
+            ShardCommand::Unobserve { child } => self.unobserve(child),
         }
     }
 
@@ -400,6 +467,144 @@ impl ShardSupervisor {
             &done.vnodes[..pending],
             done.storage,
             &done.recovered,
+        );
+    }
+
+    /// Begin an observer duty: open the child-rooted store and run the
+    /// sync + ready-signal pipeline off this loop. The duty completes
+    /// in [`Self::finish_observation`].
+    fn observe(
+        &mut self,
+        via: ShardId,
+        child: ShardId,
+        validator: ValidatorId,
+        signing_key: &Arc<Bls12381G1PrivateKey>,
+    ) {
+        if self.observers.contains_key(&child) {
+            warn!(?child, "Observe rejected: duty already running");
+            return;
+        }
+        let factory = Arc::clone(&self.storage_factory);
+        let process = Arc::clone(&self.process);
+        let events = self.events_tx.clone();
+        let beacon_network = self.beacon_network.clone();
+        let signing_key = Arc::clone(signing_key);
+        let task = self.tokio_handle.spawn(async move {
+            let opened = spawn_blocking(move || factory(child)).await;
+            let done = match opened {
+                Ok(Ok(storage)) => {
+                    match bootstrap_observer_state(
+                        process.network(),
+                        process.topology(),
+                        &storage,
+                        via,
+                        child,
+                    )
+                    .await
+                    {
+                        Ok((anchor, root, substate_count)) => {
+                            // Sync complete: tell the splitting shard's
+                            // committee, where the signal classifies as
+                            // a ReshapeReady witness leaf and folds
+                            // into the split's readiness gate.
+                            let signal = observer_ready_signal(
+                                &beacon_network,
+                                validator,
+                                &signing_key,
+                                anchor,
+                            );
+                            let recipients: Vec<ValidatorId> = process
+                                .topology()
+                                .load()
+                                .committee_for_shard(via)
+                                .iter()
+                                .copied()
+                                .filter(|&v| v != validator)
+                                .collect();
+                            process
+                                .network()
+                                .notify(&recipients, &ReadySignalNotification::new(signal));
+                            Ok(CompletedObservation {
+                                child,
+                                root,
+                                substate_count,
+                            })
+                        }
+                        Err(error) => {
+                            warn!(?via, ?child, error, "Observer duty failed");
+                            Err(child)
+                        }
+                    }
+                }
+                Ok(Err(error)) => {
+                    warn!(?child, error, "Observer duty rejected: storage open failed");
+                    Err(child)
+                }
+                Err(error) => {
+                    warn!(?child, %error, "Observer duty's storage open panicked");
+                    Err(child)
+                }
+            };
+            // Send failure means the runner is shutting down; the duty
+            // dies with it.
+            let _ = events.send(SupervisorEvent::Observed(done));
+        });
+        self.observers.insert(
+            child,
+            ObserverDuty {
+                via,
+                validator,
+                task: Some(task),
+                synced: None,
+            },
+        );
+    }
+
+    /// Settle a finished observer duty. A failure drops the registry
+    /// entry — re-admission of the split re-issues the duty.
+    fn finish_observation(&mut self, done: Result<CompletedObservation, ShardId>) {
+        match done {
+            Ok(observation) => {
+                let Some(duty) = self.observers.get_mut(&observation.child) else {
+                    info!(
+                        child = ?observation.child,
+                        "Observation completed for an abandoned duty; dropped"
+                    );
+                    return;
+                };
+                info!(
+                    via = ?duty.via,
+                    child = ?observation.child,
+                    validator = duty.validator.inner(),
+                    root = ?observation.root,
+                    substates = observation.substate_count,
+                    "Observer duty complete; ready signal broadcast"
+                );
+                duty.task = None;
+                duty.synced = Some(observation.root);
+            }
+            Err(child) => {
+                self.observers.remove(&child);
+            }
+        }
+    }
+
+    /// Abandon an observer duty: abort an in-flight sync, drop the
+    /// registry entry. The child store's directory stays on disk.
+    fn unobserve(&mut self, child: ShardId) {
+        let Some(duty) = self.observers.remove(&child) else {
+            warn!(?child, "Unobserve rejected: no duty for the child");
+            return;
+        };
+        if let Some(task) = duty.task {
+            task.abort();
+        }
+        info!(
+            via = ?duty.via,
+            ?child,
+            validator = duty.validator.inner(),
+            synced = duty.synced.is_some(),
+            "Observer duty abandoned"
         );
     }
 

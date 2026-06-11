@@ -28,7 +28,7 @@ use crossbeam::channel::{Receiver, Sender, unbounded};
 use hex::encode as hex_encode;
 use hyperscale_beacon::genesis::build_genesis_beacon_state;
 use hyperscale_beacon::proposal_pool::BeaconProposalPool;
-use hyperscale_core::{ParticipationChange, ProtocolEvent, TimerId};
+use hyperscale_core::{ObserveDelta, ParticipationChange, ProtocolEvent, TimerId};
 use hyperscale_dispatch::{Dispatch, DispatchPool};
 use hyperscale_dispatch_pooled::{PooledDispatch, ThreadPoolConfig};
 use hyperscale_engine::{GenesisConfig, NetworkDefinition, RadixExecutor, TransactionValidation};
@@ -1021,9 +1021,31 @@ impl ProductionRunner {
             validator = change.validator.inner(),
             join = ?change.join,
             leave = ?change.leave,
+            observe = ?change.observe,
             effective_epoch = change.effective_epoch.inner(),
             "Beacon placement change detected"
         );
+        match change.observe {
+            Some(ObserveDelta::Begin { via, child }) => {
+                if let Some(signing_key) = self.vnode_keys.get(&change.validator) {
+                    supervisor.handle(ShardCommand::Observe {
+                        via,
+                        child,
+                        validator: change.validator,
+                        signing_key: Arc::clone(signing_key),
+                    });
+                } else {
+                    warn!(
+                        validator = change.validator.inner(),
+                        "Observer seat for a validator without a local signing key; ignored"
+                    );
+                }
+            }
+            Some(ObserveDelta::Abandon { child, .. }) => {
+                supervisor.handle(ShardCommand::Unobserve { child });
+            }
+            None => {}
+        }
         if let Some(shard) = change.leave {
             let topology = self.topology_snapshot.clone();
             let reconfigure = self.reconfigure_tx.clone();
