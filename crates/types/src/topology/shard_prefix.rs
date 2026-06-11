@@ -25,12 +25,14 @@ use crate::ShardId;
 #[must_use]
 pub fn shard_prefix_path(shard: ShardId) -> NibblePath {
     let depth = shard.depth();
-    let path = shard.path(); // top `depth` bits hold the prefix, left-aligned
+    let path = shard.path(); // the `depth`-bit prefix in the low `depth` bits
     let mut prefix = NibblePath::empty();
     let mut taken = 0u32;
     while taken < depth {
         let count = (depth - taken).min(8);
-        let shift = 64 - taken - count;
+        // Most-significant chunk first: the prefix's leading bits sit at
+        // the top of the value's `depth` significant bits.
+        let shift = depth - taken - count;
         // `chunk` is masked to `count <= 8` bits and `count <= 8`, so both
         // conversions are exact; `unwrap_or` keeps this panic-free regardless.
         let chunk = u8::try_from((path >> shift) & ((1u64 << count) - 1)).unwrap_or(0);
