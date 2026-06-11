@@ -79,9 +79,37 @@ impl SnapSync {
         split_bits: u8,
         chunk_limit: u32,
     ) -> Self {
+        let span_path = root_path.clone();
+        Self::spanning(anchor, root_path, &span_path, split_bits, chunk_limit)
+    }
+
+    /// Start an assembly fetching only `span_path`'s key span out of a
+    /// serving tree rooted at `root_path` — a reshape observer syncs
+    /// its pending child's span out of the splitting shard's attested
+    /// whole-tree root this way. Every chunk still proves into
+    /// `anchor.state_root` at `root_path`'s depth; only the fetched
+    /// span narrows.
+    ///
+    /// # Panics
+    ///
+    /// Panics unless `span_path` sits at or under `root_path`.
+    #[must_use]
+    pub fn spanning(
+        anchor: ShardAnchor,
+        root_path: NibblePath,
+        span_path: &NibblePath,
+        split_bits: u8,
+        chunk_limit: u32,
+    ) -> Self {
+        let mut span_prefix = span_path.clone();
+        span_prefix.truncate(root_path.len());
+        assert!(
+            span_prefix == root_path,
+            "span does not sit under the serving root",
+        );
         let sub_ranges = (0..1u64 << split_bits)
             .map(|index| {
-                let (low, high) = subspan(&root_path, split_bits, index);
+                let (low, high) = subspan(span_path, split_bits, index);
                 SubRange {
                     cursor: low,
                     end: high,

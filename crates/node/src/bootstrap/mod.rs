@@ -19,6 +19,7 @@
 //! production runner pumps it with async requests; the simulation steps
 //! it deterministically — both run this exact sequencing.
 
+pub mod observer;
 pub mod snap_sync;
 pub mod witness_history;
 
