@@ -35,5 +35,5 @@ pub use certificate::{CertRootVerifyError, CertificateRootContext};
 pub use local_receipt::{LocalReceiptRootContext, LocalReceiptRootVerifyError};
 pub use provision_tx::{ProvisionTxRootsContext, ProvisionTxRootsMap, ProvisionTxRootsVerifyError};
 pub use provisions::{ProvisionRootVerifyError, ProvisionsRootContext};
-pub use state::{StateRootContext, StateRootVerifyError};
+pub use state::{SplitChildRoots, StateRootContext, StateRootVerifyError};
 pub use transaction::{TransactionRootContext, TxRootVerifyError};

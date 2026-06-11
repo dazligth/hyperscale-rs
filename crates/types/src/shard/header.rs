@@ -13,8 +13,8 @@ use crate::{
     BeaconWitnessLeafCount, BeaconWitnessRoot, BlockHash, BlockHeight, BoundedBTreeMap, BoundedVec,
     CertificateRoot, ChainOrigin, Hash, InFlightCount, LocalReceiptRoot,
     MAX_REMOTE_SHARDS_PER_WAVE, MAX_TXS_PER_BLOCK, ProposerTimestamp, ProvisionTxRoot,
-    ProvisionsRoot, QuorumCertificate, Round, ShardId, StateRoot, TransactionRoot, ValidatorId,
-    Verifiable, Verified, Verify, WaveId,
+    ProvisionsRoot, QuorumCertificate, Round, ShardId, SplitChildRoots, StateRoot, TransactionRoot,
+    ValidatorId, Verifiable, Verified, Verify, WaveId,
 };
 
 /// Block header containing consensus metadata.
@@ -54,6 +54,14 @@ pub struct BlockHeader {
     /// joiners) reads the base off the header instead of reconstructing
     /// historical beacon state.
     beacon_witness_base: BeaconWitnessLeafCount,
+    /// The two child hashes of the JMT root node behind `state_root`,
+    /// carried on every header of a split-pending shard's final epoch
+    /// (`None` everywhere else). Produced by the same replay that fills
+    /// `state_root` and verified beside it — see
+    /// [`SplitChildRoots`]. The beacon seeds the post-split children's
+    /// anchors from the terminal header's pair; it cannot decompose
+    /// `state_root` itself.
+    split_child_roots: Option<SplitChildRoots>,
 }
 
 impl BlockHeader {
@@ -63,7 +71,7 @@ impl BlockHeader {
     ///
     /// Panics if `waves.len() > MAX_TXS_PER_BLOCK` or
     /// `provision_tx_roots.len() > MAX_REMOTE_SHARDS_PER_WAVE`.
-    #[allow(clippy::too_many_arguments)] // mirrors the 19 stored fields
+    #[allow(clippy::too_many_arguments)] // mirrors the 20 stored fields
     #[must_use]
     pub fn new(
         shard_id: ShardId,
@@ -85,6 +93,7 @@ impl BlockHeader {
         beacon_witness_root: BeaconWitnessRoot,
         beacon_witness_leaf_count: BeaconWitnessLeafCount,
         beacon_witness_base: BeaconWitnessLeafCount,
+        split_child_roots: Option<SplitChildRoots>,
     ) -> Self {
         Self {
             shard_id,
@@ -106,6 +115,7 @@ impl BlockHeader {
             beacon_witness_root,
             beacon_witness_leaf_count,
             beacon_witness_base,
+            split_child_roots,
         }
     }
 
@@ -146,6 +156,7 @@ impl BlockHeader {
             beacon_witness_root: BeaconWitnessRoot::ZERO,
             beacon_witness_leaf_count: BeaconWitnessLeafCount::ZERO,
             beacon_witness_base: BeaconWitnessLeafCount::ZERO,
+            split_child_roots: None,
         }
     }
 
@@ -353,8 +364,16 @@ impl BlockHeader {
         self.beacon_witness_base
     }
 
+    /// The two child hashes of the JMT root node behind `state_root` —
+    /// present on every header of a split-pending shard's final epoch,
+    /// `None` everywhere else. Verified beside the state root.
+    #[must_use]
+    pub const fn split_child_roots(&self) -> Option<SplitChildRoots> {
+        self.split_child_roots
+    }
+
     /// Decompose into the raw fields, in struct-declaration order.
-    #[allow(clippy::type_complexity)] // mirrors the 19 stored fields
+    #[allow(clippy::type_complexity)] // mirrors the 20 stored fields
     #[must_use]
     pub fn into_parts(
         self,
@@ -378,6 +397,7 @@ impl BlockHeader {
         BeaconWitnessRoot,
         BeaconWitnessLeafCount,
         BeaconWitnessLeafCount,
+        Option<SplitChildRoots>,
     ) {
         (
             self.shard_id,
@@ -399,6 +419,7 @@ impl BlockHeader {
             self.beacon_witness_root,
             self.beacon_witness_leaf_count,
             self.beacon_witness_base,
+            self.split_child_roots,
         )
     }
 
@@ -569,6 +590,66 @@ mod tests {
         )
     }
 
+    /// `split_child_roots` is hash-affecting header content: a populated
+    /// pair survives the wire round-trip and produces a different block
+    /// hash than the same header without it.
+    #[test]
+    fn split_child_roots_round_trip_and_hash() {
+        let bare = sample_header();
+        let pair = SplitChildRoots {
+            left: StateRoot::from_raw(Hash::from_bytes(b"left")),
+            right: StateRoot::from_raw(Hash::from_bytes(b"right")),
+        };
+        let (
+            shard_id,
+            height,
+            parent_block_hash,
+            parent_qc,
+            proposer,
+            timestamp,
+            round,
+            is_fallback,
+            state_root,
+            transaction_root,
+            certificate_root,
+            local_receipt_root,
+            provision_root,
+            waves,
+            provision_tx_roots,
+            in_flight,
+            beacon_witness_root,
+            beacon_witness_leaf_count,
+            beacon_witness_base,
+            _,
+        ) = bare.clone().into_parts();
+        let carrying = BlockHeader::new(
+            shard_id,
+            height,
+            parent_block_hash,
+            parent_qc,
+            proposer,
+            timestamp,
+            round,
+            is_fallback,
+            state_root,
+            transaction_root,
+            certificate_root,
+            local_receipt_root,
+            provision_root,
+            waves.iter().cloned().collect(),
+            provision_tx_roots.iter().map(|(k, v)| (*k, *v)).collect(),
+            in_flight,
+            beacon_witness_root,
+            beacon_witness_leaf_count,
+            beacon_witness_base,
+            Some(pair),
+        );
+
+        let decoded: BlockHeader = basic_decode(&basic_encode(&carrying).unwrap()).unwrap();
+        assert_eq!(decoded.split_child_roots(), Some(pair));
+        assert_ne!(carrying.hash(), bare.hash());
+    }
+
     /// Hand-roll a `BlockHeader` whose `waves` length prefix exceeds the cap.
     /// The `BoundedVec` decoder fires before any per-element work happens.
     #[test]
@@ -580,8 +661,8 @@ mod tests {
             enc.write_payload_prefix(BASIC_SBOR_V1_PAYLOAD_PREFIX)
                 .unwrap();
             enc.write_value_kind(ValueKind::Tuple).unwrap();
-            // BlockHeader has 19 fields.
-            enc.write_size(19).unwrap();
+            // BlockHeader has 20 fields.
+            enc.write_size(20).unwrap();
             enc.encode(&h.shard_id).unwrap();
             enc.encode(&h.height).unwrap();
             enc.encode(&h.parent_block_hash).unwrap();
@@ -620,7 +701,7 @@ mod tests {
             enc.write_payload_prefix(BASIC_SBOR_V1_PAYLOAD_PREFIX)
                 .unwrap();
             enc.write_value_kind(ValueKind::Tuple).unwrap();
-            enc.write_size(19).unwrap();
+            enc.write_size(20).unwrap();
             enc.encode(&h.shard_id).unwrap();
             enc.encode(&h.height).unwrap();
             enc.encode(&h.parent_block_hash).unwrap();

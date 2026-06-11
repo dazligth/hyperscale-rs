@@ -426,6 +426,7 @@ mod tests {
             root,
             BeaconWitnessLeafCount::new(leaf_count),
             BeaconWitnessLeafCount::ZERO,
+            None,
         )
     }
 

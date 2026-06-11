@@ -21,11 +21,11 @@ use hyperscale_types::{
     FinalizedWave, Hash, InFlightCount, LocalReceiptRoot, LocalReceiptRootContext,
     NetworkDefinition, PreparedCommit, ProposerTimestamp, ProvisionHash, ProvisionTxRootsContext,
     ProvisionTxRootsMap, Provisions, ProvisionsRoot, ProvisionsRootContext, QcContext,
-    QuorumCertificate, ReadySignal, ReshapeTrigger, Round, RoutableTransaction, ShardId, StateRoot,
-    StateRootContext, StoredReceipt, Timeout, TimeoutContext, TopologySnapshot, TransactionRoot,
-    TransactionRootContext, ValidatorId, Verifiable, Verified, Verify, VoteCount,
-    WeightedTimestamp, block_header_message, block_vote_message, certified_block_header_message,
-    compute_waves, ready_signal_message,
+    QuorumCertificate, ReadySignal, ReshapeTrigger, Round, RoutableTransaction, ShardId,
+    SplitChildRoots, StateRoot, StateRootContext, StoredReceipt, Timeout, TimeoutContext,
+    TopologySnapshot, TransactionRoot, TransactionRootContext, ValidatorId, Verifiable, Verified,
+    Verify, VoteCount, WeightedTimestamp, block_header_message, block_vote_message,
+    certified_block_header_message, compute_waves, ready_signal_message,
 };
 
 /// Result of QC verification and assembly.
@@ -210,6 +210,7 @@ pub fn build_proposal<S: ShardChainWriter>(
     beacon_witness_root: BeaconWitnessRoot,
     beacon_witness_leaf_count: BeaconWitnessLeafCount,
     beacon_witness_base: BeaconWitnessLeafCount,
+    carry_split_child_roots: bool,
     pending_snapshots: &[Arc<JmtSnapshot>],
 ) -> ProposalResult {
     let (state_root, jmt_snapshot, prepared) = storage.prepare_block_commit(
@@ -220,6 +221,27 @@ pub fn build_proposal<S: ShardChainWriter>(
         pending_snapshots,
         None,
     );
+
+    // Final-epoch headers of a splitting shard carry the root node's two
+    // child hashes, read from the same JMT computation that produced
+    // `state_root`. A leaf root (≤1-key tree) yields no pair; replicas
+    // then reject the header, which can only arise if a shard drained to
+    // nearly nothing while its split stayed pending.
+    let split_child_roots = if carry_split_child_roots {
+        let pair = jmt_snapshot
+            .root_child_hashes()
+            .map(|(left, right)| SplitChildRoots { left, right });
+        if pair.is_none() {
+            tracing::error!(
+                shard = ?local_shard,
+                height = height.inner(),
+                "split-pending final epoch but the state root has no internal root node"
+            );
+        }
+        pair
+    } else {
+        None
+    };
 
     // Lift each `Verified<RoutableTransaction>` into `Verifiable` so block
     // construction and per-root compute calls see the form that
@@ -275,6 +297,7 @@ pub fn build_proposal<S: ShardChainWriter>(
         beacon_witness_root,
         beacon_witness_leaf_count,
         beacon_witness_base,
+        split_child_roots,
     );
 
     let block = Block::Live {
@@ -572,6 +595,8 @@ where
             expected_local_receipt_root,
             finalized_waves,
             block_height,
+            claimed_split_child_roots,
+            split_child_roots_required,
         } => {
             // Pre-flight: hash the receipts and compare to the QC'd
             // `local_receipt_root`. If they diverge, JMT recomputation
@@ -621,6 +646,8 @@ where
             );
             let verify_result = expected_root.verify(&StateRootContext {
                 computed_root: &computed_root,
+                claimed_split_child_roots,
+                split_child_roots_required,
             });
             record_signature_verification_latency("state_root", start.elapsed().as_secs_f64());
             let substate_delta = jmt_snapshot.leaf_delta;
@@ -673,6 +700,7 @@ where
             beacon_witness_root,
             beacon_witness_leaf_count,
             beacon_witness_base,
+            carry_split_child_roots,
         } => {
             let view = ctx
                 .pending_chain
@@ -701,6 +729,7 @@ where
                 beacon_witness_root,
                 beacon_witness_leaf_count,
                 beacon_witness_base,
+                carry_split_child_roots,
                 &pending_snapshots,
             );
             let block_hash = result.block_hash;

@@ -817,6 +817,7 @@ mod tests {
             BeaconWitnessRoot::ZERO,
             BeaconWitnessLeafCount::ZERO,
             BeaconWitnessLeafCount::ZERO,
+            None,
         );
         Arc::new(Verified::new_unchecked_for_test(CertifiedBlockHeader::new(
             header, qc,
@@ -1389,6 +1390,7 @@ mod tests {
             BeaconWitnessRoot::ZERO,
             BeaconWitnessLeafCount::ZERO,
             BeaconWitnessLeafCount::ZERO,
+            None,
         );
         let header_hash = header.hash();
         let qc = QuorumCertificate::new(
@@ -1451,6 +1453,7 @@ mod tests {
             BeaconWitnessRoot::ZERO,
             BeaconWitnessLeafCount::ZERO,
             BeaconWitnessLeafCount::ZERO,
+            None,
         );
         let block = Block::Live {
             header,
@@ -1754,6 +1757,7 @@ mod tests {
             BeaconWitnessRoot::ZERO,
             BeaconWitnessLeafCount::ZERO,
             BeaconWitnessLeafCount::ZERO,
+            None,
         );
         let provisions_verifiable: Arc<Verifiable<Provisions>> =
             Arc::new(Arc::unwrap_or_clone(provisions).into());

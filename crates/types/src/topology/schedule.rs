@@ -14,7 +14,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::{Epoch, ReshapeThresholds, TopologySnapshot, WeightedTimestamp};
+use crate::{Epoch, ReshapeThresholds, ShardId, TopologySnapshot, WeightedTimestamp};
 
 /// Per-epoch committee snapshots keyed by the epoch each governs, plus the
 /// active head used for routing.
@@ -166,6 +166,30 @@ impl TopologySchedule {
         &self.head
     }
 
+    /// The two children `shard` splits into at the end of `wt`'s epoch
+    /// window, or `None` when no split lands at that boundary — i.e.
+    /// `Some` exactly when `wt` falls in the splitting shard's final
+    /// epoch. Resolved by comparing the window's trie against the next
+    /// window's: the beacon fold that wrote `wt`'s entry wrote the next
+    /// window's lookahead in the same commit, so whenever this window's
+    /// committee is resolvable the answer is too.
+    #[must_use]
+    pub fn split_at_next_boundary(
+        &self,
+        shard: ShardId,
+        wt: WeightedTimestamp,
+    ) -> Option<(ShardId, ShardId)> {
+        let epoch = self.epoch_for(wt);
+        let current = self.by_epoch.get(&epoch)?;
+        let next = self.by_epoch.get(&epoch.next())?;
+        if !current.shard_trie().contains(shard) || next.shard_trie().contains(shard) {
+            return None;
+        }
+        let (left, right) = shard.children();
+        (next.shard_trie().contains(left) && next.shard_trie().contains(right))
+            .then_some((left, right))
+    }
+
     /// Record the committee governing `epoch`. The beacon coordinator inserts
     /// the just-applied epoch's active committee and the next epoch's
     /// lookahead on every commit.
@@ -188,6 +212,8 @@ impl TopologySchedule {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
     use crate::{NetworkDefinition, ValidatorSet};
 
@@ -279,5 +305,49 @@ mod tests {
         // A floor below every retained entry evicts nothing.
         sched.evict_below(Epoch::new(0));
         assert!(sched.at(WeightedTimestamp::from_millis(5500)).is_some());
+    }
+
+    #[test]
+    fn split_at_next_boundary_fires_only_in_the_final_window() {
+        let p = ShardId::leaf(1, 0);
+        let sibling = ShardId::leaf(1, 1);
+        let (left, right) = p.children();
+        let snap_with = |leaves: &[ShardId]| -> Arc<TopologySnapshot> {
+            Arc::new(TopologySnapshot::from_explicit_committees(
+                NetworkDefinition::simulator(),
+                &ValidatorSet::new(Vec::new()),
+                leaves.iter().map(|s| (*s, Vec::new())).collect(),
+                HashMap::new(),
+                HashMap::new(),
+                HashMap::new(),
+                HashMap::new(),
+            ))
+        };
+        // Windows 5 and 6 carry the parent; the fold starting window 6
+        // executed the split, so window 7's lookahead carries the children.
+        let mut sched = TopologySchedule::new(1000, Epoch::new(5), snap_with(&[p, sibling]));
+        sched.insert(Epoch::new(6), snap_with(&[p, sibling]));
+        sched.insert(Epoch::new(7), snap_with(&[left, right, sibling]));
+
+        // Window 5: the next window still carries p — not the final epoch.
+        assert_eq!(
+            sched.split_at_next_boundary(p, WeightedTimestamp::from_millis(5500)),
+            None
+        );
+        // Window 6 is the final epoch: the children land at the next boundary.
+        assert_eq!(
+            sched.split_at_next_boundary(p, WeightedTimestamp::from_millis(6500)),
+            Some((left, right))
+        );
+        // The sibling keeps its leaf across the same boundary.
+        assert_eq!(
+            sched.split_at_next_boundary(sibling, WeightedTimestamp::from_millis(6500)),
+            None
+        );
+        // Window 7: p no longer exists, and the window beyond is unknown.
+        assert_eq!(
+            sched.split_at_next_boundary(p, WeightedTimestamp::from_millis(7500)),
+            None
+        );
     }
 }

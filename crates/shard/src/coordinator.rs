@@ -1255,6 +1255,13 @@ impl ShardCoordinator {
             &missed,
         );
 
+        // The final-epoch headers of a splitting shard carry the root
+        // node's child hashes; the window predicate keys on the same
+        // schedule entry as the committee.
+        let carry_split_child_roots = topology
+            .split_at_next_boundary(self.local_shard, parent_qc.weighted_timestamp())
+            .is_some();
+
         let plan = assemble_build_action(
             self.me,
             self.local_shard,
@@ -1268,6 +1275,7 @@ impl ShardCoordinator {
             preview.root,
             preview.leaf_count,
             preview.base,
+            carry_split_child_roots,
         );
 
         info!(
@@ -1987,6 +1995,12 @@ impl ShardCoordinator {
                 InFlightCheck::Abort => return vec![],
             };
 
+            let split_child_roots_required = topology
+                .split_at_next_boundary(
+                    self.local_shard,
+                    block.header().parent_qc().weighted_timestamp(),
+                )
+                .is_some();
             let verification_actions = self.verification.initiate_block_verifications(
                 committee,
                 self.local_shard,
@@ -2001,6 +2015,7 @@ impl ShardCoordinator {
                     committed_height: self.committed_height,
                     deltas: &self.pending_substate_deltas,
                 },
+                split_child_roots_required,
             );
 
             // Wait for initiated verifications, or exit early when we're
@@ -4807,6 +4822,7 @@ mod tests {
             BeaconWitnessRoot::ZERO,
             BeaconWitnessLeafCount::ZERO,
             BeaconWitnessLeafCount::ZERO,
+            None,
         );
         Block::Live {
             header,
@@ -4918,6 +4934,7 @@ mod tests {
                 BeaconWitnessRoot::ZERO,
                 BeaconWitnessLeafCount::ZERO,
                 BeaconWitnessLeafCount::ZERO,
+                None,
             );
             Block::Live {
                 header,
@@ -4974,6 +4991,7 @@ mod tests {
             BeaconWitnessRoot::ZERO,
             BeaconWitnessLeafCount::ZERO,
             BeaconWitnessLeafCount::ZERO,
+            None,
         )
     }
 
@@ -5044,6 +5062,7 @@ mod tests {
                 BeaconWitnessRoot::ZERO,
                 BeaconWitnessLeafCount::ZERO,
                 BeaconWitnessLeafCount::ZERO,
+                None,
             )
         };
 
@@ -5109,6 +5128,7 @@ mod tests {
             BeaconWitnessRoot::ZERO,
             BeaconWitnessLeafCount::ZERO,
             BeaconWitnessLeafCount::ZERO,
+            None,
         );
 
         let actions = state.on_block_header(
@@ -5156,6 +5176,7 @@ mod tests {
             BeaconWitnessRoot::ZERO,
             BeaconWitnessLeafCount::ZERO,
             BeaconWitnessLeafCount::ZERO,
+            None,
         );
         Block::Live {
             header,
@@ -5304,6 +5325,7 @@ mod tests {
                 BeaconWitnessRoot::ZERO,
                 BeaconWitnessLeafCount::ZERO,
                 BeaconWitnessLeafCount::ZERO,
+                None,
             );
             let _ = state.on_block_header(
                 &topology,
@@ -5356,6 +5378,7 @@ mod tests {
                 BeaconWitnessRoot::ZERO,
                 BeaconWitnessLeafCount::ZERO,
                 BeaconWitnessLeafCount::ZERO,
+                None,
             )
         };
 
@@ -5433,6 +5456,7 @@ mod tests {
                 BeaconWitnessRoot::ZERO,
                 BeaconWitnessLeafCount::ZERO,
                 BeaconWitnessLeafCount::ZERO,
+                None,
             )
         };
 
@@ -5521,6 +5545,7 @@ mod tests {
                 BeaconWitnessRoot::ZERO,
                 BeaconWitnessLeafCount::ZERO,
                 BeaconWitnessLeafCount::ZERO,
+                None,
             )
         };
 
@@ -5593,6 +5618,7 @@ mod tests {
                 BeaconWitnessRoot::ZERO,
                 BeaconWitnessLeafCount::ZERO,
                 BeaconWitnessLeafCount::ZERO,
+                None,
             )
         };
         let block_hash = header.hash();
@@ -5678,6 +5704,7 @@ mod tests {
                 BeaconWitnessRoot::ZERO,
                 BeaconWitnessLeafCount::ZERO,
                 BeaconWitnessLeafCount::ZERO,
+                None,
             )
         };
         let block_hash = header.hash();
@@ -5782,6 +5809,7 @@ mod tests {
                 BeaconWitnessRoot::ZERO,
                 BeaconWitnessLeafCount::ZERO,
                 BeaconWitnessLeafCount::ZERO,
+                None,
             )
         };
         let block_hash = header.hash();
@@ -5834,6 +5862,7 @@ mod tests {
                 BeaconWitnessRoot::ZERO,
                 BeaconWitnessLeafCount::ZERO,
                 BeaconWitnessLeafCount::ZERO,
+                None,
             )
         };
         let actions = state.on_block_header(
@@ -6244,6 +6273,7 @@ mod tests {
                 BeaconWitnessRoot::ZERO,
                 BeaconWitnessLeafCount::ZERO,
                 BeaconWitnessLeafCount::ZERO,
+                None,
             )
         };
 
@@ -6514,6 +6544,7 @@ mod tests {
                 BeaconWitnessRoot::ZERO,
                 BeaconWitnessLeafCount::ZERO,
                 BeaconWitnessLeafCount::ZERO,
+                None,
             )
         };
         let actions1 = state.on_block_header(
@@ -6560,6 +6591,7 @@ mod tests {
                 BeaconWitnessRoot::ZERO,
                 BeaconWitnessLeafCount::ZERO,
                 BeaconWitnessLeafCount::ZERO,
+                None,
             )
         };
         let actions2 = state.on_block_header(
@@ -6658,6 +6690,7 @@ mod tests {
                 BeaconWitnessRoot::ZERO,
                 BeaconWitnessLeafCount::ZERO,
                 BeaconWitnessLeafCount::ZERO,
+                None,
             )
         };
 
@@ -7251,6 +7284,7 @@ mod tests {
                     BeaconWitnessRoot::ZERO,
                     BeaconWitnessLeafCount::ZERO,
                     BeaconWitnessLeafCount::ZERO,
+                    None,
                 )
             },
             transactions: Arc::new(BoundedVec::new()),
@@ -7321,6 +7355,7 @@ mod tests {
                     BeaconWitnessRoot::ZERO,
                     BeaconWitnessLeafCount::ZERO,
                     BeaconWitnessLeafCount::ZERO,
+                    None,
                 )
             },
             transactions: Arc::new(BoundedVec::new()),
@@ -7367,6 +7402,7 @@ mod tests {
                     BeaconWitnessRoot::ZERO,
                     BeaconWitnessLeafCount::ZERO,
                     BeaconWitnessLeafCount::ZERO,
+                    None,
                 )
             },
             transactions: Arc::new(BoundedVec::new()),
@@ -7562,6 +7598,7 @@ mod tests {
                     BeaconWitnessRoot::ZERO,
                     BeaconWitnessLeafCount::ZERO,
                     BeaconWitnessLeafCount::ZERO,
+                    None,
                 )
             },
             transactions: Arc::new(vec![tx1.clone()].into()),
@@ -7597,6 +7634,7 @@ mod tests {
                     BeaconWitnessRoot::ZERO,
                     BeaconWitnessLeafCount::ZERO,
                     BeaconWitnessLeafCount::ZERO,
+                    None,
                 )
             },
             transactions: Arc::new(txs.into()),
@@ -7644,6 +7682,7 @@ mod tests {
                     BeaconWitnessRoot::ZERO,
                     BeaconWitnessLeafCount::ZERO,
                     BeaconWitnessLeafCount::ZERO,
+                    None,
                 )
             },
             transactions: Arc::new(vec![tx1.clone()].into()),
@@ -7677,6 +7716,7 @@ mod tests {
                     BeaconWitnessRoot::ZERO,
                     BeaconWitnessLeafCount::ZERO,
                     BeaconWitnessLeafCount::ZERO,
+                    None,
                 )
             },
             transactions: Arc::new(vec![tx1].into()),

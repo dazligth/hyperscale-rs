@@ -14,9 +14,9 @@ use hyperscale_types::{
     PcVoteEquivocation, ProposerTimestamp, ProvisionHash, ProvisionTxRootsMap, Provisions,
     ProvisionsRoot, QuorumCertificate, ReadySignal, ReshapeThresholds, ReshapeTrigger, Round,
     RoutableTransaction, ShardId, SharedCertificates, SharedTransactions, SkipRequest,
-    SpcEmptyViewMsg, SpcHighTriple, SpcNewCommitMsg, SpcProposalObject, SpcView, StateRoot,
-    SubstateEntry, Timeout, TopologySnapshot, TransactionRoot, TransactionStatus, TxHash,
-    TxOutcome, ValidatorId, Verifiable, Verified, VoteCount, WaveId, WeightedTimestamp,
+    SpcEmptyViewMsg, SpcHighTriple, SpcNewCommitMsg, SpcProposalObject, SpcView, SplitChildRoots,
+    StateRoot, SubstateEntry, Timeout, TopologySnapshot, TransactionRoot, TransactionStatus,
+    TxHash, TxOutcome, ValidatorId, Verifiable, Verified, VoteCount, WaveId, WeightedTimestamp,
 };
 
 use crate::{CommitSource, FetchAbandon, FetchRequest, ProtocolEvent, TimerId};
@@ -525,6 +525,13 @@ pub enum Action {
         finalized_waves: Vec<Arc<Verifiable<FinalizedWave>>>,
         /// Block height being verified.
         block_height: BlockHeight,
+        /// The header's `split_child_roots` claim, verified beside the
+        /// state root.
+        claimed_split_child_roots: Option<SplitChildRoots>,
+        /// Whether the block's window requires the claim (the shard's
+        /// final epoch before a split), resolved by the coordinator from
+        /// the schedule.
+        split_child_roots_required: bool,
     },
 
     /// Verify a block's beacon-witness root + leaf count.
@@ -717,6 +724,12 @@ pub enum Action {
         /// coordinator from the same schedule entry as the block's
         /// committee. Stamped verbatim into the header.
         beacon_witness_base: BeaconWitnessLeafCount,
+        /// Whether the block's window is the shard's final epoch before
+        /// a split, resolved by the coordinator from the schedule. When
+        /// set, the handler extracts the root node's two child hashes
+        /// from the JMT computation and stamps them into the header as
+        /// `split_child_roots`.
+        carry_split_child_roots: bool,
     },
 
     /// Execute every transaction in a single-shard wave.

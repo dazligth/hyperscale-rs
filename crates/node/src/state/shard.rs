@@ -535,6 +535,7 @@ mod tests {
                 BeaconWitnessRoot::ZERO,
                 BeaconWitnessLeafCount::ZERO,
                 BeaconWitnessLeafCount::ZERO,
+                None,
             );
         }
         let certified_header =

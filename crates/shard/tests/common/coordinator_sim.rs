@@ -707,6 +707,8 @@ impl ShardCoordinatorSim {
                 expected_local_receipt_root: ready.expected_local_receipt_root,
                 finalized_waves: ready.finalized_waves,
                 block_height: ready.block_height,
+                claimed_split_child_roots: ready.claimed_split_child_roots,
+                split_child_roots_required: ready.split_child_roots_required,
             });
         }
         if self.coordinators[to_idx].take_ready_proposal() {
@@ -993,6 +995,7 @@ impl ShardCoordinatorSim {
                 beacon_witness_root,
                 beacon_witness_leaf_count,
                 beacon_witness_base,
+                carry_split_child_roots,
             } => {
                 let view = self.pending_chains[emitter_idx]
                     .view_at(parent_block_hash, parent_block_height);
@@ -1020,6 +1023,7 @@ impl ShardCoordinatorSim {
                     beacon_witness_root,
                     beacon_witness_leaf_count,
                     beacon_witness_base,
+                    carry_split_child_roots,
                     &pending_snapshots,
                 );
                 let block_hash = result.block_hash;
@@ -1215,6 +1219,8 @@ impl ShardCoordinatorSim {
                 expected_local_receipt_root,
                 finalized_waves,
                 block_height,
+                claimed_split_child_roots,
+                split_child_roots_required,
             } => {
                 // Mirrors the production handler: receipt-root
                 // pre-flight first, then JMT prep on success.
@@ -1250,6 +1256,8 @@ impl ShardCoordinatorSim {
                 );
                 let verify_result = expected_root.verify(&StateRootContext {
                     computed_root: &computed_root,
+                    claimed_split_child_roots,
+                    split_child_roots_required,
                 });
                 let substate_delta = jmt_snapshot.leaf_delta;
                 if verify_result.is_ok() {
@@ -1391,5 +1399,6 @@ fn perturb_header_timestamp(h: &BlockHeader) -> BlockHeader {
         h.beacon_witness_root(),
         h.beacon_witness_leaf_count(),
         h.beacon_witness_base(),
+        h.split_child_roots(),
     )
 }

@@ -184,6 +184,7 @@ mod tests {
             beacon_witness_root,
             beacon_witness_leaf_count,
             BeaconWitnessLeafCount::ZERO,
+            None,
         )
     }
 

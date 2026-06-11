@@ -75,6 +75,7 @@ mod tests {
             BeaconWitnessRoot::ZERO,
             BeaconWitnessLeafCount::ZERO,
             BeaconWitnessLeafCount::ZERO,
+            None,
         );
 
         let hash1 = header.hash();
@@ -254,6 +255,7 @@ mod tests {
                 header.beacon_witness_root(),
                 header.beacon_witness_leaf_count(),
                 header.beacon_witness_base(),
+                None,
             );
         }
         let genesis_qc = QuorumCertificate::genesis(ShardId::leaf(1, 0), ChainOrigin::ROOT);

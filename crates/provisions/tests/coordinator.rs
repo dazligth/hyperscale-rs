@@ -49,6 +49,7 @@ fn make_block(height: BlockHeight) -> CertifiedBlock {
         BeaconWitnessRoot::ZERO,
         BeaconWitnessLeafCount::ZERO,
         BeaconWitnessLeafCount::ZERO,
+        None,
     );
     let block = Block::Live {
         header,
@@ -105,6 +106,7 @@ fn make_remote_header_targeting(
         BeaconWitnessRoot::ZERO,
         BeaconWitnessLeafCount::ZERO,
         BeaconWitnessLeafCount::ZERO,
+        None,
     );
     let header_hash = header.hash();
     let qc = QuorumCertificate::new(

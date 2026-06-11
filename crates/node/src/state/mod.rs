@@ -372,6 +372,8 @@ impl StateMachine for NodeStateMachine {
                 expected_local_receipt_root: ready.expected_local_receipt_root,
                 finalized_waves: ready.finalized_waves,
                 block_height: ready.block_height,
+                claimed_split_child_roots: ready.claimed_split_child_roots,
+                split_child_roots_required: ready.split_child_roots_required,
             });
         }
 

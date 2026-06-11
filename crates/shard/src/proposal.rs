@@ -316,6 +316,7 @@ pub fn assemble_build_action(
     beacon_witness_root: BeaconWitnessRoot,
     beacon_witness_leaf_count: BeaconWitnessLeafCount,
     beacon_witness_base: BeaconWitnessLeafCount,
+    carry_split_child_roots: bool,
 ) -> BuildActionPlan {
     let (parent_block_hash, parent_qc) = chain.proposal_parent();
     let parent_block_height = parent_qc.height();
@@ -394,6 +395,7 @@ pub fn assemble_build_action(
         beacon_witness_root,
         beacon_witness_leaf_count,
         beacon_witness_base,
+        carry_split_child_roots,
     };
 
     BuildActionPlan {

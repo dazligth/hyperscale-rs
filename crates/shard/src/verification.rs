@@ -15,8 +15,9 @@ use hyperscale_core::Action;
 use hyperscale_types::{
     BeaconWitnessRoot, Block, BlockHash, BlockHeader, BlockHeight, BlockManifest, CertificateRoot,
     CertifiedBlock, ChainOrigin, FinalizedWave, InFlightCount, LinkageError, LocalReceiptRoot,
-    ProvisionTxRootsMap, ProvisionsRoot, QuorumCertificate, ReshapeThresholds, ShardId, StateRoot,
-    TopologySnapshot, TransactionRoot, Verifiable, Verified, VerifiedBlockAssembleError,
+    ProvisionTxRootsMap, ProvisionsRoot, QuorumCertificate, ReshapeThresholds, ShardId,
+    SplitChildRoots, StateRoot, TopologySnapshot, TransactionRoot, Verifiable, Verified,
+    VerifiedBlockAssembleError,
 };
 use thiserror::Error;
 use tracing::{debug, trace, warn};
@@ -105,6 +106,12 @@ pub struct ReadyStateRootVerification {
     pub finalized_waves: Vec<Arc<Verifiable<FinalizedWave>>>,
     /// Height of the block being verified.
     pub block_height: BlockHeight,
+    /// The header's `split_child_roots` claim, verified beside the
+    /// state root.
+    pub claimed_split_child_roots: Option<SplitChildRoots>,
+    /// Whether the block's window requires the claim (the shard's final
+    /// epoch before a split).
+    pub split_child_roots_required: bool,
 }
 
 /// Classification of the in-flight check outcome for the vote path.
@@ -129,6 +136,8 @@ pub struct PendingStateRootVerification {
     pub expected_root: StateRoot,
     pub expected_local_receipt_root: LocalReceiptRoot,
     pub block_height: BlockHeight,
+    pub claimed_split_child_roots: Option<SplitChildRoots>,
+    pub split_child_roots_required: bool,
 }
 
 /// Why [`VerificationPipeline::try_complete_assembly`] rejected the
@@ -945,6 +954,7 @@ impl VerificationPipeline {
         block_hash: BlockHash,
         block: &Block,
         parent_block_height: BlockHeight,
+        split_child_roots_required: bool,
     ) {
         let parent_block_hash = block.header().parent_block_hash();
         let ready = PendingStateRootVerification {
@@ -954,6 +964,8 @@ impl VerificationPipeline {
             expected_root: block.header().state_root(),
             expected_local_receipt_root: block.header().local_receipt_root(),
             block_height: block.height(),
+            claimed_split_child_roots: block.header().split_child_roots(),
+            split_child_roots_required,
         };
 
         // The parent's tree nodes must be available — either committed to
@@ -1414,13 +1426,19 @@ impl VerificationPipeline {
         block_hash: BlockHash,
         block: &Block,
         count_source: SubstateCountSource<'_>,
+        split_child_roots_required: bool,
     ) -> Vec<Action> {
         let mut actions = Vec::new();
         let h = block.header();
 
         if self.needs_state_root_verification(block) {
             let parent_block_height = h.parent_qc().height();
-            self.initiate_state_root_verification(block_hash, block, parent_block_height);
+            self.initiate_state_root_verification(
+                block_hash,
+                block,
+                parent_block_height,
+                split_child_roots_required,
+            );
         }
 
         if self.needs_root(
@@ -1613,6 +1631,8 @@ impl VerificationPipeline {
                     expected_local_receipt_root: pending.expected_local_receipt_root,
                     finalized_waves,
                     block_height: pending.block_height,
+                    claimed_split_child_roots: pending.claimed_split_child_roots,
+                    split_child_roots_required: pending.split_child_roots_required,
                 })
             })
             .collect()
@@ -1894,6 +1914,7 @@ mod tests {
             BeaconWitnessRoot::ZERO,
             BeaconWitnessLeafCount::ZERO,
             BeaconWitnessLeafCount::ZERO,
+            None,
         )
     }
 
@@ -1923,6 +1944,7 @@ mod tests {
             BeaconWitnessRoot::ZERO,
             BeaconWitnessLeafCount::ZERO,
             BeaconWitnessLeafCount::ZERO,
+            None,
         )
     }
 
@@ -2053,7 +2075,7 @@ mod tests {
         let block = block_with(BlockHeight::new(1), parent_block_hash, 0, vec![]);
         let block_hash = block.hash();
 
-        vp.initiate_state_root_verification(block_hash, &block, BlockHeight::GENESIS);
+        vp.initiate_state_root_verification(block_hash, &block, BlockHeight::GENESIS, false);
 
         let mut pb = PendingBlock::from_complete_block(
             &block,
@@ -2096,7 +2118,7 @@ mod tests {
         let block = block_with(BlockHeight::new(1), parent_block_hash, 0, vec![]);
         let block_hash = block.hash();
 
-        vp.initiate_state_root_verification(block_hash, &block, BlockHeight::GENESIS);
+        vp.initiate_state_root_verification(block_hash, &block, BlockHeight::GENESIS, false);
 
         let empty_pending = PendingBlocks::new();
         let chain = chain_view(BlockHeight::GENESIS, BlockHash::ZERO, None, &empty_pending);
@@ -2362,6 +2384,7 @@ mod tests {
             BeaconWitnessRoot::ZERO,
             BeaconWitnessLeafCount::ZERO,
             BeaconWitnessLeafCount::ZERO,
+            None,
         );
         let block = Block::Live {
             header: forged_header,
