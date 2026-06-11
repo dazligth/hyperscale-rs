@@ -470,6 +470,74 @@ mod tests {
         assert_eq!(a.boundaries, b.boundaries);
     }
 
+    /// The fold surfaces cohort-seat changes through `SlotEffects`:
+    /// the admission draw with its child assignments, the cancel
+    /// sweep's release, and silence at execution — consumed seats land
+    /// on their children through the committee transitions instead.
+    #[test]
+    fn slot_effects_surface_seat_draws_and_releases() {
+        use hyperscale_types::RESHAPE_TRIGGER_TTL_EPOCHS;
+
+        let p = ShardId::leaf(1, 0);
+        let split = ShardWitnessPayload::ScheduleSplit { shard: p };
+
+        // Admission: the draw surfaces with assignments.
+        let mut state = grow_state(4);
+        state.committee = (0u64..4).map(ValidatorId::new).collect();
+        let effects = apply_witness_chunk(&mut state, 0, vec![split.clone()]);
+        assert_eq!(effects.observers_drawn.len(), 4);
+        assert!(
+            effects
+                .observers_drawn
+                .iter()
+                .all(|seat| seat.shard == p && seat.child.parent() == Some(p)),
+        );
+        assert!(effects.observers_released.is_empty());
+        let drawn: BTreeSet<ValidatorId> = effects
+            .observers_drawn
+            .iter()
+            .map(|seat| seat.validator)
+            .collect();
+
+        // The trigger goes quiet; the staleness cancel releases every
+        // seat, once.
+        let mut released = Vec::new();
+        for _ in 0..RESHAPE_TRIGGER_TTL_EPOCHS {
+            let effects = apply_next_epoch(&mut state, &[]);
+            assert!(effects.observers_drawn.is_empty());
+            released.extend(effects.observers_released);
+        }
+        assert!(state.pending_reshapes.is_empty());
+        assert_eq!(
+            released
+                .iter()
+                .map(|seat| seat.validator)
+                .collect::<BTreeSet<_>>(),
+            drawn,
+        );
+        assert!(released.iter().all(|seat| seat.shard == p));
+
+        // Execution: seats are consumed, not released — the epoch's
+        // committee transitions carry the children instead.
+        let mut state = grow_state(4);
+        state.committee = (0u64..4).map(ValidatorId::new).collect();
+        apply_witness_chunk(&mut state, 0, vec![split]);
+        let observers: Vec<ValidatorId> = cohort_of(&state, p).keys().copied().collect();
+        let effects = apply_witness_chunk(
+            &mut state,
+            0,
+            observers
+                .iter()
+                .map(|v| ShardWitnessPayload::ReshapeReady { validator: *v })
+                .collect(),
+        );
+        assert!(state.pending_reshapes.is_empty(), "the gate must fire");
+        assert!(effects.observers_released.is_empty());
+        let (left, right) = p.children();
+        assert!(effects.shard_committee_transitions.contains_key(&left));
+        assert!(effects.shard_committee_transitions.contains_key(&right));
+    }
+
     /// The plan's Phase 2a exit criterion, through the full pipeline:
     /// after the fold that meets the gate, the epoch in flight still
     /// resolves routing against the parent while the lookahead resolves

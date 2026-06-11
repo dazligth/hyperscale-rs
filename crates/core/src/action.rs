@@ -40,6 +40,33 @@ pub struct CrossShardExecutionRequest {
     pub ownership: HashMap<NodeId, NodeId>,
 }
 
+/// A change to the local vnode's reshape-observer duty, carried on
+/// [`ParticipationChange::observe`].
+///
+/// An observer rides the splitting shard's committee for transport but
+/// never its consensus subset; its physical work is a child-rooted
+/// store synced over the child's key span, served by the splitting
+/// shard's committee.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObserveDelta {
+    /// Drawn into the cohort of `via`'s pending split: open a store
+    /// rooted at `child`'s prefix and sync the child's span.
+    Begin {
+        /// The splitting shard whose committee carries the seat.
+        via: ShardId,
+        /// The pending child the observer syncs.
+        child: ShardId,
+    },
+    /// The seat was released without executing — the trigger went
+    /// quiet or the readiness TTL elapsed: abandon the observation.
+    Abandon {
+        /// The splitting shard whose committee carried the seat.
+        via: ShardId,
+        /// The pending child the observer was syncing.
+        child: ShardId,
+    },
+}
+
 /// A beacon-driven change to one vnode's physical shard participation,
 /// detected on the lookahead committees one epoch before it takes
 /// effect.
@@ -57,11 +84,18 @@ pub struct ParticipationChange {
     /// Shard the validator is placed on at `effective_epoch` but not in
     /// the active window. A validator sits on at most one shard
     /// (`ValidatorStatus::OnShard` is singular), so a placement change
-    /// is at most one join plus one leave; at least one side is `Some`.
+    /// is at most one join plus one leave; at least one of `join`,
+    /// `leave`, and `observe` is `Some`. An observer seat never reads
+    /// as a placement — a cohort draw surfaces only through `observe`.
     pub join: Option<ShardId>,
     /// Shard the validator is on in the active window but not at
     /// `effective_epoch`.
     pub leave: Option<ShardId>,
+    /// Observer-duty delta. `Begin` accompanies no join (observers are
+    /// drawn from the pool); `Abandon` can accompany a `join` of the
+    /// same shard, when a pool draw immediately re-places the released
+    /// observer there as a regular member.
+    pub observe: Option<ObserveDelta>,
     /// Epoch whose window activates the new placement.
     pub effective_epoch: Epoch,
 }

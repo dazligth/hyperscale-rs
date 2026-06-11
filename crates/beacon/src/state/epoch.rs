@@ -7,8 +7,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use hyperscale_types::{
     BeaconCert, BeaconProposal, BeaconState, BeaconWitnessLeafCount, CertifiedBeaconBlock, Epoch,
-    NetworkDefinition, ShardBoundary, ShardEpochContribution, ShardId, SlotEffects,
-    TransitionCause, ValidatorId,
+    NetworkDefinition, ObserverSeat, PendingReshape, ShardBoundary, ShardEpochContribution,
+    ShardId, SlotEffects, TransitionCause, ValidatorId, ValidatorStatus,
 };
 
 use crate::rules::{canonical_boundary_qcs, chunk_bounds, is_boundary_crossing};
@@ -129,6 +129,10 @@ pub fn apply_epoch(
         .iter()
         .map(|(s, c)| (*s, c.members.clone()))
         .collect();
+    // Snapshot the observer seats under the same discipline: the
+    // end-of-epoch diff surfaces draws and releases through
+    // `SlotEffects.observers_drawn` / `observers_released`.
+    let pre_seats = cohort_seats(state);
 
     let (committed, transition_cause): (&[_], TransitionCause) = match input {
         ApplyEpochInput::Normal { committed, .. } => (committed, TransitionCause::NaturalShuffle),
@@ -181,6 +185,7 @@ pub fn apply_epoch(
     readied.extend(timeout_readied);
 
     let shard_committee_transitions = diff_shard_committees(state, &pre_shard_members);
+    let (observers_drawn, observers_released) = diff_observer_seats(state, &pre_seats);
 
     SlotEffects {
         registered: witness.registered,
@@ -194,7 +199,65 @@ pub fn apply_epoch(
         shard_committee_transitions,
         committee_changed: true,
         beacon_committee_transition: Some(beacon_committee_transition),
+        observers_drawn,
+        observers_released,
     }
+}
+
+/// Every pending split's cohort seats, keyed `(validator, splitting
+/// shard) → assigned child`.
+fn cohort_seats(state: &BeaconState) -> BTreeMap<(ValidatorId, ShardId), ShardId> {
+    state
+        .pending_reshapes
+        .iter()
+        .filter_map(|(target, reshape)| match reshape {
+            PendingReshape::Split { cohort, .. } => Some((*target, cohort)),
+            PendingReshape::Merge { .. } => None,
+        })
+        .flat_map(|(target, cohort)| {
+            cohort
+                .iter()
+                .map(move |(validator, seat)| ((*validator, target), seat.child))
+        })
+        .collect()
+}
+
+/// Diff the observer seats against the epoch-start snapshot.
+///
+/// New seats surface as draws. Vanished seats surface as releases —
+/// except those a split consumed, whose holder now sits `OnShard` on
+/// the very child the seat named; their transition surfaces through
+/// the committee diff instead.
+fn diff_observer_seats(
+    state: &BeaconState,
+    pre_seats: &BTreeMap<(ValidatorId, ShardId), ShardId>,
+) -> (Vec<ObserverSeat>, Vec<ObserverSeat>) {
+    let post_seats = cohort_seats(state);
+    let drawn = post_seats
+        .iter()
+        .filter(|(key, _)| !pre_seats.contains_key(key))
+        .map(|((validator, shard), child)| ObserverSeat {
+            validator: *validator,
+            shard: *shard,
+            child: *child,
+        })
+        .collect();
+    let released = pre_seats
+        .iter()
+        .filter(|(key, _)| !post_seats.contains_key(key))
+        .filter(|((validator, _), child)| {
+            !matches!(
+                state.validators.get(validator).map(|r| r.status),
+                Some(ValidatorStatus::OnShard { shard, .. }) if shard == **child
+            )
+        })
+        .map(|((validator, shard), child)| ObserverSeat {
+            validator: *validator,
+            shard: *shard,
+            child: *child,
+        })
+        .collect();
+    (drawn, released)
 }
 
 /// Record each shard's epoch boundary from the committed contributions and

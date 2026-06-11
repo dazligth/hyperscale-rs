@@ -21,7 +21,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use hyperscale_core::{Action, FetchAbandon, FetchRequest, ParticipationChange, TimerId};
+use hyperscale_core::{
+    Action, FetchAbandon, FetchRequest, ObserveDelta, ParticipationChange, TimerId,
+};
 use hyperscale_types::{
     BeaconBlock, BeaconBlockHash, BeaconCert, BeaconProposal, BeaconProposalVerifyContext,
     BeaconState, BlockHash, BlockHeight, Bls12381G1PublicKey, CertifiedBeaconBlock,
@@ -30,7 +32,7 @@ use hyperscale_types::{
     NetworkDefinition, PcValueElement, PcVector, PcVote1, PcVote1VerifyError, PcVote2,
     PcVote2VerifyError, PcVote3, PcVote3VerifyError, PcVoteEquivocation, PcVoteEquivocationContext,
     RETENTION_HORIZON, SKIP_TIMEOUT, SPC_INPUT_DWELL, ShardCommittee, ShardId, ShardWitness,
-    SkipEpochCert, SkipRequest, SkipRequestVerifyError, SpcCert, SpcEmptyViewMsg,
+    SkipEpochCert, SkipRequest, SkipRequestVerifyError, SlotEffects, SpcCert, SpcEmptyViewMsg,
     SpcEmptyViewMsgVerifyError, SpcNewCommitMsg, SpcNewCommitMsgVerifyError, SpcProposalObject,
     SpcProposalObjectVerifyError, SpcView, TopologySchedule, TopologySnapshot, ValidatorId,
     ValidatorStatus, Verifiable, Verified, Verify, WeightedTimestamp, byzantine_threshold,
@@ -1415,7 +1417,7 @@ impl BeaconCoordinator {
         let prior_tip = self.latest_block.block_hash();
         let was_on_committee = self.is_on_committee();
         let input = apply_input_for(&block);
-        apply_epoch(&mut self.state, &self.network, block.epoch(), input);
+        let effects = apply_epoch(&mut self.state, &self.network, block.epoch(), input);
         self.latest_block = Arc::clone(&block);
         self.spc.clear();
         self.skip_tracker.forget_anchor(prior_tip);
@@ -1510,7 +1512,7 @@ impl BeaconCoordinator {
         // into the active window and the two views agree again. Emitted
         // after `TopologyChanged` so the consumer reads a snapshot (and
         // snap-sync anchor) that already reflects this commit.
-        if let Some(change) = self.participation_delta() {
+        if let Some(change) = self.participation_delta(&effects) {
             actions.push(Action::ReconfigureParticipation(change));
         }
 
@@ -1554,31 +1556,67 @@ impl BeaconCoordinator {
 
     /// The local validator's placement delta between the active window
     /// (`shard_committees`) and the lookahead (`next_shard_committees`),
-    /// or `None` when the two agree. The lookahead is final for its
-    /// window — membership changes fold one epoch ahead — so a delta
-    /// here is the earliest, and only, detection point. A validator
-    /// sits on at most one shard per window (`ValidatorStatus::OnShard`
-    /// is singular and `members ⇔ status` is a fold invariant), so each
-    /// view yields at most one placement.
-    fn participation_delta(&self) -> Option<ParticipationChange> {
-        fn placement(
-            committees: &BTreeMap<ShardId, ShardCommittee>,
-            me: ValidatorId,
-        ) -> Option<ShardId> {
+    /// or `None` when the two agree and no observer seat changed hands.
+    /// The lookahead is final for its window — membership changes fold
+    /// one epoch ahead — so a delta here is the earliest, and only,
+    /// detection point. A validator sits on at most one shard per
+    /// window (`ValidatorStatus::OnShard` is singular and `members ⇔
+    /// status` is a fold invariant), so each view yields at most one
+    /// placement.
+    ///
+    /// Observer seats are transport-only committee presence, never a
+    /// member placement: membership held under an `Observing` status —
+    /// or under a seat this epoch's fold just released — is excluded
+    /// from both views, so a cohort draw surfaces as
+    /// [`ObserveDelta::Begin`] rather than a join, the grow itself is
+    /// silent, and a released seat surfaces as
+    /// [`ObserveDelta::Abandon`] with no spurious leave (plus a genuine
+    /// join when a pool draw immediately re-placed the released
+    /// observer as a regular member). A split's execution moves the
+    /// observer's lookahead membership onto its child, surfacing as the
+    /// ordinary join/leave pair.
+    fn participation_delta(&self, effects: &SlotEffects) -> Option<ParticipationChange> {
+        let me = self.me;
+        let placement = |committees: &BTreeMap<ShardId, ShardCommittee>| -> Option<ShardId> {
             committees
                 .iter()
                 .find(|(_, committee)| committee.members.contains(&me))
                 .map(|(shard, _)| *shard)
-        }
-        let current = placement(&self.state.shard_committees, self.me);
-        let next = placement(&self.state.next_shard_committees, self.me);
-        if current == next {
+                .filter(|shard| {
+                    !matches!(
+                        self.state.validators.get(&me).map(|r| r.status),
+                        Some(ValidatorStatus::Observing { shard: s, .. }) if s == *shard
+                    )
+                })
+        };
+        let drawn = effects.observers_drawn.iter().find(|s| s.validator == me);
+        let released = effects
+            .observers_released
+            .iter()
+            .find(|s| s.validator == me);
+        let current = placement(&self.state.shard_committees)
+            .filter(|shard| released.is_none_or(|seat| seat.shard != *shard));
+        let next = placement(&self.state.next_shard_committees);
+        let observe = drawn
+            .map(|seat| ObserveDelta::Begin {
+                via: seat.shard,
+                child: seat.child,
+            })
+            .or_else(|| {
+                released.map(|seat| ObserveDelta::Abandon {
+                    via: seat.shard,
+                    child: seat.child,
+                })
+            });
+        if current == next && observe.is_none() {
             return None;
         }
+        let moved = current != next;
         Some(ParticipationChange {
-            validator: self.me,
-            join: next,
-            leave: current,
+            validator: me,
+            join: next.filter(|_| moved),
+            leave: current.filter(|_| moved),
+            observe,
             effective_epoch: self.state.current_epoch.next(),
         })
     }
@@ -1939,13 +1977,14 @@ mod tests {
         BeaconWitnessLeafCount, BeaconWitnessRoot, BlockHeader, BlockHeight, Bls12381G1PrivateKey,
         Bls12381G1PublicKey, BoundedVec, CertificateRoot, CertifiedBlockHeader, Epoch,
         GenesisConfigHash, GenesisPool, GenesisValidator, Hash, InFlightCount, LeafIndex,
-        LocalReceiptRoot, MIN_BEACON_COMMITTEE_SIZE, MIN_STAKE_FLOOR, NetworkDefinition, PcVector,
-        ProposerTimestamp, ProvisionsRoot, QuorumCertificate, Randomness, Round, ShardBoundary,
-        ShardCommittee, ShardEpochContribution, ShardId, ShardWitness, ShardWitnessPayload,
-        ShardWitnessProof, SignerBitfield, SpcCert, SpcView, Stake, StakePoolId, StateRoot,
-        TransactionRoot, ValidatorId, VrfProof, WeightedTimestamp, bls_keypair_from_seed,
-        build_qc1, build_qc2, build_qc3, compute_merkle_root_with_proof, genesis_config_hash,
-        pc_context, sign_vote1, sign_vote2, sign_vote3, spc_context, zero_bls_signature,
+        LocalReceiptRoot, MIN_BEACON_COMMITTEE_SIZE, MIN_STAKE_FLOOR, NetworkDefinition,
+        ObserverSeat, PcVector, ProposerTimestamp, ProvisionsRoot, QuorumCertificate, Randomness,
+        Round, ShardBoundary, ShardCommittee, ShardEpochContribution, ShardId, ShardWitness,
+        ShardWitnessPayload, ShardWitnessProof, SignerBitfield, SpcCert, SpcView, Stake,
+        StakePoolId, StateRoot, TransactionRoot, ValidatorId, VrfProof, WeightedTimestamp,
+        bls_keypair_from_seed, build_qc1, build_qc2, build_qc3, compute_merkle_root_with_proof,
+        genesis_config_hash, pc_context, sign_vote1, sign_vote2, sign_vote3, spc_context,
+        zero_bls_signature,
     };
 
     use super::*;
@@ -4184,7 +4223,7 @@ mod tests {
     #[test]
     fn participation_delta_none_when_views_agree() {
         let coord = fresh_coord();
-        assert_eq!(coord.participation_delta(), None);
+        assert_eq!(coord.participation_delta(&SlotEffects::default()), None);
     }
 
     /// A lookahead that moves the local validator from shard 0 to
@@ -4206,7 +4245,7 @@ mod tests {
             .insert(to, ShardCommittee { members: vec![me] });
 
         let change = coord
-            .participation_delta()
+            .participation_delta(&SlotEffects::default())
             .expect("relocation produces a delta");
         assert_eq!(change.validator, me);
         assert_eq!(change.join, Some(to));
@@ -4216,7 +4255,7 @@ mod tests {
         // Promotion makes the views agree again — the delta is gone, so
         // the action fires at exactly one commit.
         coord.state.shard_committees = coord.state.next_shard_committees.clone();
-        assert_eq!(coord.participation_delta(), None);
+        assert_eq!(coord.participation_delta(&SlotEffects::default()), None);
     }
 
     /// Another validator's move is invisible to this coordinator — the
@@ -4238,6 +4277,149 @@ mod tests {
             },
         );
 
-        assert_eq!(coord.participation_delta(), None);
+        assert_eq!(coord.participation_delta(&SlotEffects::default()), None);
+    }
+
+    /// Drop `me` from a committee view's members.
+    fn remove_me(committees: &mut BTreeMap<ShardId, ShardCommittee>, me: ValidatorId) {
+        for committee in committees.values_mut() {
+            committee.members.retain(|&v| v != me);
+        }
+    }
+
+    fn seat(me: ValidatorId, via: ShardId, child: ShardId) -> ObserverSeat {
+        ObserverSeat {
+            validator: me,
+            shard: via,
+            child,
+        }
+    }
+
+    /// A cohort draw surfaces as `ObserveDelta::Begin`, never as a
+    /// member join — the observer's lookahead membership is
+    /// transport-only.
+    #[test]
+    fn participation_delta_reads_a_cohort_draw_as_observe_begin() {
+        let mut coord = fresh_coord();
+        let me = coord.me;
+        let via = ShardId::leaf(1, 0);
+        let (child, _) = via.children();
+
+        // Post-fold admission state: drawn from the pool into the
+        // lookahead committee under an Observing status.
+        remove_me(&mut coord.state.shard_committees, me);
+        remove_me(&mut coord.state.next_shard_committees, me);
+        coord
+            .state
+            .next_shard_committees
+            .get_mut(&via)
+            .unwrap()
+            .members
+            .push(me);
+        coord.state.validators.get_mut(&me).unwrap().status = ValidatorStatus::Observing {
+            shard: via,
+            placed_at_epoch: coord.state.current_epoch,
+        };
+        let mut effects = SlotEffects::default();
+        effects.observers_drawn.push(seat(me, via, child));
+
+        let change = coord
+            .participation_delta(&effects)
+            .expect("a draw produces a delta");
+        assert_eq!(change.join, None);
+        assert_eq!(change.leave, None);
+        assert_eq!(change.observe, Some(ObserveDelta::Begin { via, child }));
+        assert_eq!(change.effective_epoch, coord.state.current_epoch.next());
+
+        // The grow itself is silent: once promotion carries the
+        // observer into the active committee, neither view reads the
+        // seat as a placement.
+        coord
+            .state
+            .shard_committees
+            .get_mut(&via)
+            .unwrap()
+            .members
+            .push(me);
+        assert_eq!(coord.participation_delta(&SlotEffects::default()), None);
+    }
+
+    /// A released seat surfaces as `ObserveDelta::Abandon` with no
+    /// spurious leave — and with a genuine join when a pool draw
+    /// immediately re-placed the released observer as a regular member
+    /// of the same shard.
+    #[test]
+    fn participation_delta_reads_a_released_seat_as_abandon() {
+        let mut coord = fresh_coord();
+        let me = coord.me;
+        let via = ShardId::leaf(1, 0);
+        let (child, _) = via.children();
+
+        // Post-fold cancel state: back in the pool, out of the
+        // lookahead committee; the active window still carries the
+        // seat-kind membership.
+        remove_me(&mut coord.state.next_shard_committees, me);
+        coord.state.validators.get_mut(&me).unwrap().status = ValidatorStatus::Pooled;
+        let mut effects = SlotEffects::default();
+        effects.observers_released.push(seat(me, via, child));
+
+        let change = coord
+            .participation_delta(&effects)
+            .expect("a release produces a delta");
+        assert_eq!(change.join, None);
+        assert_eq!(change.leave, None);
+        assert_eq!(change.observe, Some(ObserveDelta::Abandon { via, child }));
+
+        // Same fold, but a pool draw re-placed the released observer on
+        // the same shard as a regular member: the join must fire even
+        // though both windows show membership of the same shard.
+        coord
+            .state
+            .next_shard_committees
+            .get_mut(&via)
+            .unwrap()
+            .members
+            .push(me);
+        coord.state.validators.get_mut(&me).unwrap().status = ValidatorStatus::OnShard {
+            shard: via,
+            ready: false,
+            placed_at_epoch: coord.state.current_epoch,
+        };
+        let change = coord
+            .participation_delta(&effects)
+            .expect("the redraw produces a delta");
+        assert_eq!(change.join, Some(via));
+        assert_eq!(change.leave, None);
+        assert_eq!(change.observe, Some(ObserveDelta::Abandon { via, child }));
+    }
+
+    /// A split's execution moves the observer's lookahead membership
+    /// onto its child — the ordinary join/leave pair, no observe delta.
+    #[test]
+    fn participation_delta_reads_execution_as_the_member_flip() {
+        let mut coord = fresh_coord();
+        let me = coord.me;
+        let via = ShardId::leaf(1, 0);
+        let (child, _) = via.children();
+
+        // Post-execution state: the lookahead replaced the parent with
+        // its children; the observer landed on its child as a member.
+        coord.state.next_shard_committees.remove(&via);
+        coord
+            .state
+            .next_shard_committees
+            .insert(child, ShardCommittee { members: vec![me] });
+        coord.state.validators.get_mut(&me).unwrap().status = ValidatorStatus::OnShard {
+            shard: child,
+            ready: true,
+            placed_at_epoch: coord.state.current_epoch,
+        };
+
+        let change = coord
+            .participation_delta(&SlotEffects::default())
+            .expect("execution produces the flip");
+        assert_eq!(change.join, Some(child));
+        assert_eq!(change.leave, Some(via));
+        assert_eq!(change.observe, None);
     }
 }

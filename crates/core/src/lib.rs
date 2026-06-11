@@ -40,7 +40,8 @@ mod timer;
 mod traits;
 
 pub use action::{
-    Action, ActionOwner, CrossShardExecutionRequest, ParticipationChange, ProvisionsRequest,
+    Action, ActionOwner, CrossShardExecutionRequest, ObserveDelta, ParticipationChange,
+    ProvisionsRequest,
 };
 pub use action_context::{ActionContext, PreparedBlock};
 pub use fetch_abandon::FetchAbandon;

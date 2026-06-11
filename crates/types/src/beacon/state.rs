@@ -444,6 +444,19 @@ pub struct CommitteeTransition {
     pub at_slot: Epoch,
 }
 
+/// One observer seat of a pending split, as surfaced in
+/// [`SlotEffects`]: who holds it, the splitting shard whose committee
+/// carries it, and the assigned pending child.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BasicSbor)]
+pub struct ObserverSeat {
+    /// Validator holding the seat.
+    pub validator: ValidatorId,
+    /// The splitting shard.
+    pub shard: ShardId,
+    /// The pending child the observer syncs.
+    pub child: ShardId,
+}
+
 /// Effects of applying one epoch, returned by `apply_epoch`.
 ///
 /// Surfaced for observability, runner-side wiring (committee handover
@@ -489,6 +502,13 @@ pub struct SlotEffects {
     /// integer-division remainder. Empty when no pool had a ready
     /// `OnShard` validator (whole epoch's share burned).
     pub rewards_credited: BTreeMap<StakePoolId, Stake>,
+    /// Observer seats drawn into pending splits' cohorts this epoch.
+    pub observers_drawn: Vec<ObserverSeat>,
+    /// Observer seats that left their cohort this epoch without
+    /// executing — the staleness cancel, the readiness TTL, jail, or
+    /// deactivation. Seats a split consumed land on their child and
+    /// surface through the committee transitions instead.
+    pub observers_released: Vec<ObserverSeat>,
 }
 
 // ─── derived queries ────────────────────────────────────────────────────────
