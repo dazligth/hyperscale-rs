@@ -239,6 +239,13 @@ pub struct ShardBoundary {
     /// shard. Reset to `0` on a refresh; carried forward (not reset) on a
     /// `Skip` epoch.
     pub consecutive_misses: u32,
+    /// The shard's final epoch, set when a split's execution schedules
+    /// its chain to terminate at that epoch's cut. A terminal record
+    /// stops bumping misses, keeps being sourced so the fold can consume
+    /// the terminal contribution (which seeds the children) and drain
+    /// the witness backlog, and drops once both have happened. `None`
+    /// for a live shard.
+    pub terminal_epoch: Option<Epoch>,
 }
 
 /// One observer drawn into a pending split's cohort.
@@ -1257,6 +1264,7 @@ mod tests {
                 witness_leaf_count: BeaconWitnessLeafCount::ZERO,
                 last_live_epoch: Epoch::GENESIS,
                 consecutive_misses: 0,
+                terminal_epoch: None,
             })
             .witness_leaf_count = BeaconWitnessLeafCount::new(7);
 

@@ -16,7 +16,7 @@ use crate::{
     ChainOrigin, FinalizedWave, LocalReceiptRoot, MAX_FINALIZED_TX_PER_BLOCK,
     MAX_PROVISIONS_PER_BLOCK, MAX_TXS_PER_BLOCK, ProvisionHash, ProvisionTxRootsMap, Provisions,
     ProvisionsRoot, QuorumCertificate, RoutableTransaction, ShardId, StateRoot, TransactionRoot,
-    TxHash, ValidatorId, Verifiable, Verified,
+    TxHash, ValidatorId, Verifiable, Verified, WeightedTimestamp,
 };
 
 /// Shared transaction list — wrapped in `Arc` so root-verification actions
@@ -175,6 +175,30 @@ impl Block {
     ) -> Self {
         Self::Live {
             header: BlockHeader::genesis(shard_id, proposer, state_root, origin),
+            transactions: Arc::new(BoundedVec::new()),
+            certificates: Arc::new(BoundedVec::new()),
+            provisions: Arc::new(BoundedVec::new()),
+        }
+    }
+
+    /// The deterministic genesis block of a split child — empty, wrapping
+    /// [`BlockHeader::split_child_genesis`]. The beacon fold seeds the
+    /// child's anchor with this block's hash; the flip installs the same
+    /// block.
+    #[must_use]
+    pub fn split_child_genesis(
+        child: ShardId,
+        state_root: StateRoot,
+        parent_terminal: &BlockHeader,
+        parent_canonical_wt: WeightedTimestamp,
+    ) -> Self {
+        Self::Live {
+            header: BlockHeader::split_child_genesis(
+                child,
+                state_root,
+                parent_terminal,
+                parent_canonical_wt,
+            ),
             transactions: Arc::new(BoundedVec::new()),
             certificates: Arc::new(BoundedVec::new()),
             provisions: Arc::new(BoundedVec::new()),

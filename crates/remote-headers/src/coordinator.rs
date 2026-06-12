@@ -276,23 +276,33 @@ impl RemoteHeaderCoordinator {
         // against a guessed committee. A below-floor epoch drops: it can
         // never resolve, and buffering it would let a Byzantine sender evict
         // honest entries from the bounded drop-oldest buffer.
-        let committee =
-            match topology.lookup(certified_header.header().parent_qc().weighted_timestamp()) {
-                ScheduleLookup::Committee(committee) => committee,
-                ScheduleLookup::NotYetCommitted => {
-                    self.awaiting.push(shard, (sender, certified_header));
-                    return vec![];
-                }
-                ScheduleLookup::Evicted => {
-                    warn!(
-                        shard = shard.inner(),
-                        height = height.inner(),
-                        sender = sender.inner(),
-                        "Remote header's committee epoch is below the schedule floor — dropping"
-                    );
-                    return vec![];
-                }
-            };
+        // Terminal-clamped: a splitting shard's coast headers carry parent
+        // QC timestamps past its final window — they verify against the
+        // shard's terminal committee. The beacon's crossing tracker reads
+        // the terminal block's canonical QC off the first coast header, so
+        // dropping these would blind the fold to the crossing.
+        let committee = match topology
+            .lookup_for_shard(
+                shard,
+                certified_header.header().parent_qc().weighted_timestamp(),
+            )
+            .0
+        {
+            ScheduleLookup::Committee(committee) => committee,
+            ScheduleLookup::NotYetCommitted => {
+                self.awaiting.push(shard, (sender, certified_header));
+                return vec![];
+            }
+            ScheduleLookup::Evicted => {
+                warn!(
+                    shard = shard.inner(),
+                    height = height.inner(),
+                    sender = sender.inner(),
+                    "Remote header's committee epoch is below the schedule floor — dropping"
+                );
+                return vec![];
+            }
+        };
 
         // Check if we already have a pending entry from this sender.
         let sender_map = self.pending.entry((shard, height)).or_default();
@@ -371,7 +381,7 @@ impl RemoteHeaderCoordinator {
                         return vec![];
                     };
                     let anchor = next_header.header().parent_qc().weighted_timestamp();
-                    match topology.lookup(anchor) {
+                    match topology.lookup_for_shard(shard, anchor).0 {
                         ScheduleLookup::Committee(committee) => {
                             return Self::emit_verify_qc(
                                 committee,

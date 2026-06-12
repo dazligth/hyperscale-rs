@@ -19,7 +19,7 @@ use hyperscale_jmt::{Blake3Hasher, Hasher};
 use sbor::prelude::*;
 use thiserror::Error;
 
-use crate::{StateRoot, Verified, Verify};
+use crate::{Hash, StateRoot, Verified, Verify};
 
 /// The two child hashes of the JMT root node behind a header's
 /// `state_root` — `r_p0` / `r_p1` for a shard whose split executes at the
@@ -44,12 +44,21 @@ pub struct SplitChildRoots {
 }
 
 impl SplitChildRoots {
+    /// The internal-node hash the pair composes to —
+    /// `hash_internal(left, right)`.
+    #[must_use]
+    pub fn composed_root(&self) -> StateRoot {
+        StateRoot::from_raw(Hash::from_hash_bytes(&Blake3Hasher::hash_internal(&[
+            *self.left.as_bytes(),
+            *self.right.as_bytes(),
+        ])))
+    }
+
     /// Whether `hash_internal(left, right)` reproduces `root` — the pair
     /// is exactly the two children of the internal node behind `root`.
     #[must_use]
     pub fn composes_to(&self, root: StateRoot) -> bool {
-        Blake3Hasher::hash_internal(&[*self.left.as_bytes(), *self.right.as_bytes()])
-            == *root.as_bytes()
+        self.composed_root() == root
     }
 }
 

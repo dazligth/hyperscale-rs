@@ -14,7 +14,7 @@ use crate::{
     CertificateRoot, ChainOrigin, Hash, InFlightCount, LocalReceiptRoot,
     MAX_REMOTE_SHARDS_PER_WAVE, MAX_TXS_PER_BLOCK, ProposerTimestamp, ProvisionTxRoot,
     ProvisionsRoot, QuorumCertificate, Round, ShardId, SplitChildRoots, StateRoot, TransactionRoot,
-    ValidatorId, Verifiable, Verified, Verify, WaveId,
+    ValidatorId, Verifiable, Verified, Verify, WaveId, WeightedTimestamp,
 };
 
 /// Block header containing consensus metadata.
@@ -142,6 +142,55 @@ impl BlockHeader {
             // reject the zero-signers genesis bitfield).
             parent_qc: Verified::<QuorumCertificate>::genesis(shard_id, origin).into(),
             proposer,
+            timestamp: ProposerTimestamp::ZERO,
+            round: Round::INITIAL,
+            is_fallback: false,
+            state_root,
+            transaction_root: TransactionRoot::ZERO,
+            certificate_root: CertificateRoot::ZERO,
+            local_receipt_root: LocalReceiptRoot::ZERO,
+            provision_root: ProvisionsRoot::ZERO,
+            waves: BoundedVec::new(),
+            provision_tx_roots: BoundedBTreeMap::new(),
+            in_flight: InFlightCount::ZERO,
+            beacon_witness_root: BeaconWitnessRoot::ZERO,
+            beacon_witness_leaf_count: BeaconWitnessLeafCount::ZERO,
+            beacon_witness_base: BeaconWitnessLeafCount::ZERO,
+            split_child_roots: None,
+        }
+    }
+
+    /// The deterministic genesis header of a split child adopting
+    /// `state_root` — its subtree of the parent's terminal root.
+    ///
+    /// Pure over `(child, state_root, parent terminal header, parent
+    /// canonical weighted timestamp)`, so the beacon fold and every child
+    /// committee member construct the byte-identical genesis: the beacon
+    /// seeds the child's anchor with this header's hash, and the flip
+    /// installs the same block. Provenance rides `parent_block_hash` (the
+    /// parent's terminal block hash; the parent shard itself is the
+    /// child's structural trie parent). The chain origin continues the
+    /// parent's lines: genesis at terminal height + 1, clock anchored at
+    /// the parent's final committed canonical weighted timestamp. The
+    /// proposer is inherited from the terminal block — a deterministic
+    /// choice that needs no committee context.
+    #[must_use]
+    pub fn split_child_genesis(
+        child: ShardId,
+        state_root: StateRoot,
+        parent_terminal: &Self,
+        parent_canonical_wt: WeightedTimestamp,
+    ) -> Self {
+        let origin = ChainOrigin {
+            genesis_height: parent_terminal.height().next(),
+            anchor_wt: parent_canonical_wt,
+        };
+        Self {
+            shard_id: child,
+            height: origin.genesis_height,
+            parent_block_hash: parent_terminal.hash(),
+            parent_qc: Verified::<QuorumCertificate>::genesis(child, origin).into(),
+            proposer: parent_terminal.proposer(),
             timestamp: ProposerTimestamp::ZERO,
             round: Round::INITIAL,
             is_fallback: false,
@@ -588,6 +637,30 @@ mod tests {
             StateRoot::ZERO,
             ChainOrigin::ROOT,
         )
+    }
+
+    /// A split child's genesis is a pure function of the parent's
+    /// terminal block: byte-identical across the beacon fold and every
+    /// flipping member, structurally genesis, continuing the parent's
+    /// height line and clock with the terminal hash as provenance.
+    #[test]
+    fn split_child_genesis_is_deterministic_and_structural() {
+        let parent_terminal = sample_header();
+        let child = ShardId::leaf(1, 0);
+        let root = StateRoot::from_raw(Hash::from_bytes(b"child subtree"));
+        let wt = WeightedTimestamp::from_millis(42_000);
+
+        let a = BlockHeader::split_child_genesis(child, root, &parent_terminal, wt);
+        let b = BlockHeader::split_child_genesis(child, root, &parent_terminal, wt);
+        assert_eq!(a.hash(), b.hash());
+
+        assert!(a.is_genesis());
+        assert_eq!(a.height(), parent_terminal.height().next());
+        assert_eq!(a.parent_qc().height(), a.height());
+        assert_eq!(a.parent_qc().weighted_timestamp(), wt);
+        assert_eq!(a.parent_block_hash(), parent_terminal.hash());
+        assert_eq!(a.state_root(), root);
+        assert_eq!(a.split_child_roots(), None);
     }
 
     /// `split_child_roots` is hash-affecting header content: a populated

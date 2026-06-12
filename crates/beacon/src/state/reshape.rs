@@ -192,6 +192,20 @@ fn try_execute_split(state: &mut BeaconState, target: ShardId) {
     };
     state.next_shard_committees.remove(&target);
 
+    // The epoch this fold starts is the parent's final one: its chain
+    // terminates at the epoch's cut and the children take over from the
+    // lookahead. The terminal mark keeps the boundary record sourced
+    // (for the terminal contribution that seeds the children, and the
+    // witness drain) without counting the dead chain as missing.
+    if let Some(boundary) = state.boundaries.get_mut(&target) {
+        boundary.terminal_epoch = Some(state.current_epoch);
+    } else {
+        tracing::warn!(
+            shard = ?target,
+            "splitting shard has no boundary record; children must seed from their own contributions"
+        );
+    }
+
     for (child, half) in halves {
         // Child committee: the parent half in assignment order, then
         // the cohort half in id order.
@@ -243,6 +257,7 @@ fn try_execute_split(state: &mut BeaconState, target: ShardId) {
                 witness_leaf_count: BeaconWitnessLeafCount::ZERO,
                 last_live_epoch: state.current_epoch,
                 consecutive_misses: 0,
+                terminal_epoch: None,
             },
         );
     }

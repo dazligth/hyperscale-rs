@@ -14,7 +14,7 @@
 //!   the proposer's chunk-coupled QC sourcing and the assembler's canonical
 //!   contribution projection, against the local witness pool.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use hyperscale_types::{
     BeaconProposal, BeaconState, BlockHash, BlockHeader, NetworkDefinition, QcContext,
@@ -82,18 +82,34 @@ pub fn source_boundary_qcs(
     state: &BeaconState,
     shard_source: &ShardSourceTracker,
 ) -> BTreeMap<ShardId, Option<QuorumCertificate>> {
-    state
+    // Active shards, plus terminated shards whose boundary records still
+    // linger: a split parent leaves the committee map at the promotion
+    // after its final epoch, but its terminal contribution (which seeds
+    // the children) and any witness backlog still need to reach the fold.
+    // The record drops once both have, ending the sourcing.
+    let sourced: BTreeSet<ShardId> = state
         .shard_committees
         .keys()
+        .copied()
+        .chain(
+            state
+                .boundaries
+                .iter()
+                .filter(|(_, b)| b.terminal_epoch.is_some())
+                .map(|(shard, _)| *shard),
+        )
+        .collect();
+    sourced
+        .into_iter()
         .filter_map(|shard| {
-            let crossing = shard_source.latest_crossing(*shard)?;
+            let crossing = shard_source.latest_crossing(shard)?;
             let qc = crossing.canonical_qc();
             let (prior, chunk_end) =
-                rules::witness_chunk_bounds(state, *shard, crossing.boundary_header());
+                rules::witness_chunk_bounds(state, shard, crossing.boundary_header());
             // Coupling: only report a shard whose chunk we can supply.
             shard_source
-                .has_witness_chunk(*shard, qc.block_hash(), prior, chunk_end)
-                .then(|| (*shard, Some(qc.clone())))
+                .has_witness_chunk(shard, qc.block_hash(), prior, chunk_end)
+                .then(|| (shard, Some(qc.clone())))
         })
         .collect()
 }

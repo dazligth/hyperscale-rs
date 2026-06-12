@@ -4104,6 +4104,7 @@ mod tests {
             witness_leaf_count: BeaconWitnessLeafCount::ZERO,
             last_live_epoch: Epoch::new(epoch),
             consecutive_misses: 0,
+            terminal_epoch: None,
         }
     }
 

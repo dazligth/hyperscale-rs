@@ -129,6 +129,7 @@ pub fn build_genesis_beacon_state(config: &BeaconGenesisConfig) -> BeaconState {
                     witness_leaf_count: BeaconWitnessLeafCount::ZERO,
                     last_live_epoch: Epoch::GENESIS,
                     consecutive_misses: 0,
+                    terminal_epoch: None,
                 },
             )
         })

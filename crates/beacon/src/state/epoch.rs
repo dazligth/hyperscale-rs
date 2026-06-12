@@ -6,9 +6,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use hyperscale_types::{
-    BeaconCert, BeaconProposal, BeaconState, BeaconWitnessLeafCount, CertifiedBeaconBlock, Epoch,
-    NetworkDefinition, ObserverSeat, PendingReshape, ShardBoundary, ShardEpochContribution,
-    ShardId, SlotEffects, TransitionCause, ValidatorId, ValidatorStatus,
+    BeaconCert, BeaconProposal, BeaconState, BeaconWitnessLeafCount, BlockHash, BlockHeader,
+    CertifiedBeaconBlock, Epoch, NetworkDefinition, ObserverSeat, PendingReshape,
+    QuorumCertificate, ShardBoundary, ShardEpochContribution, ShardId, SlotEffects,
+    TransitionCause, ValidatorId, ValidatorStatus, WeightedTimestamp,
 };
 
 use crate::rules::{canonical_boundary_qcs, chunk_bounds, is_boundary_crossing};
@@ -338,6 +339,7 @@ fn record_boundaries(
         ) {
             continue;
         }
+        let terminal_epoch = state.boundaries.get(shard).and_then(|b| b.terminal_epoch);
         state.boundaries.insert(
             *shard,
             ShardBoundary {
@@ -347,22 +349,107 @@ fn record_boundaries(
                 witness_leaf_count: BeaconWitnessLeafCount::new(chunk_end),
                 last_live_epoch: epoch,
                 consecutive_misses: 0,
+                terminal_epoch,
             },
         );
         refreshed.insert(*shard);
+
+        // A terminal shard's contribution crossing its final cut is the
+        // chain's terminal block: seed the pending children from its
+        // header, and drop the record once the witness backlog has fully
+        // drained against it.
+        if let Some(t) = terminal_epoch
+            && epoch_of_wt(qc.weighted_timestamp(), dur) > t
+        {
+            seed_split_children(state, *shard, header, qc, epoch);
+            if chunk_end == boundary_count {
+                state.boundaries.remove(shard);
+            }
+        }
     }
 
     // Active shards with no fresh boundary carry their prior record
     // forward and bump the miss counter (the "not observed crossing"
-    // signal). The shard set is fixed here, so every tracked boundary
-    // belongs to an active shard.
+    // signal). The shard set is fixed at the fold, so every tracked
+    // boundary belongs to an active shard — except terminal records,
+    // whose chains stopped on purpose and are never "missing".
     for (shard, boundary) in &mut state.boundaries {
-        if !refreshed.contains(shard) {
+        if !refreshed.contains(shard) && boundary.terminal_epoch.is_none() {
             boundary.consecutive_misses = boundary.consecutive_misses.saturating_add(1);
         }
     }
 
     outcome
+}
+
+/// Epoch whose window contains `wt` (the fold-side mirror of
+/// `TopologySchedule::epoch_for`).
+fn epoch_of_wt(wt: WeightedTimestamp, epoch_duration_ms: u64) -> Epoch {
+    wt.as_millis()
+        .checked_div(epoch_duration_ms)
+        .map_or(Epoch::GENESIS, Epoch::new)
+}
+
+/// Seed a terminated parent's pending children from its terminal header.
+///
+/// The header carries `split_child_roots` — the two child hashes of the
+/// root node behind its `state_root` — self-verified here by one
+/// `hash_internal` composition: collision resistance means a Byzantine
+/// shard cannot forge children that compose to the committed terminal
+/// root. Each still-pending child record fills completely: the verified
+/// subtree root, the child's deterministic genesis block hash (the same
+/// block the flip installs), genesis height, and a fresh accumulator. A
+/// failed or absent pair leaves the children pending — they then seed
+/// from their own first boundary contributions instead.
+fn seed_split_children(
+    state: &mut BeaconState,
+    parent: ShardId,
+    terminal_header: &BlockHeader,
+    terminal_qc: &QuorumCertificate,
+    epoch: Epoch,
+) {
+    let Some(pair) = terminal_header.split_child_roots() else {
+        tracing::warn!(
+            shard = ?parent,
+            "terminal contribution carries no split child roots; children seed from their own contributions"
+        );
+        return;
+    };
+    if !pair.composes_to(terminal_header.state_root()) {
+        tracing::warn!(
+            shard = ?parent,
+            "terminal contribution's split child roots do not compose to its state root"
+        );
+        return;
+    }
+    let (left, right) = parent.children();
+    for (child, child_root) in [(left, pair.left), (right, pair.right)] {
+        let pending = state
+            .boundaries
+            .get(&child)
+            .is_some_and(|b| b.block_hash == BlockHash::ZERO);
+        if !pending {
+            continue;
+        }
+        let genesis = BlockHeader::split_child_genesis(
+            child,
+            child_root,
+            terminal_header,
+            terminal_qc.weighted_timestamp(),
+        );
+        state.boundaries.insert(
+            child,
+            ShardBoundary {
+                state_root: child_root,
+                block_hash: genesis.hash(),
+                height: genesis.height(),
+                witness_leaf_count: BeaconWitnessLeafCount::ZERO,
+                last_live_epoch: epoch,
+                consecutive_misses: 0,
+                terminal_epoch: None,
+            },
+        );
+    }
 }
 
 #[cfg(test)]
@@ -375,9 +462,9 @@ mod tests {
         BlockHeight, BoundedVec, CertificateRoot, Epoch, Hash, InFlightCount, LeafIndex,
         LocalReceiptRoot, MAX_WITNESSES_PER_SHARD, ProposerTimestamp, ProvisionsRoot,
         QuorumCertificate, Round, ShardBoundary, ShardId, ShardWitness, ShardWitnessPayload,
-        ShardWitnessProof, SignerBitfield, Stake, StakePoolId, StateRoot, TransactionRoot,
-        TransitionCause, ValidatorId, VrfProof, WeightedTimestamp, compute_merkle_root_with_proof,
-        zero_bls_signature,
+        ShardWitnessProof, SignerBitfield, SplitChildRoots, Stake, StakePoolId, StateRoot,
+        TransactionRoot, TransitionCause, ValidatorId, VrfProof, WeightedTimestamp,
+        compute_merkle_root_with_proof, zero_bls_signature,
     };
 
     use super::*;
@@ -395,6 +482,19 @@ mod tests {
         state_root: StateRoot,
         root: BeaconWitnessRoot,
         leaf_count: u64,
+    ) -> BlockHeader {
+        boundary_block_full(shard, height, pred_wt, state_root, root, leaf_count, None)
+    }
+
+    #[allow(clippy::too_many_arguments)] // test fixture mirroring the header fields it sets
+    fn boundary_block_full(
+        shard: ShardId,
+        height: u64,
+        pred_wt: u64,
+        state_root: StateRoot,
+        root: BeaconWitnessRoot,
+        leaf_count: u64,
+        split_child_roots: Option<SplitChildRoots>,
     ) -> BlockHeader {
         let parent_qc = QuorumCertificate::new(
             BlockHash::ZERO,
@@ -426,7 +526,7 @@ mod tests {
             root,
             BeaconWitnessLeafCount::new(leaf_count),
             BeaconWitnessLeafCount::ZERO,
-            None,
+            split_child_roots,
         )
     }
 
@@ -458,6 +558,20 @@ mod tests {
         state_root: StateRoot,
         payloads: Vec<ShardWitnessPayload>,
     ) -> (BlockHeader, Vec<ShardWitness>) {
+        boundary_block_with_payloads_full(shard, height, pred_wt, state_root, payloads, None)
+    }
+
+    /// [`boundary_block_with_payloads`] with `split_child_roots` set at
+    /// construction, so the per-leaf proofs anchor to the carrying
+    /// header's final hash (the terminal-block shape).
+    fn boundary_block_with_payloads_full(
+        shard: ShardId,
+        height: u64,
+        pred_wt: u64,
+        state_root: StateRoot,
+        payloads: Vec<ShardWitnessPayload>,
+        split_child_roots: Option<SplitChildRoots>,
+    ) -> (BlockHeader, Vec<ShardWitness>) {
         let leaf_count = payloads.len() as u64;
         let leaf_hashes: Vec<Hash> = payloads
             .iter()
@@ -468,7 +582,15 @@ mod tests {
         } else {
             BeaconWitnessRoot::from_raw(compute_merkle_root_with_proof(&leaf_hashes, 0).0)
         };
-        let header = boundary_block_with_root(shard, height, pred_wt, state_root, root, leaf_count);
+        let header = boundary_block_full(
+            shard,
+            height,
+            pred_wt,
+            state_root,
+            root,
+            leaf_count,
+            split_child_roots,
+        );
         let block_hash = header.hash();
         let witnesses = payloads
             .into_iter()
@@ -579,6 +701,7 @@ mod tests {
                 witness_leaf_count: BeaconWitnessLeafCount::ZERO,
                 last_live_epoch: Epoch::GENESIS,
                 consecutive_misses: 0,
+                terminal_epoch: None,
             },
         );
         state.witness_window_bases = state.live_witness_bases();
@@ -651,6 +774,7 @@ mod tests {
                 witness_leaf_count: BeaconWitnessLeafCount::ZERO,
                 last_live_epoch: Epoch::GENESIS,
                 consecutive_misses: 0,
+                terminal_epoch: None,
             },
         );
         assert_eq!(
@@ -707,6 +831,7 @@ mod tests {
                 witness_leaf_count: BeaconWitnessLeafCount::ZERO,
                 last_live_epoch: Epoch::GENESIS,
                 consecutive_misses: 0,
+                terminal_epoch: None,
             },
         );
 
@@ -1028,5 +1153,225 @@ mod tests {
         assert_eq!(n_trans.from, s_trans.from);
         assert_eq!(n_trans.to, s_trans.to);
         assert_eq!(n_trans.at_slot, s_trans.at_slot);
+    }
+
+    /// A terminal boundary block: `leaf_count` deposit witnesses plus a
+    /// `split_child_roots` pair carried from construction (so the
+    /// per-leaf proofs anchor to the final header hash).
+    fn terminal_block_with_witnesses(
+        shard: ShardId,
+        height: u64,
+        pred_wt: u64,
+        pair: SplitChildRoots,
+        state_root: StateRoot,
+        leaf_count: u64,
+    ) -> (BlockHeader, Vec<ShardWitness>) {
+        let payloads: Vec<ShardWitnessPayload> = (0..leaf_count)
+            .map(|i| ShardWitnessPayload::StakeDeposit {
+                pool_id: StakePoolId::new(200 + u32::try_from(i).unwrap_or(u32::MAX)),
+                amount: Stake::from_whole_tokens(1),
+            })
+            .collect();
+        boundary_block_with_payloads_full(shard, height, pred_wt, state_root, payloads, Some(pair))
+    }
+
+    /// A terminal-marked parent (final epoch 1, cut at 2000ms) with both
+    /// children pending, plus the composing child-root pair.
+    fn terminating_state() -> (BeaconState, ShardId, SplitChildRoots, StateRoot) {
+        let mut state = single_pool_state(4);
+        state.chain_config.epoch_duration_ms = 1_000;
+        let parent = ShardId::leaf(1, 0);
+        state.boundaries.insert(
+            parent,
+            ShardBoundary {
+                state_root: StateRoot::from_raw(Hash::from_bytes(b"pre-terminal")),
+                block_hash: BlockHash::from_raw(Hash::from_bytes(b"pre-terminal-block")),
+                height: BlockHeight::new(8),
+                witness_leaf_count: BeaconWitnessLeafCount::ZERO,
+                last_live_epoch: Epoch::new(1),
+                consecutive_misses: 0,
+                terminal_epoch: Some(Epoch::new(1)),
+            },
+        );
+        for child in <[ShardId; 2]>::from(parent.children()) {
+            state.boundaries.insert(
+                child,
+                ShardBoundary {
+                    state_root: StateRoot::ZERO,
+                    block_hash: BlockHash::ZERO,
+                    height: BlockHeight::GENESIS,
+                    witness_leaf_count: BeaconWitnessLeafCount::ZERO,
+                    last_live_epoch: Epoch::new(1),
+                    consecutive_misses: 0,
+                    terminal_epoch: None,
+                },
+            );
+        }
+        let pair = SplitChildRoots {
+            left: StateRoot::from_raw(Hash::from_bytes(b"left subtree")),
+            right: StateRoot::from_raw(Hash::from_bytes(b"right subtree")),
+        };
+        let composed = pair.composed_root();
+        (state, parent, pair, composed)
+    }
+
+    fn contribution_for(
+        shard: ShardId,
+        header: BlockHeader,
+        witnesses: Vec<ShardWitness>,
+        qc_wt: u64,
+    ) -> (
+        Vec<(ValidatorId, BeaconProposal)>,
+        BTreeMap<ShardId, ShardEpochContribution>,
+    ) {
+        let qc = qc_over(&header, qc_wt);
+        let proposal = BeaconProposal::new(
+            std::iter::once((shard, Some(qc))).collect(),
+            Vec::new(),
+            VrfProof::ZERO,
+        );
+        let committed = vec![(ValidatorId::new(0), proposal)];
+        let contributions = std::iter::once((
+            shard,
+            ShardEpochContribution {
+                boundary_header: header,
+                witnesses: witnesses.into(),
+            },
+        ))
+        .collect();
+        (committed, contributions)
+    }
+
+    /// The terminal contribution — predecessor inside the final window,
+    /// QC past its cut, carrying a composing pair — seeds both pending
+    /// children with their verified subtree roots and deterministic
+    /// genesis hashes, then drops the parent's record (backlog drained).
+    #[test]
+    fn terminal_contribution_seeds_the_children_and_drops_the_parent() {
+        let (mut state, parent, pair, composed) = terminating_state();
+        let (left, right) = parent.children();
+
+        let (header, witnesses) =
+            terminal_block_with_witnesses(parent, 9, 1_900, pair, composed, 3);
+        let (committed, contributions) = contribution_for(parent, header.clone(), witnesses, 2_500);
+
+        record_boundaries(&mut state, Epoch::new(2), &committed, &contributions);
+
+        for (child, child_root) in [(left, pair.left), (right, pair.right)] {
+            let record = state.boundaries.get(&child).expect("child seeded");
+            let genesis = BlockHeader::split_child_genesis(
+                child,
+                child_root,
+                &header,
+                WeightedTimestamp::from_millis(2_500),
+            );
+            assert_eq!(record.state_root, child_root);
+            assert_eq!(record.block_hash, genesis.hash());
+            assert_eq!(record.height, BlockHeight::new(10));
+            assert_eq!(record.witness_leaf_count, BeaconWitnessLeafCount::ZERO);
+            assert_eq!(record.terminal_epoch, None);
+        }
+        assert!(
+            !state.boundaries.contains_key(&parent),
+            "terminal record drops once consumed and drained"
+        );
+    }
+
+    /// A pair that does not compose to the terminal root leaves the
+    /// children pending (they seed from their own first contributions);
+    /// the parent's record still drops — its contribution was consumed.
+    #[test]
+    fn non_composing_pair_leaves_children_pending() {
+        let (mut state, parent, pair, composed) = terminating_state();
+        let forged = SplitChildRoots {
+            left: StateRoot::from_raw(Hash::from_bytes(b"forged")),
+            right: pair.right,
+        };
+        let (header, witnesses) =
+            terminal_block_with_witnesses(parent, 9, 1_900, forged, composed, 3);
+        let (committed, contributions) = contribution_for(parent, header, witnesses, 2_500);
+
+        record_boundaries(&mut state, Epoch::new(2), &committed, &contributions);
+
+        for child in <[ShardId; 2]>::from(parent.children()) {
+            let record = state.boundaries.get(&child).expect("placeholder kept");
+            assert_eq!(record.block_hash, BlockHash::ZERO, "child stays pending");
+        }
+        assert!(!state.boundaries.contains_key(&parent));
+    }
+
+    /// A crossing of an earlier cut (QC inside the final window) records
+    /// normally but is not the terminal block: no seeding, no drop.
+    #[test]
+    fn pre_terminal_crossing_does_not_seed() {
+        let (mut state, parent, pair, composed) = terminating_state();
+        let (left, _) = parent.children();
+
+        let (header, witnesses) = terminal_block_with_witnesses(parent, 9, 900, pair, composed, 3);
+        let (committed, contributions) = contribution_for(parent, header, witnesses, 1_500);
+
+        record_boundaries(&mut state, Epoch::new(2), &committed, &contributions);
+
+        let record = state.boundaries.get(&parent).expect("record kept");
+        assert_eq!(
+            record.terminal_epoch,
+            Some(Epoch::new(1)),
+            "marker survives"
+        );
+        assert_eq!(
+            state.boundaries.get(&left).unwrap().block_hash,
+            BlockHash::ZERO,
+            "children untouched"
+        );
+    }
+
+    /// A terminal record with no contribution this fold carries forward
+    /// without a miss bump — the chain stopped on purpose.
+    #[test]
+    fn terminal_records_do_not_bump_misses() {
+        let (mut state, parent, _, _) = terminating_state();
+
+        record_boundaries(&mut state, Epoch::new(2), &[], &BTreeMap::new());
+
+        assert_eq!(state.boundaries.get(&parent).unwrap().consecutive_misses, 0);
+    }
+
+    /// A terminal backlog deeper than one chunk lingers drain-only: the
+    /// children seed at the first terminal fold, the record survives it,
+    /// and the next fold's continuation chunk completes the drain and
+    /// drops it.
+    #[test]
+    fn deep_terminal_backlog_lingers_until_drained() {
+        let (mut state, parent, pair, composed) = terminating_state();
+        let total = MAX_WITNESSES_PER_SHARD as u64 + 6;
+
+        let (header, witnesses) =
+            terminal_block_with_witnesses(parent, 9, 1_900, pair, composed, total);
+
+        let first_chunk = witnesses[..MAX_WITNESSES_PER_SHARD].to_vec();
+        let (committed, contributions) =
+            contribution_for(parent, header.clone(), first_chunk, 2_500);
+        record_boundaries(&mut state, Epoch::new(2), &committed, &contributions);
+
+        let record = state.boundaries.get(&parent).expect("lingers mid-drain");
+        assert_eq!(
+            record.witness_leaf_count,
+            BeaconWitnessLeafCount::new(MAX_WITNESSES_PER_SHARD as u64)
+        );
+        let (left, _) = parent.children();
+        assert_ne!(
+            state.boundaries.get(&left).unwrap().block_hash,
+            BlockHash::ZERO,
+            "children seed at the first terminal fold"
+        );
+
+        let rest = witnesses[MAX_WITNESSES_PER_SHARD..].to_vec();
+        let (committed, contributions) = contribution_for(parent, header, rest, 2_500);
+        record_boundaries(&mut state, Epoch::new(3), &committed, &contributions);
+
+        assert!(
+            !state.boundaries.contains_key(&parent),
+            "drained and dropped"
+        );
     }
 }
