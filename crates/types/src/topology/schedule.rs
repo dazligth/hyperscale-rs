@@ -166,6 +166,55 @@ impl TopologySchedule {
         &self.head
     }
 
+    /// [`at`](Self::at) for a shard whose chain may terminate: resolve
+    /// `wt`'s committee, clamping to `shard`'s **terminal window** when
+    /// `wt` falls past it. A splitting shard's last blocks carry parent
+    /// QC timestamps past the cut (the coast blocks certifying the
+    /// crossing), which resolve to a window whose trie no longer carries
+    /// the shard; those blocks are still proposed and signed by the
+    /// shard's final-epoch committee, so resolution walks back to the
+    /// newest retained window that carries the shard. The second value
+    /// is the past-terminal signal: `true` exactly for those coast
+    /// blocks, which must be empty and stop the chain once the crossing
+    /// commits. For a shard alive in `wt`'s window this is exactly
+    /// [`at`](Self::at) plus `false`.
+    #[must_use]
+    pub fn at_for_shard(
+        &self,
+        shard: ShardId,
+        wt: WeightedTimestamp,
+    ) -> Option<(&Arc<TopologySnapshot>, bool)> {
+        match self.lookup_for_shard(shard, wt) {
+            (ScheduleLookup::Committee(snapshot), past_terminal) => Some((snapshot, past_terminal)),
+            _ => None,
+        }
+    }
+
+    /// [`lookup`](Self::lookup) with the terminal clamp of
+    /// [`at_for_shard`](Self::at_for_shard): a `wt` whose window no
+    /// longer carries `shard` resolves the newest retained window that
+    /// does, flagged `true`. A `wt` whose window carries no trace of the
+    /// shard in any retained window resolves [`Evicted`](ScheduleLookup::Evicted)
+    /// — it claims a committee no honest artifact can be attested by.
+    #[must_use]
+    pub fn lookup_for_shard(
+        &self,
+        shard: ShardId,
+        wt: WeightedTimestamp,
+    ) -> (ScheduleLookup<'_>, bool) {
+        match self.lookup(wt) {
+            ScheduleLookup::Committee(snapshot) if !snapshot.shard_trie().contains(shard) => self
+                .by_epoch
+                .range(..self.epoch_for(wt))
+                .rev()
+                .find(|(_, s)| s.shard_trie().contains(shard))
+                .map_or((ScheduleLookup::Evicted, true), |(_, s)| {
+                    (ScheduleLookup::Committee(s), true)
+                }),
+            other => (other, false),
+        }
+    }
+
     /// The two children `shard` splits into at the end of `wt`'s epoch
     /// window, or `None` when no split lands at that boundary — i.e.
     /// `Some` exactly when `wt` falls in the splitting shard's final
@@ -348,6 +397,64 @@ mod tests {
         assert_eq!(
             sched.split_at_next_boundary(p, WeightedTimestamp::from_millis(7500)),
             None
+        );
+    }
+
+    #[test]
+    fn at_for_shard_clamps_past_the_terminal_window() {
+        let p = ShardId::leaf(1, 0);
+        let sibling = ShardId::leaf(1, 1);
+        let (left, right) = p.children();
+        let snap_with = |leaves: &[ShardId]| -> Arc<TopologySnapshot> {
+            Arc::new(TopologySnapshot::from_explicit_committees(
+                NetworkDefinition::simulator(),
+                &ValidatorSet::new(Vec::new()),
+                leaves.iter().map(|s| (*s, Vec::new())).collect(),
+                HashMap::new(),
+                HashMap::new(),
+                HashMap::new(),
+                HashMap::new(),
+            ))
+        };
+        // p's final window is 6; window 7 carries its children.
+        let mut sched = TopologySchedule::new(1000, Epoch::new(6), snap_with(&[p, sibling]));
+        sched.insert(Epoch::new(7), snap_with(&[left, right, sibling]));
+
+        // Alive in its window: plain `at` plus `false`.
+        let (in_window, past) = sched
+            .at_for_shard(p, WeightedTimestamp::from_millis(6500))
+            .unwrap();
+        assert!(!past);
+        assert!(Arc::ptr_eq(
+            in_window,
+            sched.at(WeightedTimestamp::from_millis(6500)).unwrap()
+        ));
+
+        // Past the cut: clamps to the terminal window's snapshot and flags it.
+        let (clamped, past) = sched
+            .at_for_shard(p, WeightedTimestamp::from_millis(7500))
+            .unwrap();
+        assert!(past);
+        assert!(Arc::ptr_eq(
+            clamped,
+            sched.at(WeightedTimestamp::from_millis(6500)).unwrap()
+        ));
+
+        // A shard alive in the same window is untouched by the clamp.
+        let (alive, past) = sched
+            .at_for_shard(sibling, WeightedTimestamp::from_millis(7500))
+            .unwrap();
+        assert!(!past);
+        assert!(Arc::ptr_eq(
+            alive,
+            sched.at(WeightedTimestamp::from_millis(7500)).unwrap()
+        ));
+
+        // Outside the retained window resolution still stalls.
+        assert!(
+            sched
+                .at_for_shard(p, WeightedTimestamp::from_millis(9500))
+                .is_none()
         );
     }
 }

@@ -475,20 +475,47 @@ impl ShardCoordinator {
 
     /// Committee that signed/produced `block_hash`. `None` to stall: the block
     /// is unknown, or this node's beacon hasn't synced the block's epoch.
+    /// Resolution clamps to this shard's terminal window, so the coast
+    /// blocks past a split's cut still resolve the committee that signs
+    /// them (the shard's final-epoch committee).
     fn committee_of_block<'t>(
         &self,
         topology: &'t TopologySchedule,
         block_hash: BlockHash,
     ) -> Option<&'t TopologySnapshot> {
         topology
-            .at(self.committee_anchor(block_hash)?)
-            .map(AsRef::as_ref)
+            .at_for_shard(self.local_shard, self.committee_anchor(block_hash)?)
+            .map(|(snapshot, _)| snapshot.as_ref())
     }
 
     /// Committee for the height in progress / our next proposal (extends
     /// `high_qc`). `None` to stall when the beacon lacks that epoch.
+    /// Terminal-clamped like [`Self::committee_of_block`], so the
+    /// final-epoch committee can still coast the chain to its crossing.
     fn tip_committee<'t>(&self, topology: &'t TopologySchedule) -> Option<&'t TopologySnapshot> {
-        topology.at(self.tip_anchor_ts()).map(AsRef::as_ref)
+        topology
+            .at_for_shard(self.local_shard, self.tip_anchor_ts())
+            .map(|(snapshot, _)| snapshot.as_ref())
+    }
+
+    /// Whether `wt` lands past this shard's terminal window — the coast
+    /// region after a split's cut. A block whose parent QC carries such a
+    /// timestamp must be empty (it exists only to certify the crossing),
+    /// and a committed one terminates the chain.
+    fn past_terminal_window(&self, topology: &TopologySchedule, wt: WeightedTimestamp) -> bool {
+        topology
+            .at_for_shard(self.local_shard, wt)
+            .is_some_and(|(_, past_terminal)| past_terminal)
+    }
+
+    /// Whether this chain has terminated: the committed tip's parent QC
+    /// sits past the shard's terminal window, i.e. the first coast block
+    /// has committed and the crossing's canonical QC is readable from the
+    /// committed chain. From here the chain stops — no proposals, no new
+    /// headers, no timeouts; the post-split children take over at the
+    /// next boundary and stragglers reach this tip via block sync.
+    fn chain_terminated(&self, topology: &TopologySchedule) -> bool {
+        self.past_terminal_window(topology, self.committed_anchor_ts)
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -957,6 +984,25 @@ impl ShardCoordinator {
             );
         }
 
+        // Past the shard's terminal window the chain only coasts: the
+        // parent QC's weighted timestamp has crossed the split's cut, so
+        // this block exists solely to certify the crossing. It must be
+        // empty — state stays frozen at the crossing's root — and the
+        // chain stops once the crossing's canonical QC commits.
+        if self.past_terminal_window(topology, parent_qc.weighted_timestamp()) {
+            return self.build_and_dispatch_proposal(
+                topology,
+                next_height,
+                round,
+                ProposalKind::Normal {
+                    transactions: Vec::new(),
+                    finalized_waves: Vec::new(),
+                    provisions: Vec::new(),
+                    finalized_tx_count: 0,
+                },
+            );
+        }
+
         // Walk the QC chain to find certificates, transactions, and
         // provisions already in pending/certified blocks above committed
         // height — the two-chain commit window leaves them visible and the
@@ -1011,6 +1057,12 @@ impl ShardCoordinator {
         next_height: BlockHeight,
         round: Round,
     ) -> bool {
+        // A terminated chain proposes nothing — the crossing is committed
+        // and the post-split children carry on from it.
+        if self.chain_terminated(topology) {
+            return false;
+        }
+
         // We extend `high_qc`, so the proposer is drawn from that committee.
         // Without it (beacon behind) we can't know whether we're the proposer
         // — stall rather than guess.
@@ -1227,7 +1279,11 @@ impl ShardCoordinator {
         // The block we build belongs to `at(parent_qc weighted ts)`; its
         // proposer schedule (missed-proposal leaves) and beacon-witness preview
         // resolve against that committee. Stall if the beacon lacks it.
-        let Some(committee) = topology.at(parent_qc.weighted_timestamp()) else {
+        // Terminal-clamped: coast blocks past a split's cut resolve the
+        // shard's final-epoch committee.
+        let Some((committee, _)) =
+            topology.at_for_shard(self.local_shard, parent_qc.weighted_timestamp())
+        else {
             return vec![];
         };
         let receipts: Vec<StoredReceipt> = match &kind {
@@ -1326,6 +1382,18 @@ impl ShardCoordinator {
         let block_hash = header.hash();
         let height = header.height();
         let round = header.round();
+
+        // A terminated chain ingests no new headers: the crossing is
+        // committed, every extension is pointless, and stragglers reach
+        // the terminal tip via block sync rather than live proposals.
+        if self.chain_terminated(topology) {
+            debug!(
+                validator = ?self.me,
+                block_hash = ?block_hash,
+                "Ignoring block header — chain terminated at its crossing"
+            );
+            return vec![];
+        }
 
         debug!(
             validator = ?self.me,
@@ -1571,8 +1639,12 @@ impl ShardCoordinator {
     /// replay — the split is diagnostic.
     fn reject_invalid_header(&self, topology: &TopologySchedule, header: &BlockHeader) -> bool {
         // Proposer of `h` is drawn from `committee(h) == at(parent_qc weighted
-        // ts)`.
-        let proposer_committee = match topology.lookup(header.parent_qc().weighted_timestamp()) {
+        // ts)`, terminal-clamped so a coast header past a split's cut
+        // resolves the shard's final-epoch committee.
+        let proposer_committee = match topology
+            .lookup_for_shard(self.local_shard, header.parent_qc().weighted_timestamp())
+            .0
+        {
             ScheduleLookup::Committee(committee) => committee.as_ref(),
             ScheduleLookup::NotYetCommitted => {
                 warn!(
@@ -1970,7 +2042,9 @@ impl ShardCoordinator {
             let Some(committee) = self.committee_of_block(topology, block_hash) else {
                 return vec![];
             };
-            if self.reject_invalid_block_contents(committee, block_hash, block) {
+            let coasting = self
+                .past_terminal_window(topology, block.header().parent_qc().weighted_timestamp());
+            if self.reject_invalid_block_contents(committee, block_hash, block, coasting) {
                 return vec![];
             }
 
@@ -2044,6 +2118,7 @@ impl ShardCoordinator {
         committee: &TopologySnapshot,
         block_hash: BlockHash,
         block: &Block,
+        coasting: bool,
     ) -> bool {
         let (qc_chain_cert_ids, qc_chain_tx_hashes, qc_chain_provision_hashes) =
             self.collect_qc_chain_hashes(block.header().parent_block_hash());
@@ -2055,6 +2130,7 @@ impl ShardCoordinator {
             &qc_chain_cert_ids,
             &qc_chain_provision_hashes,
             &self.dedup_index,
+            coasting,
         ) {
             warn!(
                 validator = ?self.me,
@@ -3539,26 +3615,31 @@ impl ShardCoordinator {
         // block keyed below it carries a forged weighted timestamp (it
         // rides outside the signed message) or sits on a stale fork — no
         // amount of retrying resolves it.
-        let committee =
-            match topology.lookup(certified.block().header().parent_qc().weighted_timestamp()) {
-                ScheduleLookup::Committee(committee) => committee,
-                ScheduleLookup::NotYetCommitted => {
-                    warn!(
-                        height = certified.block().height().inner(),
-                        "No committee for synced block's epoch yet — beacon behind, re-buffering"
-                    );
-                    let height = certified.block().height();
-                    self.block_sync.buffer_block(height, certified);
-                    return vec![];
-                }
-                ScheduleLookup::Evicted => {
-                    warn!(
-                        height = certified.block().height().inner(),
-                        "Synced block's committee epoch is below the schedule floor — rejecting"
-                    );
-                    return vec![];
-                }
-            };
+        let committee = match topology
+            .lookup_for_shard(
+                self.local_shard,
+                certified.block().header().parent_qc().weighted_timestamp(),
+            )
+            .0
+        {
+            ScheduleLookup::Committee(committee) => committee,
+            ScheduleLookup::NotYetCommitted => {
+                warn!(
+                    height = certified.block().height().inner(),
+                    "No committee for synced block's epoch yet — beacon behind, re-buffering"
+                );
+                let height = certified.block().height();
+                self.block_sync.buffer_block(height, certified);
+                return vec![];
+            }
+            ScheduleLookup::Evicted => {
+                warn!(
+                    height = certified.block().height().inner(),
+                    "Synced block's committee epoch is below the schedule floor — rejecting"
+                );
+                return vec![];
+            }
+        };
 
         // Quorum-power gate: `VerifyQcSignature` only checks the BLS
         // aggregation, not whether the signers represent ≥ 2f+1 of voting
@@ -3889,6 +3970,11 @@ impl ShardCoordinator {
     /// forms — without retransmission a healed partition never re-collects the
     /// shares it dropped and the chain wedges.
     fn broadcast_timeout(&mut self, topology: &TopologySchedule, round: Round) -> Vec<Action> {
+        // A terminated chain drives no view changes; the pacemaker only
+        // needed to reach the crossing's commit, which has happened.
+        if self.chain_terminated(topology) {
+            return vec![];
+        }
         // The timeout is tallied by the in-progress committee (the one that
         // would form the next QC). Without it (beacon behind) we can't drive a
         // view change — stall.
@@ -7733,5 +7819,88 @@ mod tests {
             }
             .is_ok()
         );
+    }
+
+    /// Schedule whose window 0 carries `ROOT` (the coordinator's shard,
+    /// with the full validator set) and whose window 1 carries its two
+    /// children instead — `ROOT`'s terminal window is 0 and any weighted
+    /// timestamp past 1000ms is coast territory.
+    fn make_terminating_schedule(n: usize) -> TopologySchedule {
+        let keys: Vec<Bls12381G1PrivateKey> = (0..n).map(|_| generate_bls_keypair()).collect();
+        let validators: Vec<ValidatorInfo> = keys
+            .iter()
+            .enumerate()
+            .map(|(i, k)| ValidatorInfo {
+                validator_id: ValidatorId::new(i as u64),
+                public_key: k.public_key(),
+            })
+            .collect();
+        let final_window = Arc::new(TopologySnapshot::new(
+            NetworkDefinition::simulator(),
+            1,
+            ValidatorSet::new(validators.clone()),
+        ));
+        let post_split = Arc::new(TopologySnapshot::new(
+            NetworkDefinition::simulator(),
+            2,
+            ValidatorSet::new(validators),
+        ));
+        let mut sched = TopologySchedule::new(1000, Epoch::new(0), final_window);
+        sched.insert(Epoch::new(1), post_split);
+        sched
+    }
+
+    fn coordinator_with_committed_anchor(anchor_ms: u64) -> ShardCoordinator {
+        let recovered = RecoveredState {
+            committed_anchor_ts: Some(WeightedTimestamp::from_millis(anchor_ms)),
+            ..RecoveredState::default()
+        };
+        ShardCoordinator::new(
+            ValidatorId::new(0),
+            ShardId::ROOT,
+            ShardConsensusConfig::default(),
+            recovered,
+        )
+    }
+
+    #[test]
+    fn chain_terminates_once_a_coast_block_commits() {
+        let sched = make_terminating_schedule(4);
+        // Committed tip anchored inside the final window: still live.
+        let live = coordinator_with_committed_anchor(500);
+        assert!(!live.chain_terminated(&sched));
+        // Committed tip anchored past the cut — the first coast block has
+        // committed, so the crossing's canonical QC is readable: stop.
+        let done = coordinator_with_committed_anchor(1500);
+        assert!(done.chain_terminated(&sched));
+    }
+
+    #[test]
+    fn terminated_chain_neither_proposes_nor_times_out() {
+        let sched = make_terminating_schedule(4);
+        // Round 4 makes this validator (id 0 of 4) the proposer.
+        let mut done = coordinator_with_committed_anchor(1500);
+        assert!(!done.can_propose(&sched, BlockHeight::new(1), Round::new(4)));
+        assert!(done.broadcast_timeout(&sched, Round::new(4)).is_empty());
+
+        let mut live = coordinator_with_committed_anchor(500);
+        assert!(live.can_propose(&sched, BlockHeight::new(1), Round::new(4)));
+        assert!(!live.broadcast_timeout(&sched, Round::new(4)).is_empty());
+    }
+
+    #[test]
+    fn terminated_chain_ignores_new_headers() {
+        let sched = make_terminating_schedule(4);
+        let mut done = coordinator_with_committed_anchor(1500);
+        let block = block_with_parent_qc_ts(BlockHeight::new(1), 500);
+        let actions = done.on_block_header(
+            &sched,
+            block.header(),
+            BlockManifest::default(),
+            |_| None,
+            |_| None,
+            |_| None,
+        );
+        assert!(actions.is_empty());
     }
 }

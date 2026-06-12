@@ -353,6 +353,7 @@ pub fn validate_no_duplicate_provisions(
 /// recomputation, and cross-ancestor uniqueness for txs, certs, and
 /// provisions. Returns a single diagnostic on the first failure so the
 /// caller can log once.
+#[allow(clippy::too_many_arguments)] // single dispatch over the pre-vote content checks
 pub fn validate_block_for_vote(
     topology: &TopologySnapshot,
     local_shard: ShardId,
@@ -361,13 +362,43 @@ pub fn validate_block_for_vote(
     qc_chain_cert_ids: &HashSet<WaveId>,
     qc_chain_provision_hashes: &HashSet<ProvisionHash>,
     dedup_index: &CommitDedupIndex,
+    coasting: bool,
 ) -> Result<(), String> {
+    if coasting {
+        validate_coast_block_empty(block)?;
+    }
     validate_transactions_verified(block)?;
     validate_transaction_ordering(block)?;
     validate_waves(topology, local_shard, block)?;
     validate_no_duplicate_transactions(block, qc_chain_tx_hashes, dedup_index)?;
     validate_no_duplicate_certificates(block, qc_chain_cert_ids, dedup_index)?;
     validate_no_duplicate_provisions(block, qc_chain_provision_hashes, dedup_index)?;
+    Ok(())
+}
+
+/// A coast block — one whose parent QC's weighted timestamp lands past
+/// the shard's terminal window — exists only to certify the crossing.
+/// It must carry no transactions, no certificates, and no provisions, so
+/// state stays frozen at the crossing's root.
+fn validate_coast_block_empty(block: &Block) -> Result<(), String> {
+    if !block.transactions().is_empty() {
+        return Err(format!(
+            "coast block past the terminal window carries {} transactions",
+            block.transactions().len()
+        ));
+    }
+    if !block.certificates().is_empty() {
+        return Err(format!(
+            "coast block past the terminal window carries {} certificates",
+            block.certificates().len()
+        ));
+    }
+    if !block.provisions().is_empty() {
+        return Err(format!(
+            "coast block past the terminal window carries {} provisions",
+            block.provisions().len()
+        ));
+    }
     Ok(())
 }
 
@@ -1252,8 +1283,44 @@ mod tests {
             &HashSet::new(),
             &HashSet::new(),
             &CommitDedupIndex::new(),
+            false,
         )
         .unwrap_err();
         assert!(err.contains("not admission-validated"));
+    }
+
+    #[test]
+    fn coast_blocks_must_be_empty() {
+        // Past the terminal window a block exists only to certify the
+        // crossing: any content fails the pre-vote check.
+        let topo = topology();
+        let with_tx = block_with_transactions(BlockHeight::new(1), sorted_verified_txs(&[10]));
+        let err = validate_block_for_vote(
+            &topo,
+            local_shard(),
+            &with_tx,
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+            &CommitDedupIndex::new(),
+            true,
+        )
+        .unwrap_err();
+        assert!(err.contains("coast block"), "{err}");
+
+        let empty = block_with_transactions(BlockHeight::new(1), Vec::new());
+        assert!(
+            validate_block_for_vote(
+                &topo,
+                local_shard(),
+                &empty,
+                &HashSet::new(),
+                &HashSet::new(),
+                &HashSet::new(),
+                &CommitDedupIndex::new(),
+                true,
+            )
+            .is_ok()
+        );
     }
 }
