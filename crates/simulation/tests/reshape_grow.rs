@@ -412,16 +412,22 @@ fn observers_grow_a_split_through_its_readiness_gate() {
         );
     }
 
-    // Every committed child chain extends the deterministic genesis the
-    // beacon anchored: the first committed block names the genesis as
-    // its parent and certifies it with a structural genesis QC carrying
-    // the parent chain's terminal clock.
+    // Every child store holds the deterministic genesis the beacon
+    // anchored as its committed base, and every committed chain extends
+    // it: the first block names the genesis as its parent and certifies
+    // it with a structural genesis QC carrying the parent chain's
+    // terminal clock.
     for child in [left, right] {
         let anchor = state.boundaries[&child];
         for node in 0..runner.num_hosts() {
             let Some(storage) = runner.hosts_shard(node, child) else {
                 continue;
             };
+            let genesis = storage
+                .get_block(genesis_height)
+                .expect("the adoption recorded the genesis as the committed tip");
+            assert_eq!(genesis.block().hash(), anchor.block_hash);
+            assert_eq!(genesis.block().header().state_root(), anchor.state_root);
             if storage.committed_height() <= genesis_height {
                 continue;
             }

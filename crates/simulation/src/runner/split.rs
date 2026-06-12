@@ -56,9 +56,6 @@ impl SimulationRunner {
             .find(|&i| self.hosts[i].hosted_shards().any(|s| s == parent))
             .expect("a host still carries the terminated parent");
         let parent_storage = &self.hosts[parent_host].shard_io(parent).storage;
-        let coast = parent_storage
-            .get_block(anchor.height)
-            .expect("parent chain committed its coast block");
         let terminal_height = anchor
             .height
             .prev()
@@ -69,22 +66,22 @@ impl SimulationRunner {
         let (genesis, origin) = split_genesis_from_terminal(
             child,
             terminal.block().header(),
-            coast.block().header(),
+            terminal.qc_verified(),
             &anchor,
         )
-        .expect("terminal pair derives the beacon-anchored genesis");
+        .expect("certified terminal derives the beacon-anchored genesis");
 
         let (storage, adopted) = observer_store.map_or_else(
             || {
                 let storage = parent_storage.clone_for_split_child(shard_prefix_path(child));
                 let adopted = storage
-                    .adopt_split_child(origin)
+                    .adopt_split_child(origin, &genesis)
                     .expect("child subtree adoption");
                 (storage, adopted)
             },
             |storage| {
                 let adopted = storage
-                    .adopt_followed_child(origin)
+                    .adopt_followed_child(origin, &genesis)
                     .expect("followed child store adoption");
                 (storage, adopted)
             },

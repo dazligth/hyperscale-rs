@@ -1,40 +1,41 @@
 //! The split-child genesis flip's deterministic core.
 //!
 //! A pre-staffed member of a split child derives the child's genesis
-//! from the terminated parent chain it holds: the terminal block `B`
-//! (the crossing the beacon anchors) and the coast block above it,
-//! whose `parent_qc` is `B`'s canonical QC. The derived genesis must
-//! reconstruct the beacon's child anchor byte-for-byte — the fold
-//! seeded the anchor with [`BlockHeader::split_child_genesis`]'s hash
-//! over the same inputs — so a mismatch means the local parent chain
-//! and the beacon disagree, and the flip fails closed.
+//! from the terminated parent chain: the terminal block `B` (the
+//! crossing the beacon anchors) and its certifying quorum certificate —
+//! the canonical QC `B`'s committed coast child carried, stored (and
+//! served) alongside `B` itself. The derived genesis must reconstruct
+//! the beacon's child anchor byte-for-byte — the fold seeded the anchor
+//! with [`BlockHeader::split_child_genesis`]'s hash over the same
+//! inputs — so a mismatch means the local parent chain and the beacon
+//! disagree, and the flip fails closed.
 
-use hyperscale_types::{Block, BlockHeader, ChainOrigin, ShardAnchor, ShardId};
+use hyperscale_types::{Block, BlockHeader, ChainOrigin, QuorumCertificate, ShardAnchor, ShardId};
 
 /// Derive a split child's genesis block and chain origin from the
-/// parent chain's terminal pair, verified against the beacon's child
-/// anchor.
+/// parent chain's certified terminal block, verified against the
+/// beacon's child anchor.
 ///
 /// `terminal_header` is `B` (the block at `anchor.height - 1` on the
-/// parent chain) and `coast_header` its committed child (at
-/// `anchor.height`), whose `parent_qc` carries `B`'s canonical weighted
-/// timestamp — the child clock's start anchor.
+/// parent chain) and `terminal_qc` the QC certifying it — the canonical
+/// QC whose weighted timestamp is the child clock's start anchor,
+/// persisted with `B` when the coast block committed it.
 ///
 /// # Errors
 ///
-/// Fails when the coast header does not certify the terminal header, or
-/// when the derived genesis does not reconstruct the beacon-anchored
-/// genesis hash and adopted state root.
+/// Fails when the quorum certificate does not certify the terminal
+/// header, or when the derived genesis does not reconstruct the
+/// beacon-anchored genesis hash and adopted state root.
 pub fn split_genesis_from_terminal(
     child: ShardId,
     terminal_header: &BlockHeader,
-    coast_header: &BlockHeader,
+    terminal_qc: &QuorumCertificate,
     anchor: &ShardAnchor,
 ) -> Result<(Block, ChainOrigin), String> {
-    if coast_header.parent_qc().block_hash() != terminal_header.hash() {
-        return Err("coast header does not certify the terminal block".to_string());
+    if terminal_qc.block_hash() != terminal_header.hash() {
+        return Err("the quorum certificate does not certify the terminal block".to_string());
     }
-    let canonical_wt = coast_header.parent_qc().weighted_timestamp();
+    let canonical_wt = terminal_qc.weighted_timestamp();
     let origin = ChainOrigin {
         genesis_height: terminal_header.height().next(),
         anchor_wt: canonical_wt,
@@ -89,8 +90,8 @@ mod tests {
         )
     }
 
-    fn coast_over(terminal: &BlockHeader, wt: u64) -> BlockHeader {
-        let qc = QuorumCertificate::new(
+    fn certifying_qc(terminal: &BlockHeader, wt: u64) -> QuorumCertificate {
+        QuorumCertificate::new(
             terminal.hash(),
             terminal.shard_id(),
             terminal.height(),
@@ -99,8 +100,7 @@ mod tests {
             SignerBitfield::new(4),
             zero_bls_signature(),
             WeightedTimestamp::from_millis(wt),
-        );
-        header_at(terminal.shard_id(), terminal.height().next(), qc)
+        )
     }
 
     /// The derivation reproduces exactly the genesis the beacon fold
@@ -114,7 +114,7 @@ mod tests {
             BlockHeight::new(9),
             QuorumCertificate::genesis(parent, ChainOrigin::ROOT),
         );
-        let coast = coast_over(&terminal, 2_500);
+        let qc = certifying_qc(&terminal, 2_500);
         let child_root = StateRoot::from_raw(Hash::from_bytes(b"left subtree"));
 
         // The fold's seeding convention over the same inputs.
@@ -131,7 +131,7 @@ mod tests {
         };
 
         let (genesis, origin) =
-            split_genesis_from_terminal(left, &terminal, &coast, &anchor).expect("derives");
+            split_genesis_from_terminal(left, &terminal, &qc, &anchor).expect("derives");
         assert_eq!(genesis.hash(), anchor.block_hash);
         assert_eq!(origin.genesis_height, BlockHeight::new(10));
         assert_eq!(origin.anchor_wt, WeightedTimestamp::from_millis(2_500));
@@ -140,6 +140,6 @@ mod tests {
             block_hash: BlockHash::from_raw(Hash::from_bytes(b"forged")),
             ..anchor
         };
-        assert!(split_genesis_from_terminal(left, &terminal, &coast, &wrong).is_err());
+        assert!(split_genesis_from_terminal(left, &terminal, &qc, &wrong).is_err());
     }
 }

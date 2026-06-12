@@ -23,7 +23,8 @@ use hyperscale_node::bootstrap::{BootstrapOutcome, BootstrapRequest, ShardBootst
 use hyperscale_storage::{RecoveredState, ShardStorage};
 use hyperscale_types::network::request::GetBlockRequest;
 use hyperscale_types::{
-    Block, BlockHeader, BlockHeight, ChainOrigin, Request, ShardAnchor, ShardId, StateRoot,
+    Block, BlockHeader, BlockHeight, ChainOrigin, QuorumCertificate, Request, ShardAnchor, ShardId,
+    StateRoot,
 };
 use tokio::sync::oneshot;
 use tokio::time::sleep;
@@ -279,18 +280,17 @@ where
             && lock(&tail).next_height() >= child_anchor.height
         {
             // Caught up through the parent's terminal block. The tail
-            // retains no headers, so the terminal pair is fetched by
-            // height — self-verifying: the coast header must certify
-            // the terminal one and the derived genesis must reproduce
+            // retains nothing, so the certified terminal is fetched by
+            // height — self-verifying: the served QC must certify the
+            // terminal header and the derived genesis must reproduce
             // the beacon-anchored hash.
             let terminal_height = child_anchor
                 .height
                 .prev()
                 .ok_or("child anchor at the absolute height floor")?;
-            let terminal = fetch_followed_header(network, child, terminal_height).await;
-            let coast = fetch_followed_header(network, child, child_anchor.height).await;
+            let (terminal, qc) = fetch_certified_terminal(network, child, terminal_height).await;
             let (genesis, origin) =
-                split_genesis_from_terminal(child, &terminal, &coast, &child_anchor)?;
+                split_genesis_from_terminal(child, &terminal, &qc, &child_anchor)?;
             let root = lock(&tail).root();
             info!(
                 ?via,
@@ -339,17 +339,18 @@ where
     }
 }
 
-/// Fetch one committed header of the followed chain by height from
-/// `shard`'s committee, retrying until a peer serves it. Headers ride
-/// inline on every block response; the caller's derivation
-/// self-verifies the pair, so no body rehydration is needed.
-async fn fetch_followed_header<N: Network>(
+/// Fetch the followed chain's certified terminal block by height from
+/// `shard`'s committee, retrying until a peer serves it. The header and
+/// its certifying QC ride inline on every block response; the caller's
+/// derivation self-verifies the pairing, so no body rehydration is
+/// needed.
+async fn fetch_certified_terminal<N: Network>(
     network: &Arc<N>,
     shard: ShardId,
     height: BlockHeight,
-) -> BlockHeader {
+) -> (BlockHeader, QuorumCertificate) {
     loop {
-        let slot: Arc<Mutex<Option<BlockHeader>>> = Arc::new(Mutex::new(None));
+        let slot: Arc<Mutex<Option<(BlockHeader, QuorumCertificate)>>> = Arc::new(Mutex::new(None));
         let out = Arc::clone(&slot);
         let waiter = send(
             network,
@@ -359,15 +360,15 @@ async fn fetch_followed_header<N: Network>(
                 if let Ok(response) = result
                     && let Some(elided) = &response.certified
                 {
-                    *lock(&out) = Some(elided.header().clone());
+                    *lock(&out) = Some((elided.header().clone(), elided.qc().clone()));
                 }
                 ResponseVerdict::Accept
             },
         );
         let _ = waiter.await;
         let fetched = lock(&slot).take();
-        if let Some(header) = fetched {
-            return header;
+        if let Some(pair) = fetched {
+            return pair;
         }
         sleep(FOLLOW_PAUSE).await;
     }

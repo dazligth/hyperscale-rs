@@ -1180,7 +1180,7 @@ async fn prepare_observer_flip(
     .await?;
     spawn_blocking(move || {
         let adopted = storage
-            .adopt_followed_child(origin)
+            .adopt_followed_child(origin, &genesis)
             .map_err(|e| format!("followed adoption: {e}"))?;
         if adopted != genesis.header().state_root() {
             return Err(format!(
@@ -1243,9 +1243,6 @@ fn adopt_from_parent(
         }
         std::thread::sleep(ANCHOR_POLL_INTERVAL);
     }
-    let coast = parent_storage
-        .get_block(anchor.height)
-        .ok_or("parent chain holds no coast block at the anchor height")?;
     let terminal_height = anchor
         .height
         .prev()
@@ -1256,7 +1253,7 @@ fn adopt_from_parent(
     let (genesis, origin) = split_genesis_from_terminal(
         child,
         terminal.block().header(),
-        coast.block().header(),
+        terminal.qc_verified(),
         anchor,
     )?;
 
@@ -1265,7 +1262,7 @@ fn adopt_from_parent(
         .map_err(|e| format!("child checkpoint: {e}"))?;
     let storage = factory(child)?;
     let adopted = storage
-        .adopt_split_child(origin)
+        .adopt_split_child(origin, &genesis)
         .map_err(|e| format!("child adoption: {e}"))?;
     if adopted != anchor.state_root {
         return Err(format!(

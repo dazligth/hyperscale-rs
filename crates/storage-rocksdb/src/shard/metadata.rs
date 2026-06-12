@@ -34,6 +34,15 @@ pub fn write_committed_qc(batch: &mut WriteBatch, qc: &QuorumCertificate) {
     typed_cf::meta_write::<CommittedQcEntry>(batch, qc);
 }
 
+/// Drop the stored latest QC. A split-child adoption resets the
+/// checkpoint-inherited parent QC this way: the child chain holds no QC
+/// at its genesis, and recovery's `latest_qc: None` makes the first
+/// proposal extend the structural genesis QC reconstructed from the
+/// chain origin.
+pub fn delete_committed_qc(batch: &mut WriteBatch) {
+    typed_cf::meta_delete::<CommittedQcEntry>(batch);
+}
+
 pub fn read_committed_qc(store: &impl ReadableStore) -> Option<QuorumCertificate> {
     typed_cf::meta_read::<CommittedQcEntry>(store)
 }

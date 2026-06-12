@@ -511,6 +511,12 @@ pub fn meta_write<E: MetadataEntry>(batch: &mut WriteBatch, value: &E::Value) {
     batch.put(E::KEY, encoded);
 }
 
+/// Delete a metadata entry in `batch`. Reads of an absent entry return
+/// `None` (or the accessor's documented default).
+pub fn meta_delete<E: MetadataEntry>(batch: &mut WriteBatch) {
+    batch.delete(E::KEY);
+}
+
 // ─── Metadata codecs ─────────────────────────────────────────────────────────
 
 /// `BlockHeight` codec — wraps BE u64, maps through `BlockHeight::new(u64)`.

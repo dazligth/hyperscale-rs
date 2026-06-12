@@ -15,7 +15,9 @@ use std::sync::Arc;
 
 use hyperscale_jmt::{Key, NibblePath, Node as JmtNode, NodeKey as JmtNodeKey, TreeReader};
 use hyperscale_storage::tree::Jmt;
-use hyperscale_types::{ChainOrigin, Hash, StateRoot};
+use hyperscale_types::{
+    BeaconWitnessLeafCount, Block, CertifiedBlock, ChainOrigin, Hash, StateRoot, Verified,
+};
 use rocksdb::WriteBatch;
 use rocksdb::checkpoint::Checkpoint;
 
@@ -23,7 +25,8 @@ use super::column_families::{CfHandles, JmtNodesCf, SubstateCountsCf};
 use super::core::RocksDbShardStorage;
 use super::jmt_stored::{StoredNodeKey, VersionedStoredNode};
 use super::metadata::{
-    read_chain_origin, read_jmt_metadata, write_chain_origin, write_jmt_metadata,
+    delete_committed_qc, read_chain_origin, read_jmt_metadata, write_chain_origin,
+    write_committed_hash, write_committed_height, write_jmt_metadata,
 };
 use crate::StorageError;
 use crate::typed_cf::{TypedCf, batch_put};
@@ -78,14 +81,15 @@ impl RocksDbShardStorage {
     /// version, takes the child-side slot as the adopted `state_root`,
     /// copies the child's root node to the genesis version (the same
     /// carry-forward an empty block performs), seeds the substate count
-    /// by walking the subtree, and records the chain origin for
-    /// recovery. The genesis block itself then commits through the
-    /// normal chain-writer path, whose genesis arm expects exactly this
-    /// metadata. Idempotent: a re-run over an already-adopted store
-    /// returns the recorded adoption untouched. An observer's followed
-    /// store adopts through [`Self::adopt_followed_child`] instead —
-    /// the shapes are caller-distinguished, since a checkpoint can be
-    /// structurally ambiguous with a followed store.
+    /// by walking the subtree, and records the chain origin plus the
+    /// `genesis` block as the committed tip — all in one atomic batch,
+    /// so a crash at any later point recovers the store as a committed
+    /// child chain at its genesis. Idempotent: a re-run over an
+    /// already-adopted store returns the recorded adoption untouched.
+    /// An observer's followed store adopts through
+    /// [`Self::adopt_followed_child`] instead — the shapes are
+    /// caller-distinguished, since a checkpoint can be structurally
+    /// ambiguous with a followed store.
     ///
     /// Returns the adopted child `state_root` — `ZERO` for an empty
     /// side. The caller asserts it against the beacon-verified
@@ -95,19 +99,31 @@ impl RocksDbShardStorage {
     ///
     /// Fails closed when the checkpoint's vintage does not match the
     /// origin (`committed version + 1 != genesis height`), when the
+    /// genesis block does not sit at the origin's height, when the
     /// parent's root collapsed to a leaf (a ≤1-key parent cannot split),
     /// or when the store's root path is the trie root (no parent side
     /// to adopt from).
-    pub fn adopt_split_child(&self, origin: ChainOrigin) -> Result<StateRoot, StorageError> {
+    pub fn adopt_split_child(
+        &self,
+        origin: ChainOrigin,
+        genesis: &Block,
+    ) -> Result<StateRoot, StorageError> {
         let _commit_guard = self
             .commit_lock
             .lock()
             .map_err(|_| StorageError::DatabaseError("commit lock poisoned".into()))?;
+        if genesis.height() != origin.genesis_height {
+            return Err(StorageError::DatabaseError(format!(
+                "genesis block at height {} does not sit at the origin's {}",
+                genesis.height(),
+                origin.genesis_height,
+            )));
+        }
 
         let (checkpoint_version, current_root) = read_jmt_metadata(&*self.db);
         let genesis_version = origin.genesis_height.inner();
-        // A re-run over an already-adopted store (crash between adoption
-        // and the genesis commit) returns the recorded adoption.
+        // A re-run over an already-adopted store returns the recorded
+        // adoption.
         if checkpoint_version == genesis_version && read_chain_origin(&*self.db) == origin {
             return Ok(current_root);
         }
@@ -189,6 +205,7 @@ impl RocksDbShardStorage {
         };
         write_jmt_metadata(&mut batch, genesis_version, child_root);
         write_chain_origin(&mut batch, origin);
+        self.append_genesis_tip_to_batch(&mut batch, genesis);
         self.db
             .write(batch)
             .map_err(|e| StorageError::DatabaseError(format!("split adoption write: {e}")))?;
@@ -202,10 +219,12 @@ impl RocksDbShardStorage {
     /// anchor and followed the parent's child-half writes to its
     /// crossing, so its tree *is* the adopted subtree: the tip's root
     /// node is copied to the genesis version, the substate count seeded
-    /// by walking it, and the chain origin recorded for recovery. The
-    /// tip version is sparse on the parent's heights (foreign-half
-    /// blocks never advanced it), so no checkpoint vintage applies —
-    /// the trust is the caller's equality check against the
+    /// by walking it, and the chain origin plus the `genesis` block
+    /// recorded as the committed tip — all in one atomic batch, so a
+    /// crash at any later point recovers the store as a committed child
+    /// chain at its genesis. The tip version is sparse on the parent's
+    /// heights (foreign-half blocks never advanced it), so no checkpoint
+    /// vintage applies — the trust is the equality check against the
     /// beacon-seeded child anchor. Idempotent like
     /// [`Self::adopt_split_child`].
     ///
@@ -216,19 +235,32 @@ impl RocksDbShardStorage {
     ///
     /// Fails closed when the store's tip sits at or past the genesis
     /// height (a followed store only ever advances on child-half writes,
-    /// which the parent's coast cannot produce), when its metadata names
-    /// a root its tree doesn't hold, or when the store's root path is
-    /// the trie root.
-    pub fn adopt_followed_child(&self, origin: ChainOrigin) -> Result<StateRoot, StorageError> {
+    /// which the parent's coast cannot produce), when the genesis block
+    /// does not sit at the origin's height or carries a state root other
+    /// than the followed one, when the store's metadata names a root its
+    /// tree doesn't hold, or when the store's root path is the trie
+    /// root.
+    pub fn adopt_followed_child(
+        &self,
+        origin: ChainOrigin,
+        genesis: &Block,
+    ) -> Result<StateRoot, StorageError> {
         let _commit_guard = self
             .commit_lock
             .lock()
             .map_err(|_| StorageError::DatabaseError("commit lock poisoned".into()))?;
+        if genesis.height() != origin.genesis_height {
+            return Err(StorageError::DatabaseError(format!(
+                "genesis block at height {} does not sit at the origin's {}",
+                genesis.height(),
+                origin.genesis_height,
+            )));
+        }
 
         let (tip_version, current_root) = read_jmt_metadata(&*self.db);
         let genesis_version = origin.genesis_height.inner();
-        // A re-run over an already-adopted store (crash between adoption
-        // and the genesis commit) returns the recorded adoption.
+        // A re-run over an already-adopted store returns the recorded
+        // adoption.
         if tip_version == genesis_version && read_chain_origin(&*self.db) == origin {
             return Ok(current_root);
         }
@@ -236,6 +268,12 @@ impl RocksDbShardStorage {
             return Err(StorageError::DatabaseError(format!(
                 "followed adoption vintage mismatch: store at version {tip_version}, \
                  genesis height {genesis_version}"
+            )));
+        }
+        if genesis.header().state_root() != current_root {
+            return Err(StorageError::DatabaseError(format!(
+                "followed root {current_root:?} does not match the genesis state root {:?}",
+                genesis.header().state_root(),
             )));
         }
         let child_path = self.root_path.clone();
@@ -283,10 +321,31 @@ impl RocksDbShardStorage {
         }
         write_jmt_metadata(&mut batch, genesis_version, current_root);
         write_chain_origin(&mut batch, origin);
+        self.append_genesis_tip_to_batch(&mut batch, genesis);
         self.db
             .write(batch)
             .map_err(|e| StorageError::DatabaseError(format!("followed adoption write: {e}")))?;
         Ok(current_root)
+    }
+
+    /// Fold the child's deterministic genesis into an adoption batch as
+    /// the committed tip: the genesis block with its deterministic
+    /// certified pairing, the committed height and hash, and a reset of
+    /// any checkpoint-inherited latest QC — the child chain holds no QC
+    /// at its genesis, and recovery's `latest_qc: None` makes the first
+    /// proposal extend the structural genesis QC reconstructed from the
+    /// chain origin.
+    fn append_genesis_tip_to_batch(&self, batch: &mut WriteBatch, genesis: &Block) {
+        let pair = Verified::<CertifiedBlock>::genesis_certified(genesis.clone());
+        self.append_block_to_batch(
+            batch,
+            pair.block(),
+            pair.qc_verified(),
+            BeaconWitnessLeafCount::ZERO,
+        );
+        write_committed_height(batch, genesis.height());
+        write_committed_hash(batch, genesis.hash().as_raw());
+        delete_committed_qc(batch);
     }
 
     /// Count the live leaves under the adopted child root by walking the
@@ -361,7 +420,7 @@ impl TreeReader for PreRootStore<'_> {
 mod tests {
     use hyperscale_jmt::{Blake3Hasher, Hasher, NibblePath};
     use hyperscale_storage::{BoundaryStore, ImportLeaf};
-    use hyperscale_types::{BlockHeight, WeightedTimestamp};
+    use hyperscale_types::{BlockHeight, ShardId, ValidatorId, WeightedTimestamp};
     use tempfile::TempDir;
 
     use super::super::metadata::read_chain_origin;
@@ -408,6 +467,31 @@ mod tests {
         }
     }
 
+    /// A deterministic child genesis at height 10 adopting `state_root`,
+    /// derived over a synthetic parent terminal header at height 9.
+    fn genesis_at_10(child: ShardId, state_root: StateRoot) -> Block {
+        let terminal = Block::genesis(
+            ShardId::ROOT,
+            ValidatorId::new(0),
+            StateRoot::ZERO,
+            ChainOrigin {
+                genesis_height: BlockHeight::new(9),
+                anchor_wt: WeightedTimestamp::ZERO,
+            },
+        );
+        Block::split_child_genesis(
+            child,
+            state_root,
+            terminal.header(),
+            WeightedTimestamp::from_millis(42_000),
+        )
+    }
+
+    fn child_of(side: u8) -> ShardId {
+        let (left, right) = ShardId::ROOT.children();
+        if side == 0 { left } else { right }
+    }
+
     /// The full parent-half flow: checkpoint the parent, open the
     /// hard-linked copy at each child's prefix, adopt. The two adopted
     /// roots compose to the parent's root, counts partition the leaf
@@ -425,7 +509,8 @@ mod tests {
             let target = child_dir.path().join("store");
             parent.checkpoint_into(&target).unwrap();
             let child = RocksDbShardStorage::open(&target, child_path(side)).unwrap();
-            let root = child.adopt_split_child(origin_at_10()).unwrap();
+            let genesis = genesis_at_10(child_of(side), StateRoot::ZERO);
+            let root = child.adopt_split_child(origin_at_10(), &genesis).unwrap();
             assert_ne!(root, StateRoot::ZERO);
             roots.push(root);
 
@@ -435,9 +520,19 @@ mod tests {
                 Some(if side == 0 { 2 } else { 1 }),
             );
             assert_eq!(read_chain_origin(&*child.db), origin_at_10());
+            // The adoption batch records the genesis as the committed
+            // tip, with no inherited latest QC.
+            let recovered = child.load_recovered_state();
+            assert_eq!(recovered.committed_height, BlockHeight::new(10));
+            assert_eq!(recovered.committed_hash, Some(genesis.hash()));
+            assert!(recovered.latest_qc.is_none());
+            assert_eq!(recovered.chain_origin, origin_at_10());
 
             // Idempotent: a re-run lands on the same values.
-            assert_eq!(child.adopt_split_child(origin_at_10()).unwrap(), root);
+            assert_eq!(
+                child.adopt_split_child(origin_at_10(), &genesis).unwrap(),
+                root,
+            );
         }
 
         assert_eq!(
@@ -462,7 +557,22 @@ mod tests {
             genesis_height: BlockHeight::new(12),
             anchor_wt: WeightedTimestamp::from_millis(42_000),
         };
-        assert!(child.adopt_split_child(stale).is_err());
+        let terminal = Block::genesis(
+            ShardId::ROOT,
+            ValidatorId::new(0),
+            StateRoot::ZERO,
+            ChainOrigin {
+                genesis_height: BlockHeight::new(11),
+                anchor_wt: WeightedTimestamp::ZERO,
+            },
+        );
+        let genesis = Block::split_child_genesis(
+            child_of(0),
+            StateRoot::ZERO,
+            terminal.header(),
+            WeightedTimestamp::from_millis(42_000),
+        );
+        assert!(child.adopt_split_child(stale, &genesis).is_err());
     }
 
     /// An empty side adopts a zero root with a zero count — the child
@@ -480,7 +590,8 @@ mod tests {
         let target = child_dir.path().join("store");
         storage.checkpoint_into(&target).unwrap();
         let child = RocksDbShardStorage::open(&target, child_path(1)).unwrap();
-        let root = child.adopt_split_child(origin_at_10()).unwrap();
+        let genesis = genesis_at_10(child_of(1), StateRoot::ZERO);
+        let root = child.adopt_split_child(origin_at_10(), &genesis).unwrap();
         assert_eq!(root, StateRoot::ZERO);
         assert_eq!(child.read_jmt_metadata(), (10, StateRoot::ZERO));
         assert_eq!(child.substate_count_at_version(10), Some(0));
@@ -555,14 +666,39 @@ mod tests {
             genesis_height: BlockHeight::new(9),
             anchor_wt: WeightedTimestamp::from_millis(42_000),
         };
-        for (store, followed_root) in [(&left, left_root), (&right, right_root)] {
-            let adopted = store.adopt_followed_child(origin).unwrap();
+        for (side, (store, followed_root)) in [(&left, left_root), (&right, right_root)]
+            .into_iter()
+            .enumerate()
+        {
+            let terminal = Block::genesis(
+                ShardId::ROOT,
+                ValidatorId::new(0),
+                StateRoot::ZERO,
+                ChainOrigin {
+                    genesis_height: BlockHeight::new(8),
+                    anchor_wt: WeightedTimestamp::ZERO,
+                },
+            );
+            let genesis = Block::split_child_genesis(
+                child_of(u8::try_from(side).unwrap()),
+                followed_root,
+                terminal.header(),
+                WeightedTimestamp::from_millis(42_000),
+            );
+            let adopted = store.adopt_followed_child(origin, &genesis).unwrap();
             assert_eq!(adopted, followed_root);
             assert_eq!(store.read_jmt_metadata(), (9, followed_root));
             assert!(store.substate_count_at_version(9).is_some());
             assert_eq!(read_chain_origin(&*store.db), origin);
+            let recovered = store.load_recovered_state();
+            assert_eq!(recovered.committed_height, BlockHeight::new(9));
+            assert_eq!(recovered.committed_hash, Some(genesis.hash()));
+            assert!(recovered.latest_qc.is_none());
             // Idempotent: a re-run lands on the same values.
-            assert_eq!(store.adopt_followed_child(origin).unwrap(), adopted);
+            assert_eq!(
+                store.adopt_followed_child(origin, &genesis).unwrap(),
+                adopted
+            );
         }
     }
 }

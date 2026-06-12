@@ -14,7 +14,7 @@ use std::sync::{Arc, RwLock};
 use hyperscale_jmt::{NibblePath, Node, NodeKey, TreeReader};
 use hyperscale_storage::lock_recover::{read_or_recover, write_or_recover};
 use hyperscale_storage::tree::Jmt;
-use hyperscale_types::{ChainOrigin, Hash, StateRoot};
+use hyperscale_types::{Block, CertifiedBlock, ChainOrigin, Hash, StateRoot, Verified};
 
 use super::core::SimShardStorage;
 use super::state::ConsensusState;
@@ -51,15 +51,28 @@ impl SimShardStorage {
     /// side. The caller asserts it against the beacon-verified child
     /// anchor; unlike the production backend there is no checkpoint
     /// vintage check, since the simulation harness supplies the stores.
-    /// An observer's followed store adopts through
+    /// The `genesis` block records as the committed tip, mirroring the
+    /// production batch. An observer's followed store adopts through
     /// [`Self::adopt_followed_child`] instead — the shapes are
     /// caller-distinguished.
     ///
     /// # Errors
     ///
-    /// Fails when the store's root path is the trie root, or when the
+    /// Fails when the store's root path is the trie root, when the
+    /// genesis block does not sit at the origin's height, or when the
     /// clone resolves no parent root or child subtree node.
-    pub fn adopt_split_child(&self, origin: ChainOrigin) -> Result<StateRoot, String> {
+    pub fn adopt_split_child(
+        &self,
+        origin: ChainOrigin,
+        genesis: &Block,
+    ) -> Result<StateRoot, String> {
+        if genesis.height() != origin.genesis_height {
+            return Err(format!(
+                "genesis block at height {} does not sit at the origin's {}",
+                genesis.height(),
+                origin.genesis_height,
+            ));
+        }
         let mut shared = write_or_recover(&self.state);
         let child_path = shared.tree_store.root_path();
         if child_path.is_empty() {
@@ -96,7 +109,7 @@ impl SimShardStorage {
         };
         install_adoption(&mut shared, origin, child_node, child_root)?;
         drop(shared);
-        write_or_recover(&self.consensus).chain_origin = origin;
+        self.install_genesis_tip(origin, genesis);
         Ok(child_root)
     }
 
@@ -107,13 +120,27 @@ impl SimShardStorage {
     ///
     /// Returns the adopted child `state_root` — `ZERO` for a store
     /// whose span held nothing (an empty half). The caller asserts it
-    /// against the beacon-verified child anchor.
+    /// against the beacon-verified child anchor. The `genesis` block
+    /// records as the committed tip, mirroring the production batch.
     ///
     /// # Errors
     ///
-    /// Fails when the store's root path is the trie root, or when its
+    /// Fails when the store's root path is the trie root, when the
+    /// genesis block does not sit at the origin's height or carries a
+    /// state root other than the followed one, or when the store's
     /// metadata names a root its tree doesn't hold.
-    pub fn adopt_followed_child(&self, origin: ChainOrigin) -> Result<StateRoot, String> {
+    pub fn adopt_followed_child(
+        &self,
+        origin: ChainOrigin,
+        genesis: &Block,
+    ) -> Result<StateRoot, String> {
+        if genesis.height() != origin.genesis_height {
+            return Err(format!(
+                "genesis block at height {} does not sit at the origin's {}",
+                genesis.height(),
+                origin.genesis_height,
+            ));
+        }
         let mut shared = write_or_recover(&self.state);
         let child_path = shared.tree_store.root_path();
         if child_path.is_empty() {
@@ -134,10 +161,33 @@ impl SimShardStorage {
                     .ok_or("followed store holds no root node at its tip version")?,
             )
         };
+        if genesis.header().state_root() != child_root {
+            return Err(format!(
+                "followed root {child_root:?} does not match the genesis state root {:?}",
+                genesis.header().state_root(),
+            ));
+        }
         install_adoption(&mut shared, origin, child_node, child_root)?;
         drop(shared);
-        write_or_recover(&self.consensus).chain_origin = origin;
+        self.install_genesis_tip(origin, genesis);
         Ok(child_root)
+    }
+
+    /// Record the child's deterministic genesis as the committed tip —
+    /// the consensus half of an adoption: the genesis block with its
+    /// deterministic certified pairing, the committed height and hash,
+    /// no latest QC (the child chain holds none at its genesis), and
+    /// the chain origin for recovery.
+    fn install_genesis_tip(&self, origin: ChainOrigin, genesis: &Block) {
+        let pair = Verified::<CertifiedBlock>::genesis_certified(genesis.clone());
+        let mut consensus = write_or_recover(&self.consensus);
+        consensus
+            .blocks
+            .insert(genesis.height(), pair.as_ref().clone());
+        consensus.committed_height = genesis.height();
+        consensus.committed_hash = Some(genesis.hash());
+        consensus.committed_qc = None;
+        consensus.chain_origin = origin;
     }
 }
 
