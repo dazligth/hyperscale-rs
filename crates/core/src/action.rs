@@ -949,6 +949,29 @@ pub enum Action {
         target: BlockHeight,
     },
 
+    /// Reconstruct a terminated shard's settled-wave set `S_P` for the
+    /// split-boundary fence.
+    ///
+    /// Emitted by `RemoteHeaderCoordinator` when it captures a new
+    /// terminal anchor from a past-terminal shard's coast header. The
+    /// I/O loop drives a `SettledSetBuilder` backward from the terminal
+    /// block against `peers`, then feeds the result back as
+    /// [`crate::ProtocolEvent::SettledWavesReconstructed`].
+    StartSettledSetSync {
+        /// The terminated shard whose settled set to reconstruct.
+        shard: ShardId,
+        /// Height of the terminal block `B`.
+        terminal_height: BlockHeight,
+        /// Hash of the terminal block `B` — the beacon-attested anchor
+        /// the backward walk starts from.
+        terminal_block_hash: BlockHash,
+        /// `B`'s weighted timestamp — bounds the fence's retention
+        /// cutoff once the set is recorded.
+        terminal_wt: WeightedTimestamp,
+        /// The terminated shard's terminal committee, asked in rotation.
+        peers: Vec<ValidatorId>,
+    },
+
     /// Issue a network fetch via one of the unified fetch protocols.
     ///
     /// Replaces the family of flat `Fetch*` / `RequestMissing*` variants —
@@ -1370,6 +1393,7 @@ impl Action {
             | Self::StartBlockSync { .. }
             | Self::StartBeaconBlockSync { .. }
             | Self::StartRemoteHeaderSync { .. }
+            | Self::StartSettledSetSync { .. }
             | Self::RestoreCommittedState { .. }
             | Self::Fetch(_)
             | Self::AbandonFetch(_)

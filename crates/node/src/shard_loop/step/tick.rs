@@ -36,6 +36,8 @@ where
         let outputs = self.io.syncs.remote_header_tick(now);
         self.process_remote_header_sync_outputs(outputs);
 
+        self.settled_set_tick();
+
         self.drive_fetch::<TransactionBinding>(FetchInput::Tick);
         self.drive_fetch::<LocalProvisionBinding>(FetchInput::Tick);
         self.drive_fetch::<FinalizedWaveBinding>(FetchInput::Tick);

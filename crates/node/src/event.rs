@@ -19,8 +19,8 @@ use hyperscale_core::{CommitSource, ProtocolEvent};
 use hyperscale_types::{
     BeaconWitnessCommit, BlockHash, BlockHeight, Bls12381G1PublicKey, Bls12381G2Signature,
     CertifiedBeaconBlock, CertifiedBlock, CertifiedBlockHeader, ElidedCertifiedBlock, Epoch,
-    HeaderFetchCount, LeafIndex, ProvisionHash, RoutableTransaction, ShardId, TxHash, ValidatorId,
-    Verifiable, Verified, WaveId,
+    HeaderFetchCount, LeafIndex, ProvisionHash, RoutableTransaction, SettledWavesReveal, ShardId,
+    TxHash, ValidatorId, Verifiable, Verified, WaveId,
 };
 
 use crate::shard_io::block_commit::QcOnlyDivergence;
@@ -247,6 +247,24 @@ pub enum ShardScopedInput {
         kind: FetchFailureKind,
     },
 
+    /// Settled-waves reveal for a past-terminal shard's reconstruction,
+    /// `None` when the peer didn't hold the height. Boxed: the reveal
+    /// carries a full certified header, which would otherwise inflate
+    /// every other queued `ShardScopedInput`.
+    SettledWavesResponseReceived {
+        /// The terminated shard being reconstructed.
+        source_shard: ShardId,
+        /// One block's settled-waves reveal, or `None` for `not_found`.
+        reveal: Option<Box<SettledWavesReveal>>,
+    },
+
+    /// Settled-waves fetch failed at the transport level. The driver
+    /// re-arms and the next `FetchTick` retries against a rotated peer.
+    SettledWavesFetchFailed {
+        /// The terminated shard being reconstructed.
+        source_shard: ShardId,
+    },
+
     /// A transaction fetch request failed (network error or peer returned None).
     TransactionsFetchFailed {
         /// Transaction hashes that failed to fetch.
@@ -406,6 +424,8 @@ impl ShardScopedInput {
             | Self::SyncBlockValidationFailed { .. }
             | Self::RemoteHeadersResponseReceived { .. }
             | Self::RemoteHeadersFetchFailed { .. }
+            | Self::SettledWavesResponseReceived { .. }
+            | Self::SettledWavesFetchFailed { .. }
             | Self::TransactionsFetchFailed { .. }
             | Self::TransactionValidated { .. }
             | Self::TransactionValidationsFailed { .. }

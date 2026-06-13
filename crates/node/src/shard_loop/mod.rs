@@ -402,6 +402,15 @@ where
             } => {
                 self.handle_remote_headers_fetch_failed(source_shard, from_height, count, kind);
             }
+            ShardScopedInput::SettledWavesResponseReceived {
+                source_shard,
+                reveal,
+            } => {
+                self.handle_settled_waves_response_received(source_shard, reveal.map(|r| *r));
+            }
+            ShardScopedInput::SettledWavesFetchFailed { source_shard } => {
+                self.handle_settled_waves_fetch_failed(source_shard);
+            }
 
             // ── Fetch protocol ─────────────────────────────────────────
             ShardScopedInput::TransactionsFetchFailed { hashes } => {

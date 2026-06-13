@@ -146,7 +146,9 @@ where
     /// its own ticker — a shard with idle fetches stops paying for the
     /// 200ms wake-up while busier shards keep ticking.
     pub(crate) fn update_fetch_tick_timer(&mut self) {
-        let any_pending = self.io.fetches.has_any_pending() || self.io.syncs.has_any_pending();
+        let any_pending = self.io.fetches.has_any_pending()
+            || self.io.syncs.has_any_pending()
+            || self.io.settled_set_sync.has_pending();
         let op = if any_pending {
             TimerOp::Set {
                 shard: self.shard,

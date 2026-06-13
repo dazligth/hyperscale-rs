@@ -114,6 +114,19 @@ where
                 source_shard,
                 target,
             } => self.process_start_remote_header_sync(source_shard, target),
+            Action::StartSettledSetSync {
+                shard,
+                terminal_height,
+                terminal_block_hash,
+                terminal_wt,
+                peers,
+            } => self.process_start_settled_set_sync(
+                shard,
+                terminal_height,
+                terminal_block_hash,
+                terminal_wt,
+                peers,
+            ),
             Action::Fetch(req) => self.process_fetch_request(req),
             Action::AbandonFetch(req) => self.process_fetch_abandon(req),
 

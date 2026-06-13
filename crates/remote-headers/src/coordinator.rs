@@ -205,18 +205,22 @@ impl RemoteHeaderCoordinator {
     /// crossing's terminal block. The earliest such header wins (names
     /// the true terminal `B`); later coast headers commit higher coast
     /// blocks and are ignored.
+    ///
+    /// Returns the anchor when it is newly captured or revised to an
+    /// earlier terminal — the cue to start (or restart) settled-set
+    /// reconstruction — and `None` when nothing changed.
     fn capture_terminal_anchor(
         &mut self,
         topology: &TopologySchedule,
         header: &CertifiedBlockHeader,
-    ) {
+    ) -> Option<TerminalAnchor> {
         let shard = header.shard_id();
         let parent_qc = header.header().parent_qc();
         if !topology
             .lookup_for_shard(shard, parent_qc.weighted_timestamp())
             .1
         {
-            return;
+            return None;
         }
         let anchor = TerminalAnchor {
             block_hash: parent_qc.block_hash(),
@@ -227,10 +231,14 @@ impl RemoteHeaderCoordinator {
             Entry::Occupied(mut existing) => {
                 if anchor.height < existing.get().height {
                     existing.insert(anchor);
+                    Some(anchor)
+                } else {
+                    None
                 }
             }
             Entry::Vacant(slot) => {
                 slot.insert(anchor);
+                Some(anchor)
             }
         }
     }
@@ -498,13 +506,30 @@ impl RemoteHeaderCoordinator {
         // A coast header certifies a split crossing — capture the
         // terminated shard's terminal block so a counterpart can
         // reconstruct its settled set and the fence can resolve.
-        self.capture_terminal_anchor(topology, &verified);
+        let new_anchor = self.capture_terminal_anchor(topology, &verified);
 
         let verified = Arc::new(verified);
         self.verified.insert(key, Arc::clone(&verified));
         self.pending.remove(&key);
 
         let mut actions = Vec::new();
+
+        // A newly captured terminal anchor seeds settled-set
+        // reconstruction against the terminated shard's terminal
+        // committee, resolved from the schedule at the terminal WT.
+        if let Some(anchor) = new_anchor {
+            let peers = match topology.lookup_for_shard(shard, anchor.terminal_wt).0 {
+                ScheduleLookup::Committee(snapshot) => snapshot.committee_for_shard(shard).to_vec(),
+                ScheduleLookup::NotYetCommitted | ScheduleLookup::Evicted => Vec::new(),
+            };
+            actions.push(Action::StartSettledSetSync {
+                shard,
+                terminal_height: anchor.height,
+                terminal_block_hash: anchor.block_hash,
+                terminal_wt: anchor.terminal_wt,
+                peers,
+            });
+        }
 
         // Update liveness tracking: advance the remote tip and record the
         // local height at which we received it. The I/O loop's
@@ -1161,6 +1186,70 @@ mod tests {
             .expect("coast header captures the terminal anchor");
         assert_eq!(anchor.height, BlockHeight::new(5));
         assert_eq!(anchor.terminal_wt, WeightedTimestamp::from_millis(1_500));
+    }
+
+    /// The first coast header from a terminated shard emits a
+    /// `StartSettledSetSync` against its terminal anchor and committee; a
+    /// later coast header (higher terminal) does not re-emit.
+    #[test]
+    fn coast_header_emits_settled_set_sync() {
+        const ED: u64 = 1_000;
+        let ids = [0u64, 1, 2, 3];
+        let mut schedule =
+            TopologySchedule::new(ED, Epoch::new(0), Arc::new(shard_snapshot(1, &ids, 0)));
+        schedule.insert(Epoch::new(1), Arc::new(shard_snapshot(2, &ids, 0)));
+
+        let mut coord = RemoteHeaderCoordinator::new(ShardId::leaf(1, 0));
+        let coast = verified_remote_header(ShardId::ROOT, BlockHeight::new(6), 1_500);
+        let actions = coord.on_remote_header_qc_verified(
+            &schedule,
+            ShardId::ROOT,
+            BlockHeight::new(6),
+            ValidatorId::new(0),
+            Ok(coast),
+        );
+
+        let sync = actions
+            .iter()
+            .find_map(|a| match a {
+                Action::StartSettledSetSync {
+                    shard,
+                    terminal_height,
+                    terminal_wt,
+                    peers,
+                    ..
+                } => Some((*shard, *terminal_height, *terminal_wt, peers.clone())),
+                _ => None,
+            })
+            .expect("coast header emits a settled-set sync");
+        assert_eq!(sync.0, ShardId::ROOT);
+        assert_eq!(sync.1, BlockHeight::new(5));
+        assert_eq!(sync.2, WeightedTimestamp::from_millis(1_500));
+        // The peers are ROOT's terminal committee, resolved from the
+        // last window that carried ROOT (epoch 0) — not the post-split
+        // epoch-1 window where ROOT is gone.
+        let expected_peers = shard_snapshot(1, &ids, 0)
+            .committee_for_shard(ShardId::ROOT)
+            .to_vec();
+        assert!(!expected_peers.is_empty());
+        assert_eq!(sync.3, expected_peers);
+
+        // A higher coast header keeps the earlier terminal and re-emits
+        // nothing.
+        let later = verified_remote_header(ShardId::ROOT, BlockHeight::new(7), 1_500);
+        let again = coord.on_remote_header_qc_verified(
+            &schedule,
+            ShardId::ROOT,
+            BlockHeight::new(7),
+            ValidatorId::new(0),
+            Ok(later),
+        );
+        assert!(
+            !again
+                .iter()
+                .any(|a| matches!(a, Action::StartSettledSetSync { .. })),
+            "a higher coast header must not restart reconstruction",
+        );
     }
 
     /// A live remote shard's header — parent QC inside its own window —

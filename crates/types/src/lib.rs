@@ -81,6 +81,7 @@ pub use crypto::{
     Bls12381G1PrivateKey, Bls12381G1PublicKey, Bls12381G2Signature, Ed25519PrivateKey,
     Ed25519PublicKey, Ed25519Signature, verify_bls12381_v1, verify_ed25519,
 };
+pub use network::response::SettledWavesReveal;
 pub use network::{
     GossipMessage, MessageClass, NetworkMessage, Request, Signed, SignedContext, SignedVerifyError,
     TopicScope,
