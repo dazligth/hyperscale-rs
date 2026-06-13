@@ -171,7 +171,7 @@ pub use time::timestamp::{
     LocalTimestamp, ProposerTimestamp, WeightedTimestamp, is_epoch_crossing,
 };
 pub use topology::awaiting::AwaitingTopologyBuffer;
-pub use topology::schedule::{ScheduleLookup, SplitAtBoundary, TopologySchedule};
+pub use topology::schedule::{QuiesceCut, ScheduleLookup, SplitAtBoundary, TopologySchedule};
 pub use topology::settled_set::{SettledSetVerdict, SettledWaveSet, settled_set_verdict};
 pub use topology::shard_prefix::shard_prefix_path;
 pub use topology::snapshot::{

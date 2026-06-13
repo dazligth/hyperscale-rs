@@ -1258,7 +1258,7 @@ fn test_mempool_to_block_integration() {
     // Transactions submitted at ~50ms with 150ms min dwell time are not yet ready
     let ready_count = node0
         .mempool_coordinator()
-        .ready_transactions(100, 0, 0, LocalTimestamp::ZERO)
+        .ready_transactions(100, 0, 0, LocalTimestamp::ZERO, None)
         .len();
     assert_eq!(
         ready_count, 0,

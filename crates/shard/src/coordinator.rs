@@ -16,7 +16,7 @@ use hyperscale_core::{Action, CommitSource, ProtocolEvent, TimerId};
 use hyperscale_types::{
     BlockHash, Hash, LocalTimestamp, MAX_FINALIZED_TX_PER_BLOCK, MAX_PROGRESS_WAIT,
     MAX_READY_SIGNALS_PER_BLOCK, MAX_READY_WINDOW_BLOCKS, MAX_TXS_PER_BLOCK, ProposerTimestamp,
-    ProvisionHash, ReadySignal, ReshapeThresholds, ReshapeTrigger, ScheduleLookup,
+    ProvisionHash, QuiesceCut, ReadySignal, ReshapeThresholds, ReshapeTrigger, ScheduleLookup,
     SettledSetVerdict, SettledWaveSet, ShardId, SplitAtBoundary, StoredReceipt, WaveId,
     WeightedTimestamp, derive_reshape_trigger, settled_set_verdict,
 };
@@ -666,6 +666,32 @@ impl ShardCoordinator {
             SplitAtBoundary::Children(..) => Some(true),
             SplitAtBoundary::No => Some(false),
             SplitAtBoundary::Unresolved => None,
+        }
+    }
+
+    /// The split-boundary quiesce window when this shard sits in its final
+    /// epoch before a split, anchored on the proposer's tip — `None` in
+    /// steady state, so the proposer's quiesce filter is inert away from a
+    /// reshape boundary. The cut is the end of the tip's epoch window.
+    /// `Unresolved` (the local beacon hasn't seen the next window yet)
+    /// yields `None`: the abort backstop covers any straddler this lets
+    /// through, so quiescing on a guess buys nothing.
+    #[must_use]
+    pub fn split_quiesce_cut(&self, topology: &TopologySchedule) -> Option<QuiesceCut> {
+        let now_wt = self.tip_anchor_ts();
+        match topology.split_at_next_boundary(self.local_shard, now_wt) {
+            SplitAtBoundary::Children(..) => {
+                let epoch = topology.epoch_for(now_wt);
+                let cut_ms = epoch
+                    .inner()
+                    .saturating_add(1)
+                    .saturating_mul(topology.epoch_duration_ms());
+                Some(QuiesceCut {
+                    now_wt,
+                    cut_wt: WeightedTimestamp::from_millis(cut_ms),
+                })
+            }
+            SplitAtBoundary::No | SplitAtBoundary::Unresolved => None,
         }
     }
 
@@ -8101,6 +8127,52 @@ mod tests {
             |_| None,
         );
         assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn split_quiesce_cut_some_in_final_epoch_none_in_steady_state() {
+        // ROOT splits into its children at the epoch-0→1 boundary, so a
+        // ROOT proposer anchored in epoch 0 is in its final epoch: the cut
+        // is the end of that window (1000 ms), the anchor its tip (genesis,
+        // 0 ms).
+        let splitting = make_terminating_schedule(4);
+        let root = ShardCoordinator::new(
+            ValidatorId::new(0),
+            ShardId::ROOT,
+            ShardConsensusConfig::default(),
+            RecoveredState::default(),
+        );
+        let cut = root
+            .split_quiesce_cut(&splitting)
+            .expect("ROOT is in its final epoch before the split");
+        assert_eq!(cut.now_wt, WeightedTimestamp::from_millis(0));
+        assert_eq!(cut.cut_wt, WeightedTimestamp::from_millis(1000));
+
+        // A shard present in both the current and the next window never
+        // splits at the boundary, so the quiesce stays inert.
+        let stable = {
+            let keys: Vec<Bls12381G1PrivateKey> = (0..4).map(|_| generate_bls_keypair()).collect();
+            let validators: Vec<ValidatorInfo> = keys
+                .iter()
+                .enumerate()
+                .map(|(i, k)| ValidatorInfo {
+                    validator_id: ValidatorId::new(i as u64),
+                    public_key: k.public_key(),
+                })
+                .collect();
+            let window = Arc::new(TopologySnapshot::new(
+                NetworkDefinition::simulator(),
+                1,
+                ValidatorSet::new(validators),
+            ));
+            let mut sched = TopologySchedule::new(1000, Epoch::new(0), Arc::clone(&window));
+            sched.insert(Epoch::new(1), window);
+            sched
+        };
+        assert!(
+            root.split_quiesce_cut(&stable).is_none(),
+            "no split pending → no quiesce cut",
+        );
     }
 
     // ─── Split-boundary fence ────────────────────────────────────────────
