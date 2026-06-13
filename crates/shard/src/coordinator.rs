@@ -985,6 +985,18 @@ impl ShardCoordinator {
         ]
     }
 
+    /// Seed the reshape trigger's substate-count frontier from the genesis
+    /// store count. Genesis lays down the engine bootstrap and any funded
+    /// accounts as substates that never appear as a commit delta, so
+    /// without this the frontier reads zero until the first delta-bearing
+    /// block — and a non-zero reshape threshold would misfire (a quiet
+    /// shard below `merge_substates` spuriously triggers a merge). Called
+    /// by the I/O loop after the genesis block commits, with the count it
+    /// reads from storage.
+    pub const fn seed_substate_count_frontier(&mut self, height: BlockHeight, count: u64) {
+        self.substate_count_frontier = (height, count);
+    }
+
     /// Handle committed state restored from storage (recovery).
     ///
     /// Called when the runner completes `Action::RestoreCommittedState`.

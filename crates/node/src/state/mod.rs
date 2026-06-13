@@ -41,7 +41,9 @@ use hyperscale_provisions::{
 use hyperscale_remote_headers::RemoteHeaderCoordinator;
 use hyperscale_shard::{ShardConsensusConfig, ShardCoordinator};
 use hyperscale_storage::RecoveredState;
-use hyperscale_types::{Block, LocalTimestamp, ShardId, StateRoot, TopologySnapshot, ValidatorId};
+use hyperscale_types::{
+    Block, BlockHeight, LocalTimestamp, ShardId, StateRoot, TopologySnapshot, ValidatorId,
+};
 use tracing::instrument;
 
 /// Combined node state machine.
@@ -262,6 +264,14 @@ impl NodeStateMachine {
         let mut actions = self.shard_coordinator.initialize_genesis(genesis);
         actions.extend(self.beacon_coordinator.on_startup());
         actions
+    }
+
+    /// Seed the reshape trigger's substate-count frontier from the genesis
+    /// store count — the I/O loop reads it once the genesis block commits.
+    /// See [`hyperscale_shard::ShardCoordinator::seed_substate_count_frontier`].
+    pub const fn seed_substate_count_frontier(&mut self, height: BlockHeight, count: u64) {
+        self.shard_coordinator
+            .seed_substate_count_frontier(height, count);
     }
 }
 

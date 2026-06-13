@@ -45,6 +45,8 @@ where
                 .initialize_genesis(now, genesis_block);
             self.shard_loop_mut(shard).drain_actions(vnode_idx, actions);
         }
+        self.shard_loop_mut(shard)
+            .seed_genesis_substate_frontier(genesis_block);
     }
 
     /// Install engine genesis on `shard`'s storage.
