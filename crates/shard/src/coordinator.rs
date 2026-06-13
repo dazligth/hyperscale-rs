@@ -16,9 +16,43 @@ use hyperscale_core::{Action, CommitSource, ProtocolEvent, TimerId};
 use hyperscale_types::{
     BlockHash, Hash, LocalTimestamp, MAX_FINALIZED_TX_PER_BLOCK, MAX_PROGRESS_WAIT,
     MAX_READY_SIGNALS_PER_BLOCK, MAX_READY_WINDOW_BLOCKS, MAX_TXS_PER_BLOCK, ProposerTimestamp,
-    ProvisionHash, ReadySignal, ReshapeThresholds, ReshapeTrigger, ScheduleLookup, ShardId,
-    SplitAtBoundary, StoredReceipt, WaveId, WeightedTimestamp, derive_reshape_trigger,
+    ProvisionHash, RETENTION_HORIZON, ReadySignal, ReshapeThresholds, ReshapeTrigger,
+    ScheduleLookup, ShardId, SplitAtBoundary, StoredReceipt, WaveId, WeightedTimestamp,
+    derive_reshape_trigger,
 };
+
+/// A terminated shard's settled-wave set, as this validator has
+/// reconstructed it — the input to the split-boundary fence.
+///
+/// `waves` is the set of that shard's wave-ids whose wave certificate
+/// committed in its chain at or before its terminal block; `terminal_wt`
+/// is the weighted timestamp at which the shard terminated, bounding how
+/// long the fence defers a still-unknown set
+/// ([`RETENTION_HORIZON`](hyperscale_types::RETENTION_HORIZON) past it,
+/// the wave is categorically unreachable everywhere).
+#[derive(Clone, Debug)]
+pub struct SettledWaveSet {
+    /// Wave-ids the terminated shard settled by its terminal block.
+    pub waves: BTreeSet<WaveId>,
+    /// The terminal block's weighted timestamp.
+    pub terminal_wt: WeightedTimestamp,
+}
+
+/// The fence's verdict on one committed block carrying a finalized wave
+/// whose certificate names a past-terminal shard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FenceVerdict {
+    /// No past-terminal-shard certificate, or every such certificate's
+    /// wave is in the settled set — the vote may proceed.
+    Pass,
+    /// A past-terminal-shard certificate names a wave that shard did not
+    /// settle (or the wave is past its retention horizon) — decline the
+    /// vote so the block can never commit.
+    Reject,
+    /// A past-terminal-shard certificate's settled set isn't known yet —
+    /// defer the vote (the block stays pending) until it arrives.
+    Defer,
+}
 
 /// Shard consensus statistics for monitoring.
 #[derive(Clone, Copy, Debug, Default)]
@@ -74,7 +108,7 @@ pub struct ShardMemoryStats {
     pub pending_assemblies: usize,
 }
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -329,6 +363,15 @@ pub struct ShardCoordinator {
     /// and clock. Genesis-fallback QCs reconstructed here must byte-match
     /// the chain's real genesis QC.
     chain_origin: ChainOrigin,
+
+    /// Settled-wave sets for shards that have terminated at a split,
+    /// keyed by the terminated shard. The split-boundary fence consults
+    /// this when voting on a block whose finalized waves carry a
+    /// certificate from a past-terminal shard: a cross-shard wave names
+    /// that shard, so the vote may only commit if the shard actually
+    /// settled the wave. Populated by the driver's settled-set
+    /// reconstruction via [`Self::record_settled_waves`].
+    settled_sets: HashMap<ShardId, SettledWaveSet>,
 }
 
 impl std::fmt::Debug for ShardCoordinator {
@@ -411,6 +454,7 @@ impl ShardCoordinator {
             me,
             local_shard,
             chain_origin: recovered.chain_origin,
+            settled_sets: HashMap::new(),
         }
     }
 
@@ -500,6 +544,111 @@ impl ShardCoordinator {
         topology
             .at_for_shard(self.local_shard, self.tip_anchor_ts())
             .map(|(snapshot, _)| snapshot.as_ref())
+    }
+
+    /// Record a terminated shard's settled-wave set for the
+    /// split-boundary fence. The driver reconstructs it from the
+    /// terminated shard's tail chain (see `SettledSetBuilder`) and feeds
+    /// it here; voting on a block whose finalized waves name `shard` then
+    /// resolves against the set instead of deferring. After recording,
+    /// the driver re-drives any votes that deferred on this shard.
+    pub fn record_settled_waves(&mut self, shard: ShardId, settled: SettledWaveSet) {
+        self.settled_sets.insert(shard, settled);
+    }
+
+    /// The split-boundary fence over a block's committed finalized waves.
+    ///
+    /// A finalized wave's certificate carries one execution certificate
+    /// per participating shard. When a constituent certificate names a
+    /// shard that is **past-terminal** at the block's anchored window,
+    /// the cross-shard wave straddled that shard's split: committing this
+    /// block applies the wave's local half, so it may only commit if the
+    /// terminated shard actually settled the wave in its own chain by its
+    /// terminal block — otherwise one side of a cross-shard transaction
+    /// applies without the other.
+    ///
+    /// Past-terminal-ness is read off the **anchored** snapshot at
+    /// `anchored_wt` (the block's `parent_qc` weighted timestamp), never
+    /// the head, so every replica voting this block reaches the same
+    /// verdict. A shard evicted from every retained window is so far past
+    /// its terminal that any wave naming it is unreachable everywhere —
+    /// reject. A past-terminal shard whose settled set isn't known yet
+    /// defers the vote; past `terminal_wt + RETENTION_HORIZON` the wave
+    /// is categorically unreachable and rejects.
+    fn fence_finalized_waves(
+        &self,
+        topology: &TopologySchedule,
+        block: &Block,
+        anchored_wt: WeightedTimestamp,
+    ) -> FenceVerdict {
+        let mut defer = false;
+        for fw in block.certificates().iter() {
+            for ec in fw.execution_certificates() {
+                let shard = ec.shard_id();
+                if shard == self.local_shard {
+                    continue;
+                }
+                // Evicted from every retained window — terminated so long
+                // ago its waves can never resolve.
+                let Some((_, past_terminal)) = topology.at_for_shard(shard, anchored_wt) else {
+                    return FenceVerdict::Reject;
+                };
+                if !past_terminal {
+                    continue;
+                }
+                match self.settled_sets.get(&shard) {
+                    Some(settled) if anchored_wt > settled.terminal_wt.plus(RETENTION_HORIZON) => {
+                        return FenceVerdict::Reject;
+                    }
+                    Some(settled) if !settled.waves.contains(ec.wave_id()) => {
+                        return FenceVerdict::Reject;
+                    }
+                    Some(_) => {}
+                    None => defer = true,
+                }
+            }
+        }
+        if defer {
+            FenceVerdict::Defer
+        } else {
+            FenceVerdict::Pass
+        }
+    }
+
+    /// Apply the split-boundary fence at vote time; returns `true` (and
+    /// logs) when the vote must not proceed. `Reject` declines the vote
+    /// outright (the block can never commit here); `Defer` holds the
+    /// block pending until the settled set is reconstructed (the driver
+    /// re-drives the vote on [`Self::record_settled_waves`]).
+    fn fence_blocks_vote(
+        &self,
+        topology: &TopologySchedule,
+        block: &Block,
+        block_hash: BlockHash,
+    ) -> bool {
+        match self.fence_finalized_waves(
+            topology,
+            block,
+            block.header().parent_qc().weighted_timestamp(),
+        ) {
+            FenceVerdict::Pass => false,
+            FenceVerdict::Reject => {
+                warn!(
+                    validator = ?self.me,
+                    block_hash = ?block_hash,
+                    "Finalized wave names a past-terminal shard that didn't settle it — not voting"
+                );
+                true
+            }
+            FenceVerdict::Defer => {
+                trace!(
+                    validator = ?self.me,
+                    block_hash = ?block_hash,
+                    "Settled set for a past-terminal shard unknown at vote; deferring"
+                );
+                true
+            }
+        }
     }
 
     /// Whether `wt` lands past this shard's terminal window — the coast
@@ -2014,6 +2163,7 @@ impl ShardCoordinator {
     ///
     /// Precondition: caller must have completed QC verification. Use
     /// `trigger_qc_verification_or_vote` as the main entry point.
+    #[allow(clippy::too_many_lines)] // linear vote pipeline: safe-vote, gap, content, fence, verify
     fn try_vote_on_block(
         &mut self,
         topology: &TopologySchedule,
@@ -2127,6 +2277,11 @@ impl ShardCoordinator {
                 );
                 return vec![];
             };
+
+            // Split-boundary fence over the block's finalized waves.
+            if self.fence_blocks_vote(topology, block, block_hash) {
+                return vec![];
+            }
             let verification_actions = self.verification.initiate_block_verifications(
                 committee,
                 self.local_shard,
@@ -7957,5 +8112,189 @@ mod tests {
             |_| None,
         );
         assert!(actions.is_empty());
+    }
+
+    // ─── Split-boundary fence ────────────────────────────────────────────
+
+    /// A live child coordinator (`leaf(1,0)`) of a `ROOT` that terminated
+    /// at wt 1000 — so `ROOT` is past-terminal at any later anchor.
+    fn fence_coordinator() -> ShardCoordinator {
+        ShardCoordinator::new(
+            ValidatorId::new(0),
+            ShardId::leaf(1, 0),
+            ShardConsensusConfig::default(),
+            RecoveredState::default(),
+        )
+    }
+
+    /// A finalized wave whose certificate carries this validator's local
+    /// EC plus a remote EC on `remote` — the cross-shard shape the fence
+    /// inspects.
+    fn cross_shard_wave(
+        local: ShardId,
+        remote: ShardId,
+        height: u64,
+    ) -> Arc<Verifiable<FinalizedWave>> {
+        use hyperscale_types::{
+            ExecutionCertificate, ExecutionOutcome, GlobalReceiptHash, GlobalReceiptRoot,
+            SignerBitfield, TxOutcome, WaveCertificate,
+        };
+        let ec = |shard: ShardId| {
+            let wave = WaveId::new(
+                shard,
+                BlockHeight::new(height),
+                std::collections::BTreeSet::new(),
+            );
+            ExecutionCertificate::new(
+                wave,
+                WeightedTimestamp::from_millis(height),
+                GlobalReceiptRoot::ZERO,
+                vec![TxOutcome::new(
+                    TxHash::from_raw(Hash::from_bytes(b"tx")),
+                    ExecutionOutcome::Succeeded {
+                        receipt_hash: GlobalReceiptHash::ZERO,
+                    },
+                )],
+                zero_bls_signature(),
+                SignerBitfield::new(4),
+            )
+        };
+        let local_wave = WaveId::new(
+            local,
+            BlockHeight::new(height),
+            std::collections::BTreeSet::new(),
+        );
+        let wc = WaveCertificate::new(local_wave, vec![Arc::new(ec(local)), Arc::new(ec(remote))]);
+        Arc::new(Verifiable::from(FinalizedWave::new(Arc::new(wc), vec![])))
+    }
+
+    fn block_with_certs(certs: Vec<Arc<Verifiable<FinalizedWave>>>) -> Block {
+        Block::Live {
+            header: make_header_at_height(BlockHeight::new(1), 1500),
+            transactions: Arc::new(BoundedVec::new()),
+            certificates: Arc::new(certs.into()),
+            provisions: Arc::new(BoundedVec::new()),
+        }
+    }
+
+    /// A finalized wave naming a past-terminal shard whose settled set is
+    /// unknown defers the vote.
+    #[test]
+    fn fence_defers_when_settled_set_unknown() {
+        let coord = fence_coordinator();
+        let sched = make_terminating_schedule(4);
+        let block = block_with_certs(vec![cross_shard_wave(
+            ShardId::leaf(1, 0),
+            ShardId::ROOT,
+            1,
+        )]);
+        assert_eq!(
+            coord.fence_finalized_waves(&sched, &block, WeightedTimestamp::from_millis(1500)),
+            FenceVerdict::Defer,
+        );
+    }
+
+    /// Once the past-terminal shard's settled set is known and contains
+    /// the wave, the vote passes.
+    #[test]
+    fn fence_passes_when_wave_settled() {
+        let mut coord = fence_coordinator();
+        let sched = make_terminating_schedule(4);
+        let settled_wave = WaveId::new(
+            ShardId::ROOT,
+            BlockHeight::new(1),
+            std::collections::BTreeSet::new(),
+        );
+        coord.record_settled_waves(
+            ShardId::ROOT,
+            SettledWaveSet {
+                waves: std::iter::once(settled_wave).collect(),
+                terminal_wt: WeightedTimestamp::from_millis(1000),
+            },
+        );
+        let block = block_with_certs(vec![cross_shard_wave(
+            ShardId::leaf(1, 0),
+            ShardId::ROOT,
+            1,
+        )]);
+        assert_eq!(
+            coord.fence_finalized_waves(&sched, &block, WeightedTimestamp::from_millis(1500)),
+            FenceVerdict::Pass,
+        );
+    }
+
+    /// A wave the past-terminal shard did not settle is rejected.
+    #[test]
+    fn fence_rejects_unsettled_wave() {
+        let mut coord = fence_coordinator();
+        let sched = make_terminating_schedule(4);
+        coord.record_settled_waves(
+            ShardId::ROOT,
+            SettledWaveSet {
+                waves: std::collections::BTreeSet::new(),
+                terminal_wt: WeightedTimestamp::from_millis(1000),
+            },
+        );
+        let block = block_with_certs(vec![cross_shard_wave(
+            ShardId::leaf(1, 0),
+            ShardId::ROOT,
+            1,
+        )]);
+        assert_eq!(
+            coord.fence_finalized_waves(&sched, &block, WeightedTimestamp::from_millis(1500)),
+            FenceVerdict::Reject,
+        );
+    }
+
+    /// Past `terminal_wt + RETENTION_HORIZON`, a wave naming the
+    /// terminated shard is categorically unreachable and rejects, even if
+    /// the (stale) settled set happens to contain it.
+    #[test]
+    fn fence_rejects_past_retention_horizon() {
+        let mut coord = fence_coordinator();
+        let sched = make_terminating_schedule(4);
+        let settled_wave = WaveId::new(
+            ShardId::ROOT,
+            BlockHeight::new(1),
+            std::collections::BTreeSet::new(),
+        );
+        coord.record_settled_waves(
+            ShardId::ROOT,
+            SettledWaveSet {
+                waves: std::iter::once(settled_wave).collect(),
+                terminal_wt: WeightedTimestamp::from_millis(1000),
+            },
+        );
+        let block = block_with_certs(vec![cross_shard_wave(
+            ShardId::leaf(1, 0),
+            ShardId::ROOT,
+            1,
+        )]);
+        let beyond = WeightedTimestamp::from_millis(1000)
+            .plus(RETENTION_HORIZON)
+            .plus(Duration::from_millis(1));
+        assert_eq!(
+            coord.fence_finalized_waves(&sched, &block, beyond),
+            FenceVerdict::Reject,
+        );
+    }
+
+    /// A wave with no past-terminal-shard certificate passes regardless of
+    /// any settled-set state — single-shard and live-cross-shard waves are
+    /// untouched.
+    #[test]
+    fn fence_ignores_live_shard_certificates() {
+        let coord = fence_coordinator();
+        let sched = make_terminating_schedule(4);
+        // Both ECs name live shards (the local child and its live sibling).
+        let block = block_with_certs(vec![cross_shard_wave(
+            ShardId::leaf(1, 0),
+            ShardId::leaf(1, 1),
+            1,
+        )]);
+        assert_eq!(
+            coord.fence_finalized_waves(&sched, &block, WeightedTimestamp::from_millis(1500)),
+            FenceVerdict::Pass,
+        );
     }
 }
