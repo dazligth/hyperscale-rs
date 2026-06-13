@@ -1,4 +1,4 @@
-//! Split-child store adoption.
+//! Reshape store adoption.
 //!
 //! A split moves no state: when shard `p` splits, each child's subtree
 //! already sits inside `p`'s store under the child's prefix, with node
@@ -328,6 +328,67 @@ impl RocksDbShardStorage {
         Ok(current_root)
     }
 
+    /// Adopt a merged parent's store — a `parent`-rooted store already
+    /// holding both children's subtrees and the stitched root `r_p` at
+    /// its tip (the keeper hard-linked its own half, synced the sibling,
+    /// and stitched the root with one internal-node write). The tip
+    /// already sits at the genesis version, so adoption only records the
+    /// deterministic merged genesis as the committed tip; unlike a split
+    /// child the prefix may be the trie root, and there is no subtree
+    /// re-pointing — the merged tree is already in place.
+    ///
+    /// Returns the adopted `r_p`. The caller asserts it against the
+    /// beacon-composed parent anchor.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the genesis block does not sit at the origin's height,
+    /// when the store's tip does not sit at that height, or when the
+    /// store's root does not match the genesis state root.
+    pub fn adopt_merge_parent(
+        &self,
+        origin: ChainOrigin,
+        genesis: &Block,
+    ) -> Result<StateRoot, StorageError> {
+        let _commit_guard = self
+            .commit_lock
+            .lock()
+            .map_err(|_| StorageError::DatabaseError("commit lock poisoned".into()))?;
+        if genesis.height() != origin.genesis_height {
+            return Err(StorageError::DatabaseError(format!(
+                "genesis block at height {} does not sit at the origin's {}",
+                genesis.height(),
+                origin.genesis_height,
+            )));
+        }
+        let (tip_version, current_root) = read_jmt_metadata(&*self.db);
+        let genesis_version = origin.genesis_height.inner();
+        // A re-run over an already-adopted store returns the recorded
+        // adoption.
+        if read_chain_origin(&*self.db) == origin {
+            return Ok(current_root);
+        }
+        if tip_version != genesis_version {
+            return Err(StorageError::DatabaseError(format!(
+                "merge adoption vintage mismatch: store at version {tip_version}, \
+                 genesis height {genesis_version}"
+            )));
+        }
+        if genesis.header().state_root() != current_root {
+            return Err(StorageError::DatabaseError(format!(
+                "merged root {current_root:?} does not match the genesis state root {:?}",
+                genesis.header().state_root(),
+            )));
+        }
+        let mut batch = WriteBatch::default();
+        write_chain_origin(&mut batch, origin);
+        self.append_genesis_tip_to_batch(&mut batch, genesis);
+        self.db
+            .write(batch)
+            .map_err(|e| StorageError::DatabaseError(format!("merge adoption write: {e}")))?;
+        Ok(current_root)
+    }
+
     /// Fold the child's deterministic genesis into an adoption batch as
     /// the committed tip: the genesis block with its deterministic
     /// certified pairing, the committed height and hash, and a reset of
@@ -420,7 +481,7 @@ impl TreeReader for PreRootStore<'_> {
 mod tests {
     use hyperscale_jmt::{Blake3Hasher, Hasher, NibblePath};
     use hyperscale_storage::{BoundaryStore, ImportLeaf};
-    use hyperscale_types::{BlockHeight, ShardId, ValidatorId, WeightedTimestamp};
+    use hyperscale_types::{BlockHash, BlockHeight, ShardId, ValidatorId, WeightedTimestamp};
     use tempfile::TempDir;
 
     use super::super::metadata::read_chain_origin;
@@ -573,6 +634,61 @@ mod tests {
             WeightedTimestamp::from_millis(42_000),
         );
         assert!(child.adopt_split_child(stale, &genesis).is_err());
+    }
+
+    /// A keeper's merged parent store, built whole-keyspace from both
+    /// halves, adopts its stitched root: the recorded tip is the merged
+    /// genesis over the already-built tree, idempotent on re-run, and a
+    /// root mismatch fails closed.
+    #[test]
+    fn merge_adoption_records_the_merged_genesis_tip() {
+        let cut = WeightedTimestamp::from_millis(10_000);
+        let merge_genesis = |state_root: StateRoot| {
+            Block::merge_parent_genesis(
+                ShardId::ROOT,
+                state_root,
+                (
+                    BlockHash::from_raw(Hash::from_bytes(b"left terminal")),
+                    BlockHeight::new(9),
+                ),
+                (
+                    BlockHash::from_raw(Hash::from_bytes(b"right terminal")),
+                    BlockHeight::new(8),
+                ),
+                cut,
+            )
+        };
+
+        let dir = TempDir::new().unwrap();
+        let storage = RocksDbShardStorage::open(dir.path(), NibblePath::empty()).unwrap();
+        // One leaf on each half so the root is the merged internal node.
+        let root = storage
+            .import_boundary_state(BlockHeight::new(10), vec![leaf(0x00), leaf(0x80)])
+            .unwrap();
+        assert_ne!(root, StateRoot::ZERO);
+
+        let genesis = merge_genesis(root);
+        assert_eq!(genesis.height(), BlockHeight::new(10));
+        let origin = ChainOrigin {
+            genesis_height: genesis.height(),
+            anchor_wt: cut,
+        };
+
+        let adopted = storage.adopt_merge_parent(origin, &genesis).unwrap();
+        assert_eq!(adopted, root);
+        assert_eq!(storage.read_jmt_metadata(), (10, root));
+        assert_eq!(read_chain_origin(&*storage.db), origin);
+        // Idempotent re-run returns the recorded adoption.
+        assert_eq!(storage.adopt_merge_parent(origin, &genesis).unwrap(), root);
+
+        // A genesis claiming a different root fails closed.
+        let dir2 = TempDir::new().unwrap();
+        let other = RocksDbShardStorage::open(dir2.path(), NibblePath::empty()).unwrap();
+        other
+            .import_boundary_state(BlockHeight::new(10), vec![leaf(0x00), leaf(0x80)])
+            .unwrap();
+        let wrong = merge_genesis(StateRoot::from_raw(Hash::from_bytes(b"forged")));
+        assert!(other.adopt_merge_parent(origin, &wrong).is_err());
     }
 
     /// An empty side adopts a zero root with a zero count — the child

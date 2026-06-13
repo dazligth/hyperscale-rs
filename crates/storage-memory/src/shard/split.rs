@@ -1,4 +1,4 @@
-//! Split-child store adoption — the simulation mirror of the `RocksDB`
+//! Reshape store adoption — the simulation mirror of the `RocksDB`
 //! backend's checkpoint hard-link and subtree adoption.
 //!
 //! [`SimShardStorage::clone_for_split_child`] is the checkpoint: a deep
@@ -8,6 +8,10 @@
 //! clone at the parent root's child-side slot;
 //! [`SimShardStorage::adopt_followed_child`] re-points an observer's
 //! followed store at the child root its own metadata names.
+//! [`SimShardStorage::adopt_merge_parent`] is the inverse: a keeper's
+//! `parent`-rooted store already holds both children's subtrees and the
+//! stitched root, so adoption only records the merged genesis as the
+//! committed tip.
 
 use std::sync::{Arc, RwLock};
 
@@ -173,6 +177,54 @@ impl SimShardStorage {
         Ok(child_root)
     }
 
+    /// Adopt a merged parent's store — a `parent`-rooted store already
+    /// holding both children's subtrees and the stitched root `r_p` at
+    /// its tip (the keeper imported them there). Unlike a split child
+    /// this adopts a whole shard, whose prefix may be the trie root, so
+    /// there is no child-slot re-pointing; the import already built the
+    /// tree. Records the deterministic merged genesis as the committed
+    /// tip.
+    ///
+    /// Returns the adopted `r_p`. The caller asserts it against the
+    /// beacon-composed parent anchor.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the genesis block does not sit at the origin's height,
+    /// when the store's tip does not sit at that height, or when the
+    /// store's root does not match the genesis state root.
+    pub fn adopt_merge_parent(
+        &self,
+        origin: ChainOrigin,
+        genesis: &Block,
+    ) -> Result<StateRoot, String> {
+        if genesis.height() != origin.genesis_height {
+            return Err(format!(
+                "genesis block at height {} does not sit at the origin's {}",
+                genesis.height(),
+                origin.genesis_height,
+            ));
+        }
+        let merged_root = {
+            let shared = read_or_recover(&self.state);
+            if shared.current_block_height != origin.genesis_height {
+                return Err(format!(
+                    "merged store at version {} does not sit at the genesis height {}",
+                    shared.current_block_height, origin.genesis_height,
+                ));
+            }
+            shared.current_root_hash
+        };
+        if genesis.header().state_root() != merged_root {
+            return Err(format!(
+                "merged root {merged_root:?} does not match the genesis state root {:?}",
+                genesis.header().state_root(),
+            ));
+        }
+        self.install_genesis_tip(origin, genesis);
+        Ok(merged_root)
+    }
+
     /// Record the child's deterministic genesis as the committed tip —
     /// the consensus half of an adoption: the genesis block with its
     /// deterministic certified pairing, the committed height and hash,
@@ -239,4 +291,89 @@ fn count_subtree_leaves(store: &impl TreeReader, root_key: &NodeKey) -> Result<u
         }
     }
     Ok(count)
+}
+
+#[cfg(test)]
+mod tests {
+    use hyperscale_storage::{BoundaryStore, ImportLeaf};
+    use hyperscale_types::{
+        Block, BlockHash, BlockHeight, ChainOrigin, Hash, ShardId, StateRoot, WeightedTimestamp,
+    };
+
+    use super::*;
+
+    /// An import leaf whose top byte places it under one trie half.
+    fn leaf(top: u8) -> ImportLeaf {
+        let mut key = [0u8; 32];
+        key[0] = top;
+        ImportLeaf {
+            leaf_key: key,
+            storage_key: vec![top; 40],
+            value: vec![top],
+        }
+    }
+
+    /// A merged parent store: one leaf on each half so the root is the
+    /// internal node `r_p`, imported at the genesis height the terminals
+    /// continue (`max(9, 8) + 1 = 10`).
+    fn merged_store() -> (SimShardStorage, StateRoot) {
+        let store = SimShardStorage::default();
+        let root = store
+            .import_boundary_state(BlockHeight::new(10), vec![leaf(0x00), leaf(0x80)])
+            .unwrap();
+        (store, root)
+    }
+
+    fn merge_genesis(state_root: StateRoot) -> (Block, ChainOrigin) {
+        let cut = WeightedTimestamp::from_millis(10_000);
+        let genesis = Block::merge_parent_genesis(
+            ShardId::ROOT,
+            state_root,
+            (
+                BlockHash::from_raw(Hash::from_bytes(b"left terminal")),
+                BlockHeight::new(9),
+            ),
+            (
+                BlockHash::from_raw(Hash::from_bytes(b"right terminal")),
+                BlockHeight::new(8),
+            ),
+            cut,
+        );
+        let origin = ChainOrigin {
+            genesis_height: genesis.height(),
+            anchor_wt: cut,
+        };
+        (genesis, origin)
+    }
+
+    /// Adoption records the merged genesis as the committed tip over the
+    /// already-built tree: the recovered state names the genesis, its
+    /// root, origin, and the imported substate count.
+    #[test]
+    fn merge_adoption_records_the_merged_genesis_tip() {
+        let (store, root) = merged_store();
+        assert_ne!(root, StateRoot::ZERO, "two halves compose an internal root");
+        let (genesis, origin) = merge_genesis(root);
+        assert_eq!(genesis.height(), BlockHeight::new(10));
+
+        let adopted = store.adopt_merge_parent(origin, &genesis).unwrap();
+        assert_eq!(adopted, root);
+
+        let recovered = store.load_recovered_state();
+        assert_eq!(recovered.committed_height, BlockHeight::new(10));
+        assert_eq!(recovered.committed_hash, Some(genesis.hash()));
+        assert_eq!(recovered.jmt_root, Some(root));
+        assert_eq!(recovered.chain_origin, origin);
+        assert_eq!(recovered.substate_count, 2);
+    }
+
+    /// A genesis claiming a different root than the store holds fails
+    /// closed — the keeper's tree and the beacon's composition disagree.
+    #[test]
+    fn merge_adoption_rejects_a_root_mismatch() {
+        let (store, root) = merged_store();
+        let (_, origin) = merge_genesis(root);
+        let (wrong, _) = merge_genesis(StateRoot::from_raw(Hash::from_bytes(b"forged root")));
+        assert!(store.adopt_merge_parent(origin, &wrong).is_err());
+    }
 }
