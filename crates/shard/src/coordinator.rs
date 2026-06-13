@@ -8318,4 +8318,118 @@ mod tests {
             FenceVerdict::Pass,
         );
     }
+
+    /// A height-1 block on `leaf(1,0)` anchored in epoch 1 (`parent_qc`
+    /// weighted timestamp 1500, past ROOT's terminal window in
+    /// [`make_terminating_schedule`]) carrying a finalized wave whose
+    /// certificate names the past-terminal shard ROOT.
+    fn straddling_block() -> Block {
+        let parent_qc = QuorumCertificate::new(
+            BlockHash::ZERO,
+            ShardId::leaf(1, 0),
+            BlockHeight::new(0),
+            BlockHash::ZERO,
+            Round::new(0),
+            SignerBitfield::empty(),
+            zero_bls_signature(),
+            WeightedTimestamp::from_millis(1500),
+        );
+        let header = BlockHeader::new(
+            ShardId::leaf(1, 0),
+            BlockHeight::new(1),
+            BlockHash::ZERO,
+            parent_qc,
+            ValidatorId::new(1),
+            ProposerTimestamp::from_millis(1500),
+            Round::new(1),
+            false,
+            StateRoot::ZERO,
+            TransactionRoot::ZERO,
+            CertificateRoot::ZERO,
+            LocalReceiptRoot::ZERO,
+            ProvisionsRoot::ZERO,
+            Vec::new(),
+            std::collections::BTreeMap::new(),
+            InFlightCount::ZERO,
+            BeaconWitnessRoot::ZERO,
+            BeaconWitnessLeafCount::ZERO,
+            BeaconWitnessLeafCount::ZERO,
+            None,
+        );
+        Block::Live {
+            header,
+            transactions: Arc::new(BoundedVec::new()),
+            certificates: Arc::new(
+                vec![cross_shard_wave(ShardId::leaf(1, 0), ShardId::ROOT, 1)].into(),
+            ),
+            provisions: Arc::new(BoundedVec::new()),
+        }
+    }
+
+    /// End to end through the real vote path: a block whose finalized
+    /// wave names a past-terminal shard defers (no verification dispatched)
+    /// while its settled set is unknown, then proceeds once the set is
+    /// recorded and the vote is re-driven.
+    #[test]
+    fn vote_defers_at_fence_then_proceeds_once_settled_set_recorded() {
+        // Local shard `leaf(1,0)` survives; ROOT is past-terminal at the
+        // block's epoch-1 anchor.
+        let mut coord = ShardCoordinator::new(
+            ValidatorId::new(0),
+            ShardId::leaf(1, 0),
+            ShardConsensusConfig::default(),
+            RecoveredState::default(),
+        );
+        let sched = make_terminating_schedule(4);
+        let block = straddling_block();
+        let block_hash = block.hash();
+        let height = block.height();
+        let round = block.header().round();
+        // Install with the block's finalized waves threaded through, so the
+        // constructed pending block carries its certificates (the default
+        // `install_complete_block` helper drops them).
+        let waves: Vec<Arc<Verifiable<FinalizedWave>>> =
+            block.certificates().iter().cloned().collect();
+        let mut pending = PendingBlock::from_complete_block(
+            &block,
+            vec![],
+            None,
+            waves,
+            vec![],
+            LocalTimestamp::ZERO,
+        );
+        pending
+            .construct_block()
+            .expect("complete block constructs cleanly");
+        coord.pending_blocks.insert(pending);
+
+        // The fence defers: ROOT's settled set is unknown, so the vote
+        // path produces nothing (no verification, no vote).
+        let deferred = coord.try_vote_on_block(&sched, block_hash, height, round);
+        assert!(
+            deferred.is_empty(),
+            "the fence must defer the vote while the settled set is unknown: {deferred:?}",
+        );
+
+        // Record ROOT's settled set including the straddler's wave, then
+        // re-drive: the fence now passes, so the block proceeds to
+        // verification.
+        let settled_wave = WaveId::new(
+            ShardId::ROOT,
+            BlockHeight::new(1),
+            std::collections::BTreeSet::new(),
+        );
+        coord.record_settled_waves(
+            ShardId::ROOT,
+            SettledWaveSet {
+                waves: std::iter::once(settled_wave).collect(),
+                terminal_wt: WeightedTimestamp::from_millis(1000),
+            },
+        );
+        let released = coord.redrive_pending_votes(&sched);
+        assert!(
+            !released.is_empty(),
+            "recording the settled set must release the deferred block into verification",
+        );
+    }
 }
