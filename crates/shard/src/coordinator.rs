@@ -524,6 +524,15 @@ impl ShardCoordinator {
         self.settled_sets.insert(shard, settled);
     }
 
+    /// The settled-wave set this validator has reconstructed for a
+    /// terminated shard, or `None` if it hasn't yet. The reconstruction
+    /// driver populates it; a test or RPC reads it to observe that the
+    /// driver ran.
+    #[must_use]
+    pub fn settled_set(&self, shard: ShardId) -> Option<&SettledWaveSet> {
+        self.settled_sets.get(&shard)
+    }
+
     /// Re-drive the vote path for every pending complete block. Called
     /// after a settled set is recorded ([`Self::record_settled_waves`]):
     /// blocks that deferred at the split-boundary fence for want of that

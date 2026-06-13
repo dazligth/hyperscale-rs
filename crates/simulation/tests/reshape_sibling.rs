@@ -17,16 +17,22 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hyperscale_network_memory::NetworkConfig;
+use hyperscale_node::shard_loop::{ProcessScopedInput, ShardEvent};
 use hyperscale_simulation::SimulationRunner;
 use hyperscale_storage::{ShardChainReader, SubstateStore};
 use hyperscale_storage_memory::SimShardStorage;
+use hyperscale_types::test_utils::test_validity_range;
 use hyperscale_types::{
-    BeaconChainConfig, BeaconState, BlockHash, Ed25519PrivateKey, NodeId, PendingReshape,
-    ReshapeThresholds, ShardAnchor, ShardId, SplitChildRoots, StateRoot, ValidatorId,
-    ValidatorStatus, ed25519_keypair_from_seed, uniform_shard_for_node,
+    BeaconChainConfig, BeaconState, BlockHash, BlockHeight, Ed25519PrivateKey, NodeId,
+    PendingReshape, ReshapeThresholds, RoutableTransaction, ShardAnchor, ShardId, SplitChildRoots,
+    StateRoot, TxHash, ValidatorId, ValidatorStatus, WeightedTimestamp, ed25519_keypair_from_seed,
+    routable_from_notarized_v1, sign_and_notarize, uniform_shard_for_node,
 };
+use radix_common::constants::XRD;
 use radix_common::math::Decimal;
+use radix_common::network::NetworkDefinition;
 use radix_common::types::ComponentAddress;
+use radix_transactions::builder::ManifestBuilder;
 use tracing_test::traced_test;
 
 const TEST_EPOCH_MS: u64 = 2000;
@@ -41,10 +47,18 @@ const SPLIT_SUBSTATES: u64 = 380;
 /// Bulk accounts funded into `leaf(1,1)` to carry it past the threshold.
 const RIGHT_BULK: usize = 20;
 
+/// Delays from admission at which to submit the cross-shard straddlers,
+/// spanning the runway to `leaf(1,1)`'s cut. The cross-shard 2PC needs
+/// several blocks, so the earlier ones settle on `leaf(1,1)` before its
+/// terminal block (and the survivor finalizes them once it reconstructs
+/// `S_{leaf(1,1)}`); the later ones straddle (settle on neither).
+const STRADDLE_DELAYS_MS: [u64; 5] = [0, 1200, 2400, 3600, 4800];
+
 const ADMISSION_BUDGET_EPOCHS: u64 = 8;
 const GATE_BUDGET_EPOCHS: u64 = 8;
 const SEED_BUDGET_EPOCHS: u64 = 6;
-const CHILD_RUN_BUDGET_EPOCHS: u64 = 4;
+const CHILD_RUN_BUDGET_EPOCHS: u64 = 6;
+const SETTLE_BUDGET_EPOCHS: u64 = 6;
 
 fn sibling_config() -> NetworkConfig {
     NetworkConfig {
@@ -139,25 +153,91 @@ fn store_for(runner: &SimulationRunner, shard: ShardId) -> Option<&SimShardStora
     (0..runner.num_hosts()).find_map(|node| runner.hosts_shard(node, shard))
 }
 
+/// A payer-to-recipient XRD transfer, signed and routable.
+fn transfer(
+    payer_key: &Ed25519PrivateKey,
+    payer: ComponentAddress,
+    recipient: ComponentAddress,
+) -> Arc<RoutableTransaction> {
+    let manifest = ManifestBuilder::new()
+        .lock_fee(payer, Decimal::from(10))
+        .withdraw_from_account(payer, XRD, Decimal::from(500))
+        .try_deposit_entire_worktop_or_abort(recipient, None)
+        .build();
+    let notarized = sign_and_notarize(manifest, &NetworkDefinition::simulator(), 1, payer_key)
+        .expect("transfer signs");
+    Arc::new(routable_from_notarized_v1(notarized, test_validity_range()).expect("routable"))
+}
+
+/// Walk a committed chain from `from` to its tip: the heights at which
+/// `hash` was committed (rides `transactions`) and finalized (rides a
+/// `FinalizedWave` certificate), and the finalizing block's weighted
+/// timestamp.
+fn scan_chain(
+    storage: &SimShardStorage,
+    from: BlockHeight,
+    hash: TxHash,
+) -> (
+    Option<BlockHeight>,
+    Option<BlockHeight>,
+    Option<WeightedTimestamp>,
+) {
+    let mut committed = None;
+    let mut finalized = None;
+    let mut finalized_wt = None;
+    let tip = storage.committed_height();
+    let mut height = from;
+    while height <= tip {
+        if let Some(certified) = storage.get_block(height) {
+            let block = certified.block();
+            if block.transactions().iter().any(|tx| tx.hash() == hash) {
+                committed = Some(height);
+            }
+            if block
+                .certificates()
+                .iter()
+                .any(|fw| fw.tx_hashes().any(|t| t == hash))
+            {
+                finalized = Some(height);
+                finalized_wt = Some(block.header().parent_qc().weighted_timestamp());
+            }
+        }
+        height = height.next();
+    }
+    (committed, finalized, finalized_wt)
+}
+
 #[traced_test]
 #[test]
-#[allow(clippy::too_many_lines)] // one surviving-sibling split lifecycle
-fn sibling_survives_a_split_with_subtree_continuity() {
+#[allow(clippy::too_many_lines)] // one surviving-sibling straddler lifecycle
+fn surviving_sibling_reconstructs_a_split_shards_settled_set() {
     let mut runner = SimulationRunner::new(&sibling_config(), 11);
     let survivor = ShardId::leaf(1, 0);
     let splitter = ShardId::leaf(1, 1);
     let (left_child, right_child) = splitter.children();
 
-    // Fund leaf(1,1) past the threshold; keep leaf(1,0) lightly funded.
+    // Bulk-fund leaf(1,1) past the threshold.
     let mut taken = Vec::new();
     let mut balances = Vec::new();
     for _ in 0..RIGHT_BULK {
         let (_, a) = account_in(splitter, 2, &mut taken);
         balances.push((a, Decimal::from(10_000)));
     }
-    for _ in 0..2 {
-        let (_, a) = account_in(survivor, 2, &mut taken);
-        balances.push((a, Decimal::from(10_000)));
+    // Straddler pairs: payer in the surviving leaf(1,0), recipient in the
+    // splitting leaf(1,1) — a genuine cross-shard transfer between the two,
+    // so leaf(1,0)'s wave names the terminating leaf(1,1).
+    let straddlers: Vec<(Ed25519PrivateKey, ComponentAddress, ComponentAddress)> =
+        STRADDLE_DELAYS_MS
+            .iter()
+            .map(|_| {
+                let (payer_key, payer) = account_in(survivor, 2, &mut taken);
+                let (_, recipient) = account_in(splitter, 2, &mut taken);
+                (payer_key, payer, recipient)
+            })
+            .collect();
+    for (_, payer, recipient) in &straddlers {
+        balances.push((*payer, Decimal::from(10_000)));
+        balances.push((*recipient, Decimal::from(10_000)));
     }
     runner.initialize_genesis_with_balances(&balances);
 
@@ -181,6 +261,21 @@ fn sibling_survives_a_split_with_subtree_continuity() {
             2,
             "the cohort halves must split evenly; got {cohort:?}",
         );
+    }
+
+    // ── Submit the cross-shard straddlers now, staggered from admission,
+    // so they span the runway to leaf(1,1)'s cut (a cross-shard 2PC needs
+    // more runway than the gate-to-cut window can give) ──
+    let mut probes: Vec<(u64, TxHash)> = Vec::new();
+    for (delay_ms, (payer_key, payer, recipient)) in STRADDLE_DELAYS_MS.iter().zip(&straddlers) {
+        let tx = transfer(payer_key, *payer, *recipient);
+        let hash = tx.hash();
+        runner.schedule_initial_event(
+            0,
+            Duration::from_millis(*delay_ms).max(Duration::from_millis(10)),
+            ShardEvent::process(ProcessScopedInput::SubmitTransaction { tx }),
+        );
+        probes.push((*delay_ms, hash));
     }
 
     // ── Observer duty: each cohort member syncs its child span ──
@@ -219,7 +314,7 @@ fn sibling_survives_a_split_with_subtree_continuity() {
         "the lookahead must carry leaf(1,1)'s children, not leaf(1,1)",
     );
     let final_epoch = state.current_epoch;
-    let _cut = Duration::from_millis((final_epoch.inner() + 1) * TEST_EPOCH_MS);
+    let cut = Duration::from_millis((final_epoch.inner() + 1) * TEST_EPOCH_MS);
     // The parent halves are leaf(1,1)'s original members landing on a
     // child — excluding the synced cohort (the pooled extras), which the
     // observer flips handle separately.
@@ -339,4 +434,88 @@ fn sibling_survives_a_split_with_subtree_continuity() {
             survivor_base.inner(),
         );
     }
+
+    // ── Settlement window: the survivor reconstructs S_{leaf(1,1)} from
+    // the coast headers it sees and finalizes every straddler it can ──
+    let settle_deadline = runner.now() + epochs(SETTLE_BUDGET_EPOCHS);
+    let _ = run_until(&mut runner, settle_deadline, |_| false);
+
+    // ── Scan each straddler's fate on both chains ──
+    let cut_wt = WeightedTimestamp::from_millis(u64::try_from(cut.as_millis()).expect("cut fits"));
+    let terminal_b = genesis_height
+        .prev()
+        .expect("leaf(1,1)'s terminal sits below the child genesis");
+    let survivor_store = store_for(&runner, survivor).expect("survivor store");
+    let splitter_store = store_for(&runner, splitter).expect("leaf(1,1) still served");
+
+    let mut report = format!(
+        "cut={}ms terminal_B=h{} child_genesis=h{}",
+        cut.as_millis(),
+        terminal_b.inner(),
+        genesis_height.inner(),
+    );
+    let mut settled = 0u32; // settled on leaf(1,1) and finalized on the survivor
+    let mut one_sided = 0u32; // finalized on the survivor but not settled on leaf(1,1)
+    let mut straddled = 0u32; // committed on leaf(1,1) but never settled there
+    for (delay, hash) in &probes {
+        let (s_committed, s_finalized, _) = scan_chain(splitter_store, BlockHeight::new(1), *hash);
+        let (v_committed, v_finalized, v_wt) =
+            scan_chain(survivor_store, BlockHeight::new(1), *hash);
+        let settled_on_splitter = s_finalized.is_some_and(|h| h <= terminal_b);
+        let finalized_on_survivor = v_finalized.is_some();
+        let post_cut = v_wt.is_some_and(|wt| wt > cut_wt);
+        let _ = write!(
+            report,
+            "\n  +{delay}ms: leaf(1,1) committed={:?} finalized={:?} settled={settled_on_splitter}; \
+             leaf(1,0) committed={:?} finalized={:?} wt={:?} post_cut={post_cut}",
+            s_committed.map(BlockHeight::inner),
+            s_finalized.map(BlockHeight::inner),
+            v_committed.map(BlockHeight::inner),
+            v_finalized.map(BlockHeight::inner),
+            v_wt.map(WeightedTimestamp::as_millis),
+        );
+        if finalized_on_survivor && !settled_on_splitter {
+            one_sided += 1;
+        }
+        if settled_on_splitter && finalized_on_survivor {
+            settled += 1;
+        }
+        if s_committed.is_some() && !settled_on_splitter {
+            straddled += 1;
+        }
+    }
+
+    // The driver demonstrably ran: a surviving leaf(1,0) member
+    // reconstructed leaf(1,1)'s settled-wave set from its coast tail. The
+    // committed mechanism only unit-tested this; here it runs over the real
+    // network against the draining committee.
+    let reconstructed = runner.vnode_state(ValidatorId::new(0)).and_then(|node| {
+        node.shard_coordinator()
+            .settled_set(splitter)
+            .map(|set| set.waves.len())
+    });
+    assert!(
+        reconstructed.is_some_and(|n| n > 0),
+        "the survivor must reconstruct a non-empty settled set for the terminated leaf(1,1) \
+         (got {reconstructed:?}) — the io_loop driver never delivered S_P:\n{report}",
+    );
+
+    // Atomicity: the survivor finalizes a cross-shard wave with leaf(1,1)
+    // only when leaf(1,1) settled it by its terminal block — never
+    // one-sided.
+    assert_eq!(
+        one_sided, 0,
+        "the survivor finalized a straddler leaf(1,1) never settled — one-sided cross-shard \
+         application:\n{report}",
+    );
+    assert!(
+        settled > 0,
+        "no straddler settled cross-shard between the survivor and the splitting shard — \
+         the offsets need retuning:\n{report}",
+    );
+    assert!(
+        straddled > 0,
+        "no straddler reached leaf(1,1)'s boundary unsettled — the offsets need retuning so \
+         the test actually stresses the cut:\n{report}",
+    );
 }
