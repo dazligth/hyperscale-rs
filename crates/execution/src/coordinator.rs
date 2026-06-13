@@ -253,6 +253,14 @@ pub struct ExecutionCoordinator {
     /// never finalize, so they abort.
     pending_counterpart_sweeps: HashMap<ShardId, HashSet<WaveId>>,
 
+    /// Transactions whose finalized wave the gate **rejected** — a late
+    /// execution certificate completed a wave naming a past-terminal
+    /// partner that never settled it. The wave is already gone from the
+    /// registry (`finalize_wave` removed it before the gate ran), so the
+    /// pending counterpart sweep can't reach the transaction; it drains
+    /// here instead, through [`Self::take_ready_counterpart_aborts`].
+    gate_rejected_aborts: Vec<TxHash>,
+
     /// This validator's identity.
     me: ValidatorId,
 
@@ -304,6 +312,7 @@ impl ExecutionCoordinator {
             settled_sets: HashMap::new(),
             gated_finalized: HashMap::new(),
             pending_counterpart_sweeps: HashMap::new(),
+            gate_rejected_aborts: Vec::new(),
             me,
             local_shard,
         }
@@ -1845,7 +1854,14 @@ impl ExecutionCoordinator {
                 self.gated_finalized.insert(wave_id, finalized_arc);
                 vec![]
             }
-            SettledSetVerdict::Reject => vec![],
+            SettledSetVerdict::Reject => {
+                // The partner never settled this wave, so it must never be
+                // produced — and `finalize_wave` already removed it from the
+                // registry, so the pending counterpart sweep can't reach its
+                // transactions. Queue them for the same abort path.
+                self.gate_rejected_aborts.extend(finalized_arc.tx_hashes());
+                vec![]
+            }
         }
     }
 
@@ -1939,6 +1955,16 @@ impl ExecutionCoordinator {
                 }
             }
         }
+
+        // Transactions whose wave the gate rejected (a late certificate
+        // completed it after the partner terminated without settling it).
+        // Their wave is already gone, so they ride the same abort path.
+        for tx_hash in self.gate_rejected_aborts.drain(..) {
+            self.waves.remove_assignment(tx_hash);
+            self.provisioning.remove_tx(tx_hash);
+            aborted.push(tx_hash);
+        }
+
         aborted.sort_unstable();
         aborted.dedup();
         if !aborted.is_empty() {
@@ -4071,6 +4097,7 @@ mod tests {
         );
         let wave = cross_shard_finalized_wave(ShardId::leaf(1, 0), ShardId::ROOT, 1);
         let wave_id = wave.wave_id().clone();
+        let tx_hash: Vec<TxHash> = wave.tx_hashes().collect();
 
         let dropped = state.emit_or_gate_finalized(&sched, wave);
         assert!(
@@ -4082,6 +4109,62 @@ mod tests {
             "a rejected wave is not buffered for retry",
         );
         assert!(!state.finalized.contains(&wave_id));
+
+        // The rejected wave's tx rides the counterpart abort path rather
+        // than wedging in flight (its wave is already out of the registry).
+        let aborted = state.take_ready_counterpart_aborts();
+        assert_eq!(aborted, tx_hash, "a gate-rejected wave's tx is aborted");
+    }
+
+    /// The late-execution-certificate H2 probe: a certificate completes a
+    /// wave naming a terminated partner *after* the cut. While the
+    /// partner's settled set is unknown the gate **defers** (never emits —
+    /// no one-sided application); once the set proves the partner never
+    /// settled the wave, the gate **rejects** it and the transaction
+    /// aborts. The fence/driver defer-release that `reshape_sibling`'s
+    /// natural straddler can't reach (it finalizes pre-cut) is exercised
+    /// here against a genuinely post-cut, unsettled wave.
+    #[test]
+    fn late_unsettled_ec_defers_then_rejects_and_aborts_no_one_sided() {
+        let mut state = make_test_state_for_shard(ValidatorId::new(0), ShardId::leaf(1, 0));
+        // Post-cut: any epoch-1 timestamp is past ROOT's terminal window.
+        state.committed_ts = WeightedTimestamp::from_millis(1500);
+        let sched = terminating_schedule();
+        let wave = cross_shard_finalized_wave(ShardId::leaf(1, 0), ShardId::ROOT, 1);
+        let wave_id = wave.wave_id().clone();
+        let tx_hashes: Vec<TxHash> = wave.tx_hashes().collect();
+
+        // The late certificate completes the wave before the settled set is
+        // reconstructed: the gate defers — held, never emitted.
+        let deferred = state.emit_or_gate_finalized(&sched, wave);
+        assert!(
+            deferred.is_empty(),
+            "no one-sided finalize while the partner's settled set is unknown",
+        );
+        assert!(state.gated_finalized.contains_key(&wave_id));
+
+        // ROOT terminated having settled nothing → the held wave rejects on
+        // redrive, is never finalized, and its tx aborts (not wedged).
+        state.record_settled_waves(
+            ShardId::ROOT,
+            SettledWaveSet {
+                waves: BTreeSet::new(),
+                terminal_wt: WeightedTimestamp::from_millis(1000),
+            },
+        );
+        let released = state.redrive_gated_finalizations(&sched);
+        assert!(
+            released.is_empty(),
+            "an unsettled wave is never finalized — no one-sided application",
+        );
+        assert!(state.gated_finalized.is_empty());
+        assert!(!state.finalized.contains(&wave_id));
+
+        let aborted = state.take_ready_counterpart_aborts();
+        assert_eq!(
+            aborted, tx_hashes,
+            "the rejected wave's tx aborts rather than wedging in flight",
+        );
     }
 
     /// A local cross-shard wave still lacking a terminated partner's
