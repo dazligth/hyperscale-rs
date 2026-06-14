@@ -874,6 +874,7 @@ mod tests {
             BeaconWitnessLeafCount::ZERO,
             BeaconWitnessLeafCount::ZERO,
             None,
+            None,
         );
         // Deliberately set wrong block_hash
         let qc = QuorumCertificate::new(
@@ -968,6 +969,7 @@ mod tests {
             BeaconWitnessRoot::ZERO,
             BeaconWitnessLeafCount::ZERO,
             BeaconWitnessLeafCount::ZERO,
+            None,
             None,
         );
         let qc = QuorumCertificate::new(

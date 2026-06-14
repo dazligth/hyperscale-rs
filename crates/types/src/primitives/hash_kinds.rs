@@ -139,6 +139,19 @@ hash_newtype!(
     "WaveReceiptHash"
 );
 
+hash_newtype!(
+    /// Merkle root over the wave-ids a shard settled within its retention
+    /// window up to a terminal block.
+    ///
+    /// Carried in [`BlockHeader::settled_waves_root`](crate::BlockHeader) on
+    /// a terminating shard's boundary header and folded into
+    /// [`ShardBoundary`](crate::ShardBoundary), so a surviving counterpart
+    /// resolves split-straddling waves against the terminated shard's
+    /// beacon-attested settled set.
+    pub SettledWavesRoot,
+    "SettledWavesRoot"
+);
+
 // ── Beacon chain ─────────────────────────────────────────────────────────────
 
 hash_newtype!(

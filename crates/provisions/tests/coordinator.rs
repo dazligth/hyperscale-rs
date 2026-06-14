@@ -50,6 +50,7 @@ fn make_block(height: BlockHeight) -> CertifiedBlock {
         BeaconWitnessLeafCount::ZERO,
         BeaconWitnessLeafCount::ZERO,
         None,
+        None,
     );
     let block = Block::Live {
         header,
@@ -106,6 +107,7 @@ fn make_remote_header_targeting(
         BeaconWitnessRoot::ZERO,
         BeaconWitnessLeafCount::ZERO,
         BeaconWitnessLeafCount::ZERO,
+        None,
         None,
     );
     let header_hash = header.hash();

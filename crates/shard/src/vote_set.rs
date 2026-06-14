@@ -452,6 +452,7 @@ mod tests {
             BeaconWitnessLeafCount::ZERO,
             BeaconWitnessLeafCount::ZERO,
             None,
+            None,
         )
     }
 

@@ -498,6 +498,7 @@ mod tests {
             BeaconWitnessLeafCount::new(leaf_count),
             BeaconWitnessLeafCount::ZERO,
             None,
+            None,
         );
         let block_hash = header.hash();
         let qc = QuorumCertificate::new(

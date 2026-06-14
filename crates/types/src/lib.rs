@@ -91,8 +91,8 @@ pub use primitives::hash::{Hash, TypedHash};
 pub use primitives::hash_kinds::{
     BeaconBlockHash, BeaconWitnessRoot, BlockHash, CertificateRoot, EventRoot, GenesisConfigHash,
     GlobalReceiptHash, GlobalReceiptRoot, LocalReceiptRoot, OwnershipRoot, ProvisionHash,
-    ProvisionTxRoot, ProvisionsRoot, StateRoot, TransactionRoot, TxHash, WaveReceiptHash,
-    WritesRoot,
+    ProvisionTxRoot, ProvisionsRoot, SettledWavesRoot, StateRoot, TransactionRoot, TxHash,
+    WaveReceiptHash, WritesRoot,
 };
 pub use primitives::identifiers::{
     Attempt, BeaconWitnessLeafCount, BlockHeight, Epoch, HeaderFetchCount, InFlightCount,

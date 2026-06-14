@@ -497,6 +497,7 @@ mod tests {
             BeaconWitnessLeafCount::new(base + window.len() as u64),
             BeaconWitnessLeafCount::new(base),
             None,
+            None,
         );
 
         // Global leaf 6 sits at window position 1.

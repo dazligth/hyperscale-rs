@@ -116,6 +116,7 @@ mod tests {
             BeaconWitnessLeafCount::ZERO,
             BeaconWitnessLeafCount::ZERO,
             None,
+            None,
         );
         let block = Block::Live {
             header,

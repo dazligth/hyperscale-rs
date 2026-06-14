@@ -1384,6 +1384,7 @@ fn make_source_header_with_parent_qc(
         BeaconWitnessLeafCount::new(leaf_count),
         BeaconWitnessLeafCount::ZERO,
         None,
+        None,
     );
     let block_hash = header.hash();
     let qc = QuorumCertificate::new(

@@ -91,6 +91,7 @@ mod tests {
             BeaconWitnessLeafCount::new(2),
             BeaconWitnessLeafCount::ZERO,
             None,
+            None,
         )
     }
 

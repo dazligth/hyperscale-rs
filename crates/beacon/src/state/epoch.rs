@@ -747,6 +747,7 @@ mod tests {
             BeaconWitnessLeafCount::new(leaf_count),
             BeaconWitnessLeafCount::ZERO,
             split_child_roots,
+            None,
         )
     }
 

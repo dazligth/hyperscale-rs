@@ -76,6 +76,7 @@ mod tests {
             BeaconWitnessLeafCount::ZERO,
             BeaconWitnessLeafCount::ZERO,
             None,
+            None,
         );
 
         let hash1 = header.hash();
@@ -255,6 +256,7 @@ mod tests {
                 header.beacon_witness_root(),
                 header.beacon_witness_leaf_count(),
                 header.beacon_witness_base(),
+                None,
                 None,
             );
         }

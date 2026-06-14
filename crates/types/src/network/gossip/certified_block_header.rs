@@ -123,6 +123,7 @@ mod tests {
             BeaconWitnessLeafCount::ZERO,
             BeaconWitnessLeafCount::ZERO,
             None,
+            None,
         );
         let qc = QuorumCertificate::genesis(ShardId::leaf(1, 0), ChainOrigin::ROOT);
 

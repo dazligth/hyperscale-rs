@@ -298,6 +298,7 @@ pub fn build_proposal<S: ShardChainWriter>(
         beacon_witness_leaf_count,
         beacon_witness_base,
         split_child_roots,
+        None,
     );
 
     let block = Block::Live {

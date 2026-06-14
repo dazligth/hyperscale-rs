@@ -1401,5 +1401,6 @@ fn perturb_header_timestamp(h: &BlockHeader) -> BlockHeader {
         h.beacon_witness_leaf_count(),
         h.beacon_witness_base(),
         h.split_child_roots(),
+        None,
     )
 }

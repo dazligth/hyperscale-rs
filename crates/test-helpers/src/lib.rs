@@ -249,6 +249,7 @@ pub fn make_live_block(
         BeaconWitnessLeafCount::ZERO,
         BeaconWitnessLeafCount::ZERO,
         None,
+        None,
     );
     let transactions: Vec<Arc<Verifiable<RoutableTransaction>>> = transactions
         .into_iter()
@@ -318,6 +319,7 @@ fn stamp_parent_qc_weighted_timestamp(block: Block, weighted_timestamp_ms: u64) 
             beacon_witness_leaf_count,
             beacon_witness_base,
             split_child_roots,
+            settled_waves_root,
         ) = header.into_parts();
         let pqc = parent_qc.as_unverified();
         let stamped = QuorumCertificate::new(
@@ -351,6 +353,7 @@ fn stamp_parent_qc_weighted_timestamp(block: Block, weighted_timestamp_ms: u64) 
             beacon_witness_leaf_count,
             beacon_witness_base,
             split_child_roots,
+            settled_waves_root,
         )
     };
     match block {
