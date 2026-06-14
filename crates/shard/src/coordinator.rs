@@ -1336,29 +1336,21 @@ impl ShardCoordinator {
         self.build_and_dispatch_proposal(topology, height, round, ProposalKind::Fallback)
     }
 
-    /// Unified proposal build + dispatch.
-    ///
-    /// Resolves the parent from the chain view, assembles a `BuildProposal`
-    /// action whose payload/timestamp/`is_fallback` bits come from `kind`,
-    /// and dispatches via the `proposal` tracker (or defers via the
-    /// verification pipeline when the parent JMT isn't ready yet).
-    /// The reshape assertion for a proposal: the load predicate over
-    /// the substate count behind the parent state, deduped against the
-    /// same trimmed window the witness root commits. Every replica
-    /// recomputes this in verification, so an assertion the local walk
-    /// can't justify would be rejected — when the count is unavailable
-    /// (it shouldn't be: proposals wait for the parent JMT, which
-    /// implies the deltas), the assertion is omitted rather than
-    /// guessed.
-    fn derive_proposal_reshape_trigger(
+    /// Substate count behind the proposal parent's post-state for the
+    /// reshape predicate, or `None` when reshaping is disabled (the
+    /// predicate can never fire, so the count is irrelevant). `Err` names
+    /// the ancestor whose delta — or, for a frontier lagging the committed
+    /// tip, the tip's persistence reconcile — is still outstanding; the
+    /// caller defers the build and retries, mirroring the verifier's park
+    /// on a missing ancestor delta.
+    fn proposal_substate_count(
         &self,
         topology: &TopologySchedule,
         parent_block_hash: BlockHash,
-        window: &[Hash],
-    ) -> Option<ReshapeTrigger> {
+    ) -> Result<Option<u64>, BlockHash> {
         let thresholds = topology.reshape_thresholds();
         if thresholds == ReshapeThresholds::DISABLED {
-            return None;
+            return Ok(None);
         }
         let count_source = SubstateCountSource {
             thresholds,
@@ -1366,21 +1358,27 @@ impl ShardCoordinator {
             committed_height: self.committed_height,
             deltas: &self.pending_substate_deltas,
         };
-        match count_source.count_behind(
-            self.committed_hash,
-            parent_block_hash,
-            &self.pending_blocks,
-        ) {
-            Ok(count) => derive_reshape_trigger(self.local_shard, count, &thresholds, window),
-            Err(blocking) => {
-                warn!(
-                    validator = ?self.me,
-                    ?blocking,
-                    "Substate count unavailable at proposal; omitting reshape assertion"
-                );
-                None
-            }
-        }
+        count_source
+            .count_behind(self.committed_hash, parent_block_hash, &self.pending_blocks)
+            .map(Some)
+    }
+
+    /// The reshape assertion for a proposal: the load predicate over the
+    /// resolved substate count, deduped against the same trimmed window
+    /// the witness root commits. A `None` count (reshaping disabled)
+    /// yields no assertion. Every replica recomputes this in verification;
+    /// the count is resolved — or the build deferred — by
+    /// [`Self::proposal_substate_count`] before the witness preview, so
+    /// this never guesses an assertion the local walk can't justify.
+    fn derive_proposal_reshape_trigger(
+        &self,
+        topology: &TopologySchedule,
+        substate_count: Option<u64>,
+        window: &[Hash],
+    ) -> Option<ReshapeTrigger> {
+        let count = substate_count?;
+        let thresholds = topology.reshape_thresholds();
+        derive_reshape_trigger(self.local_shard, count, &thresholds, window)
     }
 
     /// Drain dwell-eligible ready signals and preview the beacon-witness
@@ -1397,12 +1395,14 @@ impl ShardCoordinator {
     /// [`prospective_parent_witness_leaves`], so previewing against the
     /// committed accumulator alone would omit those leaves and produce a
     /// root no validator accepts.
+    #[allow(clippy::too_many_arguments)] // proposer-side witness preview: chain prefix + committee + reshape inputs
     fn preview_witness_commitment(
         &mut self,
         topology: &TopologySchedule,
         committee: &TopologySnapshot,
         height: BlockHeight,
         parent_block_hash: BlockHash,
+        substate_count: Option<u64>,
         receipts: &[StoredReceipt],
         missed: &[ShardWitnessPayload],
     ) -> WitnessCommitmentPreview {
@@ -1444,7 +1444,7 @@ impl ShardCoordinator {
         parent_leaves.drain(..trim);
 
         let reshape_trigger =
-            self.derive_proposal_reshape_trigger(topology, parent_block_hash, &parent_leaves);
+            self.derive_proposal_reshape_trigger(topology, substate_count, &parent_leaves);
         let new_leaves = derive_leaves(
             self.local_shard,
             committee,
@@ -1464,6 +1464,13 @@ impl ShardCoordinator {
         }
     }
 
+    /// Unified proposal build + dispatch.
+    ///
+    /// Resolves the parent from the chain view, assembles a `BuildProposal`
+    /// action whose payload/timestamp/`is_fallback` bits come from `kind`,
+    /// and dispatches via the `proposal` tracker — or defers (the parent
+    /// JMT, the split-at-boundary bit, or the reshape substate count not
+    /// yet resolved) and retries on the next tick.
     fn build_and_dispatch_proposal(
         &mut self,
         topology: &TopologySchedule,
@@ -1500,6 +1507,24 @@ impl ShardCoordinator {
             );
             return vec![];
         };
+        // The reshape predicate reads the substate count behind the parent
+        // state. Resolve it before the witness preview drains the
+        // ready-signal pool: a missing ancestor delta defers the whole
+        // build — the verifier parks on the same gap — rather than emitting
+        // a header whose omitted assertion every replica recomputes as
+        // required and rejects.
+        let substate_count = match self.proposal_substate_count(topology, parent_block_hash) {
+            Ok(count) => count,
+            Err(blocking) => {
+                trace!(
+                    validator = ?self.me,
+                    height = height.inner(),
+                    ?blocking,
+                    "Substate count unavailable at proposal; deferring until the ancestor delta lands"
+                );
+                return vec![];
+            }
+        };
         let receipts: Vec<StoredReceipt> = match &kind {
             ProposalKind::Normal {
                 finalized_waves, ..
@@ -1521,6 +1546,7 @@ impl ShardCoordinator {
             committee,
             height,
             parent_block_hash,
+            substate_count,
             &receipts,
             &missed,
         );
