@@ -162,6 +162,13 @@ where
     /// beacon signing action [`Self::allow_beacon_signing`] denies, so
     /// exactly one vnode per validator signs while the rest track
     /// passively.
+    ///
+    /// The fence is in-memory and scoped to one process lifetime: a
+    /// restart clears every seat and the per-seat high-water epoch, so the
+    /// first post-restart emission per validator claims its seat freshly.
+    /// A different vnode winning the seat within an epoch the validator
+    /// already signed before the restart would equivocate — the fence
+    /// guards concurrent vnodes, not restarts.
     beacon_signers: Mutex<HashMap<ValidatorId, BeaconSignerSeat>>,
 }
 

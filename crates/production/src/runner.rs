@@ -1032,9 +1032,17 @@ impl ProductionRunner {
             join = ?change.join,
             leave = ?change.leave,
             observe = ?change.observe,
+            keep = ?change.keep,
             effective_epoch = change.effective_epoch.inner(),
             "Beacon placement change detected"
         );
+        if let Some(keep) = change.keep {
+            warn!(
+                validator = change.validator.inner(),
+                ?keep,
+                "Keeper delta received but merge-keeper duty has no supervisor wiring; ignoring"
+            );
+        }
         match change.observe {
             Some(ObserveDelta::Begin { via, child }) => {
                 if let Some(signing_key) = self.vnode_keys.get(&change.validator) {

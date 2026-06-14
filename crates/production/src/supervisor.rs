@@ -1188,11 +1188,6 @@ impl ShardSupervisor {
     }
 }
 
-/// Poll the process topology until the beacon's child anchor projects —
-/// the fold has consumed the parent's terminal contribution and seeded
-/// the child's genesis record. The flip cannot act sooner: the anchor
-/// carries the adopted root and the deterministic genesis hash the
-/// adoption verifies against.
 /// The boundary handoff's preparation, run at the tail of the observer
 /// duty task: follow the splitting parent to its crossing, then adopt
 /// the followed store at the derived genesis and verify it against the
@@ -1244,6 +1239,11 @@ async fn prepare_observer_flip(
     .unwrap_or_else(|e| Err(format!("observer adoption task panicked: {e}")))
 }
 
+/// Poll the process topology until the beacon's child anchor projects —
+/// the fold has consumed the parent's terminal contribution and seeded
+/// the child's genesis record. The flip cannot act sooner: the anchor
+/// carries the adopted root and the deterministic genesis hash the
+/// adoption verifies against.
 async fn wait_for_child_anchor(process: &ProdProcessIo, child: ShardId) -> ShardAnchor {
     loop {
         if let Some(anchor) = process.topology().load().boundary(child) {

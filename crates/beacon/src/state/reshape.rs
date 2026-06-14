@@ -743,12 +743,11 @@ mod tests {
         assert!(effects.shard_committee_transitions.contains_key(&right));
     }
 
-    /// The plan's Phase 2a exit criterion, through the full pipeline:
-    /// after the fold that meets the gate, the epoch in flight still
-    /// resolves routing against the parent while the lookahead resolves
-    /// the two-child partition; the in-flight window's frozen consensus
-    /// subset is untouched; the promotion one epoch later activates
-    /// both children at full consensus strength.
+    /// The grow pipeline end to end: after the fold that meets the gate,
+    /// the epoch in flight still resolves routing against the parent while
+    /// the lookahead resolves the two-child partition; the in-flight
+    /// window's frozen consensus subset is untouched; the promotion one
+    /// epoch later activates both children at full consensus strength.
     #[test]
     fn lookahead_resolves_children_while_active_resolves_parent() {
         let p = ShardId::leaf(1, 0);
@@ -1225,10 +1224,10 @@ mod tests {
         assert_eq!(a.boundaries, b.boundaries);
     }
 
-    /// The Phase 5 exit criterion, inverted: after the gate fires, the
-    /// epoch in flight still resolves routing against the two children
-    /// while the lookahead resolves the reunified parent, and the merged
-    /// committee starts at full ready strength.
+    /// The merge pipeline end to end, the grow case inverted: after the
+    /// gate fires, the epoch in flight still resolves routing against the
+    /// two children while the lookahead resolves the reunified parent, and
+    /// the merged committee starts at full ready strength.
     #[test]
     fn merge_lookahead_resolves_parent_while_active_resolves_children() {
         let parent = ShardId::leaf(1, 0);

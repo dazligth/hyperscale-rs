@@ -49,8 +49,12 @@ pub fn merge_genesis_from_terminals(
     if epoch_duration_ms == 0 {
         return Err("a merge needs epoch boundaries to anchor the cut".to_string());
     }
-    // The cut is the start of the epoch the terminal blocks fall in —
-    // both crossed it, so either canonical timestamp floors to it.
+    // The merged chain's clock anchors at the cut the beacon composes in
+    // `compose_merge_parent`: the start of the epoch after the children's
+    // final one. Both terminals coasted across that boundary, so either
+    // QC's weighted timestamp floors to it; any divergence from the
+    // beacon's `(terminal_epoch + 1) * epoch_duration_ms` fails closed at
+    // the genesis-hash check below.
     let cut_ms = (left_qc.weighted_timestamp().as_millis() / epoch_duration_ms) * epoch_duration_ms;
     let cut_wt = WeightedTimestamp::from_millis(cut_ms);
     let genesis = Block::merge_parent_genesis(

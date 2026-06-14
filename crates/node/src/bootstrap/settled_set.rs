@@ -109,7 +109,6 @@ impl SettledSetBuilder {
     /// Panics only on an internal invariant breach — `next` would
     /// descend below `start_height` (the walk stops at `start_height`,
     /// which is at or above `GENESIS`, so `prev` always exists here).
-    #[allow(clippy::too_many_lines)] // one linear verification of a single reveal
     pub fn on_response(&mut self, response: &GetSettledWavesResponse) -> SettledOutcome {
         if !self.in_flight {
             return SettledOutcome::Rejected("unsolicited settled-waves response");

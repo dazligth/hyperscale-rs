@@ -4206,8 +4206,8 @@ mod tests {
         assert_eq!(aborted, tx_hash, "a gate-rejected wave's tx is aborted");
     }
 
-    /// The late-execution-certificate H2 probe: a certificate completes a
-    /// wave naming a terminated partner *after* the cut. While the
+    /// A late execution certificate completes a wave naming a terminated
+    /// partner *after* the cut. While the
     /// partner's settled set is unknown the gate **defers** (never emits —
     /// no one-sided application); once the set proves the partner never
     /// settled the wave, the gate **rejects** it and the transaction
