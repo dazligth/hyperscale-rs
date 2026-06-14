@@ -77,10 +77,19 @@ impl SimShardStorage {
                 origin.genesis_height,
             ));
         }
+        let recorded_origin = read_or_recover(&self.consensus).chain_origin;
         let mut shared = write_or_recover(&self.state);
         let child_path = shared.tree_store.root_path();
         if child_path.is_empty() {
             return Err("split adoption requires a non-root child prefix".to_string());
+        }
+
+        // A re-run over an already-adopted store returns the recorded
+        // adoption: the tip already sits at the genesis height under this
+        // origin, and the parent slot the first run consumed is gone.
+        let tip = shared.current_block_height;
+        if tip == origin.genesis_height && recorded_origin == origin {
+            return Ok(shared.current_root_hash);
         }
 
         // The metadata is the parent's; the child root hangs off the
@@ -295,9 +304,11 @@ fn count_subtree_leaves(store: &impl TreeReader, root_key: &NodeKey) -> Result<u
 
 #[cfg(test)]
 mod tests {
+    use hyperscale_jmt::{Blake3Hasher, Hasher};
     use hyperscale_storage::{BoundaryStore, ImportLeaf};
     use hyperscale_types::{
-        Block, BlockHash, BlockHeight, ChainOrigin, Hash, ShardId, StateRoot, WeightedTimestamp,
+        Block, BlockHash, BlockHeight, ChainOrigin, Hash, ShardId, StateRoot, ValidatorId,
+        WeightedTimestamp,
     };
 
     use super::*;
@@ -375,5 +386,91 @@ mod tests {
         let (_, origin) = merge_genesis(root);
         let (wrong, _) = merge_genesis(StateRoot::from_raw(Hash::from_bytes(b"forged root")));
         assert!(store.adopt_merge_parent(origin, &wrong).is_err());
+    }
+
+    /// A parent store at the trie root holding two left-side leaves and
+    /// one right-side leaf, committed at height 9, with its terminal root.
+    fn split_parent() -> (SimShardStorage, StateRoot) {
+        let store = SimShardStorage::default();
+        let root = store
+            .import_boundary_state(
+                BlockHeight::new(9),
+                vec![leaf(0x00), leaf(0x01), leaf(0x80)],
+            )
+            .unwrap();
+        (store, root)
+    }
+
+    fn child_path(side: u8) -> NibblePath {
+        let mut path = NibblePath::empty();
+        path.push_bits(side, 1);
+        path
+    }
+
+    fn origin_at_10() -> ChainOrigin {
+        ChainOrigin {
+            genesis_height: BlockHeight::new(10),
+            anchor_wt: WeightedTimestamp::from_millis(42_000),
+        }
+    }
+
+    fn child_of(side: u8) -> ShardId {
+        let (left, right) = ShardId::ROOT.children();
+        if side == 0 { left } else { right }
+    }
+
+    /// A deterministic split-child genesis at height 10 adopting
+    /// `state_root`, derived over a synthetic parent terminal at height 9.
+    fn split_genesis(child: ShardId, state_root: StateRoot) -> Block {
+        let terminal = Block::genesis(
+            ShardId::ROOT,
+            ValidatorId::new(0),
+            StateRoot::ZERO,
+            ChainOrigin {
+                genesis_height: BlockHeight::new(9),
+                anchor_wt: WeightedTimestamp::ZERO,
+            },
+        );
+        Block::split_child_genesis(
+            child,
+            state_root,
+            terminal.header(),
+            WeightedTimestamp::from_millis(42_000),
+        )
+    }
+
+    /// Both halves adopt; their roots compose to the parent's terminal
+    /// root and their counts partition the leaves. Adoption is idempotent:
+    /// a re-run returns the recorded root rather than failing on the
+    /// parent slot the first run consumed.
+    #[test]
+    fn split_adoption_partitions_and_is_idempotent() {
+        let (parent, parent_root) = split_parent();
+        let mut roots = Vec::new();
+        for side in [0u8, 1u8] {
+            let child = parent.clone_for_split_child(child_path(side));
+            let genesis = split_genesis(child_of(side), StateRoot::ZERO);
+            let root = child.adopt_split_child(origin_at_10(), &genesis).unwrap();
+            assert_ne!(root, StateRoot::ZERO);
+            roots.push(root);
+
+            let recovered = child.load_recovered_state();
+            assert_eq!(recovered.committed_height, BlockHeight::new(10));
+            assert_eq!(recovered.committed_hash, Some(genesis.hash()));
+            assert_eq!(recovered.chain_origin, origin_at_10());
+            assert_eq!(recovered.substate_count, if side == 0 { 2 } else { 1 });
+
+            assert_eq!(
+                child.adopt_split_child(origin_at_10(), &genesis).unwrap(),
+                root,
+                "re-run returns the recorded adoption",
+            );
+        }
+
+        assert_eq!(
+            Blake3Hasher::hash_internal(&[*roots[0].as_bytes(), *roots[1].as_bytes()]),
+            *parent_root.as_bytes(),
+            "adopted roots compose to the parent's terminal root",
+        );
     }
 }
