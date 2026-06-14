@@ -247,7 +247,7 @@ mod tests {
     const SHARD: ShardId = ShardId::ROOT;
 
     fn finalized_wave(height: u64) -> Arc<Verifiable<FinalizedWave>> {
-        let wave = WaveId::new(SHARD, BlockHeight::new(height), BTreeSet::new());
+        let wave = local_wave(height);
         let ec = ExecutionCertificate::new(
             wave.clone(),
             WeightedTimestamp::from_millis(1),
@@ -322,17 +322,20 @@ mod tests {
                 &BeaconWitnessCommit::empty(BeaconWitnessLeafCount::ZERO),
             );
         }
-        let root = settled_waves_root_from_ids(
-            (1..=count)
-                .map(|h| WaveId::new(SHARD, BlockHeight::new(h), BTreeSet::new()))
-                .collect::<Vec<_>>()
-                .iter(),
-        );
+        let root =
+            settled_waves_root_from_ids((1..=count).map(local_wave).collect::<Vec<_>>().iter());
         (storage, terminal, root)
     }
 
+    /// A cross-shard wave (non-empty `remote_shards`): the settled set
+    /// commits only cross-shard waves, so a single-shard fixture would be
+    /// filtered out before the merkle root.
     fn local_wave(height: u64) -> WaveId {
-        WaveId::new(SHARD, BlockHeight::new(height), BTreeSet::new())
+        WaveId::new(
+            SHARD,
+            BlockHeight::new(height),
+            BTreeSet::from([ShardId::from_heap_index(2)]),
+        )
     }
 
     /// One verified fetch against a served chain completes with the whole

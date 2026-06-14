@@ -18,11 +18,16 @@ use crate::{
     FinalizedWave, Hash, SettledWavesRoot, ShardId, Verifiable, WaveId, compute_merkle_root,
 };
 
-/// The wave-ids `shard` settled in `certificates`.
+/// The cross-shard wave-ids `shard` settled in `certificates`.
 ///
-/// The local execution certificate of each committed wave is the entry
-/// keyed on this shard. A block's own shard is `block.header().shard_id()`,
-/// so a caller filtering a block's certificates passes that.
+/// One entry per committed wave whose local execution certificate is keyed
+/// on this shard — its block's own shard, `block.header().shard_id()` — and
+/// that carries a remote dependency. **Single-shard waves are excluded:** a
+/// purely local wave's EC never rides another shard's finalized wave, so the
+/// split-boundary fence never queries it and the counterpart sweep already
+/// skips it ([`WaveId::remote_shards`] empty). The settled set therefore
+/// commits exactly the waves a surviving counterpart can ask about, keeping
+/// it proportional to cross-shard traffic rather than total throughput.
 #[must_use]
 pub fn local_settled_wave_ids<'a>(
     certificates: impl IntoIterator<Item = &'a Arc<Verifiable<FinalizedWave>>>,
@@ -31,7 +36,7 @@ pub fn local_settled_wave_ids<'a>(
     certificates
         .into_iter()
         .flat_map(|fw| fw.certificate().ec_wave_ids())
-        .filter(|wave_id| wave_id.shard_id() == shard)
+        .filter(|wave_id| wave_id.shard_id() == shard && !wave_id.is_zero())
         .collect()
 }
 

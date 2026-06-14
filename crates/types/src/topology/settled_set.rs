@@ -20,14 +20,15 @@ use crate::{RETENTION_HORIZON, ShardId, TopologySchedule, WaveId, WeightedTimest
 
 /// A terminated shard's settled-wave set.
 ///
-/// `waves` are the wave-ids whose certificate committed in its chain at or
-/// before its terminal block. `terminal_wt` is the weighted timestamp at
-/// which the shard terminated, bounding how long the set stays relevant —
+/// `waves` are the **cross-shard** wave-ids whose certificate committed in
+/// its chain at or before its terminal block — the only ones a counterpart
+/// fence ever queries. `terminal_wt` is the weighted timestamp at which the
+/// shard terminated, bounding how long the set stays relevant —
 /// [`RETENTION_HORIZON`] past it, any wave naming the shard is
 /// categorically unreachable everywhere.
 #[derive(Clone, Debug)]
 pub struct SettledWaveSet {
-    /// Wave-ids the terminated shard settled by its terminal block.
+    /// Cross-shard wave-ids the terminated shard settled by its terminal block.
     pub waves: BTreeSet<WaveId>,
     /// The terminal block's weighted timestamp.
     pub terminal_wt: WeightedTimestamp,

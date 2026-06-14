@@ -13,14 +13,19 @@ use hyperscale_metrics::record_fetch_response_sent;
 use hyperscale_storage::{BlockForSync, PendingChain, ShardStorage};
 use hyperscale_types::network::request::GetSettledWavesRequest;
 use hyperscale_types::network::response::GetSettledWavesResponse;
-use hyperscale_types::{BoundedVec, local_settled_wave_ids};
+use hyperscale_types::{BoundedVec, MAX_FINALIZED_TX_PER_BLOCK, local_settled_wave_ids};
 
 /// Serve an inbound settled-waves window request from the local chain.
+///
+/// The served set is the **cross-shard** waves the terminated shard settled
+/// in the window — the only ones a counterpart's fence can query (see
+/// [`local_settled_wave_ids`]) — so it stays proportional to cross-shard
+/// traffic, not total throughput.
 ///
 /// Returns `not_found` when the terminal block isn't held or the stored
 /// block's hash doesn't match the requested terminal — the requester
 /// rotates peers. Returns `not_found` too when the window set exceeds the
-/// wire cap (a correct committee with a within-cap window always serves).
+/// wire cap (logged loudly; within-cap for any realistic cross-shard load).
 #[must_use]
 pub fn serve_settled_waves_request<S: ShardStorage>(
     pending_chain: &PendingChain<S>,
@@ -52,10 +57,24 @@ pub fn serve_settled_waves_request<S: ShardStorage>(
 
     // `try_from_vec` is the genuinely fallible conversion: a window
     // exceeding the wire cap serves `not_found` rather than panicking on
-    // the bound (`From<Vec>` would). A within-cap window — every realistic
-    // one — always serves.
+    // the bound (`From<Vec>` would). The set is the cross-shard settled
+    // waves only, so a within-cap window covers any realistic cross-shard
+    // load; an overflow means cross-shard throughput outran the single-shot
+    // transfer and the design must escalate to paged or JMT-absence-proof
+    // delivery (c2). Log it loudly rather than letting the requester read
+    // the overflow `not_found` as a plain "block not held" and rotate peers
+    // forever.
+    let window = set.len();
     BoundedVec::try_from_vec(set.into_iter().collect()).map_or_else(
         |_| {
+            tracing::warn!(
+                shard = ?shard,
+                terminal_height = req.terminal_height.inner(),
+                window,
+                cap = MAX_FINALIZED_TX_PER_BLOCK,
+                "settled-waves window exceeds the wire cap; serving not_found — \
+                 cross-shard load outran the one-shot transfer (escalate to c2)"
+            );
             record_fetch_response_sent("settled_waves", 0);
             GetSettledWavesResponse::not_found()
         },
@@ -89,7 +108,14 @@ mod tests {
     const SHARD: ShardId = ShardId::ROOT;
 
     fn finalized_wave(height: u64) -> Arc<Verifiable<FinalizedWave>> {
-        let wave = WaveId::new(SHARD, BlockHeight::new(height), BTreeSet::new());
+        // Cross-shard wave (non-empty `remote_shards`): the settled set
+        // commits only cross-shard waves, so single-shard fixtures would be
+        // filtered out before the merkle root.
+        let wave = WaveId::new(
+            SHARD,
+            BlockHeight::new(height),
+            BTreeSet::from([ShardId::from_heap_index(2)]),
+        );
         let ec = ExecutionCertificate::new(
             wave.clone(),
             WeightedTimestamp::from_millis(1),
@@ -180,7 +206,13 @@ mod tests {
         let waves = response.waves.expect("terminal block is held");
 
         let expected: BTreeSet<WaveId> = (1..=3)
-            .map(|h| WaveId::new(SHARD, BlockHeight::new(h), BTreeSet::new()))
+            .map(|h| {
+                WaveId::new(
+                    SHARD,
+                    BlockHeight::new(h),
+                    BTreeSet::from([ShardId::from_heap_index(2)]),
+                )
+            })
             .collect();
         assert_eq!(waves.iter().cloned().collect::<BTreeSet<_>>(), expected);
         // The fence accepts iff the recomputed root equals the attested one.

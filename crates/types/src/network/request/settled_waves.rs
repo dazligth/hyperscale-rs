@@ -5,10 +5,12 @@
 //! actually settled that wave in its chain at or before the terminal block
 //! `B`. It reads `P`'s beacon-attested `settled_waves_root` from its own
 //! fold and fetches the whole window settled-wave list in one shot: the
-//! complete set `S_P` over `[B − RETENTION_HORIZON, B]`. The requester
-//! accepts the list iff its recomputed root equals the attested one, so a
-//! withheld wave changes the root and the absence of any wave from the
-//! verified-complete set is sound (see [`GetSettledWavesResponse`]).
+//! complete set `S_P` of the **cross-shard** waves `P` settled over
+//! `[B − RETENTION_HORIZON, B]` (single-shard waves are never queried, so
+//! they are excluded). The requester accepts the list iff its recomputed
+//! root equals the attested one, so a withheld wave changes the root and the
+//! absence of any wave from the verified-complete set is sound (see
+//! [`GetSettledWavesResponse`]).
 
 use sbor::prelude::BasicSbor;
 
