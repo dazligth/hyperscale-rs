@@ -678,6 +678,21 @@ impl ShardCoordinator {
         }
     }
 
+    /// Whether a header keyed at `wt` carries `settled_waves_root` — set on
+    /// any terminating boundary header (a split parent's *or* a merge
+    /// child's final epoch), identical on the build side (carry) and the
+    /// vote side (required). Broader than [`Self::split_child_roots_bit`]: a
+    /// merge child terminates without carrying `split_child_roots`. `None`
+    /// when the window's verdict is locally unresolvable yet; callers defer
+    /// and retry once the local beacon catches up.
+    fn settled_waves_root_bit(
+        &self,
+        topology: &TopologySchedule,
+        wt: WeightedTimestamp,
+    ) -> Option<bool> {
+        topology.terminates_at_next_boundary(self.local_shard, wt)
+    }
+
     /// The split-boundary quiesce window when this shard sits in its final
     /// epoch before a split, anchored on the proposer's tip — `None` in
     /// steady state, so the proposer's quiesce filter is inert away from a
@@ -1512,6 +1527,16 @@ impl ShardCoordinator {
             );
             return vec![];
         };
+        let Some(carry_settled_waves_root) =
+            self.settled_waves_root_bit(topology, parent_qc.weighted_timestamp())
+        else {
+            trace!(
+                validator = ?self.me,
+                height = height.inner(),
+                "Termination-at-boundary unresolved at proposal; deferring until the beacon catches up"
+            );
+            return vec![];
+        };
         // The reshape predicate reads the substate byte total behind the parent
         // state. Resolve it before the witness preview drains the
         // ready-signal pool: a missing ancestor delta defers the whole
@@ -1570,6 +1595,7 @@ impl ShardCoordinator {
             preview.leaf_count,
             preview.base,
             carry_split_child_roots,
+            carry_settled_waves_root,
             Arc::clone(committee),
         );
 
@@ -2324,6 +2350,16 @@ impl ShardCoordinator {
                 );
                 return vec![];
             };
+            let Some(settled_waves_root_required) = self
+                .settled_waves_root_bit(topology, block.header().parent_qc().weighted_timestamp())
+            else {
+                trace!(
+                    validator = ?self.me,
+                    block_hash = ?block_hash,
+                    "Termination-at-boundary unresolved at vote; deferring until the beacon catches up"
+                );
+                return vec![];
+            };
 
             // Split-boundary fence over the block's finalized waves.
             if self.fence_blocks_vote(topology, block, block_hash) {
@@ -2344,6 +2380,7 @@ impl ShardCoordinator {
                     deltas: &self.pending_bytes_deltas,
                 },
                 split_child_roots_required,
+                settled_waves_root_required,
             );
 
             // Wait for initiated verifications, or exit early when we're

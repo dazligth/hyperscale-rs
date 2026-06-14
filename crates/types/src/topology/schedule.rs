@@ -358,6 +358,40 @@ impl TopologySchedule {
         }
     }
 
+    /// Whether `shard` leaves the trie at the end of `wt`'s epoch window —
+    /// terminating into either its two children (a split) or its parent (a
+    /// merge). `Some(true)` when the next window drops it, `Some(false)`
+    /// when it persists, `None` when the next window hasn't committed
+    /// locally and an admitted reshape leaves the outcome genuinely unknown
+    /// (defer and retry once the local beacon catches up).
+    ///
+    /// Generalizes [`split_at_next_boundary`](Self::split_at_next_boundary)
+    /// from its split-only `Children` answer to any terminating reshape:
+    /// the terminal-coast boundary header of a split parent *or* a merge
+    /// child carries the `settled_waves_root`, so its carry predicate keys
+    /// on this. A [`single`](Self::single) schedule has no epoch
+    /// boundaries, so nothing terminates at one.
+    #[must_use]
+    pub fn terminates_at_next_boundary(
+        &self,
+        shard: ShardId,
+        wt: WeightedTimestamp,
+    ) -> Option<bool> {
+        if self.epoch_duration_ms == 0 {
+            return Some(false);
+        }
+        let epoch = self.epoch_for(wt);
+        let current = self.by_epoch.get(&epoch)?;
+        if !current.shard_trie().contains(shard) {
+            return Some(false);
+        }
+        match self.by_epoch.get(&epoch.next()) {
+            Some(next) => Some(!next.shard_trie().contains(shard)),
+            None if current.split_pending(shard) || current.merge_pending(shard) => None,
+            None => Some(false),
+        }
+    }
+
     /// Record the committee governing `epoch`. The beacon coordinator inserts
     /// the just-applied epoch's active committee and the next epoch's
     /// lookahead on every commit.
@@ -654,5 +688,92 @@ mod tests {
         // The live children resolve their head committees.
         assert!(routing.contains_key(&ShardId::leaf(1, 0)));
         assert!(routing.contains_key(&ShardId::leaf(1, 1)));
+    }
+
+    #[test]
+    fn terminates_at_next_boundary_covers_splits_and_merges() {
+        use std::collections::BTreeMap;
+
+        let snap_with = |leaves: &[ShardId],
+                         split_pending: &[ShardId],
+                         merge_keeper_children: &[ShardId]|
+         -> Arc<TopologySnapshot> {
+            let reshape_keepers: HashMap<ShardId, BTreeMap<ValidatorId, ShardId>> =
+                merge_keeper_children
+                    .iter()
+                    .map(|child| {
+                        (
+                            *child,
+                            BTreeMap::from([(ValidatorId::new(0), ShardId::ROOT)]),
+                        )
+                    })
+                    .collect();
+            Arc::new(TopologySnapshot::from_explicit_committees(
+                NetworkDefinition::simulator(),
+                &ValidatorSet::new(Vec::new()),
+                leaves.iter().map(|s| (*s, Vec::new())).collect(),
+                HashMap::new(),
+                HashMap::new(),
+                HashMap::new(),
+                HashMap::new(),
+                reshape_keepers,
+                split_pending.iter().copied().collect(),
+            ))
+        };
+        let (left, right) = ShardId::ROOT.children();
+
+        // A split parent terminates: its window carries it, the next drops
+        // it for its two children. `split_at_next_boundary` also fires.
+        let mut split =
+            TopologySchedule::new(1000, Epoch::new(5), snap_with(&[ShardId::ROOT], &[], &[]));
+        split.insert(Epoch::new(6), snap_with(&[left, right], &[], &[]));
+        let wt = WeightedTimestamp::from_millis(5500);
+        assert_eq!(
+            split.terminates_at_next_boundary(ShardId::ROOT, wt),
+            Some(true)
+        );
+        assert_eq!(
+            split.split_at_next_boundary(ShardId::ROOT, wt),
+            SplitAtBoundary::Children(left, right)
+        );
+
+        // A merge child terminates: its window carries the two children,
+        // the next drops them for their parent. `terminates` fires even
+        // though `split_at_next_boundary` does not — the case the
+        // split-only predicate missed.
+        let mut merge =
+            TopologySchedule::new(1000, Epoch::new(5), snap_with(&[left, right], &[], &[]));
+        merge.insert(Epoch::new(6), snap_with(&[ShardId::ROOT], &[], &[]));
+        assert_eq!(merge.terminates_at_next_boundary(left, wt), Some(true));
+        assert_eq!(merge.split_at_next_boundary(left, wt), SplitAtBoundary::No);
+        // The shard's counterpart in the same merge also terminates.
+        assert_eq!(merge.terminates_at_next_boundary(right, wt), Some(true));
+
+        // A shard present in both windows does not terminate.
+        let mut steady =
+            TopologySchedule::new(1000, Epoch::new(5), snap_with(&[left, right], &[], &[]));
+        steady.insert(Epoch::new(6), snap_with(&[left, right], &[], &[]));
+        assert_eq!(steady.terminates_at_next_boundary(left, wt), Some(false));
+
+        // Next window not yet committed: an admitted merge (keepers drawn)
+        // leaves the outcome unresolved, exactly as an admitted split does.
+        let merge_pending = TopologySchedule::new(
+            1000,
+            Epoch::new(5),
+            snap_with(&[left, right], &[], &[left, right]),
+        );
+        assert_eq!(merge_pending.terminates_at_next_boundary(left, wt), None);
+        let split_pending = TopologySchedule::new(
+            1000,
+            Epoch::new(5),
+            snap_with(&[ShardId::ROOT], &[ShardId::ROOT], &[]),
+        );
+        assert_eq!(
+            split_pending.terminates_at_next_boundary(ShardId::ROOT, wt),
+            None
+        );
+        // No admitted reshape and no next window: definitively no termination.
+        let quiet = TopologySchedule::new(1000, Epoch::new(5), snap_with(&[left, right], &[], &[]));
+        assert_eq!(quiet.terminates_at_next_boundary(left, wt), Some(false));
     }
 }

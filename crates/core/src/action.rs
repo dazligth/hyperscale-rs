@@ -570,6 +570,10 @@ pub enum Action {
         /// final epoch before a split), resolved by the coordinator from
         /// the schedule.
         split_child_roots_required: bool,
+        /// Whether the block's window requires a `settled_waves_root` — set
+        /// on any terminating boundary header (a split parent's or a merge
+        /// child's final epoch), broader than `split_child_roots_required`.
+        settled_waves_root_required: bool,
         /// The header's `settled_waves_root` claim, recomputed beside the
         /// state root over the committed retention window when the block
         /// terminates the shard at a boundary.
@@ -776,6 +780,12 @@ pub enum Action {
         /// from the JMT computation and stamps them into the header as
         /// `split_child_roots`.
         carry_split_child_roots: bool,
+        /// Whether the block's window is the shard's final epoch before it
+        /// terminates at a reshape boundary — a split parent *or* a merge
+        /// child, broader than `carry_split_child_roots`. When set, the
+        /// handler computes the `settled_waves_root` over the committed
+        /// retention window and stamps it into the header.
+        carry_settled_waves_root: bool,
         /// The block's **anchored** committee snapshot, resolved by the
         /// coordinator as `at_for_shard(local_shard, parent_qc.wt)` — the
         /// same one the verifier recomputes against. Classification

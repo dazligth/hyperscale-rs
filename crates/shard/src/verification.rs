@@ -112,6 +112,10 @@ pub struct ReadyStateRootVerification {
     /// Whether the block's window requires the claim (the shard's final
     /// epoch before a split).
     pub split_child_roots_required: bool,
+    /// Whether the block's window requires a `settled_waves_root` — set on
+    /// any terminating boundary header (a split parent's or a merge
+    /// child's final epoch), broader than [`Self::split_child_roots_required`].
+    pub settled_waves_root_required: bool,
     /// The header's `settled_waves_root` claim, verified beside the state
     /// root over the committed retention window.
     pub claimed_settled_waves_root: Option<SettledWavesRoot>,
@@ -144,6 +148,7 @@ pub struct PendingStateRootVerification {
     pub block_height: BlockHeight,
     pub claimed_split_child_roots: Option<SplitChildRoots>,
     pub split_child_roots_required: bool,
+    pub settled_waves_root_required: bool,
     pub claimed_settled_waves_root: Option<SettledWavesRoot>,
     pub parent_weighted_timestamp: WeightedTimestamp,
 }
@@ -963,6 +968,7 @@ impl VerificationPipeline {
         block: &Block,
         parent_block_height: BlockHeight,
         split_child_roots_required: bool,
+        settled_waves_root_required: bool,
     ) {
         let parent_block_hash = block.header().parent_block_hash();
         let ready = PendingStateRootVerification {
@@ -974,6 +980,7 @@ impl VerificationPipeline {
             block_height: block.height(),
             claimed_split_child_roots: block.header().split_child_roots(),
             split_child_roots_required,
+            settled_waves_root_required,
             claimed_settled_waves_root: block.header().settled_waves_root(),
             parent_weighted_timestamp: block.header().parent_qc().weighted_timestamp(),
         };
@@ -1437,6 +1444,7 @@ impl VerificationPipeline {
         block: &Block,
         count_source: SubstateCountSource<'_>,
         split_child_roots_required: bool,
+        settled_waves_root_required: bool,
     ) -> Vec<Action> {
         let mut actions = Vec::new();
         let h = block.header();
@@ -1448,6 +1456,7 @@ impl VerificationPipeline {
                 block,
                 parent_block_height,
                 split_child_roots_required,
+                settled_waves_root_required,
             );
         }
 
@@ -1643,6 +1652,7 @@ impl VerificationPipeline {
                     block_height: pending.block_height,
                     claimed_split_child_roots: pending.claimed_split_child_roots,
                     split_child_roots_required: pending.split_child_roots_required,
+                    settled_waves_root_required: pending.settled_waves_root_required,
                     claimed_settled_waves_root: pending.claimed_settled_waves_root,
                     parent_weighted_timestamp: pending.parent_weighted_timestamp,
                 })
@@ -2089,7 +2099,7 @@ mod tests {
         let block = block_with(BlockHeight::new(1), parent_block_hash, 0, vec![]);
         let block_hash = block.hash();
 
-        vp.initiate_state_root_verification(block_hash, &block, BlockHeight::GENESIS, false);
+        vp.initiate_state_root_verification(block_hash, &block, BlockHeight::GENESIS, false, false);
 
         let mut pb = PendingBlock::from_complete_block(
             &block,
@@ -2132,7 +2142,7 @@ mod tests {
         let block = block_with(BlockHeight::new(1), parent_block_hash, 0, vec![]);
         let block_hash = block.hash();
 
-        vp.initiate_state_root_verification(block_hash, &block, BlockHeight::GENESIS, false);
+        vp.initiate_state_root_verification(block_hash, &block, BlockHeight::GENESIS, false, false);
 
         let empty_pending = PendingBlocks::new();
         let chain = chain_view(BlockHeight::GENESIS, BlockHash::ZERO, None, &empty_pending);

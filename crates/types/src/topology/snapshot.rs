@@ -418,6 +418,18 @@ impl TopologySnapshot {
         self.split_pending.contains(&shard)
     }
 
+    /// Whether `shard` is a constituent of an admitted, paired merge as of
+    /// this window's committee freeze — i.e. whether the trie *might*
+    /// replace it with its parent at the end of this window. The merge
+    /// mirror of [`Self::split_pending`], read from the projected keeper
+    /// cohorts (a merge projects keepers keyed by the child each runs only
+    /// once it has paired). `false` is definitive: no merge can land at
+    /// this window's boundary.
+    #[must_use]
+    pub fn merge_pending(&self, shard: ShardId) -> bool {
+        self.reshape_keepers.contains_key(&shard)
+    }
+
     /// Get the ordered committee members for a shard — full membership,
     /// the networking view.
     ///

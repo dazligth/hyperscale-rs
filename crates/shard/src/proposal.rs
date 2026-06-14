@@ -317,6 +317,7 @@ pub fn assemble_build_action(
     beacon_witness_leaf_count: BeaconWitnessLeafCount,
     beacon_witness_base: BeaconWitnessLeafCount,
     carry_split_child_roots: bool,
+    carry_settled_waves_root: bool,
     classification_topology: Arc<TopologySnapshot>,
 ) -> BuildActionPlan {
     let (parent_block_hash, parent_qc) = chain.proposal_parent();
@@ -397,6 +398,7 @@ pub fn assemble_build_action(
         beacon_witness_leaf_count,
         beacon_witness_base,
         carry_split_child_roots,
+        carry_settled_waves_root,
         classification_topology,
     };
 

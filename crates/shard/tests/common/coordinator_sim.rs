@@ -710,6 +710,7 @@ impl ShardCoordinatorSim {
                 block_height: ready.block_height,
                 claimed_split_child_roots: ready.claimed_split_child_roots,
                 split_child_roots_required: ready.split_child_roots_required,
+                settled_waves_root_required: ready.settled_waves_root_required,
                 claimed_settled_waves_root: ready.claimed_settled_waves_root,
                 parent_weighted_timestamp: ready.parent_weighted_timestamp,
             });
@@ -999,12 +1000,13 @@ impl ShardCoordinatorSim {
                 beacon_witness_leaf_count,
                 beacon_witness_base,
                 carry_split_child_roots,
+                carry_settled_waves_root,
                 classification_topology,
             } => {
                 let view = self.pending_chains[emitter_idx]
                     .view_at(parent_block_hash, parent_block_height);
                 let pending_snapshots = view.pending_snapshots().to_vec();
-                let settled_waves_root = carry_split_child_roots.then(|| {
+                let settled_waves_root = carry_settled_waves_root.then(|| {
                     self.pending_chains[emitter_idx].settled_waves_root_in_window(
                         shard_id,
                         parent_block_hash,
@@ -1236,6 +1238,7 @@ impl ShardCoordinatorSim {
                 block_height,
                 claimed_split_child_roots,
                 split_child_roots_required,
+                settled_waves_root_required,
                 claimed_settled_waves_root,
                 parent_weighted_timestamp,
             } => {
@@ -1260,7 +1263,7 @@ impl ShardCoordinatorSim {
                 if !receipt_ok {
                     return;
                 }
-                let computed_settled_waves_root = split_child_roots_required.then(|| {
+                let computed_settled_waves_root = settled_waves_root_required.then(|| {
                     self.pending_chains[emitter_idx].settled_waves_root_in_window(
                         self.shard,
                         parent_block_hash,
@@ -1286,7 +1289,7 @@ impl ShardCoordinatorSim {
                     split_child_roots_required,
                     claimed_settled_waves_root,
                     computed_settled_waves_root,
-                    settled_waves_root_required: split_child_roots_required,
+                    settled_waves_root_required,
                 });
                 let bytes_delta = jmt_snapshot.bytes_delta;
                 if verify_result.is_ok() {
