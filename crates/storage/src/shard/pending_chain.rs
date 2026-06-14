@@ -270,7 +270,11 @@ where
     /// Pure over the parent chain: the proposer (parent still pending) and
     /// every verifier (parent committed) walk the same ancestors and
     /// produce the same set, so the settled-waves root they derive agrees.
-    fn settled_waves_in_window(
+    /// A terminal committee serving a counterpart its window list reads the
+    /// same set off the committed tail (`own` is the terminal block's own
+    /// settled wave-ids, its prefix the committed ancestors), so the served
+    /// list recomputes to the attested root.
+    pub fn settled_waves_in_window(
         &self,
         local_shard: ShardId,
         parent_block_hash: BlockHash,

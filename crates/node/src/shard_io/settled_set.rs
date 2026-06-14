@@ -1,80 +1,83 @@
-//! Per-shard settled-set reconstruction host.
+//! Per-shard settled-waves acquisition host.
 //!
-//! When a remote shard P terminates at a split, a surviving counterpart
-//! must learn `S_P` — the wave-ids P settled at or before its terminal
+//! When a remote shard `P` terminates at a split, a surviving counterpart
+//! must learn `S_P` — the wave-ids `P` settled at or before its terminal
 //! block — so the split-boundary fence can resolve cross-shard
-//! `FinalizedWave`s naming P (see [`SettledSetBuilder`]). This host owns
-//! one [`SettledSetBuilder`] per past-terminal shard and the scheduling
-//! around it: which peer to ask, when to re-arm a stalled walk, and when
-//! the walk is complete.
+//! `FinalizedWave`s naming `P`. This host owns one acquisition per
+//! past-terminal shard: a single verified fetch of `P`'s complete settled
+//! window list, checked against the beacon-attested `settled_waves_root`
+//! the node read from its own fold.
 //!
 //! Sans-io like the [`Sync`](super::sync) FSMs: methods fold an input and
-//! return [`SettledSetOutput`]s the I/O glue turns into network requests
-//! and a `SettledWavesReconstructed` event. A healthy walk advances at
-//! network round-trip speed — each accepted block immediately fetches the
-//! next — while a stall (peer doesn't hold the height, transport failure)
-//! rotates the peer and waits for the next `FetchTick` rather than
-//! spinning.
-//!
-//! [`SettledSetBuilder`]: crate::bootstrap::settled_set::SettledSetBuilder
+//! return [`SettledWavesAcquisitionOutput`]s the I/O glue turns into
+//! network requests and a `SettledWavesReconstructed` event. A correct
+//! terminal committee satisfies the root check on the first fetch; a
+//! `not_found` or a list that doesn't recompute to the attested root
+//! rotates the peer and retries on the next tick. Each driver self-expires
+//! once the node's chain advances past `terminal_wt + RETENTION_HORIZON`,
+//! beyond which the fence rejects any wave naming `P` regardless.
 
 use std::collections::{BTreeSet, HashMap};
 
 use hyperscale_types::network::request::GetSettledWavesRequest;
 use hyperscale_types::network::response::GetSettledWavesResponse;
-use hyperscale_types::{BlockHash, BlockHeight, ShardId, ValidatorId, WaveId, WeightedTimestamp};
+use hyperscale_types::{
+    BlockHash, BlockHeight, RETENTION_HORIZON, SettledWavesRoot, ShardId, ValidatorId, WaveId,
+    WeightedTimestamp, settled_waves_root_from_ids,
+};
 
-use crate::bootstrap::settled_set::{SettledOutcome, SettledSetBuilder};
-
-/// One in-flight reconstruction of a terminated shard's settled set.
-struct SettledSetDriver {
-    /// The backward-walk sequencer over P's tail chain.
-    builder: SettledSetBuilder,
-    /// P's terminal block hash — identifies which terminal this driver
+/// One in-flight acquisition of a terminated shard's settled set.
+struct AcquisitionDriver {
+    /// Height of `P`'s terminal block — names the window end the serve
+    /// reconstructs from.
+    terminal_height: BlockHeight,
+    /// `P`'s terminal block hash — identifies which terminal this driver
     /// targets, so a duplicate start for the same terminal is a no-op.
     terminal_block_hash: BlockHash,
-    /// P's terminal committee, asked in rotation. Empty falls back to
+    /// `P`'s terminal weighted timestamp — carried into the completion
+    /// event to bound the fence's retention cutoff, and the driver's
+    /// self-expiry.
+    terminal_wt: WeightedTimestamp,
+    /// The beacon-attested root the fetched list must recompute to.
+    attested_root: SettledWavesRoot,
+    /// `P`'s terminal committee, asked in rotation. Empty falls back to
     /// shard-routed peer selection.
     peers: Vec<ValidatorId>,
-    /// P's terminal weighted timestamp — carried into the completion
-    /// event to bound the fence's retention cutoff.
-    terminal_wt: WeightedTimestamp,
-    /// Rotates through `peers` on each stall.
+    /// Rotates through `peers` on each `not_found` / mismatch / failure.
     cursor: usize,
+    /// Whether a fetch is outstanding — withholds duplicate fetches.
+    in_flight: bool,
 }
 
-impl SettledSetDriver {
-    /// The next fetch this driver wants, or `None` while a request is
-    /// outstanding or the walk is complete.
-    fn next_fetch(&mut self, shard: ShardId) -> Option<SettledSetOutput> {
-        let request = self.builder.next_request()?;
-        let peer = if self.peers.is_empty() {
+impl AcquisitionDriver {
+    const fn request(&self) -> GetSettledWavesRequest {
+        GetSettledWavesRequest::new(self.terminal_height, self.terminal_block_hash)
+    }
+
+    fn peer(&self) -> Option<ValidatorId> {
+        if self.peers.is_empty() {
             None
         } else {
             Some(self.peers[self.cursor % self.peers.len()])
-        };
-        Some(SettledSetOutput::Fetch {
-            shard,
-            peer,
-            request,
-        })
+        }
     }
 }
 
 /// What the I/O glue should do after folding an input into the host.
-pub enum SettledSetOutput {
-    /// Issue this settled-waves fetch against `shard`'s terminal
-    /// committee, biased to `peer`.
+pub enum SettledWavesAcquisitionOutput {
+    /// Issue the window fetch against `shard`'s terminal committee, biased
+    /// to `peer`.
     Fetch {
-        /// The terminated shard being reconstructed.
+        /// The terminated shard being acquired.
         shard: ShardId,
         /// Preferred terminal-committee member, or `None` to route by
         /// shard alone.
         peer: Option<ValidatorId>,
-        /// The block fetch the builder wants next.
+        /// The window list request.
         request: GetSettledWavesRequest,
     },
-    /// The walk reached the start height — `S_P` is complete.
+    /// The fetched list verified against the attested root — `S_P` is
+    /// complete.
     Complete {
         /// The terminated shard whose settled set this is.
         shard: ShardId,
@@ -85,15 +88,15 @@ pub enum SettledSetOutput {
     },
 }
 
-/// Drives a [`SettledSetBuilder`] per past-terminal shard. One per
+/// Drives one settled-waves acquisition per past-terminal shard. One per
 /// [`ShardIo`](super::ShardIo); shared across the shard's vnodes, so a
 /// duplicate start for an already-targeted terminal is deduplicated.
 #[derive(Default)]
-pub struct SettledSetSyncHost {
-    drivers: HashMap<ShardId, SettledSetDriver>,
+pub struct SettledWavesAcquisitionHost {
+    drivers: HashMap<ShardId, AcquisitionDriver>,
 }
 
-impl SettledSetSyncHost {
+impl SettledWavesAcquisitionHost {
     /// An empty host.
     #[must_use]
     pub fn new() -> Self {
@@ -102,102 +105,120 @@ impl SettledSetSyncHost {
         }
     }
 
-    /// True while any reconstruction is unfinished — keeps the shard's
-    /// `FetchTick` alive so stalled walks re-arm.
+    /// True while any acquisition is unfinished — keeps the shard's
+    /// `FetchTick` alive so parked acquisitions retry and expired ones
+    /// drop.
     #[must_use]
     pub fn has_pending(&self) -> bool {
         !self.drivers.is_empty()
     }
 
-    /// Begin reconstructing `shard`'s settled set from its terminal
-    /// anchor. A start for a terminal already in flight is a no-op (the
-    /// shard's vnodes each emit the trigger). A start naming a different
-    /// terminal block — the earliest coast header revised which block is
-    /// `B` — replaces the running driver.
+    /// Begin (or retry) acquiring `shard`'s settled set. A start for a
+    /// terminal already in flight is a no-op; one for a parked driver
+    /// re-issues the fetch against the next peer; one naming a different
+    /// terminal block replaces the running driver.
     pub fn start(
         &mut self,
         shard: ShardId,
         terminal_height: BlockHeight,
         terminal_block_hash: BlockHash,
         terminal_wt: WeightedTimestamp,
+        attested_root: SettledWavesRoot,
         peers: Vec<ValidatorId>,
-        start_height: BlockHeight,
-    ) -> Vec<SettledSetOutput> {
-        if self
-            .drivers
-            .get(&shard)
-            .is_some_and(|d| d.terminal_block_hash == terminal_block_hash)
+    ) -> Vec<SettledWavesAcquisitionOutput> {
+        if let Some(driver) = self.drivers.get_mut(&shard)
+            && driver.terminal_block_hash == terminal_block_hash
         {
-            return vec![];
-        }
-        let mut driver = SettledSetDriver {
-            builder: SettledSetBuilder::new(
+            if driver.in_flight {
+                return vec![];
+            }
+            driver.in_flight = true;
+            return vec![SettledWavesAcquisitionOutput::Fetch {
                 shard,
-                terminal_height,
-                terminal_block_hash,
-                start_height,
-            ),
+                peer: driver.peer(),
+                request: driver.request(),
+            }];
+        }
+        let driver = AcquisitionDriver {
+            terminal_height,
             terminal_block_hash,
-            peers,
             terminal_wt,
+            attested_root,
+            peers,
             cursor: 0,
+            in_flight: true,
         };
-        let first = driver.next_fetch(shard);
+        let out = SettledWavesAcquisitionOutput::Fetch {
+            shard,
+            peer: driver.peer(),
+            request: driver.request(),
+        };
         self.drivers.insert(shard, driver);
-        first.into_iter().collect()
+        vec![out]
     }
 
-    /// Fold a settled-waves response into `shard`'s walk. Accepting the
-    /// last block emits `Complete`; an accepted intermediate block
-    /// immediately fetches the next; a not-yet-available or rejected
-    /// response rotates the peer and waits for the next tick.
+    /// Fold a window response into `shard`'s acquisition. A list that
+    /// recomputes to the attested root completes; `not_found` or a
+    /// mismatch rotates the peer and parks for the next tick.
     pub fn on_response(
         &mut self,
         shard: ShardId,
         response: &GetSettledWavesResponse,
-    ) -> Vec<SettledSetOutput> {
+    ) -> Vec<SettledWavesAcquisitionOutput> {
         let Some(driver) = self.drivers.get_mut(&shard) else {
             return vec![];
         };
-        match driver.builder.on_response(response) {
-            SettledOutcome::Accepted => {
-                if !driver.builder.is_complete() {
-                    return driver.next_fetch(shard).into_iter().collect();
-                }
-            }
-            SettledOutcome::NotYetAvailable | SettledOutcome::Rejected(_) => {
-                driver.cursor = driver.cursor.wrapping_add(1);
-                return vec![];
-            }
+        driver.in_flight = false;
+        let Some(waves) = &response.waves else {
+            driver.cursor = driver.cursor.wrapping_add(1);
+            return vec![];
+        };
+        if settled_waves_root_from_ids(waves.iter()) != driver.attested_root {
+            driver.cursor = driver.cursor.wrapping_add(1);
+            return vec![];
         }
+        let set: BTreeSet<WaveId> = waves.iter().cloned().collect();
         let driver = self
             .drivers
             .remove(&shard)
             .expect("just matched as present");
-        vec![SettledSetOutput::Complete {
+        vec![SettledWavesAcquisitionOutput::Complete {
             shard,
-            waves: driver.builder.into_settled(),
+            waves: set,
             terminal_wt: driver.terminal_wt,
         }]
     }
 
     /// A transport-level failure of the outstanding fetch. Re-arms the
-    /// builder and rotates the peer; the next tick re-issues.
+    /// driver and rotates the peer; the next tick re-issues.
     pub fn on_failure(&mut self, shard: ShardId) {
         if let Some(driver) = self.drivers.get_mut(&shard) {
-            driver.builder.on_failure();
+            driver.in_flight = false;
             driver.cursor = driver.cursor.wrapping_add(1);
         }
     }
 
-    /// Re-issue every stalled walk's next fetch. Drivers with an
-    /// outstanding request emit nothing (the builder withholds while
-    /// in-flight).
-    pub fn on_tick(&mut self) -> Vec<SettledSetOutput> {
+    /// Drop acquisitions whose retention window has passed (the fence
+    /// rejects naming the shard regardless), then re-issue every parked
+    /// acquisition's fetch. `now_wt` is the node's current chain weighted
+    /// timestamp, or `None` before the first commit.
+    pub fn on_tick(
+        &mut self,
+        now_wt: Option<WeightedTimestamp>,
+    ) -> Vec<SettledWavesAcquisitionOutput> {
+        if let Some(now) = now_wt {
+            self.drivers
+                .retain(|_, d| now <= d.terminal_wt.plus(RETENTION_HORIZON));
+        }
         let mut outputs = Vec::new();
         for (&shard, driver) in &mut self.drivers {
-            if let Some(out) = driver.next_fetch(shard) {
-                outputs.push(out);
+            if !driver.in_flight {
+                driver.in_flight = true;
+                outputs.push(SettledWavesAcquisitionOutput::Fetch {
+                    shard,
+                    peer: driver.peer(),
+                    request: driver.request(),
+                });
             }
         }
         outputs
@@ -211,15 +232,13 @@ mod tests {
     use hyperscale_storage::test_helpers::make_test_certified;
     use hyperscale_storage::{PendingChain, ShardChainWriter};
     use hyperscale_storage_memory::SimShardStorage;
-    use hyperscale_types::network::response::GetSettledWavesResponse;
     use hyperscale_types::{
         BeaconWitnessCommit, BeaconWitnessLeafCount, BeaconWitnessRoot, Block, BlockHash,
-        BlockHeader, Bls12381G2Signature, BoundedVec, CertificateRoot, ChainOrigin,
-        ExecutionCertificate, ExecutionOutcome, FinalizedWave, GlobalReceiptHash,
-        GlobalReceiptRoot, Hash, InFlightCount, LocalReceiptRoot, ProposerTimestamp,
-        ProvisionsRoot, QuorumCertificate, Round, ShardId, SignerBitfield, StateRoot,
-        TransactionRoot, TxHash, TxOutcome, ValidatorId, Verifiable, Verified, WaveCertificate,
-        WaveId, WeightedTimestamp,
+        BlockHeader, Bls12381G2Signature, BoundedVec, CertificateRoot, ExecutionCertificate,
+        ExecutionOutcome, FinalizedWave, GlobalReceiptHash, GlobalReceiptRoot, Hash, InFlightCount,
+        LocalReceiptRoot, ProposerTimestamp, ProvisionsRoot, QuorumCertificate, Round, ShardId,
+        SignerBitfield, StateRoot, TransactionRoot, TxHash, TxOutcome, ValidatorId, Verifiable,
+        Verified, WaveCertificate, WaveId, WeightedTimestamp, settled_waves_root_from_ids,
     };
 
     use super::*;
@@ -248,19 +267,30 @@ mod tests {
         )))
     }
 
-    /// Commit `height` blocks (1..=count), each carrying its own settled
-    /// wave, and return the storage plus the terminal block's hash.
-    fn served_chain(count: u64) -> (Arc<SimShardStorage>, BlockHash) {
+    /// Commit `count` blocks (1..=count), each carrying its own settled
+    /// wave, and return the storage, the terminal hash, and the attested
+    /// settled-waves root over the whole window.
+    fn served_chain(count: u64) -> (Arc<SimShardStorage>, BlockHash, SettledWavesRoot) {
         let storage = Arc::new(SimShardStorage::default());
         let mut parent = BlockHash::ZERO;
         let mut terminal = BlockHash::ZERO;
         for h in 1..=count {
             let certs = [finalized_wave(h)];
+            let parent_qc = QuorumCertificate::new(
+                parent,
+                SHARD,
+                BlockHeight::new(h.saturating_sub(1)),
+                BlockHash::ZERO,
+                Round::INITIAL,
+                SignerBitfield::new(4),
+                Bls12381G2Signature([0u8; 96]),
+                WeightedTimestamp::from_millis(1_000 * h),
+            );
             let header = BlockHeader::new(
                 SHARD,
                 BlockHeight::new(h),
                 parent,
-                QuorumCertificate::genesis(SHARD, ChainOrigin::ROOT),
+                parent_qc,
                 ValidatorId::new(0),
                 ProposerTimestamp::from_millis(1_000 * h),
                 Round::INITIAL,
@@ -292,41 +322,45 @@ mod tests {
                 &BeaconWitnessCommit::empty(BeaconWitnessLeafCount::ZERO),
             );
         }
-        (storage, terminal)
+        let root = settled_waves_root_from_ids(
+            (1..=count)
+                .map(|h| WaveId::new(SHARD, BlockHeight::new(h), BTreeSet::new()))
+                .collect::<Vec<_>>()
+                .iter(),
+        );
+        (storage, terminal, root)
     }
 
     fn local_wave(height: u64) -> WaveId {
         WaveId::new(SHARD, BlockHeight::new(height), BTreeSet::new())
     }
 
-    /// Drive the host against a served chain: each `Fetch` is answered by
-    /// the serve handler, and the walk completes with every block's
-    /// settled wave.
+    /// One verified fetch against a served chain completes with the whole
+    /// window list, and the driver drops.
     #[test]
-    fn reconstructs_and_completes_against_a_served_chain() {
-        let (storage, terminal) = served_chain(3);
+    fn acquires_against_a_served_chain() {
+        let (storage, terminal, root) = served_chain(3);
         let pending_chain = PendingChain::new(storage);
 
-        let mut host = SettledSetSyncHost::new();
+        let mut host = SettledWavesAcquisitionHost::new();
         let mut outputs = host.start(
             SHARD,
             BlockHeight::new(3),
             terminal,
             WeightedTimestamp::from_millis(9_000),
+            root,
             vec![ValidatorId::new(7)],
-            BlockHeight::GENESIS.next(),
         );
 
         let mut completed = None;
-        // The walk is a chain of single fetches; answer each in turn.
         while let Some(output) = outputs.pop() {
             match output {
-                SettledSetOutput::Fetch { shard, request, .. } => {
+                SettledWavesAcquisitionOutput::Fetch { shard, request, .. } => {
                     assert_eq!(shard, SHARD);
                     let response = serve_settled_waves_request(&pending_chain, &request);
                     outputs.extend(host.on_response(SHARD, &response));
                 }
-                SettledSetOutput::Complete {
+                SettledWavesAcquisitionOutput::Complete {
                     shard,
                     waves,
                     terminal_wt,
@@ -339,77 +373,106 @@ mod tests {
         }
 
         assert_eq!(
-            completed.expect("walk completes"),
+            completed.expect("acquisition completes"),
             BTreeSet::from([local_wave(1), local_wave(2), local_wave(3)]),
         );
-        assert!(!host.has_pending(), "the driver is dropped on completion");
+        assert!(!host.has_pending(), "the driver drops on completion");
     }
 
-    /// A not-found response parks the walk; the next tick re-issues the
-    /// same height.
+    /// A list that doesn't recompute to the attested root is rejected: the
+    /// peer rotates and the acquisition parks rather than recording a
+    /// forged set.
     #[test]
-    fn not_found_parks_until_the_next_tick() {
-        let mut host = SettledSetSyncHost::new();
-        let outputs = host.start(
+    fn root_mismatch_parks_and_rotates() {
+        let (storage, terminal, _) = served_chain(3);
+        let pending_chain = PendingChain::new(storage);
+
+        let mut host = SettledWavesAcquisitionHost::new();
+        // Attest a root the served chain cannot satisfy.
+        let wrong_root = settled_waves_root_from_ids([&local_wave(99)]);
+        let _ = host.start(
+            SHARD,
+            BlockHeight::new(3),
+            terminal,
+            WeightedTimestamp::from_millis(9_000),
+            wrong_root,
+            vec![ValidatorId::new(0), ValidatorId::new(1)],
+        );
+        let request = GetSettledWavesRequest::new(BlockHeight::new(3), terminal);
+        let response = serve_settled_waves_request(&pending_chain, &request);
+        let parked = host.on_response(SHARD, &response);
+        assert!(parked.is_empty(), "a mismatch parks rather than completes");
+        assert!(host.has_pending());
+
+        // The tick re-arms the fetch against the rotated peer.
+        let ticked = host.on_tick(Some(WeightedTimestamp::from_millis(9_100)));
+        assert!(matches!(
+            ticked.as_slice(),
+            [SettledWavesAcquisitionOutput::Fetch { .. }]
+        ));
+    }
+
+    /// A driver whose retention window has passed drops on tick.
+    #[test]
+    fn expires_past_the_retention_horizon() {
+        let mut host = SettledWavesAcquisitionHost::new();
+        let _ = host.start(
             SHARD,
             BlockHeight::new(2),
             BlockHash::ZERO,
-            WeightedTimestamp::from_millis(1),
-            vec![ValidatorId::new(0), ValidatorId::new(1)],
-            BlockHeight::GENESIS.next(),
+            WeightedTimestamp::from_millis(1_000),
+            settled_waves_root_from_ids(std::iter::empty()),
+            vec![],
         );
-        assert!(matches!(
-            outputs.as_slice(),
-            [SettledSetOutput::Fetch { .. }]
-        ));
-
-        // The peer doesn't hold the height: no immediate re-issue.
-        let parked = host.on_response(SHARD, &GetSettledWavesResponse::not_found());
-        assert!(parked.is_empty(), "a not-found parks rather than spins");
         assert!(host.has_pending());
 
-        // The tick re-arms the fetch (now biased to the rotated peer).
-        let ticked = host.on_tick();
-        assert!(matches!(
-            ticked.as_slice(),
-            [SettledSetOutput::Fetch { .. }]
-        ));
+        let past = WeightedTimestamp::from_millis(1_000)
+            .plus(RETENTION_HORIZON)
+            .plus(RETENTION_HORIZON);
+        let outputs = host.on_tick(Some(past));
+        assert!(outputs.is_empty());
+        assert!(!host.has_pending(), "the expired driver drops");
     }
 
-    /// A duplicate start for the same terminal is a no-op; a start for a
-    /// different terminal replaces the running driver.
+    /// A duplicate start for the same terminal while a fetch is in flight
+    /// is a no-op; a start for a different terminal replaces the driver.
     #[test]
     fn dedupes_by_terminal_block() {
-        let mut host = SettledSetSyncHost::new();
+        let mut host = SettledWavesAcquisitionHost::new();
+        let root = settled_waves_root_from_ids(std::iter::empty());
         let _ = host.start(
             SHARD,
             BlockHeight::new(2),
             BlockHash::from_raw(Hash::from_bytes(b"terminal-a")),
             WeightedTimestamp::from_millis(1),
+            root,
             vec![],
-            BlockHeight::GENESIS.next(),
         );
         let dup = host.start(
             SHARD,
             BlockHeight::new(2),
             BlockHash::from_raw(Hash::from_bytes(b"terminal-a")),
             WeightedTimestamp::from_millis(1),
+            root,
             vec![],
-            BlockHeight::GENESIS.next(),
         );
-        assert!(dup.is_empty(), "same terminal does not restart the walk");
+        assert!(dup.is_empty(), "same terminal in flight does not re-fetch");
 
         let replaced = host.start(
             SHARD,
             BlockHeight::new(3),
             BlockHash::from_raw(Hash::from_bytes(b"terminal-b")),
             WeightedTimestamp::from_millis(1),
+            root,
             vec![],
-            BlockHeight::GENESIS.next(),
         );
         assert!(
-            matches!(replaced.as_slice(), [SettledSetOutput::Fetch { request, .. }] if request.height == BlockHeight::new(3)),
-            "a revised terminal restarts the walk from the new block",
+            matches!(
+                replaced.as_slice(),
+                [SettledWavesAcquisitionOutput::Fetch { request, .. }]
+                    if request.terminal_height == BlockHeight::new(3)
+            ),
+            "a revised terminal restarts the acquisition from the new block",
         );
     }
 }

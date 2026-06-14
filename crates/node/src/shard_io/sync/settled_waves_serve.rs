@@ -1,50 +1,69 @@
-//! Inbound settled-waves request handling.
+//! Inbound settled-waves window request handling.
 //!
-//! Serves one committed block's settled-wave reveal to a counterpart
-//! reconstructing a terminated shard's settled set across a split
-//! boundary (see [`SettledSetBuilder`]). Reads the block through
-//! `PendingChain` so both pending and persisted heights answer; the
-//! reveal carries only the block's certified header plus, per committed
-//! certificate, its execution certificates' wave-ids — the minimal data
-//! that reproduces the header's `certificate_root` and names each
-//! settled wave.
-//!
-//! [`SettledSetBuilder`]: crate::bootstrap::settled_set::SettledSetBuilder
+//! Serves a terminated shard's complete settled-wave window list to a
+//! surviving counterpart resolving cross-shard waves across a split
+//! boundary. The request names the terminal block `B`; the server
+//! reconstructs `S_P` over `[B − RETENTION_HORIZON, B]` off its committed
+//! chain — the same set `B`'s `settled_waves_root` commits — so the
+//! requester accepts the list against the beacon-attested root. No
+//! per-block QC: completeness is the merkle root, not block-by-block
+//! verification.
 
 use hyperscale_metrics::record_fetch_response_sent;
 use hyperscale_storage::{BlockForSync, PendingChain, ShardStorage};
-use hyperscale_types::CertifiedBlockHeader;
 use hyperscale_types::network::request::GetSettledWavesRequest;
-use hyperscale_types::network::response::{GetSettledWavesResponse, SettledWavesReveal};
+use hyperscale_types::network::response::GetSettledWavesResponse;
+use hyperscale_types::{BoundedVec, local_settled_wave_ids};
 
-/// Serve an inbound settled-waves request from the local chain.
+/// Serve an inbound settled-waves window request from the local chain.
 ///
-/// Returns `not_found` when the height isn't held, so the requester
-/// rotates peers. Serves by height; the requester binds the served
-/// block to the terminal chain via the header hash and rejects a
-/// mismatch.
+/// Returns `not_found` when the terminal block isn't held or the stored
+/// block's hash doesn't match the requested terminal — the requester
+/// rotates peers. Returns `not_found` too when the window set exceeds the
+/// wire cap (a correct committee with a within-cap window always serves).
 #[must_use]
 pub fn serve_settled_waves_request<S: ShardStorage>(
     pending_chain: &PendingChain<S>,
     req: &GetSettledWavesRequest,
 ) -> GetSettledWavesResponse {
-    let Some(BlockForSync { block, qc, .. }) = pending_chain.block_for_sync(req.height) else {
+    let Some(BlockForSync { block, .. }) = pending_chain.block_for_sync(req.terminal_height) else {
         record_fetch_response_sent("settled_waves", 0);
         return GetSettledWavesResponse::not_found();
     };
+    if block.hash() != req.terminal_block_hash {
+        record_fetch_response_sent("settled_waves", 0);
+        return GetSettledWavesResponse::not_found();
+    }
 
-    let certs = block
-        .certificates()
-        .iter()
-        .map(|fw| fw.certificate().ec_wave_ids().into())
-        .collect::<Vec<_>>()
-        .into();
-    let certified_header = CertifiedBlockHeader::new(block.header().clone(), qc);
-    record_fetch_response_sent("settled_waves", 1);
-    GetSettledWavesResponse::found(SettledWavesReveal {
-        certified_header,
-        certs,
-    })
+    let shard = block.header().shard_id();
+    let own = local_settled_wave_ids(block.certificates().iter(), shard);
+    let Some(parent_height) = block.height().prev() else {
+        // Genesis carries no certificates and never terminates a split.
+        record_fetch_response_sent("settled_waves", 0);
+        return GetSettledWavesResponse::not_found();
+    };
+    let set = pending_chain.settled_waves_in_window(
+        shard,
+        block.header().parent_block_hash(),
+        parent_height,
+        block.header().parent_qc().weighted_timestamp(),
+        own,
+    );
+
+    // `try_from_vec` is the genuinely fallible conversion: a window
+    // exceeding the wire cap serves `not_found` rather than panicking on
+    // the bound (`From<Vec>` would). A within-cap window — every realistic
+    // one — always serves.
+    BoundedVec::try_from_vec(set.into_iter().collect()).map_or_else(
+        |_| {
+            record_fetch_response_sent("settled_waves", 0);
+            GetSettledWavesResponse::not_found()
+        },
+        |bounded| {
+            record_fetch_response_sent("settled_waves", 1);
+            GetSettledWavesResponse::found(bounded)
+        },
+    )
 }
 
 #[cfg(test)]
@@ -57,19 +76,20 @@ mod tests {
     use hyperscale_storage_memory::SimShardStorage;
     use hyperscale_types::{
         BeaconWitnessCommit, BeaconWitnessLeafCount, BeaconWitnessRoot, Block, BlockHash,
-        BlockHeader, BlockHeight, Bls12381G2Signature, BoundedVec, CertificateRoot, ChainOrigin,
+        BlockHeader, BlockHeight, Bls12381G2Signature, BoundedVec, CertificateRoot,
         ExecutionCertificate, ExecutionOutcome, FinalizedWave, GlobalReceiptHash,
         GlobalReceiptRoot, Hash, InFlightCount, LocalReceiptRoot, ProposerTimestamp,
         ProvisionsRoot, QuorumCertificate, Round, ShardId, SignerBitfield, StateRoot,
         TransactionRoot, TxHash, TxOutcome, ValidatorId, Verifiable, Verified, WaveCertificate,
-        WaveId, WeightedTimestamp,
+        WaveId, WeightedTimestamp, settled_waves_root_from_ids,
     };
 
     use super::*;
-    use crate::bootstrap::settled_set::{SettledOutcome, SettledSetBuilder};
+
+    const SHARD: ShardId = ShardId::ROOT;
 
     fn finalized_wave(height: u64) -> Arc<Verifiable<FinalizedWave>> {
-        let wave = WaveId::new(ShardId::ROOT, BlockHeight::new(height), BTreeSet::new());
+        let wave = WaveId::new(SHARD, BlockHeight::new(height), BTreeSet::new());
         let ec = ExecutionCertificate::new(
             wave.clone(),
             WeightedTimestamp::from_millis(1),
@@ -89,24 +109,35 @@ mod tests {
         )))
     }
 
-    /// A committed block's settled waves serve and reconstruct end to
-    /// end through the builder over the memory backend.
-    #[test]
-    fn serves_a_committed_blocks_settled_waves() {
-        let storage = Arc::new(SimShardStorage::default());
-        let certs = [finalized_wave(1)];
-        let header = BlockHeader::new(
-            ShardId::ROOT,
-            BlockHeight::new(1),
+    fn commit_block(
+        storage: &SimShardStorage,
+        height: u64,
+        parent: BlockHash,
+        pred_wt: u64,
+        certs: &[Arc<Verifiable<FinalizedWave>>],
+    ) -> BlockHash {
+        let parent_qc = QuorumCertificate::new(
+            parent,
+            SHARD,
+            BlockHeight::new(height.saturating_sub(1)),
             BlockHash::ZERO,
-            QuorumCertificate::genesis(ShardId::ROOT, ChainOrigin::ROOT),
+            Round::INITIAL,
+            SignerBitfield::new(4),
+            Bls12381G2Signature([0u8; 96]),
+            WeightedTimestamp::from_millis(pred_wt),
+        );
+        let header = BlockHeader::new(
+            SHARD,
+            BlockHeight::new(height),
+            parent,
+            parent_qc,
             ValidatorId::new(0),
-            ProposerTimestamp::from_millis(1_000),
+            ProposerTimestamp::from_millis(1_000 * height),
             Round::INITIAL,
             false,
             StateRoot::ZERO,
             TransactionRoot::ZERO,
-            *Verified::<CertificateRoot>::compute(&certs).as_ref(),
+            *Verified::<CertificateRoot>::compute(certs).as_ref(),
             LocalReceiptRoot::ZERO,
             ProvisionsRoot::ZERO,
             Vec::new(),
@@ -124,31 +155,55 @@ mod tests {
             certificates: Arc::new(certs.to_vec().into()),
             provisions: Arc::new(BoundedVec::new()),
         };
-        let terminal = block.hash();
+        let hash = block.hash();
         storage.commit_block(
             &make_test_certified(block),
             &BeaconWitnessCommit::empty(BeaconWitnessLeafCount::ZERO),
         );
+        hash
+    }
 
-        let pending_chain = PendingChain::new(storage);
+    /// The served window list recomputes to the terminal block's
+    /// `settled_waves_root` — every block's settled wave over the window.
+    #[test]
+    fn serves_the_full_settled_window() {
+        let storage = SimShardStorage::default();
+        let mut parent = BlockHash::ZERO;
+        for h in 1..=3 {
+            parent = commit_block(&storage, h, parent, 1_000 * h, &[finalized_wave(h)]);
+        }
+        let terminal = parent;
+        let pending_chain = PendingChain::new(Arc::new(storage));
 
-        let mut builder = SettledSetBuilder::new(
-            ShardId::ROOT,
-            BlockHeight::new(1),
-            terminal,
-            BlockHeight::new(1),
-        );
-        let req = builder.next_request().expect("first request");
+        let req = GetSettledWavesRequest::new(BlockHeight::new(3), terminal);
         let response = serve_settled_waves_request(&pending_chain, &req);
-        assert_eq!(builder.on_response(&response), SettledOutcome::Accepted);
-        assert!(builder.is_complete());
+        let waves = response.waves.expect("terminal block is held");
+
+        let expected: BTreeSet<WaveId> = (1..=3)
+            .map(|h| WaveId::new(SHARD, BlockHeight::new(h), BTreeSet::new()))
+            .collect();
+        assert_eq!(waves.iter().cloned().collect::<BTreeSet<_>>(), expected);
+        // The fence accepts iff the recomputed root equals the attested one.
         assert_eq!(
-            builder.into_settled(),
-            BTreeSet::from([WaveId::new(
-                ShardId::ROOT,
-                BlockHeight::new(1),
-                BTreeSet::new()
-            )]),
+            settled_waves_root_from_ids(waves.iter()),
+            settled_waves_root_from_ids(expected.iter()),
+        );
+    }
+
+    /// A hash mismatch against the stored block serves `not_found`.
+    #[test]
+    fn wrong_terminal_hash_serves_not_found() {
+        let storage = SimShardStorage::default();
+        let _ = commit_block(&storage, 1, BlockHash::ZERO, 1_000, &[finalized_wave(1)]);
+        let pending_chain = PendingChain::new(Arc::new(storage));
+        let req = GetSettledWavesRequest::new(
+            BlockHeight::new(1),
+            BlockHash::from_raw(Hash::from_bytes(b"other-chain")),
+        );
+        assert!(
+            serve_settled_waves_request(&pending_chain, &req)
+                .waves
+                .is_none()
         );
     }
 
@@ -160,7 +215,7 @@ mod tests {
         let req = GetSettledWavesRequest::new(BlockHeight::new(7), BlockHash::ZERO);
         assert!(
             serve_settled_waves_request(&pending_chain, &req)
-                .reveal
+                .waves
                 .is_none()
         );
     }

@@ -1,58 +1,37 @@
-//! Settled-wave reveal response for the split-boundary fence.
+//! Settled-waves window response for the split-boundary fence.
 
 use sbor::prelude::BasicSbor;
 
-use crate::{
-    BoundedVec, CertifiedBlockHeader, MAX_EXECUTION_CERTIFICATES_PER_WAVE,
-    MAX_FINALIZED_TX_PER_BLOCK, MessageClass, NetworkMessage, WaveId,
-};
+use crate::{BoundedVec, MAX_FINALIZED_TX_PER_BLOCK, MessageClass, NetworkMessage, WaveId};
 
-/// One committed block's settled-wave reveal.
+/// The complete settled-wave window list of a terminated shard.
 ///
-/// Verified, not trusted bare: the requester checks `certified_header`
-/// hashes to the expected block hash (chaining back from the
-/// beacon-attested terminal), recomputes the header's `certificate_root`
-/// from `certs`, and only then reads each certificate's settled wave-id
-/// off the verified pairs. The QC inside the header is the requester's
-/// (driver's) to verify against P's committee — completeness against the
-/// root is what this reveal proves.
-#[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
-pub struct SettledWavesReveal {
-    /// The block's header paired with its committing QC.
-    pub certified_header: CertifiedBlockHeader,
-    /// The execution-certificate wave-ids of every wave certificate the
-    /// block committed, in block order; the inner list is one
-    /// certificate's EC wave-ids in `receipt_hash` order. Reproduces the
-    /// header's `certificate_root` and yields each certificate's own
-    /// settled wave (the entry whose shard is the serving shard).
-    pub certs: BoundedVec<
-        BoundedVec<WaveId, MAX_EXECUTION_CERTIFICATES_PER_WAVE>,
-        MAX_FINALIZED_TX_PER_BLOCK,
-    >,
-}
-
-/// Response to a
-/// [`GetSettledWavesRequest`](crate::network::request::GetSettledWavesRequest).
+/// `waves` is `S_P` in full: every wave-id `P` settled in
+/// `[B − RETENTION_HORIZON, B]`. Verified, not trusted bare — the
+/// requester recomputes `settled_waves_root_from_ids(waves)` and accepts
+/// only when it equals the beacon-attested `settled_waves_root`. Because
+/// the root commits the whole set, a server can neither hide a settled
+/// wave (a missing leaf changes the root) nor fabricate one, so the
+/// verified-complete set makes the absence of any wave from it sound.
 #[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
 pub struct GetSettledWavesResponse {
-    /// The block's reveal, or `None` when this peer doesn't hold the
-    /// requested height — the requester rotates to another peer.
-    pub reveal: Option<SettledWavesReveal>,
+    /// The terminated shard's complete settled-wave window list, or `None`
+    /// when this peer doesn't hold the terminal block — the requester
+    /// rotates to another terminal-committee member.
+    pub waves: Option<BoundedVec<WaveId, MAX_FINALIZED_TX_PER_BLOCK>>,
 }
 
 impl GetSettledWavesResponse {
-    /// A reveal for one committed block.
+    /// A complete window list for the terminated shard.
     #[must_use]
-    pub const fn found(reveal: SettledWavesReveal) -> Self {
-        Self {
-            reveal: Some(reveal),
-        }
+    pub const fn found(waves: BoundedVec<WaveId, MAX_FINALIZED_TX_PER_BLOCK>) -> Self {
+        Self { waves: Some(waves) }
     }
 
-    /// This peer can't serve the requested height.
+    /// This peer can't serve the requested terminal block.
     #[must_use]
     pub const fn not_found() -> Self {
-        Self { reveal: None }
+        Self { waves: None }
     }
 }
 
@@ -68,43 +47,10 @@ impl NetworkMessage for GetSettledWavesResponse {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use sbor::{basic_decode, basic_encode};
 
     use super::*;
-    use crate::{
-        BeaconWitnessLeafCount, BeaconWitnessRoot, BlockHash, BlockHeader, BlockHeight,
-        CertificateRoot, ChainOrigin, Hash, InFlightCount, LocalReceiptRoot, ProposerTimestamp,
-        ProvisionsRoot, QuorumCertificate, Round, ShardId, StateRoot, TransactionRoot, ValidatorId,
-        Verifiable,
-    };
-
-    fn header() -> BlockHeader {
-        BlockHeader::new(
-            ShardId::ROOT,
-            BlockHeight::new(7),
-            BlockHash::from_raw(Hash::from_bytes(b"parent")),
-            QuorumCertificate::genesis(ShardId::ROOT, ChainOrigin::ROOT),
-            ValidatorId::new(0),
-            ProposerTimestamp::from_millis(1_234_567_890),
-            Round::INITIAL,
-            false,
-            StateRoot::ZERO,
-            TransactionRoot::ZERO,
-            CertificateRoot::ZERO,
-            LocalReceiptRoot::ZERO,
-            ProvisionsRoot::ZERO,
-            Vec::new(),
-            BTreeMap::new(),
-            InFlightCount::ZERO,
-            BeaconWitnessRoot::ZERO,
-            BeaconWitnessLeafCount::ZERO,
-            BeaconWitnessLeafCount::ZERO,
-            None,
-            None,
-        )
-    }
+    use crate::{BlockHeight, ShardId};
 
     #[test]
     fn test_sbor_roundtrip_not_found() {
@@ -115,18 +61,13 @@ mod tests {
     }
 
     #[test]
-    fn test_sbor_roundtrip_reveal() {
+    fn test_sbor_roundtrip_found() {
         let wave = WaveId::new(
             ShardId::ROOT,
             BlockHeight::new(7),
             std::iter::empty().collect(),
         );
-        let h = header();
-        let qc = QuorumCertificate::genesis(ShardId::ROOT, ChainOrigin::ROOT);
-        let response = GetSettledWavesResponse::found(SettledWavesReveal {
-            certified_header: CertifiedBlockHeader::new(h, Verifiable::from(qc)),
-            certs: vec![vec![wave].into()].into(),
-        });
+        let response = GetSettledWavesResponse::found(vec![wave].into());
         let encoded = basic_encode(&response).unwrap();
         let decoded: GetSettledWavesResponse = basic_decode(&encoded).unwrap();
         assert_eq!(response, decoded);

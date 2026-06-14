@@ -8,8 +8,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use hyperscale_types::{
     BeaconCert, BeaconProposal, BeaconState, BeaconWitnessLeafCount, BlockHash, BlockHeader,
     CertifiedBeaconBlock, Epoch, EpochWindows, KeptSeat, NetworkDefinition, ObserverSeat,
-    PendingReshape, QuorumCertificate, ShardBoundary, ShardEpochContribution, ShardId, SlotEffects,
-    SplitAdoption, SplitChildRoots, TransitionCause, ValidatorId, ValidatorStatus,
+    PendingReshape, QuorumCertificate, RETENTION_HORIZON, ShardBoundary, ShardEpochContribution,
+    ShardId, SlotEffects, SplitAdoption, SplitChildRoots, TransitionCause, ValidatorId,
+    ValidatorStatus,
 };
 
 use crate::rules::{canonical_boundary_qcs, chunk_bounds, is_boundary_crossing};
@@ -473,23 +474,17 @@ fn record_boundaries(
         // chain's terminal block. A split parent seeds its pending
         // children from the header's `split_child_roots`; a merge child
         // carries none — its parent composes from both children's terminal
-        // roots in the post-loop pass below. Either record drops once its
-        // witness backlog has fully drained, but a merge child holds while
-        // its parent is still pending so the composition can read its root.
+        // roots in the post-loop pass below. The record then lingers,
+        // carrying the terminated shard's `settled_waves_root` for
+        // surviving counterparts to read, until the retention GC below
+        // drops it.
         if let Some(t) = terminal_epoch
             && windows.epoch_for(qc.weighted_timestamp()) > t
         {
-            let fully_drained = chunk_end == boundary_count;
             if header.split_child_roots().is_some() {
                 seed_split_children(state, *shard, header, qc, epoch);
-                if fully_drained {
-                    state.boundaries.remove(shard);
-                }
             } else {
                 terminal_recorded.insert(*shard);
-                if !merge_parent_pending(state, *shard) && fully_drained {
-                    state.boundaries.remove(shard);
-                }
             }
         }
     }
@@ -509,6 +504,18 @@ fn record_boundaries(
     // terminal contribution this fold, after the miss bump so the freshly
     // composed anchor starts clean.
     compose_merge_parents(state, epoch, windows, &terminal_recorded);
+
+    // Drop terminal records past their retention horizon. A terminated
+    // shard's record lingers only to project its `settled_waves_root` to
+    // surviving counterparts; past `terminal_wt + RETENTION_HORIZON` the
+    // split-boundary fence rejects any wave naming it regardless, so the
+    // record is dead weight. Bounded so a terminated shard can't
+    // accumulate forever.
+    let now = windows.window_of(epoch).start;
+    state.boundaries.retain(|_, b| {
+        b.terminal_epoch
+            .is_none_or(|t| now <= windows.window_of(t).end.plus(RETENTION_HORIZON))
+    });
 
     outcome
 }
@@ -574,17 +581,6 @@ fn seed_split_children(
             },
         );
     }
-}
-
-/// Whether `shard` is a merge child whose parent hasn't composed yet —
-/// the parent still carries a pending placeholder boundary (zero hash).
-/// A merge child holds its terminal record until then so its sibling can
-/// still read its root for the composition.
-fn merge_parent_pending(state: &BeaconState, shard: ShardId) -> bool {
-    shard
-        .parent()
-        .and_then(|parent| state.boundaries.get(&parent))
-        .is_some_and(|b| b.block_hash == BlockHash::ZERO)
 }
 
 /// Compose every pending merge parent whose two children both delivered
@@ -1488,9 +1484,10 @@ mod tests {
     /// The terminal contribution — predecessor inside the final window,
     /// QC past its cut, carrying a composing pair — seeds both pending
     /// children with their verified subtree roots and deterministic
-    /// genesis hashes, then drops the parent's record (backlog drained).
+    /// genesis hashes, and the parent's terminal record lingers (carrying
+    /// its settled-waves root for surviving counterparts) past the drain.
     #[test]
-    fn terminal_contribution_seeds_the_children_and_drops_the_parent() {
+    fn terminal_contribution_seeds_the_children_and_retains_the_parent() {
         let (mut state, parent, pair, composed) = terminating_state();
         let (left, right) = parent.children();
 
@@ -1514,15 +1511,17 @@ mod tests {
             assert_eq!(record.witness_leaf_count, BeaconWitnessLeafCount::ZERO);
             assert_eq!(record.terminal_epoch, None);
         }
-        assert!(
-            !state.boundaries.contains_key(&parent),
-            "terminal record drops once consumed and drained"
-        );
+        let record = state
+            .boundaries
+            .get(&parent)
+            .expect("terminal record lingers for the retention window");
+        assert_eq!(record.terminal_epoch, Some(Epoch::new(1)));
+        assert_eq!(record.block_hash, header.hash());
     }
 
     /// A pair that does not compose to the terminal root leaves the
     /// children pending (they seed from their own first contributions);
-    /// the parent's record still drops — its contribution was consumed.
+    /// the parent's terminal record still lingers past the drain.
     #[test]
     fn non_composing_pair_leaves_children_pending() {
         let (mut state, parent, pair, composed) = terminating_state();
@@ -1540,7 +1539,10 @@ mod tests {
             let record = state.boundaries.get(&child).expect("placeholder kept");
             assert_eq!(record.block_hash, BlockHash::ZERO, "child stays pending");
         }
-        assert!(!state.boundaries.contains_key(&parent));
+        assert!(
+            state.boundaries.contains_key(&parent),
+            "terminal record lingers"
+        );
     }
 
     /// A crossing of an earlier cut (QC inside the final window) records
@@ -1580,12 +1582,13 @@ mod tests {
         assert_eq!(state.boundaries.get(&parent).unwrap().consecutive_misses, 0);
     }
 
-    /// A terminal backlog deeper than one chunk lingers drain-only: the
-    /// children seed at the first terminal fold, the record survives it,
-    /// and the next fold's continuation chunk completes the drain and
-    /// drops it.
+    /// A terminal backlog deeper than one chunk drains over two folds: the
+    /// children seed at the first terminal fold, the record applies one
+    /// chunk and survives, and the next fold's continuation chunk completes
+    /// the drain. The record then lingers (within the retention window) to
+    /// project the terminated shard's settled-waves root.
     #[test]
-    fn deep_terminal_backlog_lingers_until_drained() {
+    fn deep_terminal_backlog_drains_over_two_folds() {
         let (mut state, parent, pair, composed) = terminating_state();
         let total = MAX_WITNESSES_PER_SHARD as u64 + 6;
 
@@ -1613,9 +1616,39 @@ mod tests {
         let (committed, contributions) = contribution_for(parent, header, rest, 2_500);
         record_boundaries(&mut state, Epoch::new(3), &committed, &contributions);
 
+        let record = state
+            .boundaries
+            .get(&parent)
+            .expect("terminal record lingers past the drain");
+        assert_eq!(
+            record.witness_leaf_count,
+            BeaconWitnessLeafCount::new(total),
+            "the second chunk completed the drain",
+        );
+    }
+
+    /// A terminal record drops once the chain advances past its retention
+    /// horizon — it lingers only to project the settled-waves root, dead
+    /// weight once the fence rejects naming the shard regardless.
+    #[test]
+    fn terminal_record_drops_past_the_retention_horizon() {
+        let (mut state, parent, pair, composed) = terminating_state();
+        let (header, witnesses) =
+            terminal_block_with_witnesses(parent, 9, 1_900, pair, composed, 3, None);
+        let (committed, contributions) = contribution_for(parent, header, witnesses, 2_500);
+        record_boundaries(&mut state, Epoch::new(2), &committed, &contributions);
+        assert!(
+            state.boundaries.contains_key(&parent),
+            "lingers within the retention window",
+        );
+
+        // Advance to an epoch whose window opens past the terminal cut
+        // (2000ms at epoch_duration 1000) plus `RETENTION_HORIZON`.
+        let past = Epoch::new(RETENTION_HORIZON.as_secs() + 5);
+        record_boundaries(&mut state, past, &[], &BTreeMap::new());
         assert!(
             !state.boundaries.contains_key(&parent),
-            "drained and dropped"
+            "terminal record drops past the retention horizon",
         );
     }
 
@@ -1840,12 +1873,13 @@ mod tests {
             "children held at compose"
         );
 
-        // Fold E+2: the drained children re-source again and, with the
-        // parent composed, drop.
+        // Fold E+2: the children re-source again and, with the parent
+        // composed, linger past the drain (carrying their settled-waves
+        // roots for surviving counterparts) until the retention GC.
         let (committed, contributions) = both(2_500, 2_500);
         record_boundaries(&mut state, Epoch::new(4), &committed, &contributions);
-        assert!(!state.boundaries.contains_key(&left), "left drops");
-        assert!(!state.boundaries.contains_key(&right), "right drops");
+        assert!(state.boundaries.contains_key(&left), "left lingers");
+        assert!(state.boundaries.contains_key(&right), "right lingers");
         assert_eq!(
             state.boundaries[&parent].block_hash,
             anchor.hash(),

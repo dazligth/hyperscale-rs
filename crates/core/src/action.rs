@@ -1001,25 +1001,29 @@ pub enum Action {
         target: BlockHeight,
     },
 
-    /// Reconstruct a terminated shard's settled-wave set `S_P` for the
-    /// split-boundary fence.
+    /// Acquire a terminated shard's settled-wave set `S_P` for the
+    /// split-boundary fence in one beacon-attested shot.
     ///
-    /// Emitted by `RemoteHeaderCoordinator` when it captures a new
-    /// terminal anchor from a past-terminal shard's coast header. The
-    /// I/O loop drives a `SettledSetBuilder` backward from the terminal
-    /// block against `peers`, then feeds the result back as
-    /// [`crate::ProtocolEvent::SettledWavesReconstructed`].
-    StartSettledSetSync {
-        /// The terminated shard whose settled set to reconstruct.
+    /// Emitted when the node's own beacon fold attests a terminated
+    /// shard's `settled_waves_root` it doesn't yet hold `S_P` for. The
+    /// I/O loop fetches the shard's complete settled-wave window list
+    /// from its terminal committee (`peers`), accepts it only when the
+    /// recomputed root equals `attested_root`, and feeds the verified
+    /// set back as [`crate::ProtocolEvent::SettledWavesReconstructed`].
+    StartSettledWavesAcquisition {
+        /// The terminated shard whose settled set to acquire.
         shard: ShardId,
         /// Height of the terminal block `B`.
         terminal_height: BlockHeight,
-        /// Hash of the terminal block `B` — the beacon-attested anchor
-        /// the backward walk starts from.
+        /// Hash of the terminal block `B` — the beacon-attested terminal
+        /// the window list ends at.
         terminal_block_hash: BlockHash,
-        /// `B`'s weighted timestamp — bounds the fence's retention
-        /// cutoff once the set is recorded.
+        /// `B`'s weighted timestamp — bounds the fence's retention cutoff
+        /// once the set is recorded, and the host's self-expiry.
         terminal_wt: WeightedTimestamp,
+        /// The beacon-attested `settled_waves_root` the fetched list is
+        /// checked against; a mismatch rotates the peer.
+        attested_root: SettledWavesRoot,
         /// The terminated shard's terminal committee, asked in rotation.
         peers: Vec<ValidatorId>,
     },
@@ -1445,7 +1449,7 @@ impl Action {
             | Self::StartBlockSync { .. }
             | Self::StartBeaconBlockSync { .. }
             | Self::StartRemoteHeaderSync { .. }
-            | Self::StartSettledSetSync { .. }
+            | Self::StartSettledWavesAcquisition { .. }
             | Self::RestoreCommittedState { .. }
             | Self::Fetch(_)
             | Self::AbandonFetch(_)

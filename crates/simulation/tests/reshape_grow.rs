@@ -305,9 +305,20 @@ fn observers_grow_a_split_through_its_readiness_gate() {
         );
     }
     let state = beacon_state(&runner).expect("post-seed state");
+    // The parent's terminal record lingers past the drain to project its
+    // beacon-attested settled-waves root to surviving counterparts; the
+    // retention GC drops it later.
+    let root_record = state
+        .boundaries
+        .get(&ShardId::ROOT)
+        .expect("the parent's terminal record lingers for the retention window");
     assert!(
-        !state.boundaries.contains_key(&ShardId::ROOT),
-        "the parent's terminal record must drop once consumed and drained",
+        root_record.terminal_epoch.is_some(),
+        "the lingering record is the parent's terminal record",
+    );
+    assert!(
+        root_record.settled_waves_root.is_some(),
+        "the terminal record carries the parent's settled-waves root",
     );
     // Subtree-root continuity, the keystone: the seeded anchors are
     // exactly the parent terminal root's two children.

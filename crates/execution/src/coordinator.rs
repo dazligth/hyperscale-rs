@@ -231,7 +231,7 @@ pub struct ExecutionCoordinator {
     // Split-boundary finalize gate
     // ═══════════════════════════════════════════════════════════════════════
     /// Settled-wave sets of past-terminal shards, fed by the `io_loop`'s
-    /// reconstruction driver (mirrors the shard coordinator's vote fence).
+    /// settled-waves acquisition (mirrors the shard coordinator's vote fence).
     /// The finalize gate reads them so a wave naming a shard that didn't
     /// settle it is never produced — the shared [`settled_set_verdict`]
     /// keeps this verdict identical to the vote fence's.
@@ -1541,6 +1541,7 @@ impl ExecutionCoordinator {
             self.committed_ts = certified.block().header().parent_qc().weighted_timestamp();
         }
         self.provisioning.advance_clock(self.committed_ts);
+        self.gc_settled_sets();
 
         // Retro-stamp entries recorded before the first local commit. Remote
         // headers can register expected exec certs while `committed_ts` is
@@ -1944,6 +1945,17 @@ impl ExecutionCoordinator {
         }
         self.pending_counterpart_sweeps.insert(shard, outstanding);
         self.settled_sets.insert(shard, settled);
+    }
+
+    /// Drop settled-wave sets past their retention horizon. Past
+    /// `terminal_wt + RETENTION_HORIZON` the gate rejects any wave naming
+    /// the shard regardless of the set, so retaining it only leaks memory.
+    /// The counterpart-sweep entry for the same shard clears itself on the
+    /// same horizon, so the two stay consistent.
+    fn gc_settled_sets(&mut self) {
+        let now = self.committed_ts;
+        self.settled_sets
+            .retain(|_, settled| now <= settled.terminal_wt.plus(RETENTION_HORIZON));
     }
 
     /// Note that a settled execution certificate naming us has been
@@ -4211,7 +4223,7 @@ mod tests {
     /// partner's settled set is unknown the gate **defers** (never emits —
     /// no one-sided application); once the set proves the partner never
     /// settled the wave, the gate **rejects** it and the transaction
-    /// aborts. The fence/driver defer-release that `reshape_sibling`'s
+    /// aborts. The fence/gate defer-release that `reshape_sibling`'s
     /// natural straddler can't reach (it finalizes pre-cut) is exercised
     /// here against a genuinely post-cut, unsettled wave.
     #[test]

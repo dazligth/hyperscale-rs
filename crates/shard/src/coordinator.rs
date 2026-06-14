@@ -16,9 +16,9 @@ use hyperscale_core::{Action, CommitSource, ProtocolEvent, TimerId};
 use hyperscale_types::{
     BlockHash, Hash, LocalTimestamp, MAX_FINALIZED_TX_PER_BLOCK, MAX_PROGRESS_WAIT,
     MAX_READY_SIGNALS_PER_BLOCK, MAX_READY_WINDOW_BLOCKS, MAX_TXS_PER_BLOCK, ProposerTimestamp,
-    ProvisionHash, QuiesceCut, ReadySignal, ReshapeThresholds, ReshapeTrigger, ScheduleLookup,
-    SettledSetVerdict, SettledWaveSet, ShardId, SplitAtBoundary, StoredReceipt, WaveId,
-    WeightedTimestamp, derive_reshape_trigger, settled_set_verdict,
+    ProvisionHash, QuiesceCut, RETENTION_HORIZON, ReadySignal, ReshapeThresholds, ReshapeTrigger,
+    ScheduleLookup, SettledSetVerdict, SettledWaveSet, ShardId, SplitAtBoundary, StoredReceipt,
+    WaveId, WeightedTimestamp, derive_reshape_trigger, settled_set_verdict,
 };
 
 /// Shard consensus statistics for monitoring.
@@ -336,8 +336,8 @@ pub struct ShardCoordinator {
     /// this when voting on a block whose finalized waves carry a
     /// certificate from a past-terminal shard: a cross-shard wave names
     /// that shard, so the vote may only commit if the shard actually
-    /// settled the wave. Populated by the driver's settled-set
-    /// reconstruction via [`Self::record_settled_waves`].
+    /// settled the wave. Populated by the settled-waves acquisition via
+    /// [`Self::record_settled_waves`].
     settled_sets: HashMap<ShardId, SettledWaveSet>,
 }
 
@@ -514,20 +514,29 @@ impl ShardCoordinator {
     }
 
     /// Record a terminated shard's settled-wave set for the
-    /// split-boundary fence. The driver reconstructs it from the
-    /// terminated shard's tail chain (see `SettledSetBuilder`) and feeds
-    /// it here; voting on a block whose finalized waves name `shard` then
-    /// resolves against the set instead of deferring. Pair with
-    /// [`Self::redrive_pending_votes`] to re-drive votes that deferred at
-    /// the fence before the set was known.
+    /// split-boundary fence. A one-shot acquisition fetches the complete
+    /// window list and verifies it against the beacon-attested
+    /// `settled_waves_root` before feeding it here; voting on a block
+    /// whose finalized waves name `shard` then resolves against the set
+    /// instead of deferring. Pair with [`Self::redrive_pending_votes`] to
+    /// re-drive votes that deferred at the fence before the set was known.
     pub fn record_settled_waves(&mut self, shard: ShardId, settled: SettledWaveSet) {
         self.settled_sets.insert(shard, settled);
     }
 
-    /// The settled-wave set this validator has reconstructed for a
-    /// terminated shard, or `None` if it hasn't yet. The reconstruction
-    /// driver populates it; a test or RPC reads it to observe that the
-    /// driver ran.
+    /// Drop settled-wave sets past their retention horizon. Once the
+    /// committed chain advances beyond `terminal_wt + RETENTION_HORIZON`,
+    /// the fence rejects any wave naming the shard regardless of the set,
+    /// so retaining it only leaks memory.
+    fn gc_settled_sets(&mut self) {
+        let now = self.committed_anchor_ts;
+        self.settled_sets
+            .retain(|_, settled| now <= settled.terminal_wt.plus(RETENTION_HORIZON));
+    }
+
+    /// The settled-wave set this validator has acquired for a terminated
+    /// shard, or `None` if it hasn't yet. The acquisition host populates
+    /// it; a test or RPC reads it to observe that the acquisition ran.
     #[must_use]
     pub fn settled_set(&self, shard: ShardId) -> Option<&SettledWaveSet> {
         self.settled_sets.get(&shard)
@@ -595,8 +604,8 @@ impl ShardCoordinator {
     /// Apply the split-boundary fence at vote time; returns `true` (and
     /// logs) when the vote must not proceed. `Reject` declines the vote
     /// outright (the block can never commit here); `Defer` holds the
-    /// block pending until the settled set is reconstructed (the driver
-    /// re-drives the vote on [`Self::record_settled_waves`]).
+    /// block pending until the settled set is acquired (the vote
+    /// re-drives on [`Self::record_settled_waves`]).
     fn fence_blocks_vote(
         &self,
         topology: &TopologySchedule,
@@ -3577,6 +3586,7 @@ impl ShardCoordinator {
         // committee after it is pruned from `pending_blocks`.
         self.committed_anchor_ts = block.header().parent_qc().weighted_timestamp();
         self.committed_state_root = block.header().state_root();
+        self.gc_settled_sets();
 
         // Retire the committed block's substate delta into the count
         // frontier. Sync commits carry no delta (QC-trusted, never

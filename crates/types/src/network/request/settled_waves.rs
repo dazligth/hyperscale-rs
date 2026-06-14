@@ -1,39 +1,41 @@
-//! Settled-wave reveal request for the split-boundary fence.
+//! Settled-waves window request for the split-boundary fence.
 //!
-//! After a shard P terminates at a split, a surviving counterpart must
-//! decide, for any cross-shard wave still referencing P, whether P
-//! actually settled that wave in its chain at or before the terminal
-//! block B. It learns this by walking P's tail chain back from B,
-//! reading each block's settled-wave reveal. The server resolves the
-//! block at `height` and answers the wave-ids its committed
-//! certificates carry; the requester binds the reveal to B's chain via
-//! `block_hash` and the header chain (see [`GetSettledWavesResponse`]).
+//! After a shard `P` terminates at a split, a surviving counterpart must
+//! decide, for any cross-shard wave still referencing `P`, whether `P`
+//! actually settled that wave in its chain at or before the terminal block
+//! `B`. It reads `P`'s beacon-attested `settled_waves_root` from its own
+//! fold and fetches the whole window settled-wave list in one shot: the
+//! complete set `S_P` over `[B − RETENTION_HORIZON, B]`. The requester
+//! accepts the list iff its recomputed root equals the attested one, so a
+//! withheld wave changes the root and the absence of any wave from the
+//! verified-complete set is sound (see [`GetSettledWavesResponse`]).
 
 use sbor::prelude::BasicSbor;
 
 use crate::network::response::GetSettledWavesResponse;
 use crate::{BlockHash, BlockHeight, MessageClass, NetworkMessage, Request};
 
-/// Request the settled-wave reveal for one committed block of a
-/// terminated shard's tail chain.
+/// Request a terminated shard's complete settled-wave window list,
+/// anchored at its terminal block.
 #[derive(Debug, Clone, PartialEq, Eq, BasicSbor)]
 pub struct GetSettledWavesRequest {
-    /// Height of the block whose certificates the requester wants
-    /// revealed.
-    pub height: BlockHeight,
-    /// Expected hash of that block. The requester learns it from the
-    /// beacon-attested terminal anchor (for B) or the previous block's
-    /// `parent_block_hash` (walking back); the server serves by height
-    /// and the requester rejects a hash mismatch.
-    pub block_hash: BlockHash,
+    /// Height of the terminal block `B` the window ends at.
+    pub terminal_height: BlockHeight,
+    /// Expected hash of `B` — the beacon-attested terminal the requester
+    /// reads from its fold. The server resolves `B` by height and answers
+    /// `not_found` on a hash mismatch.
+    pub terminal_block_hash: BlockHash,
 }
 
 impl GetSettledWavesRequest {
-    /// Request the reveal for the block at `height` whose hash the
-    /// requester expects to be `block_hash`.
+    /// Request the settled-wave window ending at terminal block
+    /// `(terminal_height, terminal_block_hash)`.
     #[must_use]
-    pub const fn new(height: BlockHeight, block_hash: BlockHash) -> Self {
-        Self { height, block_hash }
+    pub const fn new(terminal_height: BlockHeight, terminal_block_hash: BlockHash) -> Self {
+        Self {
+            terminal_height,
+            terminal_block_hash,
+        }
     }
 }
 
@@ -51,7 +53,7 @@ impl Request for GetSettledWavesRequest {
     type Response = GetSettledWavesResponse;
 
     fn is_empty_response(response: &Self::Response) -> bool {
-        response.reveal.is_none()
+        response.waves.is_none()
     }
 }
 

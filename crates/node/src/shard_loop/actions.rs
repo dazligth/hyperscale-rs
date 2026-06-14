@@ -114,17 +114,19 @@ where
                 source_shard,
                 target,
             } => self.process_start_remote_header_sync(source_shard, target),
-            Action::StartSettledSetSync {
+            Action::StartSettledWavesAcquisition {
                 shard,
                 terminal_height,
                 terminal_block_hash,
                 terminal_wt,
+                attested_root,
                 peers,
-            } => self.process_start_settled_set_sync(
+            } => self.process_start_settled_waves_acquisition(
                 shard,
                 terminal_height,
                 terminal_block_hash,
                 terminal_wt,
+                attested_root,
                 peers,
             ),
             Action::Fetch(req) => self.process_fetch_request(req),

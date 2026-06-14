@@ -21,7 +21,7 @@ pub use finalized_wave::GetFinalizedWavesResponse;
 pub use local_provision::{GetLocalProvisionsResponse, LocalProvisionEntry};
 pub use provision::GetProvisionResponse;
 pub use remote_header::GetRemoteHeadersResponse;
-pub use settled_waves::{GetSettledWavesResponse, SettledWavesReveal};
+pub use settled_waves::GetSettledWavesResponse;
 pub use state_range::{
     GetStateRangeResponse, MAX_LEAVES_PER_STATE_RANGE, StateRangeChunk, StateRangeLeaf,
 };

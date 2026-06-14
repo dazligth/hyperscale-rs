@@ -288,6 +288,27 @@ impl TopologySchedule {
         }
     }
 
+    /// The weighted timestamp at which `shard` terminated — the end of the
+    /// newest retained window that still carried it — or `None` when the
+    /// shard is live in the head or absent from every retained window.
+    ///
+    /// A terminated split parent leaves the head trie but lingers in recent
+    /// windows until its drain horizon; this returns its terminal cut,
+    /// which bounds the split-boundary fence's retention cutoff and the
+    /// settled-waves acquisition's self-expiry.
+    #[must_use]
+    pub fn terminal_cut_wt(&self, shard: ShardId) -> Option<WeightedTimestamp> {
+        if self.head.shard_trie().contains(shard) {
+            return None;
+        }
+        let windows = self.windows();
+        self.by_epoch
+            .iter()
+            .rev()
+            .find(|(_, snapshot)| snapshot.shard_trie().contains(shard))
+            .map(|(epoch, _)| windows.window_of(*epoch).end)
+    }
+
     /// Whether `shard` splits into its two children at the end of `wt`'s
     /// epoch window — [`Children`](SplitAtBoundary::Children) exactly
     /// when `wt` falls in the splitting shard's final epoch, resolved by

@@ -18,9 +18,9 @@ use std::sync::Arc;
 use hyperscale_core::{CommitSource, ProtocolEvent};
 use hyperscale_types::{
     BeaconWitnessCommit, BlockHash, BlockHeight, Bls12381G1PublicKey, Bls12381G2Signature,
-    CertifiedBeaconBlock, CertifiedBlock, CertifiedBlockHeader, ElidedCertifiedBlock, Epoch,
-    HeaderFetchCount, LeafIndex, ProvisionHash, RoutableTransaction, SettledWavesReveal, ShardId,
-    TxHash, ValidatorId, Verifiable, Verified, WaveId,
+    BoundedVec, CertifiedBeaconBlock, CertifiedBlock, CertifiedBlockHeader, ElidedCertifiedBlock,
+    Epoch, HeaderFetchCount, LeafIndex, MAX_FINALIZED_TX_PER_BLOCK, ProvisionHash,
+    RoutableTransaction, ShardId, TxHash, ValidatorId, Verifiable, Verified, WaveId,
 };
 
 use crate::shard_io::block_commit::QcOnlyDivergence;
@@ -247,21 +247,21 @@ pub enum ShardScopedInput {
         kind: FetchFailureKind,
     },
 
-    /// Settled-waves reveal for a past-terminal shard's reconstruction,
-    /// `None` when the peer didn't hold the height. Boxed: the reveal
-    /// carries a full certified header, which would otherwise inflate
-    /// every other queued `ShardScopedInput`.
+    /// A past-terminal shard's complete settled-wave window list, `None`
+    /// when the peer didn't hold the terminal block. The acquisition host
+    /// verifies it against the beacon-attested root before recording.
     SettledWavesResponseReceived {
-        /// The terminated shard being reconstructed.
+        /// The terminated shard being acquired.
         source_shard: ShardId,
-        /// One block's settled-waves reveal, or `None` for `not_found`.
-        reveal: Option<Box<SettledWavesReveal>>,
+        /// The shard's complete settled-wave window list, or `None` for
+        /// `not_found`.
+        waves: Option<BoundedVec<WaveId, MAX_FINALIZED_TX_PER_BLOCK>>,
     },
 
     /// Settled-waves fetch failed at the transport level. The driver
     /// re-arms and the next `FetchTick` retries against a rotated peer.
     SettledWavesFetchFailed {
-        /// The terminated shard being reconstructed.
+        /// The terminated shard being acquired.
         source_shard: ShardId,
     },
 

@@ -684,8 +684,8 @@ pub enum ProtocolEvent {
         height: BlockHeight,
     },
 
-    /// The `io_loop`'s settled-set driver finished reconstructing a
-    /// past-terminal shard's settled-wave set (see `SettledSetBuilder`).
+    /// The `io_loop`'s settled-waves acquisition verified a past-terminal
+    /// shard's complete settled-wave set against its beacon-attested root.
     /// `ShardCoordinator` records it for the split-boundary fence and
     /// re-drives any votes that deferred for want of it.
     SettledWavesReconstructed {

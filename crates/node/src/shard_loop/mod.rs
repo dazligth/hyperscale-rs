@@ -404,9 +404,9 @@ where
             }
             ShardScopedInput::SettledWavesResponseReceived {
                 source_shard,
-                reveal,
+                waves,
             } => {
-                self.handle_settled_waves_response_received(source_shard, reveal.map(|r| *r));
+                self.handle_settled_waves_response_received(source_shard, waves);
             }
             ShardScopedInput::SettledWavesFetchFailed { source_shard } => {
                 self.handle_settled_waves_fetch_failed(source_shard);

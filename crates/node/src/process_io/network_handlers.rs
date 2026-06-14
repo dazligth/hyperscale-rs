@@ -1012,12 +1012,12 @@ pub fn register_shard_request_handlers<S, N, D>(
             serve_shard_witnesses_request(&pending_chain, &req)
         });
 
-    // ── settled_waves.request → committed-block settled-wave reveal ──
+    // ── settled_waves.request → terminated-shard settled window list ──
     //
-    // A counterpart reconstructing this shard's settled set across a
-    // split boundary walks the tail chain backward; each request reveals
-    // one block's certificates' wave-ids, verifiable against the header's
-    // certificate root.
+    // A counterpart resolving this shard's settled set across a split
+    // boundary names its terminal block; we serve the complete settled-wave
+    // window list, which the counterpart accepts against the beacon-attested
+    // settled-waves root.
     let pending_chain = Arc::clone(&io.pending_chain);
     process
         .network
