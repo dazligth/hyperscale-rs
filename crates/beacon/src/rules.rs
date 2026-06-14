@@ -12,8 +12,8 @@
 use std::collections::BTreeMap;
 
 use hyperscale_types::{
-    BeaconBlock, BeaconProposal, BeaconState, BlockHeader, MAX_WITNESSES_PER_SHARD,
-    QuorumCertificate, ShardId, ShardWitness, Verifiable, is_epoch_crossing,
+    BeaconBlock, BeaconProposal, BeaconState, BlockHeader, EpochWindows, MAX_WITNESSES_PER_SHARD,
+    QuorumCertificate, ShardId, ShardWitness, Verifiable,
 };
 
 /// Witness chunk bounds for one shard's boundary: `prior` is the applied
@@ -114,17 +114,16 @@ pub(crate) fn canonical_boundary_qcs<'a>(
 /// Whether `boundary_header` is the first block across the epoch cut `qc`
 /// attests: its predecessor sits at or before the largest epoch boundary
 /// below the block's own weighted timestamp (`qc.wt`). Pure over the
-/// chain's epoch duration — the fold applies the same test.
+/// chain's epoch windows — the fold applies the same test.
 #[must_use]
 pub(crate) fn is_boundary_crossing(
     boundary_header: &BlockHeader,
     qc: &QuorumCertificate,
-    epoch_duration_ms: u64,
+    windows: EpochWindows,
 ) -> bool {
-    is_epoch_crossing(
+    windows.is_crossing(
         boundary_header.parent_qc().weighted_timestamp(),
         qc.weighted_timestamp(),
-        epoch_duration_ms,
     )
 }
 
@@ -148,11 +147,11 @@ pub(crate) fn contributions_well_formed(state: &BeaconState, block: &BeaconBlock
     if contributions.len() != canonical.len() {
         return false;
     }
-    let dur = state.chain_config.epoch_duration_ms;
+    let windows = state.chain_config.epoch_windows();
     canonical.into_iter().all(|(shard, qc)| {
         contributions.get(&shard).is_some_and(|contribution| {
             let header = &contribution.boundary_header;
-            if header.hash() != qc.block_hash() || !is_boundary_crossing(header, qc, dur) {
+            if header.hash() != qc.block_hash() || !is_boundary_crossing(header, qc, windows) {
                 return false;
             }
             let (prior, chunk_end) = witness_chunk_bounds(state, shard, header);

@@ -14,7 +14,10 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::{Epoch, ReshapeThresholds, ShardId, TopologySnapshot, ValidatorId, WeightedTimestamp};
+use crate::{
+    Epoch, EpochWindows, ReshapeThresholds, ShardId, TopologySnapshot, ValidatorId,
+    WeightedTimestamp,
+};
 
 /// Per-shard committees for request **routing**, terminal-clamped.
 ///
@@ -138,6 +141,14 @@ impl TopologySchedule {
         self.epoch_duration_ms
     }
 
+    /// The schedule's epoch-window grid — for callers that need
+    /// [`window_of`](EpochWindows::window_of) or the crossing predicates, not
+    /// just the [`epoch_for`](Self::epoch_for) lookup the schedule itself uses.
+    #[must_use]
+    pub const fn windows(&self) -> EpochWindows {
+        EpochWindows::new(self.epoch_duration_ms)
+    }
+
     /// A schedule of one committee for all time: every weighted timestamp
     /// resolves to `snapshot`, and it is also the head. Used by tests and by
     /// within-epoch callers that hold a single committee.
@@ -160,10 +171,7 @@ impl TopologySchedule {
     /// every timestamp to genesis.
     #[must_use]
     pub const fn epoch_for(&self, wt: WeightedTimestamp) -> Epoch {
-        match wt.as_millis().checked_div(self.epoch_duration_ms) {
-            Some(epoch) => Epoch::new(epoch),
-            None => Epoch::GENESIS,
-        }
+        self.windows().epoch_for(wt)
     }
 
     /// Committee that signed an artifact attested at `wt` — exact, for

@@ -170,7 +170,7 @@ fn boundary_qc_admissible(
         return false;
     };
     boundary_qc_authentic(shard, header, qc, topology, network)
-        && rules::is_boundary_crossing(header, qc, state.chain_config.epoch_duration_ms)
+        && rules::is_boundary_crossing(header, qc, state.chain_config.epoch_windows())
 }
 
 /// The locally-held header for `block_hash` in `shard`, via the

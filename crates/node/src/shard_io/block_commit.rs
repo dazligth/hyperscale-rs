@@ -25,9 +25,9 @@ use hyperscale_dispatch::{Dispatch, DispatchPool};
 use hyperscale_metrics::{record_block_committed, set_block_height};
 use hyperscale_storage::{ChainEntry, PendingChain, ShardChainWriter, ShardStorage};
 use hyperscale_types::{
-    BeaconWitnessCommit, BlockHash, BlockHeight, CertifiedBlock, ConsensusReceipt, FinalizedWave,
-    LocalTimestamp, PreparedCommit, ShardId, StateRoot, SyncHint, Verifiable, Verified,
-    WeightedTimestamp, is_epoch_crossing,
+    BeaconWitnessCommit, BlockHash, BlockHeight, CertifiedBlock, ConsensusReceipt, EpochWindows,
+    FinalizedWave, LocalTimestamp, PreparedCommit, ShardId, StateRoot, SyncHint, Verifiable,
+    Verified, WeightedTimestamp,
 };
 use tracing::debug;
 
@@ -730,11 +730,8 @@ impl BlockCommitCoordinator {
                 let parent_qc = block.header().parent_qc();
                 if let Some(last) = trigger.last
                     && parent_qc.block_hash() == last.hash
-                    && is_epoch_crossing(
-                        last.parent_qc_wt,
-                        parent_qc.weighted_timestamp(),
-                        trigger.epoch_duration_ms,
-                    )
+                    && EpochWindows::new(trigger.epoch_duration_ms)
+                        .is_crossing(last.parent_qc_wt, parent_qc.weighted_timestamp())
                 {
                     pin_before[i] = Some(last.height);
                 }

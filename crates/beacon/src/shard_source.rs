@@ -19,8 +19,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use hyperscale_types::{
-    BlockHash, BlockHeader, BlockHeight, CertifiedBlockHeader, Epoch, LeafIndex, QuorumCertificate,
-    ShardId, ShardWitness, Verified,
+    BlockHash, BlockHeader, BlockHeight, CertifiedBlockHeader, Epoch, EpochWindows, LeafIndex,
+    QuorumCertificate, ShardId, ShardWitness, Verified,
 };
 
 /// How many recent epoch-boundary crossings to retain per shard. The
@@ -289,6 +289,7 @@ impl ShardSourceTracker {
         height: BlockHeight,
         epoch_duration_ms: u64,
     ) {
+        let windows = EpochWindows::new(epoch_duration_ms);
         let found: Vec<(Epoch, ObservedCrossing)> = {
             let Some(headers) = self.shard_headers.get(&shard) else {
                 return;
@@ -299,7 +300,7 @@ impl ShardSourceTracker {
                 .filter_map(|(b_height, c_height)| {
                     let b = headers.get(&b_height?)?;
                     let c = headers.get(&c_height)?;
-                    detect_crossing(b, c, epoch_duration_ms)
+                    detect_crossing(b, c, windows)
                 })
                 .collect()
         };
@@ -386,32 +387,23 @@ impl ShardSourceTracker {
 fn detect_crossing(
     b: &Arc<Verified<CertifiedBlockHeader>>,
     c: &Arc<Verified<CertifiedBlockHeader>>,
-    epoch_duration_ms: u64,
+    windows: EpochWindows,
 ) -> Option<(Epoch, ObservedCrossing)> {
-    if epoch_duration_ms == 0 {
-        return None;
-    }
     let canonical_qc = c.header().parent_qc();
     if canonical_qc.block_hash() != b.block_hash() {
         return None;
     }
-    let b_wt = canonical_qc.weighted_timestamp().as_millis();
-    let b_pred_wt = b.header().parent_qc().weighted_timestamp().as_millis();
-    // The largest epoch boundary strictly below `b`'s weighted timestamp.
-    let k = b_wt.checked_sub(1)? / epoch_duration_ms;
-    if k == 0 {
-        return None;
-    }
-    let cut = k * epoch_duration_ms;
-    (b_pred_wt <= cut).then(|| {
-        (
-            Epoch::new(k),
-            ObservedCrossing {
-                boundary_header: Arc::clone(b),
-                canonical_qc: canonical_qc.clone(),
-            },
-        )
-    })
+    let epoch = windows.crossing_epoch(
+        b.header().parent_qc().weighted_timestamp(),
+        canonical_qc.weighted_timestamp(),
+    )?;
+    Some((
+        epoch,
+        ObservedCrossing {
+            boundary_header: Arc::clone(b),
+            canonical_qc: canonical_qc.clone(),
+        },
+    ))
 }
 
 // Flat accessors; names are the documentation.

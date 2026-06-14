@@ -10,7 +10,7 @@
 //! the local chains and the beacon disagree and the flip fails closed.
 
 use hyperscale_types::{
-    Block, BlockHeader, ChainOrigin, QuorumCertificate, ShardAnchor, ShardId, WeightedTimestamp,
+    Block, BlockHeader, ChainOrigin, EpochWindows, QuorumCertificate, ShardAnchor, ShardId,
 };
 
 /// Derive a merged parent's genesis block and chain origin from its two
@@ -53,10 +53,11 @@ pub fn merge_genesis_from_terminals(
     // `compose_merge_parent`: the start of the epoch after the children's
     // final one. Both terminals coasted across that boundary, so either
     // QC's weighted timestamp floors to it; any divergence from the
-    // beacon's `(terminal_epoch + 1) * epoch_duration_ms` fails closed at
-    // the genesis-hash check below.
-    let cut_ms = (left_qc.weighted_timestamp().as_millis() / epoch_duration_ms) * epoch_duration_ms;
-    let cut_wt = WeightedTimestamp::from_millis(cut_ms);
+    // beacon's composed cut fails closed at the genesis-hash check below.
+    let windows = EpochWindows::new(epoch_duration_ms);
+    let cut_wt = windows
+        .window_of(windows.epoch_for(left_qc.weighted_timestamp()))
+        .start;
     let genesis = Block::merge_parent_genesis(
         parent,
         anchor.state_root,

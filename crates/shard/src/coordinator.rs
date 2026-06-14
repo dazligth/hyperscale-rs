@@ -681,14 +681,10 @@ impl ShardCoordinator {
         let now_wt = self.tip_anchor_ts();
         match topology.split_at_next_boundary(self.local_shard, now_wt) {
             SplitAtBoundary::Children(..) => {
-                let epoch = topology.epoch_for(now_wt);
-                let cut_ms = epoch
-                    .inner()
-                    .saturating_add(1)
-                    .saturating_mul(topology.epoch_duration_ms());
+                let windows = topology.windows();
                 Some(QuiesceCut {
                     now_wt,
-                    cut_wt: WeightedTimestamp::from_millis(cut_ms),
+                    cut_wt: windows.window_of(windows.epoch_for(now_wt)).end,
                 })
             }
             SplitAtBoundary::No | SplitAtBoundary::Unresolved => None,

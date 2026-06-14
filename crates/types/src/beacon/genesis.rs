@@ -14,9 +14,9 @@ use blake3::Hasher;
 use sbor::prelude::*;
 
 use crate::{
-    BEACON_SIGNER_COUNT, Bls12381G1PublicKey, EPOCH_DURATION, GenesisConfigHash, Hash,
-    NetworkDefinition, Randomness, ReshapeThresholds, SHARD_CAPACITY, ShardId, Stake, StakePoolId,
-    ValidatorId,
+    BEACON_SIGNER_COUNT, Bls12381G1PublicKey, EPOCH_DURATION, EpochWindows, GenesisConfigHash,
+    Hash, NetworkDefinition, Randomness, ReshapeThresholds, SHARD_CAPACITY, ShardId, Stake,
+    StakePoolId, ValidatorId,
 };
 
 /// Domain tag for the genesis-config hash. Binds the digest to "beacon
@@ -54,6 +54,14 @@ impl BeaconChainConfig {
     #[must_use]
     pub const fn epoch_duration(&self) -> Duration {
         Duration::from_millis(self.epoch_duration_ms)
+    }
+
+    /// The chain's epoch-window grid — the single home for every
+    /// weighted-timestamp-to-epoch and boundary-crossing computation the fold
+    /// performs.
+    #[must_use]
+    pub const fn epoch_windows(&self) -> EpochWindows {
+        EpochWindows::new(self.epoch_duration_ms)
     }
 }
 

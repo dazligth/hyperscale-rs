@@ -7,9 +7,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use hyperscale_types::{
     BeaconCert, BeaconProposal, BeaconState, BeaconWitnessLeafCount, BlockHash, BlockHeader,
-    CertifiedBeaconBlock, Epoch, KeptSeat, NetworkDefinition, ObserverSeat, PendingReshape,
-    QuorumCertificate, ShardBoundary, ShardEpochContribution, ShardId, SlotEffects, SplitAdoption,
-    SplitChildRoots, TransitionCause, ValidatorId, ValidatorStatus, WeightedTimestamp,
+    CertifiedBeaconBlock, Epoch, EpochWindows, KeptSeat, NetworkDefinition, ObserverSeat,
+    PendingReshape, QuorumCertificate, ShardBoundary, ShardEpochContribution, ShardId, SlotEffects,
+    SplitAdoption, SplitChildRoots, TransitionCause, ValidatorId, ValidatorStatus,
 };
 
 use crate::rules::{canonical_boundary_qcs, chunk_bounds, is_boundary_crossing};
@@ -399,7 +399,7 @@ fn record_boundaries(
     committed: &[(ValidatorId, BeaconProposal)],
     shard_contributions: &BTreeMap<ShardId, ShardEpochContribution>,
 ) -> WitnessOutcome {
-    let dur = state.chain_config.epoch_duration_ms;
+    let windows = state.chain_config.epoch_windows();
     // Bind each contribution to its shard's canonical committed QC — the
     // same selection the receiver's `contributions_well_formed` gate
     // applied — so the fold and the verifier never diverge on which QC
@@ -427,7 +427,7 @@ fn record_boundaries(
         // Require a genuine epoch crossing: the boundary block is the first
         // block across some epoch boundary, so its predecessor sits at or
         // before the cut.
-        if !is_boundary_crossing(header, qc, dur) {
+        if !is_boundary_crossing(header, qc, windows) {
             continue;
         }
         // Chunk math (0-based, count-aligned): `prior` is the applied
@@ -476,7 +476,7 @@ fn record_boundaries(
         // witness backlog has fully drained, but a merge child holds while
         // its parent is still pending so the composition can read its root.
         if let Some(t) = terminal_epoch
-            && epoch_of_wt(qc.weighted_timestamp(), dur) > t
+            && windows.epoch_for(qc.weighted_timestamp()) > t
         {
             let fully_drained = chunk_end == boundary_count;
             if header.split_child_roots().is_some() {
@@ -507,17 +507,9 @@ fn record_boundaries(
     // Compose any merge parent whose two children both delivered their
     // terminal contribution this fold, after the miss bump so the freshly
     // composed anchor starts clean.
-    compose_merge_parents(state, epoch, dur, &terminal_recorded);
+    compose_merge_parents(state, epoch, windows, &terminal_recorded);
 
     outcome
-}
-
-/// Epoch whose window contains `wt` (the fold-side mirror of
-/// `TopologySchedule::epoch_for`).
-fn epoch_of_wt(wt: WeightedTimestamp, epoch_duration_ms: u64) -> Epoch {
-    wt.as_millis()
-        .checked_div(epoch_duration_ms)
-        .map_or(Epoch::GENESIS, Epoch::new)
 }
 
 /// Seed a terminated parent's pending children from its terminal header.
@@ -607,7 +599,7 @@ fn merge_parent_pending(state: &BeaconState, shard: ShardId) -> bool {
 fn compose_merge_parents(
     state: &mut BeaconState,
     epoch: Epoch,
-    epoch_duration_ms: u64,
+    windows: EpochWindows,
     terminal_recorded: &BTreeSet<ShardId>,
 ) {
     let mut parents: BTreeSet<ShardId> = BTreeSet::new();
@@ -630,7 +622,7 @@ fn compose_merge_parents(
         }
     }
     for parent in parents {
-        compose_merge_parent(state, parent, epoch, epoch_duration_ms);
+        compose_merge_parent(state, parent, epoch, windows);
     }
 }
 
@@ -638,7 +630,7 @@ fn compose_merge_parent(
     state: &mut BeaconState,
     parent: ShardId,
     epoch: Epoch,
-    epoch_duration_ms: u64,
+    windows: EpochWindows,
 ) {
     let (left, right) = parent.children();
     let left_b = state.boundaries[&left];
@@ -649,9 +641,7 @@ fn compose_merge_parent(
     let terminal_epoch = left_b
         .terminal_epoch
         .expect("filtered as a recorded terminal");
-    let cut_wt = WeightedTimestamp::from_millis(
-        (terminal_epoch.inner() + 1).saturating_mul(epoch_duration_ms),
-    );
+    let cut_wt = windows.window_of(terminal_epoch).end;
     let composed = SplitChildRoots {
         left: left_b.state_root,
         right: right_b.state_root,

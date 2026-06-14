@@ -161,15 +161,14 @@ pub use signing::{
     vrf_output_from_proof, vrf_reveal_message, vrf_sign, vrf_verify,
 };
 pub use state_key::{MAX_STATE_ENTRY_KEY_LEN, MAX_STATE_ENTRY_VALUE_LEN};
+pub use time::epoch_windows::EpochWindows;
 pub use time::limits::{MAX_TIMESTAMP_DELAY, MAX_TIMESTAMP_RUSH};
 pub use time::range::{MAX_VALIDITY_RANGE, TimestampRange};
 pub use time::timeouts::{
     EPOCH_DURATION, MAX_PROGRESS_WAIT, REMOTE_HEADER_RETENTION, RETENTION_HORIZON, SKIP_TIMEOUT,
     VIEW_CHANGE_TIMEOUT, VIEW_CHANGE_TIMEOUT_INCREMENT, VIEW_CHANGE_TIMEOUT_MAX, WAVE_TIMEOUT,
 };
-pub use time::timestamp::{
-    LocalTimestamp, ProposerTimestamp, WeightedTimestamp, is_epoch_crossing,
-};
+pub use time::timestamp::{LocalTimestamp, ProposerTimestamp, WeightedTimestamp};
 pub use topology::awaiting::AwaitingTopologyBuffer;
 pub use topology::schedule::{
     QuiesceCut, RoutingCommittees, ScheduleLookup, SplitAtBoundary, TopologySchedule,

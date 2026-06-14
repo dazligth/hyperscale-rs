@@ -75,11 +75,8 @@ pub fn retention_floor(
     local_frontier: WeightedTimestamp,
     now: LocalTimestamp,
 ) -> Epoch {
-    let epoch_of = |ms: u64| {
-        ms.checked_div(state.chain_config.epoch_duration_ms)
-            .map_or(Epoch::GENESIS, Epoch::new)
-    };
-    let local_chain = epoch_of(local_frontier.as_millis());
+    let windows = state.chain_config.epoch_windows();
+    let local_chain = windows.epoch_for(local_frontier);
     let shard_boundaries = state
         .shard_committees
         .keys()
@@ -90,10 +87,10 @@ pub fn retention_floor(
         })
         .min()
         .unwrap_or(Epoch::GENESIS);
-    let horizon = epoch_of(
+    let horizon = windows.epoch_for(WeightedTimestamp::from_millis(
         now.as_millis()
             .saturating_sub(RETENTION_HORIZON.as_secs() * 1000),
-    );
+    ));
     local_chain
         .min(shard_boundaries)
         .min(horizon)
@@ -335,19 +332,20 @@ impl BeaconCoordinator {
         ]
     }
 
-    /// Wall-clock boundary of the upcoming epoch —
-    /// `next_epoch × chain_config.epoch_duration_ms`. The beacon starts the
-    /// next epoch's SPC only once `now` reaches this, so its synthetic
-    /// per-epoch clock (`epoch × epoch_duration_ms`) tracks wall-clock instead
-    /// of racing ahead at SPC-round speed.
+    /// Wall-clock boundary of the upcoming epoch — the close of the current
+    /// epoch's window. The beacon starts the next epoch's SPC only once `now`
+    /// reaches this, so its synthetic per-epoch clock tracks wall-clock
+    /// instead of racing ahead at SPC-round speed. The window's weighted-time
+    /// cut is the same instant on this validator's local clock — the synthetic
+    /// beacon clock is anchored to `epoch × epoch_duration_ms`.
     const fn next_epoch_boundary(&self) -> LocalTimestamp {
-        LocalTimestamp::from_millis(
-            self.state
-                .current_epoch
-                .next()
-                .inner()
-                .saturating_mul(self.state.chain_config.epoch_duration_ms),
-        )
+        let cut = self
+            .state
+            .chain_config
+            .epoch_windows()
+            .window_of(self.state.current_epoch)
+            .end;
+        LocalTimestamp::from_millis(cut.as_millis())
     }
 
     /// Wall-clock duration from `now` to [`Self::next_epoch_boundary`].
@@ -2081,8 +2079,13 @@ mod tests {
     /// Advance `coord`'s clock past the next epoch's skip deadline so
     /// skip-request intake and admission accept requests.
     fn pass_skip_deadline(coord: &mut BeaconCoordinator) {
-        let next = coord.current_state().current_epoch.next().inner();
-        let boundary = next * coord.current_state().chain_config.epoch_duration_ms;
+        let state = coord.current_state();
+        let boundary = state
+            .chain_config
+            .epoch_windows()
+            .window_of(state.current_epoch)
+            .end
+            .as_millis();
         let timeout_ms: u64 = SKIP_TIMEOUT
             .as_millis()
             .try_into()
