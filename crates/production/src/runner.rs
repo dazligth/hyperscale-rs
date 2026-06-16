@@ -1260,6 +1260,10 @@ fn build_network_stack(args: NetworkBuildArgs) -> Result<NetworkStack, RunnerErr
         args.local_shards.iter().copied().collect(),
     ));
 
+    // Read before the config is moved into the adapter; applied uniformly to
+    // every outbound send path so test clusters pace to a simulated RTT.
+    let simulated_outbound_latency = args.network_config.simulated_outbound_latency;
+
     let adapter = Libp2pAdapter::new(
         args.network_config,
         args.network,
@@ -1273,6 +1277,7 @@ fn build_network_stack(args: NetworkBuildArgs) -> Result<NetworkStack, RunnerErr
     let request_pool = Arc::new(RequestStreamPool::new(
         adapter.clone(),
         TokioHandle::current(),
+        simulated_outbound_latency,
     ));
     let request_manager = Arc::new(RequestManager::new(
         request_pool,
@@ -1285,6 +1290,7 @@ fn build_network_stack(args: NetworkBuildArgs) -> Result<NetworkStack, RunnerErr
         TokioHandle::current(),
         registry,
         args.topology,
+        simulated_outbound_latency,
     );
 
     Ok(NetworkStack {

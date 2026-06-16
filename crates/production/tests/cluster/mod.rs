@@ -48,6 +48,15 @@ const LISTEN_ADDR_TIMEOUT: Duration = Duration::from_secs(5);
 /// Cadence for the `await_*` observation polls.
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
+/// Simulated one-way inter-host RTT injected on every outbound libp2p send.
+/// Zero-latency localhost lets a loadless committee form quorum certificates
+/// dozens of times a second — far faster than any real deployment — which
+/// floods this single-process harness and lags the consensus clock behind
+/// wall-clock. Pacing each send to a realistic delay throttles quorum
+/// formation to a few blocks a second so the beacon clock tracks wall-clock
+/// and reshape duties seat inside the real-time budget.
+const SIMULATED_OUTBOUND_LATENCY: Duration = Duration::from_millis(60);
+
 /// Graceful-shutdown budget per host on teardown.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -466,6 +475,7 @@ fn build_host(args: BuildHostArgs<'_>) -> BuiltHost {
     let network_config = Libp2pConfig {
         listen_addresses: vec!["/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()],
         bootstrap_peers: args.bootstrap_peers,
+        simulated_outbound_latency: SIMULATED_OUTBOUND_LATENCY,
         ..Default::default()
     };
 

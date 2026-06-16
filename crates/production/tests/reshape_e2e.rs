@@ -130,7 +130,7 @@ async fn beacon_chain_config_reaches_genesis() {
 /// explicitly with `--ignored`.
 #[tokio::test]
 #[serial]
-#[ignore = "real-time split e2e: the beacon now executes the split (gate fires, trie reshapes, child placement + observer flips dispatch), but on the loadless cluster ROOT proposes empty blocks unthrottled and races, lagging the consensus clock behind wall-clock so the children miss the real-time seating budget; needs proposer idle-block pacing"]
+#[ignore = "real-time split e2e: the simulated network latency now paces ROOT so the gate fires early and both children seat from the composed anchors, but the freshly seated children stall at their genesis — only the round proposer's coordinator runs while the other committee members receive no child consensus messages (a production-only runtime-joined-shard delivery gap the sim never hits). Stays ignored until that is fixed"]
 async fn split_seats_both_children_from_composed_anchors() {
     let _ = fmt().with_test_writer().try_init();
 
@@ -148,21 +148,20 @@ async fn split_seats_both_children_from_composed_anchors() {
         ..BeaconChainConfig::default()
     };
 
-    // Seat the full validator set one committee + one surplus validator
-    // per host, across four hosts — so every drawn cohort member is live
-    // on some host and the committee spans distinct libp2p peers (a
-    // proposer's gossip reaches its voters; same-peer vnodes never receive
-    // their own host's broadcast). All eight start on ROOT; the surplus
-    // are passive followers there until drawn as observers.
+    // Seat the full validator set one validator per host, across eight
+    // hosts — so every drawn cohort member is live on some host and every
+    // seat owns its own libp2p peer and storage directory. The latter
+    // matters at the flip: a child's parent-half adoption checkpoints into
+    // its own dir while a colocated observer would still hold that dir's
+    // store open, so packing both seats of one child onto a host would
+    // collide on the per-directory store lock. One vnode per host keeps
+    // each adoption and observer flip on its own store. All eight start on
+    // ROOT; the surplus are passive followers there until drawn as
+    // observers.
     let cluster = Cluster::start(ClusterSpec {
         topology: fixtures.topology(),
-        hosts: (0..4)
-            .map(|h| {
-                HostSpec::new(vec![
-                    vnode(&fixtures, h, parent),
-                    vnode(&fixtures, h + 4, parent),
-                ])
-            })
+        hosts: (0..8)
+            .map(|v| HostSpec::new(vec![vnode(&fixtures, v, parent)]))
             .collect(),
         beacon_chain_config: chain_config,
         genesis_config: None,
