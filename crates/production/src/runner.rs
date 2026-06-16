@@ -1052,7 +1052,6 @@ impl ProductionRunner {
                     let own_child = if sibling == left { right } else { left };
                     supervisor.handle(ShardCommand::Keep {
                         parent,
-                        sibling,
                         own_child,
                         validator: change.validator,
                         signing_key: Arc::clone(signing_key),
@@ -1065,7 +1064,10 @@ impl ProductionRunner {
                 }
             }
             Some(KeepDelta::Abandon { parent }) => {
-                supervisor.handle(ShardCommand::Unkeep { parent });
+                supervisor.handle(ShardCommand::Unkeep {
+                    parent,
+                    validator: change.validator,
+                });
             }
             None => {}
         }

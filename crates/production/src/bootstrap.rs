@@ -16,10 +16,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use hyperscale_network::{Network, RequestError, ResponseVerdict};
-use hyperscale_node::SharedTopologySnapshot;
 use hyperscale_node::bootstrap::observer::{ObserverBootstrap, ObserverTail, TailOutcome};
 use hyperscale_node::bootstrap::split_flip::split_genesis_from_terminal;
 use hyperscale_node::bootstrap::{BootstrapOutcome, BootstrapRequest, ShardBootstrap};
+use hyperscale_node::{SharedTopologySnapshot, serve_state_range_request};
 use hyperscale_storage::{ImportLeaf, RecoveredState, ShardStorage};
 use hyperscale_types::network::request::GetBlockRequest;
 use hyperscale_types::{
@@ -183,6 +183,61 @@ where
             } else {
                 fruitless = 0;
             }
+        }
+    }
+}
+
+/// Collect a locally hosted shard's full leaf set at its
+/// beacon-attested anchor, serving every state range from `storage`
+/// directly. A merge keeper runs its own child to that child's terminal
+/// block, so it reads that half from the store it already holds rather
+/// than syncing it back over the network — no transport, no committee
+/// round-trips, so the keeper's heaviest half never competes with the
+/// concurrent sibling syncs at the boundary. Mirrors
+/// [`collect_half_leaves`]; an empty half collects an empty set.
+///
+/// # Errors
+///
+/// Returns a description when the store no longer pins the anchor
+/// boundary (so a state range can't be served); the caller falls back
+/// to a network sync.
+pub fn collect_half_leaves_local<S>(
+    storage: &Arc<S>,
+    shard: ShardId,
+    anchor: ShardAnchor,
+) -> Result<Vec<ImportLeaf>, String>
+where
+    S: ShardStorage,
+{
+    let mut bootstrap = ShardBootstrap::new(shard, anchor);
+    loop {
+        if let Some((_, leaves)) = bootstrap.take_import() {
+            return Ok(leaves);
+        }
+        if bootstrap.is_complete() {
+            return Ok(Vec::new());
+        }
+        // Leaf collection returns at the import, before `on_imported`
+        // opens the witness phase, so the sequencer only ever wants
+        // state ranges here.
+        let mut progressed = false;
+        for request in bootstrap.next_requests() {
+            let BootstrapRequest::StateRange(id, request) = request else {
+                unreachable!("leaf collection stays in the state phase");
+            };
+            let response = serve_state_range_request(storage, &request);
+            if matches!(
+                bootstrap.on_state_range(id, &response),
+                BootstrapOutcome::Accepted
+            ) {
+                progressed = true;
+            }
+        }
+        if !progressed {
+            return Err(format!(
+                "local leaf collection for {shard:?} stalled; boundary {} no longer pinned",
+                anchor.height.inner()
+            ));
         }
     }
 }
