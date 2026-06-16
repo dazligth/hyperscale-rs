@@ -18,28 +18,37 @@
 #![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use hex::encode as hex_encode;
 use hyperscale_engine::GenesisConfig;
 use hyperscale_network_libp2p::{Libp2pAdapter, Libp2pConfig};
-use hyperscale_production::rpc::NodeStatusState;
+use hyperscale_node::TxStatusCache;
+use hyperscale_production::rpc::{NodeStatusState, TxSubmissionSender};
 use hyperscale_production::{
     ProductionRunner, RunnerError, ShutdownHandle, StorageDirResolver, StorageFactory, VnodeConfig,
 };
 use hyperscale_shard::ShardConsensusConfig;
-use hyperscale_storage::{BeaconChainReader, BeaconStorage};
+use hyperscale_storage::{BeaconChainReader, BeaconStorage, ShardChainReader};
 use hyperscale_storage_rocksdb::{RocksDbBeaconStorage, RocksDbShardStorage};
 use hyperscale_types::{
-    BeaconChainConfig, BeaconState, Epoch, PendingReshape, ShardId, TopologySnapshot,
-    shard_prefix_path,
+    BeaconChainConfig, BeaconState, BlockHeight, Epoch, PendingReshape, RoutableTransaction,
+    ShardId, TopologySnapshot, TransactionDecision, TransactionStatus, TxHash, shard_prefix_path,
 };
 use libp2p::Multiaddr;
 use tempfile::TempDir;
 use tokio::task::{JoinHandle, spawn};
 use tokio::time::{sleep, timeout};
+
+/// Per-host registry of every `RocksDbShardStorage` the host has opened —
+/// the startup shards plus any the supervisor opens at a reshape flip.
+/// Shared with the live runner (`RocksDB` permits concurrent reads on a
+/// single open handle), so a test scans committed chains and reads byte
+/// totals straight off the same store the consensus threads write into,
+/// no second open and no lock contention.
+pub type StoreRegistry = Arc<Mutex<HashMap<ShardId, Arc<RocksDbShardStorage>>>>;
 
 /// How long to wait for host 0 to surface a listen address before
 /// bootstrapping the rest of the cluster to it.
@@ -67,6 +76,23 @@ pub fn temp_storage_factory(dir: &TempDir) -> StorageFactory {
         RocksDbShardStorage::open(resolve(shard), shard_prefix_path(shard))
             .map(Arc::new)
             .map_err(|e| format!("{e:?}"))
+    })
+}
+
+/// Like [`temp_storage_factory`], but records every opened store into a
+/// shared registry so the harness can scan a runtime-joined shard's chain
+/// (a split child, a merged parent) the same way it scans a startup shard.
+fn capturing_storage_factory(dir: &TempDir, registry: StoreRegistry) -> StorageFactory {
+    let resolve = temp_storage_dir(dir);
+    Arc::new(move |shard: ShardId| {
+        let store = RocksDbShardStorage::open(resolve(shard), shard_prefix_path(shard))
+            .map(Arc::new)
+            .map_err(|e| format!("{e:?}"))?;
+        registry
+            .lock()
+            .expect("store registry")
+            .insert(shard, Arc::clone(&store));
+        Ok(store)
     })
 }
 
@@ -109,11 +135,23 @@ pub struct ClusterSpec {
 }
 
 /// A running host: its network adapter, RPC status slot, beacon store,
-/// and the handles to shut it down and join its runner task.
+/// the live shard-store registry and transaction hooks, and the handles
+/// to shut it down and join its runner task.
 struct Host {
     adapter: Arc<Libp2pAdapter>,
     rpc_status: Arc<ArcSwap<NodeStatusState>>,
     beacon_storage: Arc<RocksDbBeaconStorage>,
+    /// Submit a transaction into this host's process (the production
+    /// analog of the sim's `ProcessScopedInput::SubmitTransaction`): routes
+    /// to the touched shards' mempools, gossiping any it doesn't host.
+    tx_submission: TxSubmissionSender,
+    /// Process-wide status cache — every shard thread on this host records
+    /// its terminal verdict here, the only place a counterpart abort (which
+    /// never lands on-chain) is observable.
+    tx_status: Arc<TxStatusCache>,
+    /// Every `RocksDbShardStorage` this host has opened, shared live with
+    /// the runner for chain scans and byte-total reads.
+    stores: StoreRegistry,
     shutdown: Option<ShutdownHandle>,
     join: JoinHandle<Result<(), RunnerError>>,
 }
@@ -182,6 +220,9 @@ impl Cluster {
                 adapter: bh.adapter,
                 rpc_status: bh.rpc_status,
                 beacon_storage: bh.beacon_storage,
+                tx_submission: bh.tx_submission,
+                tx_status: bh.tx_status,
+                stores: bh.stores,
                 shutdown: Some(shutdown),
                 join,
             });
@@ -438,6 +479,97 @@ impl Cluster {
         });
     }
 
+    /// Submit a transaction into host `idx`'s process — the production
+    /// analog of the sim's `ProcessScopedInput::SubmitTransaction`. The
+    /// process computes the touched-shard fanout and admits onto every
+    /// hosted shard's mempool, gossiping any it doesn't host. Returns
+    /// `false` only when the host is shutting down. Submit through a host
+    /// that runs the transaction's source shard so it admits directly
+    /// rather than relying on a gossip hop.
+    pub fn submit_transaction(&self, idx: usize, tx: Arc<RoutableTransaction>) -> bool {
+        (self.hosts[idx].tx_submission)(tx)
+    }
+
+    /// The terminal verdict host `idx`'s process recorded for `hash`, if
+    /// any. Mirrors the sim's `tx_status`: a counterpart abort never lands
+    /// on-chain, so this status cache is the only place it surfaces.
+    pub fn tx_status(&self, idx: usize, hash: &TxHash) -> Option<TransactionStatus> {
+        self.hosts[idx]
+            .tx_status
+            .get(hash)
+            .map(|(status, _)| status)
+    }
+
+    /// The first host index serving `shard`, if any — used to address a
+    /// transaction's source committee.
+    pub fn host_serving(&self, shard: ShardId) -> Option<usize> {
+        self.hosts
+            .iter()
+            .position(|h| h.adapter.local_shards().contains(&shard))
+    }
+
+    /// A live handle to any host's `RocksDbShardStorage` for `shard`. Every
+    /// committee member commits the same chain, so the first match suffices.
+    fn store_for(&self, shard: ShardId) -> Option<Arc<RocksDbShardStorage>> {
+        self.hosts.iter().find_map(|h| {
+            h.stores
+                .lock()
+                .expect("store registry")
+                .get(&shard)
+                .cloned()
+        })
+    }
+
+    /// Walk `shard`'s committed chain from height 1: the height at which
+    /// `hash` was committed (rides a block's `transactions`) and the height
+    /// plus decision at which it was finalized (rides a `FinalizedWave`
+    /// certificate). The decision matters at a reshape boundary: a
+    /// counterpart abort finalizes the straddler with `Aborted`, which a
+    /// presence-only check would misread as a one-sided apply. Reads straight
+    /// off the live store the runner writes to. `(None, None)` if no host
+    /// serves `shard`.
+    pub fn chain_fate(
+        &self,
+        shard: ShardId,
+        hash: TxHash,
+    ) -> (
+        Option<BlockHeight>,
+        Option<(BlockHeight, TransactionDecision)>,
+    ) {
+        let Some(store) = self.store_for(shard) else {
+            return (None, None);
+        };
+        let mut committed = None;
+        let mut finalized = None;
+        let tip = store.committed_height();
+        let mut height = BlockHeight::new(1);
+        while height <= tip {
+            if let Some(certified) = store.get_block(height) {
+                let block = certified.block();
+                if block.transactions().iter().any(|tx| tx.hash() == hash) {
+                    committed = Some(height);
+                }
+                for fw in block.certificates().iter() {
+                    if let Some((_, decision)) =
+                        fw.tx_decisions().into_iter().find(|(h, _)| *h == hash)
+                    {
+                        finalized = Some((height, decision));
+                    }
+                }
+            }
+            height = height.next();
+        }
+        (committed, finalized)
+    }
+
+    /// The committed JMT byte total `shard` carries at its tip — the input
+    /// to the reshape threshold. Lets a straddle test measure and bracket
+    /// `split_bytes` against the real production genesis rather than guess.
+    pub fn substate_bytes(&self, shard: ShardId) -> Option<u64> {
+        let store = self.store_for(shard)?;
+        store.substate_bytes_at_version(store.committed_height().inner())
+    }
+
     /// Poll `f` every [`POLL_INTERVAL`] until it returns `Some` or
     /// `within` elapses.
     async fn poll<T>(&self, within: Duration, mut f: impl FnMut() -> Option<T>) -> Option<T> {
@@ -473,6 +605,9 @@ struct BuiltHost {
     adapter: Arc<Libp2pAdapter>,
     rpc_status: Arc<ArcSwap<NodeStatusState>>,
     beacon_storage: Arc<RocksDbBeaconStorage>,
+    tx_submission: TxSubmissionSender,
+    tx_status: Arc<TxStatusCache>,
+    stores: StoreRegistry,
 }
 
 struct BuildHostArgs<'a> {
@@ -515,6 +650,10 @@ fn build_host(args: BuildHostArgs<'_>) -> BuiltHost {
         ..Default::default()
     };
 
+    // Seed the registry with the startup stores, then hand the supervisor
+    // a factory that records every reshape-opened store into the same map.
+    let stores: StoreRegistry = Arc::new(Mutex::new(storages.clone()));
+
     let beacon_reader: Arc<dyn BeaconStorage> = beacon_storage.clone();
     let mut builder = ProductionRunner::builder(
         args.vnodes,
@@ -523,7 +662,7 @@ fn build_host(args: BuildHostArgs<'_>) -> BuiltHost {
         storages,
         beacon_reader,
         network_config,
-        temp_storage_factory(args.temp_dir),
+        capturing_storage_factory(args.temp_dir, Arc::clone(&stores)),
         temp_storage_dir(args.temp_dir),
     )
     .beacon_chain_config(args.beacon_chain_config)
@@ -533,12 +672,18 @@ fn build_host(args: BuildHostArgs<'_>) -> BuiltHost {
     }
     let runner = builder.build().expect("build runner");
     let adapter = Arc::clone(runner.network());
+    // Capture the submission + status hooks before `run()` consumes the host.
+    let tx_submission = runner.tx_submission_sender();
+    let tx_status = runner.tx_status_cache();
 
     BuiltHost {
         runner,
         adapter,
         rpc_status,
         beacon_storage,
+        tx_submission,
+        tx_status,
+        stores,
     }
 }
 

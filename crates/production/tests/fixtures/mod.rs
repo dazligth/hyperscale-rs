@@ -8,7 +8,7 @@
 // in any one binary aren't dead code.
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use hyperscale_network::ValidatorKeyMap;
@@ -19,6 +19,38 @@ use hyperscale_types::{
 use libp2p::identity::Keypair;
 use libp2p::identity::ed25519::{Keypair as Ed25519Keypair, SecretKey};
 use libp2p::{Multiaddr, PeerId};
+
+/// Generate `num_validators` deterministic BLS (consensus) and Ed25519
+/// (libp2p) keypairs from `seed`, on independent derivation paths.
+fn derive_keypairs(seed: u64, num_validators: u32) -> (Vec<Bls12381G1PrivateKey>, Vec<Keypair>) {
+    let bls_keys = (0..num_validators)
+        .map(|i| {
+            let mut seed_bytes = [0u8; 32];
+            let key_seed = seed
+                .wrapping_add(u64::from(i))
+                .wrapping_mul(0x517c_c1b7_2722_0a95);
+            seed_bytes[..8].copy_from_slice(&key_seed.to_le_bytes());
+            seed_bytes[8..16].copy_from_slice(&u64::from(i).to_le_bytes());
+            bls_keypair_from_seed(&seed_bytes)
+        })
+        .collect();
+
+    let ed25519_keys = (0..num_validators)
+        .map(|i| {
+            let mut seed_bytes = [0u8; 32];
+            let key_seed = seed
+                .wrapping_add(u64::from(i))
+                .wrapping_mul(0x9e37_79b9_7f4a_7c15);
+            seed_bytes[..8].copy_from_slice(&key_seed.to_le_bytes());
+            seed_bytes[8..16].copy_from_slice(&u64::from(i).to_le_bytes());
+            seed_bytes[16..24].copy_from_slice(b"ed25519k"); // Domain separation
+            let secret = SecretKey::try_from_bytes(seed_bytes).expect("valid ed25519 seed");
+            Keypair::from(Ed25519Keypair::from(secret))
+        })
+        .collect();
+
+    (bls_keys, ed25519_keys)
+}
 
 /// Test fixtures for deterministic test setup.
 ///
@@ -80,36 +112,7 @@ impl TestFixtures {
             * u32::try_from(num_shards).expect("num_shards fits in u32 for tests");
         let num_validators = seated + pool_surplus;
 
-        // Generate BLS keys deterministically
-        let bls_keys: Vec<Bls12381G1PrivateKey> = (0..num_validators)
-            .map(|i| {
-                let mut seed_bytes = [0u8; 32];
-                let key_seed = seed
-                    .wrapping_add(u64::from(i))
-                    .wrapping_mul(0x517c_c1b7_2722_0a95);
-                seed_bytes[..8].copy_from_slice(&key_seed.to_le_bytes());
-                seed_bytes[8..16].copy_from_slice(&u64::from(i).to_le_bytes());
-                bls_keypair_from_seed(&seed_bytes)
-            })
-            .collect();
-
-        // Generate Ed25519 keys deterministically using a different derivation path
-        // for independence from the BLS keys above.
-        let ed25519_keys: Vec<Keypair> = (0..num_validators)
-            .map(|i| {
-                let mut seed_bytes = [0u8; 32];
-                let key_seed = seed
-                    .wrapping_add(u64::from(i))
-                    .wrapping_mul(0x9e37_79b9_7f4a_7c15);
-                seed_bytes[..8].copy_from_slice(&key_seed.to_le_bytes());
-                seed_bytes[8..16].copy_from_slice(&u64::from(i).to_le_bytes());
-                seed_bytes[16..24].copy_from_slice(b"ed25519k"); // Domain separation
-
-                // libp2p's ed25519 key from seed
-                let secret = SecretKey::try_from_bytes(seed_bytes).expect("valid ed25519 seed");
-                Keypair::from(Ed25519Keypair::from(secret))
-            })
-            .collect();
+        let (bls_keys, ed25519_keys) = derive_keypairs(seed, num_validators);
 
         let public_keys: Vec<Bls12381G1PublicKey> = bls_keys
             .iter()
@@ -154,6 +157,59 @@ impl TestFixtures {
             num_shards,
             validators_per_shard,
             pool_surplus,
+        }
+    }
+
+    /// Create fixtures over an arbitrary, possibly non-uniform shard
+    /// partition: the live shards are exactly the keys of `committees`, each
+    /// mapped to its committee. Validator ids index the generated keypairs,
+    /// so the highest id across all committees sets the validator count. Used
+    /// to seat a survivor at one trie depth and a merging pair at another —
+    /// the partition a uniform `with_shards` cannot express — so a reshape
+    /// scenario runs on fewer shards (and so fewer pinned consensus threads)
+    /// than the uniform leaf count would force.
+    pub fn with_explicit_shards(seed: u64, committees: Vec<(ShardId, Vec<ValidatorId>)>) -> Self {
+        let num_validators = committees
+            .iter()
+            .flat_map(|(_, ids)| ids)
+            .map(|id| u32::try_from(id.inner()).expect("validator id fits in u32") + 1)
+            .max()
+            .expect("at least one committee member");
+
+        let (bls_keys, ed25519_keys) = derive_keypairs(seed, num_validators);
+        let public_keys: Vec<Bls12381G1PublicKey> = bls_keys
+            .iter()
+            .map(Bls12381G1PrivateKey::public_key)
+            .collect();
+        let global_validators: Vec<ValidatorInfo> = (0..num_validators)
+            .map(|i| ValidatorInfo {
+                validator_id: ValidatorId::new(u64::from(i)),
+                public_key: public_keys[i as usize],
+            })
+            .collect();
+        let global_validator_set = ValidatorSet::new(global_validators);
+
+        let committee_map: HashMap<ShardId, Vec<ValidatorId>> = committees.into_iter().collect();
+        let topology = Arc::new(TopologySnapshot::from_explicit_committees(
+            NetworkDefinition::simulator(),
+            &global_validator_set,
+            committee_map.clone(),
+            committee_map,
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            BTreeSet::new(),
+        ));
+
+        Self {
+            bls_keys,
+            ed25519_keys,
+            topology,
+            num_validators,
+            num_shards: 0,
+            validators_per_shard: 0,
+            pool_surplus: 0,
         }
     }
 
