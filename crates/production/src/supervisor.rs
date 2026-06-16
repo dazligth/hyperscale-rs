@@ -1303,9 +1303,10 @@ impl ShardSupervisor {
             callback_tx,
         );
         shard_loop.set_time(consensus_clock(self.genesis_offset_ms));
-        if let Some(genesis) = genesis {
-            shard_loop.install_genesis(genesis);
-        }
+        // The genesis commit arms the pacemaker; capture its timer ops so the
+        // spawned loop arms them as its initial ops rather than dropping them.
+        let initial_timer_ops =
+            genesis.map_or_else(Vec::new, |genesis| shard_loop.install_genesis(genesis));
 
         self.storages
             .lock()
@@ -1320,7 +1321,7 @@ impl ShardSupervisor {
             shutdown_rx,
         };
         let validator_ids = vnodes.iter().map(|v| v.validator_id.inner()).collect();
-        let cfg = self.loop_config(channels, Vec::new());
+        let cfg = self.loop_config(channels, initial_timer_ops);
         let join = spawn_shard_loop(shard_loop, cfg);
         self.shards.insert(
             shard,

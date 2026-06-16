@@ -522,7 +522,14 @@ where
     /// [`Block::split_child_genesis`](hyperscale_types::Block::split_child_genesis).
     /// The storage's adoption already points the JMT at the genesis
     /// version, so the commit's genesis arm re-records that height.
-    pub fn install_genesis(&mut self, genesis: &Block) {
+    ///
+    /// Returns the timer ops the genesis commit produced — chiefly the
+    /// consensus pacemaker's [`TimerId::ViewChange`] arm. The caller spawns
+    /// the loop after this returns, so it must hand these back as the loop's
+    /// initial timer ops; otherwise the first `run_step` clears them and the
+    /// shard never arms its pacemaker (the startup runner threads the
+    /// equivalent ops through `initial_timer_ops`).
+    pub fn install_genesis(&mut self, genesis: &Block) -> Vec<TimerOp> {
         let certified = Arc::new(Verified::<CertifiedBlock>::genesis_certified(
             genesis.clone(),
         ));
@@ -539,6 +546,7 @@ where
         )));
 
         self.seed_genesis_substate_frontier(genesis);
+        std::mem::take(&mut self.pending_timer_ops)
     }
 
     /// Seed every vnode's reshape-trigger count frontier from the genesis
