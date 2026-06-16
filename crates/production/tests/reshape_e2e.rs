@@ -231,10 +231,15 @@ async fn split_seats_both_children_from_composed_anchors() {
 /// keepers flip onto the parent. Exercises the production `ShardSupervisor`
 /// keep path and the `RocksDbShardStorage` merge adoption.
 ///
-/// Real-time and `#[serial]` like its split sibling.
-#[tokio::test]
+/// Real-time and `#[serial]` like its split sibling. Runs on a
+/// multi-threaded runtime: the merge keeps two child shards live through
+/// the grow (versus the split's single parent), so the beacon fold, both
+/// children's consensus, and the keeper duties all run at once. A
+/// production host has a multi-threaded runtime to itself; a
+/// single-threaded test runtime serializing the cluster stalls the fold,
+/// where giving it real worker threads matches the deployed shape.
+#[tokio::test(flavor = "multi_thread", worker_threads = 16)]
 #[serial]
-#[ignore = "real-time merge e2e: the keeper re-assertion fires the gate, the children compose the parent anchor, and the keeper-derived merged genesis reconstructs it — but the keepers do not reliably finish building their merged-parent stores and seat the parent. The post-crossing half-syncs (and the pairing fold before them) stall under the single-process harness load running eight hosts, two active child shards, and four concurrent keeper duties, so fewer than a quorum of keepers seat and the parent never advances. Passes intermittently; stays ignored until the keeper seat is reliable"]
 async fn keepers_merge_two_siblings_into_their_parent() {
     let _ = fmt().with_test_writer().try_init();
 
@@ -258,16 +263,24 @@ async fn keepers_merge_two_siblings_into_their_parent() {
         ..BeaconChainConfig::default()
     };
 
-    // One validator per host across eight hosts: hosts 0-3 run the left
-    // child's committee, hosts 4-7 the right's. One vnode per host so a
-    // keeper's freshly built merged-parent store never collides with
-    // another seat on the same shard's directory lock.
+    // Four hosts, each running one left- and one right-child vnode: host h
+    // holds left committee member h and right member h+4. Packing both
+    // children onto every host halves the cluster (four libp2p endpoints
+    // instead of eight), which is the load relief the merge's two live
+    // child chains need to fold their ready signals before the readiness
+    // TTL churns the pairing. The keeper duty coalesces a host's two seats
+    // onto one shared parent store at the boundary, so they don't collide
+    // on the directory lock; and because each host runs both children, the
+    // boundary handoff reads both terminated halves from local stores with
+    // no cross-committee sync.
     let cluster = Cluster::start(ClusterSpec {
         topology: fixtures.topology(),
-        hosts: (0..8)
-            .map(|v| {
-                let shard = if v < 4 { left } else { right };
-                HostSpec::new(vec![vnode(&fixtures, v, shard)])
+        hosts: (0..4)
+            .map(|h| {
+                HostSpec::new(vec![
+                    vnode(&fixtures, h, left),
+                    vnode(&fixtures, h + 4, right),
+                ])
             })
             .collect(),
         beacon_chain_config: chain_config,
