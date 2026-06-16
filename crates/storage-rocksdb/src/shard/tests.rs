@@ -524,6 +524,8 @@ fn push_wave(block: &mut Block, fw: Arc<Verifiable<FinalizedWave>>) {
             transactions: Arc::new(BoundedVec::new()),
             certificates: Arc::new(BoundedVec::new()),
             provision_hashes: Arc::new(BoundedVec::new()),
+            ready_signals: Arc::new(BoundedVec::new()),
+            reshape_trigger: None,
         },
     );
     *block = match taken {
@@ -532,6 +534,8 @@ fn push_wave(block: &mut Block, fw: Arc<Verifiable<FinalizedWave>>) {
             transactions,
             certificates,
             provisions,
+            ready_signals,
+            reshape_trigger,
         } => {
             let mut certificates = (*certificates).clone();
             certificates.push(fw);
@@ -540,6 +544,8 @@ fn push_wave(block: &mut Block, fw: Arc<Verifiable<FinalizedWave>>) {
                 transactions,
                 certificates: Arc::new(certificates),
                 provisions,
+                ready_signals,
+                reshape_trigger,
             }
         }
         Block::Sealed {
@@ -547,6 +553,8 @@ fn push_wave(block: &mut Block, fw: Arc<Verifiable<FinalizedWave>>) {
             transactions,
             certificates,
             provision_hashes,
+            ready_signals,
+            reshape_trigger,
         } => {
             let mut certificates = (*certificates).clone();
             certificates.push(fw);
@@ -555,6 +563,8 @@ fn push_wave(block: &mut Block, fw: Arc<Verifiable<FinalizedWave>>) {
                 transactions,
                 certificates: Arc::new(certificates),
                 provision_hashes,
+                ready_signals,
+                reshape_trigger,
             }
         }
     };
@@ -586,6 +596,8 @@ fn attach_receipts(block: &mut Block, receipts: Vec<StoredReceipt>) {
             transactions: Arc::new(BoundedVec::new()),
             certificates: Arc::new(BoundedVec::new()),
             provision_hashes: Arc::new(BoundedVec::new()),
+            ready_signals: Arc::new(BoundedVec::new()),
+            reshape_trigger: None,
         },
     );
     *block = match taken {
@@ -594,6 +606,8 @@ fn attach_receipts(block: &mut Block, receipts: Vec<StoredReceipt>) {
             transactions,
             certificates,
             provisions,
+            ready_signals,
+            reshape_trigger,
         } => {
             let mut certificates = (*certificates).clone();
             certificates.push(new_fw);
@@ -602,6 +616,8 @@ fn attach_receipts(block: &mut Block, receipts: Vec<StoredReceipt>) {
                 transactions,
                 certificates: Arc::new(certificates),
                 provisions,
+                ready_signals,
+                reshape_trigger,
             }
         }
         Block::Sealed {
@@ -609,6 +625,8 @@ fn attach_receipts(block: &mut Block, receipts: Vec<StoredReceipt>) {
             transactions,
             certificates,
             provision_hashes,
+            ready_signals,
+            reshape_trigger,
         } => {
             let mut certificates = (*certificates).clone();
             certificates.push(new_fw);
@@ -617,6 +635,8 @@ fn attach_receipts(block: &mut Block, receipts: Vec<StoredReceipt>) {
                 transactions,
                 certificates: Arc::new(certificates),
                 provision_hashes,
+                ready_signals,
+                reshape_trigger,
             }
         }
     };
@@ -713,6 +733,8 @@ fn test_commit_block_stores_certificates() {
             transactions,
             certificates: fw_certificates,
             provisions,
+            ready_signals: Arc::new(BoundedVec::new()),
+            reshape_trigger: None,
         },
         Block::Sealed {
             header,
@@ -724,6 +746,8 @@ fn test_commit_block_stores_certificates() {
             transactions,
             certificates: fw_certificates,
             provision_hashes,
+            ready_signals: Arc::new(BoundedVec::new()),
+            reshape_trigger: None,
         },
     };
     let _ = storage.commit_block(&make_test_certified(block), &no_witness());

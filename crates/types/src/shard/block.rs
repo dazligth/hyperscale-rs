@@ -14,9 +14,10 @@ use thiserror::Error;
 use crate::{
     BeaconWitnessRoot, BlockHash, BlockHeader, BlockHeight, BoundedVec, CertificateRoot,
     ChainOrigin, FinalizedWave, LocalReceiptRoot, MAX_FINALIZED_TX_PER_BLOCK,
-    MAX_PROVISIONS_PER_BLOCK, MAX_TXS_PER_BLOCK, ProvisionHash, ProvisionTxRootsMap, Provisions,
-    ProvisionsRoot, QuorumCertificate, RoutableTransaction, ShardId, StateRoot, TransactionRoot,
-    TxHash, ValidatorId, Verifiable, Verified, WeightedTimestamp,
+    MAX_PROVISIONS_PER_BLOCK, MAX_READY_SIGNALS_PER_BLOCK, MAX_TXS_PER_BLOCK, ProvisionHash,
+    ProvisionTxRootsMap, Provisions, ProvisionsRoot, QuorumCertificate, ReadySignal,
+    ReshapeTrigger, RoutableTransaction, ShardId, StateRoot, TransactionRoot, TxHash, ValidatorId,
+    Verifiable, Verified, WeightedTimestamp,
 };
 
 /// Shared transaction list — wrapped in `Arc` so root-verification actions
@@ -77,6 +78,15 @@ pub type SharedProvisions = Arc<BoundedVec<Arc<Verifiable<Provisions>>, MAX_PROV
 /// payload has been dropped. Same `Arc` rationale as [`SharedTransactions`].
 pub type SharedProvisionHashes = Arc<BoundedVec<ProvisionHash, MAX_PROVISIONS_PER_BLOCK>>;
 
+/// Shared ready-signal list — the proposer's drained `ready_signals`,
+/// carried on the block so the beacon-witness leaf derivation reproduces
+/// them on every node regardless of how the block arrived. They are
+/// committed via the header's `beacon_witness_root` (so the block hash
+/// already binds them) but cannot be recovered from a header alone, so
+/// they ride the body like transactions ride `transaction_root`. Same
+/// `Arc` rationale as [`SharedTransactions`].
+pub type SharedReadySignals = Arc<BoundedVec<ReadySignal, MAX_READY_SIGNALS_PER_BLOCK>>;
+
 /// Complete block with header and transaction data.
 ///
 /// Transactions are stored in a single flat list, sorted by hash for deterministic ordering.
@@ -105,6 +115,14 @@ pub enum Block {
         certificates: SharedCertificates,
         /// Provisions needed to execute cross-shard waves locally.
         provisions: SharedProvisions,
+        /// Ready signals the proposer drained into this block. Committed
+        /// via `beacon_witness_root`; carried here so commit-time
+        /// beacon-witness leaf derivation is identical on every node.
+        ready_signals: SharedReadySignals,
+        /// The block's reshape assertion, if any. Committed via
+        /// `beacon_witness_root`; carried here for the same reason as
+        /// `ready_signals`.
+        reshape_trigger: Option<ReshapeTrigger>,
     },
     /// Block past its execution window — provision bodies dropped, but
     /// the original `ProvisionHash` list is retained so sync-serving glue
@@ -121,6 +139,14 @@ pub enum Block {
         /// Content hashes of the provisions the block consumed while
         /// `Live`. Empty iff the block consumed no provisions.
         provision_hashes: SharedProvisionHashes,
+        /// Ready signals the proposer drained into this block — retained
+        /// through sealing (unlike provisions) because the beacon-witness
+        /// fold consuming them can run well after the block sealed. See
+        /// `Block::Live::ready_signals`.
+        ready_signals: SharedReadySignals,
+        /// The block's reshape assertion, if any. Retained through
+        /// sealing for the same reason as `ready_signals`.
+        reshape_trigger: Option<ReshapeTrigger>,
     },
 }
 
@@ -178,6 +204,8 @@ impl Block {
             transactions: Arc::new(BoundedVec::new()),
             certificates: Arc::new(BoundedVec::new()),
             provisions: Arc::new(BoundedVec::new()),
+            ready_signals: Arc::new(BoundedVec::new()),
+            reshape_trigger: None,
         }
     }
 
@@ -202,6 +230,8 @@ impl Block {
             transactions: Arc::new(BoundedVec::new()),
             certificates: Arc::new(BoundedVec::new()),
             provisions: Arc::new(BoundedVec::new()),
+            ready_signals: Arc::new(BoundedVec::new()),
+            reshape_trigger: None,
         }
     }
 
@@ -229,6 +259,8 @@ impl Block {
             transactions: Arc::new(BoundedVec::new()),
             certificates: Arc::new(BoundedVec::new()),
             provisions: Arc::new(BoundedVec::new()),
+            ready_signals: Arc::new(BoundedVec::new()),
+            reshape_trigger: None,
         }
     }
 
@@ -291,6 +323,31 @@ impl Block {
         }
     }
 
+    /// Ready signals carried on the block — present in both variants.
+    /// The beacon-witness leaf derivation reads these at commit, so they
+    /// must be byte-identical across nodes; carrying them on the block
+    /// (rather than only the in-memory manifest) makes that hold for
+    /// sync-committed and reloaded blocks.
+    #[must_use]
+    pub const fn ready_signals(&self) -> &SharedReadySignals {
+        match self {
+            Self::Live { ready_signals, .. } | Self::Sealed { ready_signals, .. } => ready_signals,
+        }
+    }
+
+    /// The block's reshape assertion, if any — present in both variants.
+    #[must_use]
+    pub const fn reshape_trigger(&self) -> Option<ReshapeTrigger> {
+        match self {
+            Self::Live {
+                reshape_trigger, ..
+            }
+            | Self::Sealed {
+                reshape_trigger, ..
+            } => *reshape_trigger,
+        }
+    }
+
     /// True if this block is still in its `Live` variant.
     #[must_use]
     pub const fn is_live(&self) -> bool {
@@ -309,6 +366,8 @@ impl Block {
                 transactions,
                 certificates,
                 provisions,
+                ready_signals,
+                reshape_trigger,
             } => {
                 let hashes: Vec<ProvisionHash> = provisions.iter().map(|p| p.hash()).collect();
                 Self::Sealed {
@@ -316,6 +375,8 @@ impl Block {
                     transactions,
                     certificates,
                     provision_hashes: Arc::new(hashes.into()),
+                    ready_signals,
+                    reshape_trigger,
                 }
             }
             sealed @ Self::Sealed { .. } => sealed,
@@ -337,12 +398,16 @@ impl Block {
                 header,
                 transactions,
                 certificates,
+                ready_signals,
+                reshape_trigger,
                 ..
             } => Self::Live {
                 header,
                 transactions,
                 certificates,
                 provisions,
+                ready_signals,
+                reshape_trigger,
             },
             Self::Live { .. } => {
                 panic!("into_live called on an already-Live block")

@@ -146,6 +146,8 @@ fn commit_with(
                 transactions,
                 certificates,
                 provisions,
+                ready_signals,
+                reshape_trigger,
             } => {
                 let mut certificates = (*certificates).clone();
                 certificates.push(new_fw);
@@ -154,6 +156,8 @@ fn commit_with(
                     transactions,
                     certificates: Arc::new(certificates),
                     provisions,
+                    ready_signals,
+                    reshape_trigger,
                 }
             }
             Block::Sealed {
@@ -161,6 +165,8 @@ fn commit_with(
                 transactions,
                 certificates,
                 provision_hashes,
+                ready_signals,
+                reshape_trigger,
             } => {
                 let mut certificates = (*certificates).clone();
                 certificates.push(new_fw);
@@ -169,6 +175,8 @@ fn commit_with(
                     transactions,
                     certificates: Arc::new(certificates),
                     provision_hashes,
+                    ready_signals,
+                    reshape_trigger,
                 }
             }
         }
@@ -468,6 +476,8 @@ fn test_transactions_batch_with_indexed_block() {
             transactions: Arc::new(vec![tx].into()),
             certificates,
             provisions,
+            ready_signals: Arc::new(BoundedVec::new()),
+            reshape_trigger: None,
         },
         Block::Sealed {
             header,
@@ -479,6 +489,8 @@ fn test_transactions_batch_with_indexed_block() {
             transactions: Arc::new(vec![tx].into()),
             certificates,
             provision_hashes,
+            ready_signals: Arc::new(BoundedVec::new()),
+            reshape_trigger: None,
         },
     };
 

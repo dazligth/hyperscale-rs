@@ -5225,6 +5225,8 @@ mod tests {
             transactions: Arc::new(BoundedVec::new()),
             certificates: Arc::new(BoundedVec::new()),
             provisions: Arc::new(BoundedVec::new()),
+            ready_signals: Arc::new(BoundedVec::new()),
+            reshape_trigger: None,
         }
     }
 
@@ -5338,6 +5340,8 @@ mod tests {
                 transactions: Arc::new(BoundedVec::new()),
                 certificates: Arc::new(BoundedVec::new()),
                 provisions: Arc::new(BoundedVec::new()),
+                ready_signals: Arc::new(BoundedVec::new()),
+                reshape_trigger: None,
             }
         };
 
@@ -5584,6 +5588,8 @@ mod tests {
             transactions: Arc::new(BoundedVec::new()),
             certificates: Arc::new(BoundedVec::new()),
             provisions: Arc::new(BoundedVec::new()),
+            ready_signals: Arc::new(BoundedVec::new()),
+            reshape_trigger: None,
         }
     }
 
@@ -6056,6 +6062,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // synthetic QC/header fixtures, one block field per line
     fn test_qc_signature_verified_success_triggers_vote() {
         let (mut state, topology) = make_multi_validator_state_at(1);
         state.set_time(LocalTimestamp::from_millis(100_000));
@@ -6065,6 +6072,8 @@ mod tests {
             transactions: Arc::new(BoundedVec::new()),
             certificates: Arc::new(BoundedVec::new()),
             provisions: Arc::new(BoundedVec::new()),
+            ready_signals: Arc::new(BoundedVec::new()),
+            reshape_trigger: None,
         };
         let parent_block_hash = parent_block.hash();
         state.committed_height = BlockHeight::new(1);
@@ -7783,6 +7792,8 @@ mod tests {
             transactions: Arc::new(BoundedVec::new()),
             certificates: Arc::new(BoundedVec::new()),
             provisions: Arc::new(BoundedVec::new()),
+            ready_signals: Arc::new(BoundedVec::new()),
+            reshape_trigger: None,
         };
         let mut sub_quorum_signers = SignerBitfield::new(4);
         sub_quorum_signers.set(0); // single signer — far below 2f+1 = 3
@@ -7855,6 +7866,8 @@ mod tests {
             transactions: Arc::new(BoundedVec::new()),
             certificates: Arc::new(BoundedVec::new()),
             provisions: Arc::new(BoundedVec::new()),
+            ready_signals: Arc::new(BoundedVec::new()),
+            reshape_trigger: None,
         };
         let block_hash = block.hash();
         let _ = state.record_block_committed(
@@ -7903,6 +7916,8 @@ mod tests {
             transactions: Arc::new(BoundedVec::new()),
             certificates: Arc::new(BoundedVec::new()),
             provisions: Arc::new(BoundedVec::new()),
+            ready_signals: Arc::new(BoundedVec::new()),
+            reshape_trigger: None,
         };
         let qc = {
             let __qc = make_test_qc(block.hash(), BlockHeight::new(1));
@@ -8100,6 +8115,8 @@ mod tests {
             transactions: Arc::new(vec![tx1.clone()].into()),
             certificates: Arc::new(BoundedVec::new()),
             provisions: Arc::new(BoundedVec::new()),
+            ready_signals: Arc::new(BoundedVec::new()),
+            reshape_trigger: None,
         };
         let ancestor_hash = ancestor_block.hash();
         install_complete_block(&mut state, &ancestor_block);
@@ -8137,6 +8154,8 @@ mod tests {
             transactions: Arc::new(txs.into()),
             certificates: Arc::new(BoundedVec::new()),
             provisions: Arc::new(BoundedVec::new()),
+            ready_signals: Arc::new(BoundedVec::new()),
+            reshape_trigger: None,
         };
 
         let result = {
@@ -8186,6 +8205,8 @@ mod tests {
             transactions: Arc::new(vec![tx1.clone()].into()),
             certificates: Arc::new(BoundedVec::new()),
             provisions: Arc::new(BoundedVec::new()),
+            ready_signals: Arc::new(BoundedVec::new()),
+            reshape_trigger: None,
         };
         let ancestor_hash = ancestor_block.hash();
 
@@ -8221,6 +8242,8 @@ mod tests {
             transactions: Arc::new(vec![tx1].into()),
             certificates: Arc::new(BoundedVec::new()),
             provisions: Arc::new(BoundedVec::new()),
+            ready_signals: Arc::new(BoundedVec::new()),
+            reshape_trigger: None,
         };
 
         // Ancestor is at committed height, so walk stops before checking it
@@ -8460,6 +8483,8 @@ mod tests {
             transactions: Arc::new(BoundedVec::new()),
             certificates: Arc::new(certs.into()),
             provisions: Arc::new(BoundedVec::new()),
+            ready_signals: Arc::new(BoundedVec::new()),
+            reshape_trigger: None,
         }
     }
 
@@ -8621,6 +8646,8 @@ mod tests {
                 vec![cross_shard_wave(ShardId::leaf(1, 0), ShardId::ROOT, 1)].into(),
             ),
             provisions: Arc::new(BoundedVec::new()),
+            ready_signals: Arc::new(BoundedVec::new()),
+            reshape_trigger: None,
         }
     }
 

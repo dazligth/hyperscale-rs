@@ -180,6 +180,8 @@ mod tests {
             transactions: Arc::new(BoundedVec::new()),
             certificates: Arc::new(certs.to_vec().into()),
             provisions: Arc::new(BoundedVec::new()),
+            ready_signals: Arc::new(BoundedVec::new()),
+            reshape_trigger: None,
         };
         let hash = block.hash();
         storage.commit_block(

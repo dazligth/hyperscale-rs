@@ -101,8 +101,9 @@ impl BlockManifest {
     /// responsible for only invoking this on `Live` blocks (or accepting
     /// the empty result) when provision-hash fidelity matters — e.g. the
     /// commit-bookkeeping path that populates `CommitDedupIndex`.
-    /// `ready_signals` and `reshape_trigger` are likewise unrecoverable
-    /// from a `Block` alone and come back empty/`None`.
+    /// `ready_signals` and `reshape_trigger` are carried on the block
+    /// itself, so they round-trip faithfully here — the commit-time
+    /// beacon-witness leaf derivation reads them and must match every node.
     #[must_use]
     pub fn from_block(block: &Block) -> Self {
         // The source `Block` collections are themselves `BoundedVec`s capped
@@ -115,7 +116,14 @@ impl BlockManifest {
             .map(|c| c.wave_id().clone())
             .collect();
         let provision_hashes = block.provision_hashes();
-        Self::new(tx_hashes, cert_ids, provision_hashes, Vec::new(), None)
+        let ready_signals = block.ready_signals().iter().cloned().collect();
+        Self::new(
+            tx_hashes,
+            cert_ids,
+            provision_hashes,
+            ready_signals,
+            block.reshape_trigger(),
+        )
     }
 }
 

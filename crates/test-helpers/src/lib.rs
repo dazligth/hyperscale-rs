@@ -260,6 +260,8 @@ pub fn make_live_block(
         transactions: Arc::new(transactions.into()),
         certificates: Arc::new(certificates.into()),
         provisions: Arc::new(BoundedVec::new()),
+        ready_signals: Arc::new(BoundedVec::new()),
+        reshape_trigger: None,
     }
 }
 
@@ -362,22 +364,30 @@ fn stamp_parent_qc_weighted_timestamp(block: Block, weighted_timestamp_ms: u64) 
             transactions,
             certificates,
             provisions,
+            ready_signals,
+            reshape_trigger,
         } => Block::Live {
             header: restamp(header),
             transactions,
             certificates,
             provisions,
+            ready_signals,
+            reshape_trigger,
         },
         Block::Sealed {
             header,
             transactions,
             certificates,
             provision_hashes,
+            ready_signals,
+            reshape_trigger,
         } => Block::Sealed {
             header: restamp(header),
             transactions,
             certificates,
             provision_hashes,
+            ready_signals,
+            reshape_trigger,
         },
     }
 }

@@ -288,6 +288,8 @@ impl RocksDbShardStorage {
             transactions: Arc::new(transactions.into()),
             certificates: Arc::new(certificates.into()),
             provision_hashes: Arc::new(manifest.provision_hashes().clone()),
+            ready_signals: Arc::new(manifest.ready_signals().clone()),
+            reshape_trigger: manifest.reshape_trigger(),
         };
 
         let elapsed = start.elapsed().as_secs_f64();
@@ -432,6 +434,8 @@ impl RocksDbShardStorage {
             transactions: Arc::new(transactions.into()),
             certificates: Arc::new(certificates.into()),
             provision_hashes: Arc::new(provision_hashes_bounded.clone()),
+            ready_signals: Arc::new(manifest.ready_signals().clone()),
+            reshape_trigger: manifest.reshape_trigger(),
         };
         let provision_hashes = provision_hashes_bounded.into_inner();
 

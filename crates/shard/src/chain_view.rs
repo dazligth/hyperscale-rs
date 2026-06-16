@@ -197,6 +197,8 @@ mod tests {
             transactions: Arc::new(BoundedVec::new()),
             certificates: Arc::new(BoundedVec::new()),
             provisions: Arc::new(BoundedVec::new()),
+            ready_signals: Arc::new(BoundedVec::new()),
+            reshape_trigger: None,
         }
     }
 
@@ -323,6 +325,8 @@ mod tests {
             transactions: Arc::new(vec![tx].into()),
             certificates: Arc::new(BoundedVec::new()),
             provisions: Arc::new(BoundedVec::new()),
+            ready_signals: Arc::new(BoundedVec::new()),
+            reshape_trigger: None,
         };
         let low_pending = pending_from_block(&low);
         let low_hash = low_pending.header().hash();

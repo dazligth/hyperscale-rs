@@ -57,6 +57,8 @@ fn make_block(height: BlockHeight) -> CertifiedBlock {
         transactions: Arc::new(BoundedVec::new()),
         certificates: Arc::new(BoundedVec::new()),
         provisions: Arc::new(BoundedVec::new()),
+        ready_signals: Arc::new(BoundedVec::new()),
+        reshape_trigger: None,
     };
     let qc = {
         let __qc = QuorumCertificate::genesis(ShardId::leaf(1, 0), ChainOrigin::ROOT);

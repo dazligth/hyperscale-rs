@@ -1604,6 +1604,8 @@ mod tests {
             transactions,
             certificates: Arc::new(certs),
             provisions,
+            ready_signals: Arc::new(BoundedVec::new()),
+            reshape_trigger: None,
         };
         let qc = QuorumCertificate::new(
             block.hash(),

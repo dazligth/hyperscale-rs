@@ -25,8 +25,9 @@ use sbor::prelude::BasicSbor;
 
 use crate::{
     Block, BlockHash, BlockHeader, BloomFilter, BloomKey, BoundedVec, CertifiedBlock,
-    FinalizedWave, MAX_FINALIZED_TX_PER_BLOCK, MAX_PROVISIONS_PER_BLOCK, MAX_TXS_PER_BLOCK,
-    ProvisionHash, Provisions, QuorumCertificate, RoutableTransaction, TxHash, Verifiable, WaveId,
+    FinalizedWave, MAX_FINALIZED_TX_PER_BLOCK, MAX_PROVISIONS_PER_BLOCK,
+    MAX_READY_SIGNALS_PER_BLOCK, MAX_TXS_PER_BLOCK, ProvisionHash, Provisions, QuorumCertificate,
+    ReadySignal, ReshapeTrigger, RoutableTransaction, TxHash, Verifiable, WaveId,
 };
 
 /// Inventory of locally-known item hashes, grouped by category.
@@ -92,6 +93,11 @@ pub struct ElidedCertifiedBlock {
     certificates:
         BoundedVec<(WaveId, Option<Arc<Verifiable<FinalizedWave>>>), MAX_FINALIZED_TX_PER_BLOCK>,
     provisions: ElidedProvisions,
+    /// Beacon-witness-bearing block fields, always inline (never elided):
+    /// they are small and the receiver needs them to reproduce the
+    /// block's beacon-witness leaves at commit.
+    ready_signals: BoundedVec<ReadySignal, MAX_READY_SIGNALS_PER_BLOCK>,
+    reshape_trigger: Option<ReshapeTrigger>,
 }
 
 /// Variant-discriminated provisions payload for [`ElidedCertifiedBlock`].
@@ -234,6 +240,13 @@ impl ElidedCertifiedBlock {
             transactions: transactions.into(),
             certificates: certificates.into(),
             provisions,
+            ready_signals: block
+                .ready_signals()
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .into(),
+            reshape_trigger: block.reshape_trigger(),
         }
     }
 
@@ -336,6 +349,8 @@ impl ElidedCertifiedBlock {
                     transactions: txs,
                     certificates: certs,
                     provisions: Arc::new(provisions.into()),
+                    ready_signals: Arc::new(self.ready_signals.clone()),
+                    reshape_trigger: self.reshape_trigger,
                 }
             }
             (None, ElidedProvisions::Sealed(hashes)) => Block::Sealed {
@@ -343,6 +358,8 @@ impl ElidedCertifiedBlock {
                 transactions: txs,
                 certificates: certs,
                 provision_hashes: Arc::new(hashes.clone()),
+                ready_signals: Arc::new(self.ready_signals.clone()),
+                reshape_trigger: self.reshape_trigger,
             },
             (None, ElidedProvisions::Live(_)) => {
                 unreachable!("live_provs is Some when provisions is Live")
@@ -467,6 +484,8 @@ mod tests {
             transactions: Arc::new(vec![Arc::new(Verifiable::from(tx))].into()),
             certificates: Arc::new(BoundedVec::new()),
             provisions: Arc::new(BoundedVec::new()),
+            ready_signals: Arc::new(BoundedVec::new()),
+            reshape_trigger: None,
         }
     }
 
@@ -629,7 +648,7 @@ mod tests {
             enc.write_payload_prefix(BASIC_SBOR_V1_PAYLOAD_PREFIX)
                 .unwrap();
             enc.write_value_kind(ValueKind::Tuple).unwrap();
-            enc.write_size(5).unwrap();
+            enc.write_size(7).unwrap();
             enc.encode(&header).unwrap();
             enc.encode(&qc).unwrap();
             enc.write_value_kind(ValueKind::Array).unwrap();
@@ -661,7 +680,7 @@ mod tests {
             enc.write_payload_prefix(BASIC_SBOR_V1_PAYLOAD_PREFIX)
                 .unwrap();
             enc.write_value_kind(ValueKind::Tuple).unwrap();
-            enc.write_size(5).unwrap();
+            enc.write_size(7).unwrap();
             enc.encode(&header).unwrap();
             enc.encode(&qc).unwrap();
             // Empty transactions.
@@ -698,7 +717,7 @@ mod tests {
             enc.write_payload_prefix(BASIC_SBOR_V1_PAYLOAD_PREFIX)
                 .unwrap();
             enc.write_value_kind(ValueKind::Tuple).unwrap();
-            enc.write_size(5).unwrap();
+            enc.write_size(7).unwrap();
             enc.encode(&header).unwrap();
             enc.encode(&qc).unwrap();
             enc.encode(&Vec::<(TxHash, Option<Arc<RoutableTransaction>>)>::new())

@@ -586,6 +586,8 @@ mod tests {
             transactions: Arc::new(BoundedVec::new()),
             certificates: Arc::new(BoundedVec::new()),
             provisions: Arc::new(BoundedVec::new()),
+            ready_signals: Arc::new(BoundedVec::new()),
+            reshape_trigger: None,
         };
         let qc = qc_for(&block);
         let certified = CertifiedBlock::new_unchecked(block, qc);
@@ -599,6 +601,8 @@ mod tests {
             transactions: Arc::new(BoundedVec::new()),
             certificates: Arc::new(BoundedVec::new()),
             provisions: Arc::new(BoundedVec::new()),
+            ready_signals: Arc::new(BoundedVec::new()),
+            reshape_trigger: None,
         };
         let qc = qc_for(&block);
         let certified = CertifiedBlock::new_unchecked(block, qc);
@@ -616,6 +620,8 @@ mod tests {
             transactions: Arc::new(BoundedVec::new()),
             certificates: Arc::new(BoundedVec::new()),
             provisions: Arc::new(BoundedVec::new()),
+            ready_signals: Arc::new(BoundedVec::new()),
+            reshape_trigger: None,
         };
         let qc = QuorumCertificate::new(
             BlockHash::from_raw(Hash::from_bytes(b"wrong")),
@@ -637,6 +643,8 @@ mod tests {
             transactions: Arc::new(BoundedVec::new()),
             certificates: Arc::new(BoundedVec::new()),
             provisions: Arc::new(BoundedVec::new()),
+            ready_signals: Arc::new(BoundedVec::new()),
+            reshape_trigger: None,
         };
         let qc = QuorumCertificate::new(
             block.hash(),
@@ -664,6 +672,8 @@ mod tests {
             transactions: Arc::new(vec![tx].into()),
             certificates: Arc::new(BoundedVec::new()),
             provisions: Arc::new(BoundedVec::new()),
+            ready_signals: Arc::new(BoundedVec::new()),
+            reshape_trigger: None,
         };
         let qc = qc_for(&block);
         let certified = CertifiedBlock::new_unchecked(block, qc);
@@ -687,6 +697,8 @@ mod tests {
             transactions: Arc::new(vec![tx].into()),
             certificates: Arc::new(BoundedVec::new()),
             provisions: Arc::new(BoundedVec::new()),
+            ready_signals: Arc::new(BoundedVec::new()),
+            reshape_trigger: None,
         };
         let qc = qc_for(&block);
         let certified = CertifiedBlock::new_unchecked(block, qc);
@@ -707,6 +719,8 @@ mod tests {
             transactions: Arc::new(BoundedVec::new()),
             certificates: Arc::new(vec![fw].into()),
             provisions: Arc::new(BoundedVec::new()),
+            ready_signals: Arc::new(BoundedVec::new()),
+            reshape_trigger: None,
         };
         let qc = qc_for(&block);
         let certified = CertifiedBlock::new_unchecked(block, qc);
@@ -761,6 +775,8 @@ mod tests {
             transactions: Arc::new(BoundedVec::new()),
             certificates: Arc::new(vec![fw].into()),
             provisions: Arc::new(BoundedVec::new()),
+            ready_signals: Arc::new(BoundedVec::new()),
+            reshape_trigger: None,
         };
         let qc = qc_for(&block);
         let certified = CertifiedBlock::new_unchecked(block, qc);
@@ -788,6 +804,8 @@ mod tests {
             transactions: Arc::new(BoundedVec::new()),
             certificates: Arc::new(vec![fw].into()),
             provisions: Arc::new(BoundedVec::new()),
+            ready_signals: Arc::new(BoundedVec::new()),
+            reshape_trigger: None,
         };
         let qc = qc_for(&block);
         let certified = CertifiedBlock::new_unchecked(block, qc);
@@ -835,6 +853,8 @@ mod tests {
             transactions: Arc::new(BoundedVec::new()),
             certificates: Arc::new(vec![fw].into()),
             provisions: Arc::new(BoundedVec::new()),
+            ready_signals: Arc::new(BoundedVec::new()),
+            reshape_trigger: None,
         };
         let qc = qc_for(&block);
         let certified = CertifiedBlock::new_unchecked(block, qc);

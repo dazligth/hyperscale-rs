@@ -548,11 +548,11 @@ impl PendingBlock {
     /// `received_provisions` are populated from the same source.
     ///
     /// `ready_signals` and `reshape_trigger` carry what the proposer
-    /// put on the wire manifest — the manifest stores them alongside
-    /// the derived tx/cert/provision hashes, and neither is recoverable
-    /// from the `Block` alone. The block's witness root commits to
-    /// both, so the rebuilt manifest must mirror them exactly or every
-    /// replica rejects the broadcast.
+    /// drained; the manifest stores them alongside the derived
+    /// tx/cert/provision hashes, mirroring the same fields the block now
+    /// carries. The block's witness root commits to both, so the rebuilt
+    /// manifest must match them exactly or every replica rejects the
+    /// broadcast.
     pub fn from_complete_block(
         block: &Block,
         ready_signals: Vec<ReadySignal>,
@@ -755,6 +755,8 @@ impl PendingBlock {
             transactions: Arc::new(transactions.into()),
             certificates: Arc::new(certificates.into()),
             provisions: Arc::new(provisions.into()),
+            ready_signals: Arc::new(self.manifest.ready_signals().clone()),
+            reshape_trigger: self.manifest.reshape_trigger(),
         });
 
         self.constructed_block = Some(Arc::clone(&block));
@@ -1039,6 +1041,8 @@ mod tests {
             transactions: Arc::new(BoundedVec::new()),
             certificates: Arc::new(vec![wire_fw].into()),
             provisions: Arc::new(BoundedVec::new()),
+            ready_signals: Arc::new(BoundedVec::new()),
+            reshape_trigger: None,
         };
 
         let pending = PendingBlock::from_complete_block(

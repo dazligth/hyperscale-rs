@@ -161,10 +161,10 @@ pub struct ProposalResult {
     /// Hash of the constructed block, cached so callers don't recompute.
     pub block_hash: BlockHash,
     /// Manifest carrying the proposer's drained `ready_signals` alongside
-    /// the standard tx/cert/provision hash lists. The downstream
-    /// gossip + pending-block pathway uses this; `BlockManifest::from_block`
-    /// alone can't recover `ready_signals` since the field isn't on
-    /// `Block`.
+    /// the standard tx/cert/provision hash lists, for the downstream
+    /// gossip + pending-block pathway. The same fields ride on
+    /// [`block`](Self::block) too, so a sync-committed or reloaded copy of
+    /// this block recovers them via `BlockManifest::from_block`.
     pub manifest: BlockManifest,
     /// JMT prepared-commit closure from the proposer's pre-commit,
     /// threaded to the commit pipeline so the proposer doesn't recompute
@@ -307,13 +307,10 @@ pub fn build_proposal<S: ShardChainWriter>(
         transactions: Arc::new(transactions.into()),
         certificates: Arc::new(certificates.into()),
         provisions: Arc::new(provisions.into()),
+        ready_signals: Arc::new(ready_signals.clone().into()),
+        reshape_trigger,
     };
 
-    // Manifest mirrors `BlockManifest::from_block` but carries the
-    // proposer's drained `ready_signals` and reshape assertion — neither
-    // manifest field can be recovered from a `Block` alone, so the
-    // proposer threads them forward here for the downstream gossip +
-    // pending-block pathway.
     let tx_hashes: Vec<_> = block.transactions().iter().map(|tx| tx.hash()).collect();
     let cert_ids: Vec<_> = block
         .certificates()

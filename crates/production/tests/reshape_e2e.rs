@@ -130,7 +130,7 @@ async fn beacon_chain_config_reaches_genesis() {
 /// explicitly with `--ignored`.
 #[tokio::test]
 #[serial]
-#[ignore = "real-time split e2e: admits, but the cohort admission does not yet survive view-change churn long enough for observers to seat the children"]
+#[ignore = "real-time split e2e: the beacon now executes the split (gate fires, trie reshapes, child placement + observer flips dispatch), but on the loadless cluster ROOT proposes empty blocks unthrottled and races, lagging the consensus clock behind wall-clock so the children miss the real-time seating budget; needs proposer idle-block pacing"]
 async fn split_seats_both_children_from_composed_anchors() {
     let _ = fmt().with_test_writer().try_init();
 

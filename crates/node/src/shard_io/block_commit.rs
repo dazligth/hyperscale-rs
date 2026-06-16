@@ -1504,6 +1504,8 @@ mod tests {
             transactions: Arc::new(vec![].into()),
             certificates: Arc::new(vec![].into()),
             provisions: Arc::new(BoundedVec::new()),
+            ready_signals: Arc::new(BoundedVec::new()),
+            reshape_trigger: None,
         };
         let hash = block.hash();
         // SAFETY: synthetic test fixture, no real signature.
