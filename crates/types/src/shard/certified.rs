@@ -273,9 +273,17 @@ impl Verified<CertifiedBlock> {
     /// unverified blocks can't reach the write path. Callers in
     /// storage adapters or recovery paths use this constructor; any
     /// other caller is misusing it.
+    ///
+    /// Serialization does not carry the QC's verification marker, so a
+    /// `CertifiedBlock` rebuilt from storage holds an `Unverified` inner
+    /// QC. The predicate this type promises includes that inner QC being
+    /// verified — [`Self::qc_verified`] relies on it — so restore the
+    /// marker here, sound by the same write-time guarantee as the block.
     #[must_use]
-    pub const fn from_persisted(certified: CertifiedBlock) -> Self {
-        Self::new_unchecked(certified)
+    pub fn from_persisted(certified: CertifiedBlock) -> Self {
+        let (block, qc) = certified.into_parts();
+        let qc = Verified::<QuorumCertificate>::from_persisted(qc.into_unverified());
+        Self::new_unchecked(CertifiedBlock::new_unchecked(block, qc))
     }
 
     /// Pair a `Verified<Block>` with a `Verified<QuorumCertificate>`,
