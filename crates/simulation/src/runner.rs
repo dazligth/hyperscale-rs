@@ -43,6 +43,7 @@ use tracing::{debug, info, trace};
 
 use crate::event_queue::EventKey;
 
+pub mod grow;
 pub mod merge;
 pub mod observer;
 pub mod relocation;
@@ -599,6 +600,19 @@ impl SimulationRunner {
             }
         }
         None
+    }
+
+    /// Host `node`'s current topology snapshot, or `None` if `node` is out of
+    /// range.
+    #[must_use]
+    pub fn host_topology(&self, node: NodeIndex) -> Option<Arc<TopologySnapshot>> {
+        Some(
+            self.hosts
+                .get(node as usize)?
+                .process()
+                .topology()
+                .load_full(),
+        )
     }
 
     /// Get a reference to the network.
