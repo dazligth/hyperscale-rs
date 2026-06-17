@@ -1,22 +1,29 @@
-//! End-to-end: a committed system transaction reports its beacon action.
+//! End-to-end beacon lifecycle through committed system transactions.
 //!
-//! Drives a real `StakeDeposit` system transaction from submission through the
-//! shard commit, the shard's beacon-witness root, and the beacon fold — then
-//! asserts the deposited stake appears on the folded `BeaconState`. No witness
-//! is injected; the action travels the same rail a real staking transaction
-//! would.
+//! Each test drives a real system transaction from submission through the shard
+//! commit, the shard's beacon-witness root, and the beacon fold, then asserts
+//! the folded `BeaconState`. No witness is injected; every action travels the
+//! same rail a real staking or registration transaction would. The deposited /
+//! withdrawn amounts are asserted by the transaction message (the stop-gap
+//! trust model), so a pool can be funded past genesis capacity regardless of
+//! the payer's balance.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use hyperscale_network_memory::NetworkConfig;
 use hyperscale_simulation::SimulationRunner;
 use hyperscale_types::{
-    BeaconChainConfig, BeaconWitnessEvent, Ed25519PrivateKey, Stake, StakePoolId,
+    BeaconChainConfig, BeaconState, BeaconWitnessEvent, Bls12381G1PublicKey, Ed25519PrivateKey,
+    Stake, StakePool, StakePoolId, ValidatorId, ValidatorStatus, bls_keypair_from_seed,
 };
 use radix_common::math::Decimal;
 use radix_common::types::ComponentAddress;
 
 const TEST_EPOCH_MS: u64 = 2000;
+
+/// The single genesis pool every genesis validator belongs to.
+const GENESIS_POOL: StakePoolId = StakePoolId::new(0);
 
 /// One shard, four validators, beacon committee four.
 fn single_shard_config() -> NetworkConfig {
@@ -36,30 +43,83 @@ fn single_shard_config() -> NetworkConfig {
     }
 }
 
-fn account_of(key: &Ed25519PrivateKey) -> ComponentAddress {
-    ComponentAddress::preallocated_account_from_public_key(&key.public_key())
+/// Boot a single-shard network with `payer`'s account funded, warmed up to
+/// where the shard is producing blocks and the beacon is folding.
+fn booted(seed: u64, payer: &Ed25519PrivateKey) -> SimulationRunner {
+    let mut runner = SimulationRunner::new(&single_shard_config(), seed);
+    let account = ComponentAddress::preallocated_account_from_public_key(&payer.public_key());
+    runner.initialize_genesis_with_balances(&[(account, Decimal::from(100_000))]);
+    runner.run_until(Duration::from_secs(8));
+    runner
 }
 
-/// Host 0's folded stake for `pool`, or `None` if the pool has no entry yet.
-fn pool_stake(runner: &SimulationRunner, pool: StakePoolId) -> Option<Stake> {
-    let (_, state) = runner.beacon_storage(0)?.latest_committed()?;
-    state.pools.get(&pool).map(|p| p.total_stake)
+/// Host 0's latest committed beacon state.
+fn committed_state(runner: &SimulationRunner) -> Option<Arc<BeaconState>> {
+    runner
+        .beacon_storage(0)?
+        .latest_committed()
+        .map(|(_, state)| state)
+}
+
+fn pool_total_stake(runner: &SimulationRunner, pool: StakePoolId) -> Option<Stake> {
+    committed_state(runner)?
+        .pools
+        .get(&pool)
+        .map(|p| p.total_stake)
+}
+
+fn pool_effective_stake(runner: &SimulationRunner, pool: StakePoolId) -> Option<Stake> {
+    committed_state(runner)?
+        .pools
+        .get(&pool)
+        .map(StakePool::effective_stake)
+}
+
+fn validator_status(runner: &SimulationRunner, id: ValidatorId) -> Option<ValidatorStatus> {
+    committed_state(runner)?
+        .validators
+        .get(&id)
+        .map(|r| r.status)
+}
+
+/// A well-formed 48-byte BLS pubkey for a registration — never verified, since
+/// no host runs the registered validator.
+fn dummy_pubkey(seed: u8) -> Bls12381G1PublicKey {
+    bls_keypair_from_seed(&[seed; 32]).public_key()
+}
+
+/// Run in one-second slices until `pred` holds or `budget` elapses; returns
+/// whether it held.
+fn run_until(
+    runner: &mut SimulationRunner,
+    budget: Duration,
+    mut pred: impl FnMut(&SimulationRunner) -> bool,
+) -> bool {
+    let deadline = runner.now() + budget;
+    while runner.now() < deadline {
+        let next = runner.now() + Duration::from_secs(1);
+        runner.run_until(next);
+        if pred(runner) {
+            return true;
+        }
+    }
+    pred(runner)
 }
 
 #[test]
-fn stake_deposit_system_tx_folds_into_beacon_state() {
-    let mut runner = SimulationRunner::new(&single_shard_config(), 0x57AC);
+fn stake_deposit_folds_into_beacon_state() {
     let payer = Ed25519PrivateKey::from_u64(42).unwrap();
-    runner.initialize_genesis_with_balances(&[(account_of(&payer), Decimal::from(100_000))]);
-
-    // Warm up so the shard is producing blocks and the beacon is folding.
-    runner.run_until(Duration::from_secs(8));
+    let mut runner = booted(0x57AC, &payer);
 
     // A pool id no genesis validator uses, so the deposit is the only source of
     // its stake.
     let pool = StakePoolId::new(7777);
     let amount = Stake::from_whole_tokens(1_000);
-    assert_eq!(pool_stake(&runner, pool), None, "pool must not exist yet");
+    assert_eq!(
+        pool_total_stake(&runner, pool),
+        None,
+        "pool must not exist yet"
+    );
 
     runner.submit_system_action(
         &payer,
@@ -70,17 +130,205 @@ fn stake_deposit_system_tx_folds_into_beacon_state() {
         },
     );
 
-    // The transaction commits on the shard, the shard's witness root carries the
-    // deposit, and the next beacon fold credits the pool.
-    let deadline = runner.now() + Duration::from_secs(60);
-    let mut folded = false;
-    while runner.now() < deadline {
-        let next = runner.now() + Duration::from_secs(1);
-        runner.run_until(next);
-        if pool_stake(&runner, pool) == Some(amount) {
-            folded = true;
-            break;
-        }
-    }
-    assert!(folded, "beacon never folded the stake deposit");
+    assert!(
+        run_until(&mut runner, Duration::from_secs(60), |r| {
+            pool_total_stake(r, pool) == Some(amount)
+        }),
+        "beacon never folded the stake deposit",
+    );
+}
+
+#[test]
+fn register_validator_pools_a_node() {
+    let payer = Ed25519PrivateKey::from_u64(42).unwrap();
+    let mut runner = booted(0x5EED, &payer);
+
+    // Fund a fresh pool well above min_stake so it can support a validator.
+    let pool = StakePoolId::new(7777);
+    let newcomer = ValidatorId::new(1000);
+    runner.submit_system_action(
+        &payer,
+        1,
+        &BeaconWitnessEvent::StakeDeposit {
+            pool_id: pool,
+            amount: Stake::from_whole_tokens(10_000_000),
+        },
+    );
+    assert!(
+        run_until(&mut runner, Duration::from_secs(30), |r| {
+            pool_total_stake(r, pool).is_some()
+        }),
+        "deposit never folded",
+    );
+
+    runner.submit_system_action(
+        &payer,
+        2,
+        &BeaconWitnessEvent::RegisterValidator {
+            pool_id: pool,
+            validator_id: newcomer,
+            pubkey: dummy_pubkey(9),
+        },
+    );
+    assert!(
+        run_until(&mut runner, Duration::from_secs(30), |r| {
+            validator_status(r, newcomer) == Some(ValidatorStatus::Pooled)
+        }),
+        "registered validator never reached the pool",
+    );
+}
+
+#[test]
+fn register_without_capacity_is_rejected() {
+    let payer = Ed25519PrivateKey::from_u64(42).unwrap();
+    let mut runner = booted(0x0CA9, &payer);
+
+    // The pool exists but holds less than one min_stake, so it can support no
+    // validator — the registration must be rejected on the capacity gate.
+    let pool = StakePoolId::new(8888);
+    let newcomer = ValidatorId::new(2000);
+    runner.submit_system_action(
+        &payer,
+        1,
+        &BeaconWitnessEvent::StakeDeposit {
+            pool_id: pool,
+            amount: Stake::from_whole_tokens(500_000),
+        },
+    );
+    assert!(
+        run_until(&mut runner, Duration::from_secs(30), |r| {
+            pool_total_stake(r, pool).is_some()
+        }),
+        "deposit never folded",
+    );
+
+    runner.submit_system_action(
+        &payer,
+        2,
+        &BeaconWitnessEvent::RegisterValidator {
+            pool_id: pool,
+            validator_id: newcomer,
+            pubkey: dummy_pubkey(11),
+        },
+    );
+    // Run long enough that the registration has committed and folded; an
+    // accepted one would surface within a couple of epochs.
+    run_until(&mut runner, Duration::from_secs(20), |_| false);
+    assert_eq!(
+        validator_status(&runner, newcomer),
+        None,
+        "under-capacity registration must not create a validator record",
+    );
+}
+
+#[test]
+fn stake_withdraw_drops_effective_stake() {
+    let payer = Ed25519PrivateKey::from_u64(42).unwrap();
+    let mut runner = booted(0xD7A1, &payer);
+
+    let pool = StakePoolId::new(9999);
+    let deposited = Stake::from_whole_tokens(5_000_000);
+    let withdrawn = Stake::from_whole_tokens(2_000_000);
+    let remaining = Stake::from_whole_tokens(3_000_000);
+
+    runner.submit_system_action(
+        &payer,
+        1,
+        &BeaconWitnessEvent::StakeDeposit {
+            pool_id: pool,
+            amount: deposited,
+        },
+    );
+    assert!(
+        run_until(&mut runner, Duration::from_secs(30), |r| {
+            pool_total_stake(r, pool) == Some(deposited)
+        }),
+        "deposit never folded",
+    );
+
+    runner.submit_system_action(
+        &payer,
+        2,
+        &BeaconWitnessEvent::StakeWithdraw {
+            pool_id: pool,
+            amount: withdrawn,
+        },
+    );
+    assert!(
+        run_until(&mut runner, Duration::from_secs(30), |r| {
+            pool_effective_stake(r, pool) == Some(remaining)
+        }),
+        "withdrawal never dropped effective stake",
+    );
+    // `total_stake` holds through the unbonding window; only `effective_stake`
+    // drops immediately.
+    assert_eq!(
+        pool_total_stake(&runner, pool),
+        Some(deposited),
+        "total stake must hold until the withdrawal unbonds",
+    );
+}
+
+#[test]
+fn registered_validator_activates_onto_a_shard() {
+    let payer = Ed25519PrivateKey::from_u64(42).unwrap();
+    let mut runner = booted(0xAC11, &payer);
+
+    let newcomer = ValidatorId::new(1000);
+
+    // Grow the genesis pool past its capacity so it can support another node.
+    runner.submit_system_action(
+        &payer,
+        1,
+        &BeaconWitnessEvent::StakeDeposit {
+            pool_id: GENESIS_POOL,
+            amount: Stake::from_whole_tokens(10_000_000),
+        },
+    );
+    assert!(
+        run_until(&mut runner, Duration::from_secs(30), |r| {
+            pool_total_stake(r, GENESIS_POOL)
+                .is_some_and(|s| s >= Stake::from_whole_tokens(13_000_000))
+        }),
+        "capacity deposit never folded",
+    );
+
+    // Register a new validator; with the committee full it parks in the pool.
+    runner.submit_system_action(
+        &payer,
+        2,
+        &BeaconWitnessEvent::RegisterValidator {
+            pool_id: GENESIS_POOL,
+            validator_id: newcomer,
+            pubkey: dummy_pubkey(9),
+        },
+    );
+    assert!(
+        run_until(&mut runner, Duration::from_secs(30), |r| {
+            validator_status(r, newcomer) == Some(ValidatorStatus::Pooled)
+        }),
+        "newcomer never reached the pool",
+    );
+
+    // Retire a genesis validator; the freed committee slot draws the only pooled
+    // validator — the newcomer — onto the shard. It enters `OnShard { ready:
+    // false }`; the ready flip follows later via the shard's `Ready` witness or
+    // the ready-timeout, neither of which this host-less validator drives, so the
+    // placement is the activation milestone.
+    runner.submit_system_action(
+        &payer,
+        3,
+        &BeaconWitnessEvent::DeactivateValidator {
+            validator_id: ValidatorId::new(0),
+        },
+    );
+    assert!(
+        run_until(&mut runner, Duration::from_secs(40), |r| {
+            matches!(
+                validator_status(r, newcomer),
+                Some(ValidatorStatus::OnShard { .. })
+            )
+        }),
+        "newcomer never drew onto the shard after a slot freed",
+    );
 }
