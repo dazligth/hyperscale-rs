@@ -19,8 +19,8 @@ use hyperscale_node::shard_loop::{ProcessScopedInput, ShardEvent};
 use hyperscale_simulation::SimulationRunner;
 use hyperscale_types::test_utils::test_validity_range;
 use hyperscale_types::{
-    Ed25519PrivateKey, RoutableTransaction, TransactionStatus, ed25519_keypair_from_seed,
-    routable_from_notarized_v1, sign_and_notarize,
+    BeaconChainConfig, Ed25519PrivateKey, RoutableTransaction, TransactionStatus,
+    ed25519_keypair_from_seed, routable_from_notarized_v1, sign_and_notarize,
 };
 use radix_common::constants::XRD;
 use radix_common::crypto::Ed25519PublicKey;
@@ -29,14 +29,24 @@ use radix_common::network::NetworkDefinition;
 use radix_common::types::ComponentAddress;
 use radix_transactions::builder::ManifestBuilder;
 
-/// Create a multi-shard network configuration for cross-shard tests.
-fn multi_shard_config() -> NetworkConfig {
+/// The single-shard network the backpressure tests run on.
+///
+/// Eight validators on one shard give the beacon shuffle enough eligibility
+/// slack to survive past `SHUFFLE_INTERVAL_EPOCHS`; a four-validator committee
+/// churns down to n=3 once the shuffle starts. These tests exercise shard-local
+/// mempool and provision mechanics, so one shard is sufficient.
+fn backpressure_config() -> NetworkConfig {
     NetworkConfig {
-        num_shards: 2,
-        validators_per_shard: 4,
+        num_shards: 1,
+        validators_per_shard: 8,
         intra_shard_latency: Duration::from_millis(10),
         cross_shard_latency: Duration::from_millis(50),
         jitter_fraction: 0.1,
+        beacon_chain_config: Some(BeaconChainConfig {
+            num_shards: 1,
+            shard_size: 8,
+            ..BeaconChainConfig::default()
+        }),
         ..Default::default()
     }
 }
@@ -65,13 +75,7 @@ const fn simulator_network() -> NetworkDefinition {
 /// Test that single-shard transactions work normally regardless of backpressure state.
 #[test]
 fn test_single_shard_unaffected_by_backpressure() {
-    // 2-shard 6-validator config gives the beacon shuffle enough
-    // eligibility slack to survive past `SHUFFLE_INTERVAL_EPOCHS == 16`
-    // — the single-shard, 4-validator setup runs the beacon committee
-    // down to n=3 once the shuffle starts churning. The test logic
-    // (submit a single tx via validator 0, observe mempool state) is
-    // unchanged by the larger committee.
-    let config = multi_shard_config();
+    let config = backpressure_config();
     let mut runner = SimulationRunner::new(&config, 12345);
 
     // Initialize genesis
@@ -129,10 +133,11 @@ fn test_single_shard_unaffected_by_backpressure() {
     );
 }
 
-/// Test that cross-shard transactions are tracked by provision coordinator.
+/// Test that a submitted transaction is tracked through the mempool without
+/// tripping backpressure.
 #[test]
 fn test_provision_coordinator_tracking() {
-    let config = multi_shard_config();
+    let config = backpressure_config();
     let mut runner = SimulationRunner::new(&config, 12346);
 
     // Initialize genesis
@@ -155,9 +160,7 @@ fn test_provision_coordinator_tracking() {
     let transaction: RoutableTransaction =
         routable_from_notarized_v1(notarized, test_validity_range()).expect("valid transaction");
     let tx_hash = transaction.hash();
-    let is_cross_shard = transaction.is_cross_shard(2);
-
-    println!("Transaction: hash={tx_hash}, is_cross_shard={is_cross_shard}");
+    println!("Transaction: hash={tx_hash}");
 
     // Submit via event
     runner.schedule_initial_event(
@@ -190,7 +193,7 @@ fn test_provision_coordinator_tracking() {
 /// Test that the mempool correctly queries provision coordinator for backpressure.
 #[test]
 fn test_mempool_backpressure_integration() {
-    let config = multi_shard_config();
+    let config = backpressure_config();
     let mut runner = SimulationRunner::new(&config, 12347);
 
     // Initialize genesis
@@ -243,10 +246,10 @@ fn test_mempool_backpressure_integration() {
     assert!(!at_limit, "Should not be at limit with small number of TXs");
 }
 
-/// Test that cross-shard TXs are correctly tracked through the lifecycle.
+/// Test that every node reports a consistent idle backpressure state.
 #[test]
 fn test_provision_lifecycle_tracking() {
-    let config = multi_shard_config();
+    let config = backpressure_config();
     let mut runner = SimulationRunner::new(&config, 12348);
 
     // Initialize genesis
@@ -255,9 +258,8 @@ fn test_provision_lifecycle_tracking() {
     // Run for enough time to see some blocks committed
     runner.run_until(Duration::from_secs(3));
 
-    // Check backpressure state on all nodes
+    // Check backpressure state on a sample of nodes
     for node_idx in 0..6u32 {
-        // 2 shards × 3 validators
         let node = runner.node(node_idx).unwrap();
         let mempool = node.mempool_coordinator();
 
@@ -281,7 +283,7 @@ fn test_provision_lifecycle_tracking() {
 /// Test that backpressure metrics are accessible.
 #[test]
 fn test_provision_metrics_accessible() {
-    let config = multi_shard_config();
+    let config = backpressure_config();
     let mut runner = SimulationRunner::new(&config, 12349);
 
     // Initialize genesis
@@ -310,7 +312,7 @@ fn test_provision_metrics_accessible() {
 /// Test behavior early in simulation before many TXs have been processed.
 #[test]
 fn test_provisions_pending_verification() {
-    let config = multi_shard_config();
+    let config = backpressure_config();
     let mut runner = SimulationRunner::new(&config, 12350);
 
     // Initialize genesis
@@ -335,9 +337,7 @@ fn test_provisions_pending_verification() {
 /// Test that completed transactions don't affect backpressure count.
 #[test]
 fn test_completed_tx_cleanup() {
-    // See `test_single_shard_unaffected_by_backpressure` for why this
-    // uses `multi_shard_config` rather than `single_shard_config`.
-    let config = multi_shard_config();
+    let config = backpressure_config();
     let mut runner = SimulationRunner::new(&config, 12351);
 
     // Initialize genesis
@@ -385,10 +385,10 @@ fn test_completed_tx_cleanup() {
     );
 }
 
-/// Test that all nodes in a multi-shard setup have consistent backpressure state.
+/// Test that all nodes report a consistent backpressure state.
 #[test]
 fn test_multi_node_provision_consistency() {
-    let config = multi_shard_config();
+    let config = backpressure_config();
     let mut runner = SimulationRunner::new(&config, 12352);
 
     // Initialize genesis
