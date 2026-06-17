@@ -538,6 +538,12 @@ fn set_bits(key: &mut Key, at: u16, count: u8, val: u8) {
     debug_assert!(count <= 8);
     debug_assert!(usize::from(at) + usize::from(count) <= 256);
 
+    // Overwriting zero bits is a no-op. Guarding here also keeps the shift
+    // below from reaching 16 (`16 - off - 0`), which would overflow a u16.
+    if count == 0 {
+        return;
+    }
+
     let byte = usize::from(at / 8);
     let off = usize::from(at % 8);
     let shift = 16 - off - usize::from(count);
