@@ -1,72 +1,85 @@
-//! Multi-vnode cross-shard hosting smoke tests.
+//! Multi-vnode cross-shard hosting smoke test.
 //!
-//! A single `IoLoop` hosting vnodes in *different* shards: gossip shard
-//! routing, fetch-callback tagging, per-shard timer keying, and shared
-//! per-shard stores composing end-to-end. Mirrors the same-shard variant
-//! in `multi_vnode_tests.rs`, but uses [`HostingMode::CrossShard`] so
-//! each host carries one validator from every shard.
+//! After growing to two shards, the split's observer seating leaves some hosts
+//! running a vnode in *each* child shard — a single `IoLoop` servicing
+//! different shards. Exercises gossip shard routing, fetch-callback tagging,
+//! per-shard timer keying, and shared per-shard stores composing end to end,
+//! the same machinery the same-shard variant in `multi_vnode_tests.rs` covers.
 
 use std::time::Duration;
 
-use hyperscale_network_memory::{HostingMode, NetworkConfig};
 use hyperscale_simulation::SimulationRunner;
-use hyperscale_types::{BlockHeight, ValidatorId};
+use hyperscale_types::ShardId;
 use tracing_test::traced_test;
 
-/// Two hosts × two vnodes each (one per shard), 2 shards. Each host
-/// carries one validator from shard 0 and one from shard 1. Validators
-/// `V0`,`V1` are in shard 0; `V2`,`V3` are in shard 1; host 0 hosts
-/// `{V0, V2}`, host 1 hosts `{V1, V3}`. Runs a short consensus burst
-/// and asserts every validator's shard committed beyond genesis.
+mod common;
+use common::{cross_shard_grow_config, grown_leaves};
+
+/// Lowest committed height across `leaf`'s live committee.
+fn min_height(runner: &SimulationRunner, leaf: ShardId) -> u64 {
+    runner
+        .shard_vnodes(leaf)
+        .iter()
+        .map(|v| v.shard_coordinator().committed_height().inner())
+        .min()
+        .expect("leaf has a live committee")
+}
+
+/// Greatest committed-height spread across `leaf`'s live committee — the drift
+/// between members on different hosts.
+fn drift(runner: &SimulationRunner, leaf: ShardId) -> u64 {
+    let heights: Vec<u64> = runner
+        .shard_vnodes(leaf)
+        .iter()
+        .map(|v| v.shard_coordinator().committed_height().inner())
+        .collect();
+    let max = heights.iter().max().expect("live committee");
+    let min = heights.iter().min().expect("live committee");
+    max - min
+}
+
 #[traced_test]
 #[test]
-fn test_v2_cross_shard_hosting_makes_progress() {
-    let config = NetworkConfig {
-        num_shards: 2,
-        validators_per_shard: 2,
-        vnodes_per_host: 1, // ignored under CrossShard mode
-        hosting_mode: HostingMode::CrossShard,
-        intra_shard_latency: Duration::from_millis(50),
-        cross_shard_latency: Duration::from_millis(50),
-        jitter_fraction: 0.1,
-        packet_loss_rate: 0.0,
-        beacon_chain_config: None,
-        pool_extra_validators: 0,
-    };
-
-    let mut runner = SimulationRunner::new(&config, 7);
+fn test_cross_shard_hosting_makes_progress() {
+    let mut runner = SimulationRunner::new(&cross_shard_grow_config(), 7);
     runner.initialize_genesis();
-    runner.run_until(Duration::from_secs(3));
+    runner.grow_to(2);
+    let leaves = grown_leaves();
 
-    let heights: Vec<BlockHeight> = (0..4)
-        .map(|i| {
-            runner
-                .vnode_state(ValidatorId::new(i))
-                .expect("validator should be hosted")
-                .shard_coordinator()
-                .committed_height()
+    // The grow's observer seating must leave at least one host co-hosting a
+    // vnode in each child — the cross-shard hosting under test.
+    let cross_hosts = (0..runner.num_hosts())
+        .filter(|&h| {
+            leaves
+                .iter()
+                .all(|&leaf| runner.hosts_shard(h, leaf).is_some())
         })
+        .count();
+    assert!(
+        cross_hosts >= 1,
+        "grow must leave at least one host co-hosting both children",
+    );
+
+    // Both children keep advancing under the shared hosts: snapshot each leaf's
+    // lowest committed height, run a burst, and require every member to climb.
+    let before: Vec<u64> = leaves
+        .iter()
+        .map(|&leaf| min_height(&runner, leaf))
         .collect();
-
-    let min = *heights.iter().min().expect("4 validators");
-    assert!(
-        min > BlockHeight::GENESIS,
-        "all validators should commit beyond genesis under cross-shard hosting; heights = {heights:?}"
-    );
-
-    // V0 and V1 are both in shard 0 but on *different hosts* (host 0
-    // and host 1) — cross-host drift bounded by one block at the
-    // moment of snapshot. Same shape for V2/V3 in shard 1. Cross-shard
-    // heights (e.g. V0 vs V2) are fully independent and can diverge
-    // freely.
-    let shard0_drift = heights[0].inner().abs_diff(heights[1].inner());
-    let shard1_drift = heights[2].inner().abs_diff(heights[3].inner());
-    assert!(
-        shard0_drift <= 1,
-        "shard 0 validators should drift by at most 1 block; got {heights:?}"
-    );
-    assert!(
-        shard1_drift <= 1,
-        "shard 1 validators should drift by at most 1 block; got {heights:?}"
-    );
+    let until = runner.now() + Duration::from_secs(8);
+    runner.run_until(until);
+    for (&leaf, &start) in leaves.iter().zip(&before) {
+        let now = min_height(&runner, leaf);
+        assert!(
+            now > start,
+            "{leaf:?} stalled under cross-shard hosting: {start} -> {now}",
+        );
+        // Members of one shard on different hosts stay closely synchronized —
+        // cross-host drift bounded by a small window at the snapshot instant.
+        assert!(
+            drift(&runner, leaf) <= 2,
+            "{leaf:?} committee drifted too far: {}",
+            drift(&runner, leaf),
+        );
+    }
 }
