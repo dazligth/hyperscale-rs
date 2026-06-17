@@ -25,28 +25,31 @@ const TEST_EPOCH_MS: u64 = 2000;
 /// The single genesis pool every genesis validator belongs to.
 const GENESIS_POOL: StakePoolId = StakePoolId::new(0);
 
-/// One shard, four validators, beacon committee four.
-fn single_shard_config() -> NetworkConfig {
+/// One shard of `validators` nodes, the committee sized to the whole set. With
+/// no validators left over for the pool, the shuffle has no stock and never
+/// fires, so committee membership stays put for the test's duration.
+fn single_shard_config(validators: u32) -> NetworkConfig {
     NetworkConfig {
         num_shards: 1,
-        validators_per_shard: 4,
+        validators_per_shard: validators,
         intra_shard_latency: Duration::from_millis(100),
         cross_shard_latency: Duration::from_millis(100),
         jitter_fraction: 0.1,
         beacon_chain_config: Some(BeaconChainConfig {
             epoch_duration_ms: TEST_EPOCH_MS,
             num_shards: 1,
-            shard_size: 4,
+            shard_size: validators,
             ..BeaconChainConfig::default()
         }),
         ..Default::default()
     }
 }
 
-/// Boot a single-shard network with `payer`'s account funded, warmed up to
-/// where the shard is producing blocks and the beacon is folding.
-fn booted(seed: u64, payer: &Ed25519PrivateKey) -> SimulationRunner {
-    let mut runner = SimulationRunner::new(&single_shard_config(), seed);
+/// Boot a single-shard network of `validators` nodes with `payer`'s account
+/// funded, warmed up to where the shard is producing blocks and the beacon is
+/// folding.
+fn booted(validators: u32, seed: u64, payer: &Ed25519PrivateKey) -> SimulationRunner {
+    let mut runner = SimulationRunner::new(&single_shard_config(validators), seed);
     let account = ComponentAddress::preallocated_account_from_public_key(&payer.public_key());
     runner.initialize_genesis_with_balances(&[(account, Decimal::from(100_000))]);
     runner.run_until(Duration::from_secs(8));
@@ -109,7 +112,7 @@ fn run_until(
 #[test]
 fn stake_deposit_folds_into_beacon_state() {
     let payer = Ed25519PrivateKey::from_u64(42).unwrap();
-    let mut runner = booted(0x57AC, &payer);
+    let mut runner = booted(4, 0x57AC, &payer);
 
     // A pool id no genesis validator uses, so the deposit is the only source of
     // its stake.
@@ -141,7 +144,7 @@ fn stake_deposit_folds_into_beacon_state() {
 #[test]
 fn register_validator_pools_a_node() {
     let payer = Ed25519PrivateKey::from_u64(42).unwrap();
-    let mut runner = booted(0x5EED, &payer);
+    let mut runner = booted(4, 0x5EED, &payer);
 
     // Fund a fresh pool well above min_stake so it can support a validator.
     let pool = StakePoolId::new(7777);
@@ -181,7 +184,7 @@ fn register_validator_pools_a_node() {
 #[test]
 fn register_without_capacity_is_rejected() {
     let payer = Ed25519PrivateKey::from_u64(42).unwrap();
-    let mut runner = booted(0x0CA9, &payer);
+    let mut runner = booted(4, 0x0CA9, &payer);
 
     // The pool exists but holds less than one min_stake, so it can support no
     // validator — the registration must be rejected on the capacity gate.
@@ -224,7 +227,7 @@ fn register_without_capacity_is_rejected() {
 #[test]
 fn stake_withdraw_drops_effective_stake() {
     let payer = Ed25519PrivateKey::from_u64(42).unwrap();
-    let mut runner = booted(0xD7A1, &payer);
+    let mut runner = booted(4, 0xD7A1, &payer);
 
     let pool = StakePoolId::new(9999);
     let deposited = Stake::from_whole_tokens(5_000_000);
@@ -272,7 +275,7 @@ fn stake_withdraw_drops_effective_stake() {
 #[test]
 fn registered_validator_activates_onto_a_shard() {
     let payer = Ed25519PrivateKey::from_u64(42).unwrap();
-    let mut runner = booted(0xAC11, &payer);
+    let mut runner = booted(4, 0xAC11, &payer);
 
     let newcomer = ValidatorId::new(1000);
 
@@ -330,5 +333,62 @@ fn registered_validator_activates_onto_a_shard() {
             )
         }),
         "newcomer never drew onto the shard after a slot freed",
+    );
+}
+
+#[test]
+fn withdrawal_ejects_a_validator_that_a_deposit_reactivates() {
+    let payer = Ed25519PrivateKey::from_u64(42).unwrap();
+    // Seven nodes give the committee slack to keep quorum while a couple are
+    // ejected; `shard_size == validators` keeps the shuffle dormant.
+    let mut runner = booted(7, 0xE1EC, &payer);
+
+    // The highest-id genesis validator is the first the over-capacity sweep
+    // ejects, so it is the one to watch.
+    let victim = ValidatorId::new(6);
+    assert!(
+        matches!(
+            validator_status(&runner, victim),
+            Some(ValidatorStatus::OnShard { .. } | ValidatorStatus::Pooled)
+        ),
+        "victim should start active",
+    );
+
+    // The withdrawal blocks new support immediately but only releases stake —
+    // and forces the over-capacity ejection — once it unbonds, an
+    // UNBONDING_WINDOW_EPOCHS later.
+    runner.submit_system_action(
+        &payer,
+        1,
+        &BeaconWitnessEvent::StakeWithdraw {
+            pool_id: GENESIS_POOL,
+            amount: Stake::from_whole_tokens(1_500_000),
+        },
+    );
+    assert!(
+        run_until(&mut runner, Duration::from_secs(120), |r| {
+            validator_status(r, victim) == Some(ValidatorStatus::InsufficientStake)
+        }),
+        "the matured withdrawal never ejected the over-capacity validator",
+    );
+
+    // Top the pool back up; `auto_reactivate` promotes the ejected validator
+    // back into service once capacity returns.
+    runner.submit_system_action(
+        &payer,
+        2,
+        &BeaconWitnessEvent::StakeDeposit {
+            pool_id: GENESIS_POOL,
+            amount: Stake::from_whole_tokens(3_000_000),
+        },
+    );
+    assert!(
+        run_until(&mut runner, Duration::from_secs(30), |r| {
+            matches!(
+                validator_status(r, victim),
+                Some(ValidatorStatus::Pooled | ValidatorStatus::OnShard { .. })
+            )
+        }),
+        "the deposit never reactivated the ejected validator",
     );
 }
