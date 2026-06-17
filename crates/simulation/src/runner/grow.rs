@@ -8,10 +8,11 @@
 //! until the readiness gate reshapes the children into the lookahead, the
 //! parent coasts to its crossing and seeds both child anchors, every store
 //! follows the parent to its terminal root, and each member flips onto its
-//! assigned child. Repeating one generation per trie level grows a power-of-two
-//! target. The runner is left positioned exactly where a multi-shard genesis
-//! used to leave it: every child at full committee strength, committing past
-//! its genesis.
+//! assigned child. Every leaf of one generation splits together — an admitted
+//! split that no one drives stalls the beacon fold the others depend on —
+//! so the runner is left positioned exactly where a multi-shard genesis used
+//! to leave it: every child at full committee strength, committing past its
+//! genesis.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,8 +21,8 @@ use hyperscale_network_memory::NodeIndex;
 use hyperscale_storage::ShardChainReader;
 use hyperscale_storage_memory::SimShardStorage;
 use hyperscale_types::{
-    BeaconState, BlockHash, PendingReshape, ShardAnchor, ShardId, StateRoot, TopologySnapshot,
-    ValidatorId, ValidatorStatus,
+    BeaconState, BlockHash, BlockHeight, PendingReshape, ShardAnchor, ShardId, StateRoot,
+    TopologySnapshot, ValidatorId, ValidatorStatus,
 };
 
 use super::SimulationRunner;
@@ -30,17 +31,38 @@ use super::SimulationRunner;
 const ADMISSION_BUDGET_EPOCHS: u64 = 8;
 
 /// Epochs the folded ready signals get to fire the readiness gate.
-const GATE_BUDGET_EPOCHS: u64 = 8;
+const GATE_BUDGET_EPOCHS: u64 = 10;
 
 /// Epochs the parent gets to coast to its crossing and seed both child anchors.
-const SEED_BUDGET_EPOCHS: u64 = 6;
+const SEED_BUDGET_EPOCHS: u64 = 12;
 
 /// Epochs the flipped children get to commit past their genesis.
-const CHILD_RUN_BUDGET_EPOCHS: u64 = 4;
+const CHILD_RUN_BUDGET_EPOCHS: u64 = 6;
+
+/// One frontier leaf's split, carried through the generation's phases.
+struct PendingSplit {
+    /// The splitting leaf.
+    parent: ShardId,
+    /// Its two children, `parent.children()`.
+    left: ShardId,
+    right: ShardId,
+    /// The parent's pre-split committee — the members that partition across the
+    /// children when the gate fires.
+    members: Vec<ValidatorId>,
+    /// Each cohort member's synced child store, its imported root, and the
+    /// anchor the sync verified against.
+    synced: Vec<(
+        ValidatorId,
+        ShardId,
+        SimShardStorage,
+        ShardAnchor,
+        StateRoot,
+    )>,
+}
 
 impl SimulationRunner {
     /// Grow the current single-shard topology until it holds `target_shards`
-    /// leaves, splitting every frontier leaf once per generation.
+    /// leaves, splitting every frontier leaf together once per generation.
     ///
     /// The caller must have run genesis first
     /// (`initialize_genesis` / `initialize_genesis_with_balances`) and armed
@@ -63,138 +85,166 @@ impl SimulationRunner {
             if frontier.len() as u64 >= u64::from(target_shards) {
                 break;
             }
-            for parent in frontier {
-                self.split_shard(parent);
+            self.split_frontier(&frontier);
+        }
+    }
+
+    /// Drive every leaf in `parents` through one split generation together,
+    /// leaving each child seated at full strength and committing past genesis.
+    fn split_frontier(&mut self, parents: &[ShardId]) {
+        let mut splits = self.prepare_splits(parents);
+        self.await_admission(&splits);
+        self.observe_all(&mut splits);
+        self.await_gate(&splits);
+        self.await_seed(&splits);
+
+        let state = self
+            .committed_beacon_state()
+            .expect("post-gate beacon state");
+        let children_genesis: Vec<(ShardId, BlockHeight)> = splits
+            .iter()
+            .flat_map(|split| [split.left, split.right])
+            .map(|child| (child, state.boundaries[&child].height))
+            .collect();
+
+        self.flip_all(splits, &state);
+        self.await_children(&children_genesis);
+    }
+
+    /// Capture each frontier leaf's children and pre-split committee.
+    fn prepare_splits(&self, parents: &[ShardId]) -> Vec<PendingSplit> {
+        parents
+            .iter()
+            .map(|&parent| {
+                let (left, right) = parent.children();
+                let members = self.snapshot().committee_for_shard(parent).to_vec();
+                PendingSplit {
+                    parent,
+                    left,
+                    right,
+                    members,
+                    synced: Vec::new(),
+                }
+            })
+            .collect()
+    }
+
+    /// Wait until the armed trigger folds and the beacon draws a full cohort
+    /// for every frontier split.
+    fn await_admission(&mut self, splits: &[PendingSplit]) {
+        let deadline = self.now + self.epochs(ADMISSION_BUDGET_EPOCHS);
+        let admitted = self.run_until_predicate(deadline, |r| {
+            splits.iter().all(|split| {
+                r.pending_split_cohort(split.parent)
+                    .is_some_and(|cohort| cohort.len() == split.members.len())
+            })
+        });
+        assert!(
+            admitted,
+            "every frontier split must draw a full cohort within \
+             {ADMISSION_BUDGET_EPOCHS} epochs",
+        );
+    }
+
+    /// Run each cohort member's observer duty: sync its assigned child span and
+    /// signal ready.
+    fn observe_all(&mut self, splits: &mut [PendingSplit]) {
+        for split in splits.iter_mut() {
+            let parent = split.parent;
+            let cohort = self
+                .pending_split_cohort(parent)
+                .expect("cohort just admitted");
+            for (validator, child) in cohort {
+                let (store, root, anchor) = self.observe_child(validator, parent, child);
+                split.synced.push((validator, child, store, anchor, root));
             }
         }
     }
 
-    /// Drive `parent`'s split through its full lifecycle, leaving both children
-    /// seated at full strength and committing past genesis.
-    fn split_shard(&mut self, parent: ShardId) {
-        let (left, right) = parent.children();
-
-        // The parent's pre-split committee — the members that partition across
-        // the two children when the gate fires.
-        let parent_members: Vec<ValidatorId> = self.snapshot().committee_for_shard(parent).to_vec();
-        let cohort_size = parent_members.len();
-
-        // Admission: the armed trigger folds and the beacon draws the cohort.
-        let admit_deadline = self.now + self.epochs(ADMISSION_BUDGET_EPOCHS);
-        let admitted = self.run_until_predicate(admit_deadline, |r| {
-            r.pending_split_cohort(parent)
-                .is_some_and(|cohort| cohort.len() == cohort_size)
-        });
-        assert!(
-            admitted,
-            "split of {parent:?} must draw a full cohort within \
-             {ADMISSION_BUDGET_EPOCHS} epochs",
-        );
-        let cohort = self
-            .pending_split_cohort(parent)
-            .expect("cohort just admitted");
-
-        // Observer duty: each cohort member syncs its assigned child span and
-        // signals ready.
-        let mut synced: Vec<(
-            ValidatorId,
-            ShardId,
-            SimShardStorage,
-            ShardAnchor,
-            StateRoot,
-        )> = Vec::with_capacity(cohort.len());
-        for (validator, child) in &cohort {
-            let (store, root, anchor) = self.observe_child(*validator, parent, *child);
-            synced.push((*validator, *child, store, anchor, root));
-        }
-
-        // The readiness gate: re-assert each ready signal until the trie
-        // reshapes the children into the lookahead.
-        let gate_deadline = self.now + self.epochs(GATE_BUDGET_EPOCHS);
+    /// Re-assert every cohort's ready signal until all frontier splits reshape
+    /// their children into the lookahead.
+    fn await_gate(&mut self, splits: &[PendingSplit]) {
+        let deadline = self.now + self.epochs(GATE_BUDGET_EPOCHS);
         let mut reshaped = false;
-        while self.now < gate_deadline {
-            if let Some(current) = self.pending_split_cohort(parent) {
-                for (validator, _) in &current {
-                    self.broadcast_observer_ready(*validator, parent);
+        while self.now < deadline {
+            for split in splits {
+                if let Some(cohort) = self.pending_split_cohort(split.parent) {
+                    for (validator, _) in cohort {
+                        self.broadcast_observer_ready(validator, split.parent);
+                    }
                 }
             }
             let next = self.now + Duration::from_secs(1);
             self.run_until(next);
-            if self.committed_beacon_state().is_some_and(|state| {
-                !state.pending_reshapes.contains_key(&parent)
-                    && state.next_shard_committees.contains_key(&left)
-            }) {
+            if self.all_reshaped(splits) {
                 reshaped = true;
                 break;
             }
         }
         assert!(
             reshaped,
-            "the ready signals must fire the split gate of {parent:?} within \
+            "every frontier split's ready signals must fire the gate within \
              {GATE_BUDGET_EPOCHS} epochs",
         );
+    }
 
-        // Seed: the parent coasts to its crossing and the fold seeds both
-        // children's anchors from its terminal contribution.
-        let seed_deadline = self.now + self.epochs(SEED_BUDGET_EPOCHS);
-        let seeded = self.run_until_predicate(seed_deadline, |r| {
+    /// Whether every split's parent has drained from `pending_reshapes` and its
+    /// children stand in the lookahead.
+    fn all_reshaped(&self, splits: &[PendingSplit]) -> bool {
+        self.committed_beacon_state().is_some_and(|state| {
+            splits.iter().all(|split| {
+                !state.pending_reshapes.contains_key(&split.parent)
+                    && state.next_shard_committees.contains_key(&split.left)
+            })
+        })
+    }
+
+    /// Wait until every parent coasts to its crossing and seeds both child
+    /// anchors from its terminal contribution.
+    fn await_seed(&mut self, splits: &[PendingSplit]) {
+        let deadline = self.now + self.epochs(SEED_BUDGET_EPOCHS);
+        let seeded = self.run_until_predicate(deadline, |r| {
             r.committed_beacon_state().is_some_and(|state| {
-                [left, right].iter().all(|child| {
-                    state
-                        .boundaries
-                        .get(child)
-                        .is_some_and(|boundary| boundary.block_hash != BlockHash::ZERO)
+                splits.iter().all(|split| {
+                    [split.left, split.right].iter().all(|child| {
+                        state
+                            .boundaries
+                            .get(child)
+                            .is_some_and(|boundary| boundary.block_hash != BlockHash::ZERO)
+                    })
                 })
             })
         });
         assert!(
             seeded,
-            "the split of {parent:?} must seed both child anchors within \
+            "every frontier split must seed both child anchors within \
              {SEED_BUDGET_EPOCHS} epochs",
         );
+    }
 
-        let state = self
-            .committed_beacon_state()
-            .expect("post-gate beacon state");
-
-        // Each original parent member's assigned child, read from the reshaped
-        // beacon state.
-        let parent_halves: Vec<(ValidatorId, ShardId)> = parent_members
-            .iter()
-            .map(|member| {
-                let status = state.validators[member].status;
-                let ValidatorStatus::OnShard { shard, .. } = status else {
-                    panic!("parent member {member:?} must land on a child of {parent:?}; got {status:?}")
-                };
-                (*member, shard)
-            })
-            .collect();
-
-        // Stay-current duty: bring each synced store up to the parent's
-        // terminal root before its child genesis adopts it.
-        for (_, child, store, anchor, imported_root) in &synced {
-            self.follow_child(store, parent, *child, *anchor, *imported_root);
-        }
-
-        self.flip_split_members(parent, &parent_halves, synced);
-
-        // Both children run: blocks commit past their genesis on a seated
-        // member, from state continuous with the parent's subtree.
-        let genesis_height = state.boundaries[&left].height;
-        let run_deadline = self.now + self.epochs(CHILD_RUN_BUDGET_EPOCHS);
-        let progressed = self.run_until_predicate(run_deadline, |r| {
-            [left, right].iter().all(|child| {
-                (0..r.num_hosts()).any(|node| {
-                    r.hosts_shard(node, *child)
-                        .is_some_and(|storage| storage.committed_height() > genesis_height)
+    /// Follow each synced store to the parent's terminal root, then flip every
+    /// member onto its assigned child.
+    fn flip_all(&mut self, splits: Vec<PendingSplit>, state: &BeaconState) {
+        for split in splits {
+            let parent_halves: Vec<(ValidatorId, ShardId)> = split
+                .members
+                .iter()
+                .map(|member| {
+                    let status = state.validators[member].status;
+                    let ValidatorStatus::OnShard { shard, .. } = status else {
+                        panic!(
+                            "parent member {member:?} must land on a child of {:?}; got {status:?}",
+                            split.parent,
+                        )
+                    };
+                    (*member, shard)
                 })
-            })
-        });
-        assert!(
-            progressed,
-            "both children of {parent:?} must commit past genesis within \
-             {CHILD_RUN_BUDGET_EPOCHS} epochs",
-        );
+                .collect();
+            for (_, child, store, anchor, imported_root) in &split.synced {
+                self.follow_child(store, split.parent, *child, *anchor, *imported_root);
+            }
+            self.flip_split_members(split.parent, &parent_halves, split.synced);
+        }
     }
 
     /// Flip every member onto its assigned child: parent halves clone-and-adopt
@@ -231,6 +281,24 @@ impl SimulationRunner {
             sibling_hosts.push(node);
             self.flip_split_child(node, validator, parent, child, Some(store));
         }
+    }
+
+    /// Wait until every grown child commits past its genesis on a seated host.
+    fn await_children(&mut self, children_genesis: &[(ShardId, BlockHeight)]) {
+        let deadline = self.now + self.epochs(CHILD_RUN_BUDGET_EPOCHS);
+        let progressed = self.run_until_predicate(deadline, |r| {
+            children_genesis.iter().all(|(child, genesis_height)| {
+                (0..r.num_hosts()).any(|node| {
+                    r.hosts_shard(node, *child)
+                        .is_some_and(|storage| storage.committed_height() > *genesis_height)
+                })
+            })
+        });
+        assert!(
+            progressed,
+            "every grown child must commit past genesis within \
+             {CHILD_RUN_BUDGET_EPOCHS} epochs",
+        );
     }
 
     /// The current live leaf shards, read from host 0's topology snapshot.
