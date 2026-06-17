@@ -4137,7 +4137,7 @@ mod tests {
         };
         let local_wave = WaveId::new(local, BlockHeight::new(height), BTreeSet::new());
         let wc = WaveCertificate::new(local_wave, vec![Arc::new(ec(local)), Arc::new(ec(remote))]);
-        Arc::new(Verifiable::from(FinalizedWave::new(Arc::new(wc), vec![])))
+        Arc::new(Verified::new_unchecked_for_test(FinalizedWave::new(Arc::new(wc), vec![])).into())
     }
 
     /// A wave naming a past-terminal shard whose settled set is unknown is
