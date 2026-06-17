@@ -97,6 +97,15 @@ pub struct NodeStateMachine {
     /// in-flight transaction and pending wave is aborted exactly once —
     /// no later block can ever decide them.
     terminal_chain_swept: bool,
+
+    /// Committed height observed at the previous cleanup tick, and how many
+    /// consecutive cleanup ticks it has gone unchanged. The cross-shard
+    /// fallback fetches are otherwise only swept on block commit; once the
+    /// shard has stalled for [`STALL_RECOVERY_TICKS`] ticks they are flushed
+    /// from the cleanup timer so a shard stuck on missing cross-shard data can
+    /// still fetch it.
+    last_cleanup_height: Option<BlockHeight>,
+    cleanup_stall_ticks: u32,
 }
 
 impl std::fmt::Debug for NodeStateMachine {
@@ -162,6 +171,8 @@ impl NodeStateMachine {
             me,
             local_shard,
             terminal_chain_swept: false,
+            last_cleanup_height: None,
+            cleanup_stall_ticks: 0,
         }
     }
 

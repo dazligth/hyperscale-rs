@@ -245,6 +245,25 @@ impl ExpectedCertTracker {
         fetches
     }
 
+    /// Eager-fetch every expectation that hasn't been requested yet,
+    /// bypassing the timeout window. The timeout in [`Self::check_timeouts`]
+    /// is measured against the committed-block weighted timestamp, which
+    /// stops advancing while the shard is stalled on the very certs these
+    /// fetches recover; a commit-independent caller flushes through here so
+    /// the fallback still fires. Records `last_requested_at` so the `io_loop`
+    /// owns retries from this point.
+    pub fn flush_all(&mut self, now_ts: WeightedTimestamp) -> Vec<WaveId> {
+        let mut fetches = Vec::new();
+        for (key, entry) in &mut self.expected {
+            if entry.last_requested_at.is_some() {
+                continue;
+            }
+            entry.last_requested_at = Some(now_ts);
+            fetches.push(key.2.clone());
+        }
+        fetches
+    }
+
     /// Drop expectations whose source shard is no longer referenced by any
     /// outstanding local wave. The coordinator computes the set from
     /// `WaveRegistry` and passes it in — the tracker has no view of waves.

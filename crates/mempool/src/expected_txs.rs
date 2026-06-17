@@ -128,4 +128,24 @@ impl ExpectedTxs {
         }
         by_source.into_iter().collect()
     }
+
+    /// Every expected tx grouped by source shard, regardless of grace. The
+    /// grace in [`Self::due_for_fetch`] is measured against the committed-block
+    /// weighted timestamp, which stops advancing while the shard stalls on the
+    /// missing txs; a commit-independent caller flushes through here so the
+    /// fallback still fires. The fetch protocol dedupes in-flight ids, so
+    /// re-emitting is safe.
+    pub fn flush_all(&self) -> Vec<(ShardId, Vec<TxHash>)> {
+        let mut by_source: BTreeMap<ShardId, Vec<TxHash>> = BTreeMap::new();
+        for (tx_hash, entry) in &self.entries {
+            by_source
+                .entry(entry.source_shard)
+                .or_default()
+                .push(*tx_hash);
+        }
+        for ids in by_source.values_mut() {
+            ids.sort();
+        }
+        by_source.into_iter().collect()
+    }
 }

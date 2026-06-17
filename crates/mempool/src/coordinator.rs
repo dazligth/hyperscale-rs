@@ -514,6 +514,26 @@ impl MempoolCoordinator {
         self.expected_txs.source(tx_hash)
     }
 
+    /// Eager-fetch every expected cross-shard tx, independent of block commit.
+    /// The grace-driven fetch in [`Self::on_block_committed`] stops firing when
+    /// the shard stalls on the missing txs; a commit-independent driver (the
+    /// cleanup timer) flushes through here to break the deadlock.
+    #[must_use]
+    pub fn flush_expected_txs(&self) -> Vec<Action> {
+        self.expected_txs
+            .flush_all()
+            .into_iter()
+            .map(|(source_shard, ids)| {
+                Action::Fetch(FetchRequest::Transactions {
+                    ids,
+                    shard: source_shard,
+                    preferred: None,
+                    class: Some(MessageClass::Recovery),
+                })
+            })
+            .collect()
+    }
+
     /// Evict a transaction that has reached a terminal state.
     ///
     /// Removes the pool entry and tombstones the hash so it can't be

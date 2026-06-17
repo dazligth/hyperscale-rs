@@ -10,6 +10,12 @@ use tracing::instrument;
 
 use super::NodeStateMachine;
 
+/// Consecutive cleanup ticks of unchanged committed height before the
+/// cross-shard fallback fetches are flushed. At the default one-second cleanup
+/// interval this is ~5s — aligned with the per-fallback gossip grace, so it
+/// fires only on a genuine stall, not a transient gap between commits.
+const STALL_RECOVERY_TICKS: u32 = 5;
+
 impl NodeStateMachine {
     #[instrument(skip(self))]
     pub(super) fn on_cleanup_timer(&mut self) -> Vec<Action> {
@@ -27,6 +33,8 @@ impl NodeStateMachine {
         // but we're stuck.
         actions.extend(self.shard_coordinator.check_sync_health());
 
+        actions.extend(self.recover_stalled_fallback_fetches());
+
         // Drop tombstones whose `end_timestamp_exclusive` has passed — past
         // expiry, validator-side validity check rejects re-submission anyway.
         self.mempool_coordinator.cleanup_expired_tombstones();
@@ -36,6 +44,37 @@ impl NodeStateMachine {
         // from accumulating dead entries when expiry outpaces selection.
         self.mempool_coordinator.cleanup_expired_pending();
 
+        actions
+    }
+
+    /// Flush the cross-shard fallback fetches when the shard has stalled.
+    ///
+    /// Headers, provisions, execution certs, and cross-shard txs each fall back
+    /// to a peer fetch when their gossip is missing, but those fallbacks are
+    /// only swept on block commit — so a shard stuck on the very data a fetch
+    /// would recover stops sweeping exactly when it must. Once the committed
+    /// height has gone unchanged for [`STALL_RECOVERY_TICKS`] cleanup ticks,
+    /// flush all four eagerly. The fetches are idempotent and dedupe in flight,
+    /// so flushing while still genuinely waiting is harmless.
+    fn recover_stalled_fallback_fetches(&mut self) -> Vec<Action> {
+        let height = self.shard_coordinator.committed_height();
+        if self.last_cleanup_height == Some(height) {
+            self.cleanup_stall_ticks = self.cleanup_stall_ticks.saturating_add(1);
+        } else {
+            self.cleanup_stall_ticks = 0;
+            self.last_cleanup_height = Some(height);
+        }
+        if self.cleanup_stall_ticks < STALL_RECOVERY_TICKS {
+            return Vec::new();
+        }
+
+        let topology = self.beacon_coordinator.current_topology_snapshot();
+        let mut actions = self
+            .remote_headers_coordinator
+            .flush_expected_headers(topology);
+        actions.extend(self.provisions_coordinator.flush_expected_provisions());
+        actions.extend(self.execution_coordinator.flush_expected_certs());
+        actions.extend(self.mempool_coordinator.flush_expected_txs());
         actions
     }
 

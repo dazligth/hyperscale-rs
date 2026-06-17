@@ -1392,6 +1392,26 @@ impl ExecutionCoordinator {
         }
     }
 
+    /// Eager-fetch every expected execution cert whose fallback hasn't fired,
+    /// independent of block commit. The commit-driven [`Self::check_exec_cert_timeouts`]
+    /// stops running when the shard stalls on the missing certs, so a
+    /// commit-independent driver (the cleanup timer) flushes through here to
+    /// break the deadlock.
+    pub fn flush_expected_certs(&mut self) -> Vec<Action> {
+        let now_ts = self.committed_ts;
+        self.expected_certs
+            .flush_all(now_ts)
+            .into_iter()
+            .map(|wave_id| {
+                Action::Fetch(FetchRequest::ExecutionCerts {
+                    wave_id,
+                    preferred: None,
+                    class: None,
+                })
+            })
+            .collect()
+    }
+
     /// Check for timed-out expected execution certs and emit fallback requests.
     ///
     /// Called during block commit processing. Returns actions for any certs
