@@ -153,10 +153,20 @@ pub fn find_accounts_on_each_shard(
     }
 }
 
-/// Build a withdraw-from-`acc_a`, deposit-to-`acc_b` cross-shard transfer whose
-/// validity range brackets `now` (the current weighted time after the grow).
+/// A validity range bracketing `now` (the current weighted time after a grow).
 /// The genesis-anchored `test_validity_range()` (`[0, 1min]`) has long expired
-/// by the time `grow_to` finishes, so a post-grow tx must carry its own.
+/// by the time `grow_to` finishes, so a post-grow tx must carry its own — 150s
+/// forward, well under the 5-minute `MAX_VALIDITY_RANGE`.
+#[must_use]
+pub fn grow_validity_range(now: Duration) -> TimestampRange {
+    TimestampRange::new(
+        WeightedTimestamp::ZERO.plus(now.saturating_sub(Duration::from_secs(5))),
+        WeightedTimestamp::ZERO.plus(now + Duration::from_secs(150)),
+    )
+}
+
+/// Build a withdraw-from-`acc_a`, deposit-to-`acc_b` cross-shard transfer whose
+/// validity range brackets `now`.
 ///
 /// # Panics
 ///
@@ -168,10 +178,6 @@ pub fn build_cross_shard_transfer(
     acc_b: ComponentAddress,
     now: Duration,
 ) -> RoutableTransaction {
-    let validity = TimestampRange::new(
-        WeightedTimestamp::ZERO.plus(now.saturating_sub(Duration::from_secs(5))),
-        WeightedTimestamp::ZERO.plus(now + Duration::from_secs(150)),
-    );
     let manifest = ManifestBuilder::new()
         .lock_fee(acc_a, Decimal::from(10))
         .withdraw_from_account(acc_a, XRD, Decimal::from(500))
@@ -179,7 +185,7 @@ pub fn build_cross_shard_transfer(
         .build();
     let notarized = sign_and_notarize(manifest, &NetworkDefinition::simulator(), 200, kp_a)
         .expect("transfer signs");
-    routable_from_notarized_v1(notarized, validity).expect("transfer is routable")
+    routable_from_notarized_v1(notarized, grow_validity_range(now)).expect("transfer is routable")
 }
 
 /// Submit `tx` to whichever host now carries `source_shard`. The grow shuffles

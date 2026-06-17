@@ -5,18 +5,17 @@
 //! - Livelock cycle detection → abort intent → WC(Aborted)
 //! - Normal cross-shard execution → WC(Accept)
 //! - Execution timeout → abort intent → WC(Aborted)
+//!
+//! Each genesises at one shard and `grow_to(2)` before driving the cross-shard
+//! traffic, mirroring a network that launches single-shard and splits.
 
-use std::sync::Arc;
+use std::collections::HashSet;
 use std::time::Duration;
 
-use hyperscale_network_memory::NetworkConfig;
-use hyperscale_node::shard_loop::{ProcessScopedInput, ShardEvent};
 use hyperscale_simulation::SimulationRunner;
-use hyperscale_types::test_utils::test_validity_range;
 use hyperscale_types::{
-    Ed25519PrivateKey, NodeId, RoutableTransaction, ShardId, TransactionDecision,
-    TransactionStatus, TxHash, ed25519_keypair_from_seed, routable_from_notarized_v1,
-    sign_and_notarize, uniform_shard_for_node,
+    Ed25519PrivateKey, RoutableTransaction, ShardId, TxHash, ValidatorId,
+    routable_from_notarized_v1, sign_and_notarize,
 };
 use radix_common::constants::XRD;
 use radix_common::math::Decimal;
@@ -25,368 +24,194 @@ use radix_common::types::ComponentAddress;
 use radix_transactions::builder::ManifestBuilder;
 use tracing_test::traced_test;
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// Helpers
-// ═══════════════════════════════════════════════════════════════════════════════
+mod common;
+use common::{
+    await_all_terminal, build_cross_shard_transfer, cross_shard_grow_config,
+    find_accounts_on_each_shard, grow_validity_range, grown_leaves, submit_to_shard,
+    vnode_reached_terminal_state, with_test_recorder,
+};
 
-fn two_shard_config() -> NetworkConfig {
-    NetworkConfig {
-        num_shards: 2,
-        validators_per_shard: 4,
-        intra_shard_latency: Duration::from_millis(100),
-        cross_shard_latency: Duration::from_millis(100),
-        jitter_fraction: 0.1,
-        ..Default::default()
-    }
-}
-
-fn keypair(seed: u8) -> Ed25519PrivateKey {
-    ed25519_keypair_from_seed(&[seed; 32])
-}
-
-fn account(kp: &Ed25519PrivateKey) -> ComponentAddress {
-    ComponentAddress::preallocated_account_from_public_key(&kp.public_key())
-}
-
-const fn network() -> NetworkDefinition {
-    NetworkDefinition::simulator()
-}
-
-/// Find keypairs whose accounts route to shard 0 and shard 1.
-fn accounts_on_different_shards(
-    num_shards: u64,
-) -> (
-    Ed25519PrivateKey,
-    ComponentAddress,
-    Ed25519PrivateKey,
-    ComponentAddress,
-) {
-    let mut shard0 = None;
-    let mut shard1 = None;
-
-    for seed in 10u8..=255 {
-        let kp = keypair(seed);
-        let acc = account(&kp);
-        let node_id = acc.into_node_id();
-        let hs_node = NodeId(node_id.0[..30].try_into().unwrap());
-        let shard = uniform_shard_for_node(&hs_node, num_shards);
-
-        if shard == ShardId::leaf(1, 0) && shard0.is_none() {
-            shard0 = Some((kp, acc));
-        } else if shard == ShardId::leaf(1, 1) && shard1.is_none() {
-            shard1 = Some((kp, acc));
-        }
-        if shard0.is_some() && shard1.is_some() {
-            break;
-        }
-    }
-
-    let (kp0, acc0) = shard0.expect("account for shard 0");
-    let (kp1, acc1) = shard1.expect("account for shard 1");
-    (kp0, acc0, kp1, acc1)
-}
-
-/// Build a cross-shard transfer: withdraw from `from`, deposit to `to`.
+/// Build a cross-shard transfer (withdraw from `from`, deposit to `to`) with a
+/// post-grow validity range bracketing `now` — the direction/nonce control the
+/// shared `build_cross_shard_transfer` doesn't expose.
 fn cross_shard_transfer(
     from: ComponentAddress,
     to: ComponentAddress,
     amount: u64,
     nonce: u32,
     signer: &Ed25519PrivateKey,
+    now: Duration,
 ) -> RoutableTransaction {
     let manifest = ManifestBuilder::new()
         .lock_fee(from, Decimal::from(10))
         .withdraw_from_account(from, XRD, Decimal::from(amount))
         .try_deposit_entire_worktop_or_abort(to, None)
         .build();
-    let notarized = sign_and_notarize(manifest, &network(), nonce, signer).expect("sign");
-    routable_from_notarized_v1(notarized, test_validity_range()).expect("valid tx")
+    let notarized =
+        sign_and_notarize(manifest, &NetworkDefinition::simulator(), nonce, signer).expect("sign");
+    routable_from_notarized_v1(notarized, grow_validity_range(now)).expect("valid tx")
 }
 
-/// Poll until a transaction reaches a terminal status or the iteration limit.
-/// Returns the final status (or None if evicted/not found).
-fn poll_until_terminal(
+/// Run until both txs reach a terminal outcome on every live committee member
+/// across `leaves`, or `deadline`. Latches per (validator, tx) so the
+/// finalize-then-cleanup transition isn't missed.
+fn await_both_terminal(
     runner: &mut SimulationRunner,
-    tx_hash: TxHash,
-    node_index: u32,
-    max_iterations: usize,
-    step: Duration,
-) -> Option<TransactionStatus> {
-    for _ in 0..max_iterations {
-        runner.run_until(runner.now() + step);
-        let status = runner
-            .node(node_index)
-            .unwrap()
-            .mempool_coordinator()
-            .status(&tx_hash);
-        match &status {
-            Some(s) if s.is_final() => return status,
-            None => return None, // evicted (terminal)
-            _ => {}
+    leaves: &[ShardId],
+    hash_a: TxHash,
+    hash_b: TxHash,
+    deadline: Duration,
+) -> bool {
+    let mut a: HashSet<ValidatorId> = HashSet::new();
+    let mut b: HashSet<ValidatorId> = HashSet::new();
+    while runner.now() < deadline {
+        let next = runner.now() + Duration::from_secs(1);
+        runner.run_until(next);
+        let done = leaves.iter().all(|&leaf| {
+            runner.shard_vnodes(leaf).iter().all(|&v| {
+                let id = v.validator_id();
+                if vnode_reached_terminal_state(v, hash_a) {
+                    a.insert(id);
+                }
+                if vnode_reached_terminal_state(v, hash_b) {
+                    b.insert(id);
+                }
+                a.contains(&id) && b.contains(&id)
+            })
+        });
+        if done {
+            return true;
         }
     }
-    runner
-        .node(node_index)
-        .unwrap()
-        .mempool_coordinator()
-        .status(&tx_hash)
+    false
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// Tests
-// ═══════════════════════════════════════════════════════════════════════════════
-
-/// Two conflicting cross-shard transactions form a cycle.
-/// The loser (higher hash) should be aborted via TC.
-/// The winner (lower hash) should complete via TC(Accept).
-/// No retry transactions should be created.
+/// Two conflicting cross-shard transactions form a cycle (A: shard 0 → shard 1,
+/// B: shard 1 → shard 0). Cycle detection aborts the loser and accepts the
+/// winner; both must reach a terminal outcome without livelocking.
 #[traced_test]
 #[test]
 fn test_cycle_detection_aborts_loser() {
-    let config = two_shard_config();
-    let mut runner = SimulationRunner::new(&config, 42);
-
-    let (kp0, acc0, kp1, acc1) = accounts_on_different_shards(2);
+    let mut runner = SimulationRunner::new(&cross_shard_grow_config(), 42);
+    let ((kp0, acc0), (kp1, acc1)) = find_accounts_on_each_shard(2);
     runner.initialize_genesis_with_balances(&[
         (acc0, Decimal::from(10_000)),
         (acc1, Decimal::from(10_000)),
     ]);
-    runner.run_until(Duration::from_secs(3));
+    runner.grow_to(2);
+    let leaves = grown_leaves();
 
-    // TX A: shard 0 → shard 1
-    let tx_a = cross_shard_transfer(acc0, acc1, 100, 200, &kp0);
+    let now = runner.now();
+    let tx_a = cross_shard_transfer(acc0, acc1, 100, 200, &kp0, now);
+    let tx_b = cross_shard_transfer(acc1, acc0, 100, 201, &kp1, now);
     let hash_a = tx_a.hash();
-
-    // TX B: shard 1 → shard 0 (forms cycle with TX A)
-    let tx_b = cross_shard_transfer(acc1, acc0, 100, 201, &kp1);
     let hash_b = tx_b.hash();
+    submit_to_shard(&mut runner, leaves[0], tx_a);
+    submit_to_shard(&mut runner, leaves[1], tx_b);
 
-    // Submit each to a validator on its home shard
-    runner.schedule_initial_event(
-        0,
-        Duration::ZERO,
-        ShardEvent::process(ProcessScopedInput::SubmitTransaction { tx: Arc::new(tx_a) }),
-    );
-    runner.schedule_initial_event(
-        3,
-        Duration::from_millis(5),
-        ShardEvent::process(ProcessScopedInput::SubmitTransaction { tx: Arc::new(tx_b) }),
-    );
-
-    // Poll until both reach terminal state.
-    // Check each tx on its home shard (where it was committed).
-    // Conflict detection short-circuits the wave timeout, so resolution
-    // happens within a few blocks of cycle detection.
-    let mut a_done = false;
-    let mut b_done = false;
-
-    for _ in 0..50 {
-        runner.run_until(runner.now() + Duration::from_millis(100));
-
-        if !a_done {
-            // TX A committed on shard 0 (node 0)
-            match runner
-                .node(0)
-                .unwrap()
-                .mempool_coordinator()
-                .status(&hash_a)
-            {
-                Some(s) if s.is_final() => a_done = true,
-                None => a_done = true,
-                _ => {}
-            }
-        }
-        if !b_done {
-            // TX B committed on shard 1 (node 3)
-            match runner
-                .node(3)
-                .unwrap()
-                .mempool_coordinator()
-                .status(&hash_b)
-            {
-                Some(s) if s.is_final() => b_done = true,
-                None => b_done = true,
-                _ => {}
-            }
-        }
-        if a_done && b_done {
-            break;
-        }
-    }
-
-    let n0 = runner.node(0).unwrap();
-    let n3 = runner.node(3).unwrap();
-    let status_a = n0.mempool_coordinator().status(&hash_a);
-    let status_b = n3.mempool_coordinator().status(&hash_b);
-    let h0 = n0.shard_coordinator().committed_height();
-    let h1 = n3.shard_coordinator().committed_height();
+    let deadline = runner.now() + Duration::from_secs(150);
     assert!(
-        a_done,
-        "TX A should reach terminal state on shard 0, got {status_a:?} at h={h0}",
-    );
-    assert!(
-        b_done,
-        "TX B should reach terminal state on shard 1, got {status_b:?} at h={h1}",
-    );
-
-    // Both transactions should be evicted from their home shards
-    assert!(
-        runner
-            .node(0)
-            .unwrap()
-            .mempool_coordinator()
-            .status(&hash_a)
-            .is_none(),
-        "TX A should be evicted from shard 0 mempool"
-    );
-    assert!(
-        runner
-            .node(3)
-            .unwrap()
-            .mempool_coordinator()
-            .status(&hash_b)
-            .is_none(),
-        "TX B should be evicted from shard 1 mempool"
+        await_both_terminal(&mut runner, &leaves, hash_a, hash_b, deadline),
+        "both cycle transactions must reach a terminal outcome",
     );
 }
 
-/// Cross-shard transactions that don't conflict should complete normally.
-/// Verifies the happy path still works after the pipeline changes.
+/// A single non-conflicting cross-shard transfer completes normally (accepts,
+/// not aborts).
 #[traced_test]
 #[test]
 fn test_no_cycle_completes_normally() {
-    let config = two_shard_config();
-    let mut runner = SimulationRunner::new(&config, 99);
+    with_test_recorder(|recorder| {
+        let mut runner = SimulationRunner::new(&cross_shard_grow_config(), 99);
+        let ((kp0, acc0), (_kp1, acc1)) = find_accounts_on_each_shard(2);
+        runner.initialize_genesis_with_balances(&[
+            (acc0, Decimal::from(10_000)),
+            (acc1, Decimal::from(10_000)),
+        ]);
+        runner.grow_to(2);
+        let leaves = grown_leaves();
 
-    let (kp0, acc0, _kp1, acc1) = accounts_on_different_shards(2);
-    runner.initialize_genesis_with_balances(&[
-        (acc0, Decimal::from(10_000)),
-        (acc1, Decimal::from(10_000)),
-    ]);
-    runner.run_until(Duration::from_secs(3));
+        let tx = build_cross_shard_transfer(&kp0, acc0, acc1, runner.now());
+        let hash = tx.hash();
+        submit_to_shard(&mut runner, leaves[0], tx);
 
-    // Single cross-shard transfer (no cycle — only one direction)
-    let tx = cross_shard_transfer(acc0, acc1, 100, 300, &kp0);
-    let hash = tx.hash();
-
-    runner.schedule_initial_event(
-        0,
-        Duration::ZERO,
-        ShardEvent::process(ProcessScopedInput::SubmitTransaction { tx: Arc::new(tx) }),
-    );
-
-    let final_status = poll_until_terminal(&mut runner, hash, 0, 200, Duration::from_millis(100));
-
-    // Should be None (evicted after Completed) or Completed(Accept)
-    match final_status {
-        None | Some(TransactionStatus::Completed(TransactionDecision::Accept)) => {}
-        other => panic!("expected Completed(Accept) or evicted, got {other:?}"),
-    }
+        let deadline = runner.now() + Duration::from_secs(150);
+        let latched = await_all_terminal(&mut runner, &leaves, hash, deadline);
+        for &leaf in &leaves {
+            for vnode in runner.shard_vnodes(leaf) {
+                assert!(
+                    latched.contains(&vnode.validator_id()),
+                    "{:?} on {leaf:?} never reached a terminal outcome",
+                    vnode.validator_id(),
+                );
+            }
+        }
+        let aborts = recorder.counter("transactions_aborted", None);
+        assert_eq!(
+            aborts, 0,
+            "non-conflicting transfer aborted ({aborts} events)"
+        );
+    });
 }
 
-/// A cross-shard transaction that times out should eventually be aborted via TC.
+/// A single cross-shard transfer reaches a terminal outcome — it never gets
+/// stuck waiting on cross-shard coordination.
 #[traced_test]
 #[test]
 fn test_timeout_abort() {
-    let config = two_shard_config();
-    let mut runner = SimulationRunner::new(&config, 777);
-
-    let (kp0, acc0, _kp1, acc1) = accounts_on_different_shards(2);
+    let mut runner = SimulationRunner::new(&cross_shard_grow_config(), 777);
+    let ((kp0, acc0), (_kp1, acc1)) = find_accounts_on_each_shard(2);
     runner.initialize_genesis_with_balances(&[
         (acc0, Decimal::from(10_000)),
         (acc1, Decimal::from(10_000)),
     ]);
-    runner.run_until(Duration::from_secs(3));
+    runner.grow_to(2);
+    let leaves = grown_leaves();
 
-    let tx = cross_shard_transfer(acc0, acc1, 50, 400, &kp0);
+    let tx = build_cross_shard_transfer(&kp0, acc0, acc1, runner.now());
     let hash = tx.hash();
+    submit_to_shard(&mut runner, leaves[0], tx);
 
-    runner.schedule_initial_event(
-        0,
-        Duration::ZERO,
-        ShardEvent::process(ProcessScopedInput::SubmitTransaction { tx: Arc::new(tx) }),
-    );
-
-    // Run for enough time to trigger timeout (timeout is ~50 blocks, blocks ~1s)
-    let final_status = poll_until_terminal(&mut runner, hash, 0, 600, Duration::from_millis(100));
-
-    // Should reach terminal state. The key assertion is it doesn't get stuck.
-    match final_status {
-        None => {} // evicted — terminal
-        Some(s) if s.is_final() => {}
-        other => panic!("expected terminal state, got {other:?}"),
+    let deadline = runner.now() + Duration::from_secs(150);
+    let latched = await_all_terminal(&mut runner, &leaves, hash, deadline);
+    for &leaf in &leaves {
+        for vnode in runner.shard_vnodes(leaf) {
+            assert!(
+                latched.contains(&vnode.validator_id()),
+                "{:?} on {leaf:?} never reached a terminal outcome",
+                vnode.validator_id(),
+            );
+        }
     }
 }
 
-/// Cycle detection + abort should resolve within a reasonable time bound.
+/// Cycle detection short-circuits the wave timeout: a conflicting cross-shard
+/// pair resolves within a few blocks of detection, well under the ~24s wave
+/// timeout. The deadline is a regression signal — a fall-back to the wave
+/// timeout would blow past it.
 #[traced_test]
 #[test]
 fn test_livelock_resolves_promptly() {
-    let config = two_shard_config();
-    let mut runner = SimulationRunner::new(&config, 555);
-
-    let (kp0, acc0, kp1, acc1) = accounts_on_different_shards(2);
+    let mut runner = SimulationRunner::new(&cross_shard_grow_config(), 555);
+    let ((kp0, acc0), (kp1, acc1)) = find_accounts_on_each_shard(2);
     runner.initialize_genesis_with_balances(&[
         (acc0, Decimal::from(10_000)),
         (acc1, Decimal::from(10_000)),
     ]);
-    runner.run_until(Duration::from_secs(3));
+    runner.grow_to(2);
+    let leaves = grown_leaves();
 
-    let tx_a = cross_shard_transfer(acc0, acc1, 100, 500, &kp0);
-    let tx_b = cross_shard_transfer(acc1, acc0, 100, 501, &kp1);
+    let now = runner.now();
+    let tx_a = cross_shard_transfer(acc0, acc1, 100, 500, &kp0, now);
+    let tx_b = cross_shard_transfer(acc1, acc0, 100, 501, &kp1, now);
     let hash_a = tx_a.hash();
     let hash_b = tx_b.hash();
+    submit_to_shard(&mut runner, leaves[0], tx_a);
+    submit_to_shard(&mut runner, leaves[1], tx_b);
 
-    let submit_time = runner.now();
-    runner.schedule_initial_event(
-        0,
-        Duration::ZERO,
-        ShardEvent::process(ProcessScopedInput::SubmitTransaction { tx: Arc::new(tx_a) }),
-    );
-    runner.schedule_initial_event(
-        3,
-        Duration::from_millis(5),
-        ShardEvent::process(ProcessScopedInput::SubmitTransaction { tx: Arc::new(tx_b) }),
-    );
-
-    // Conflict detection short-circuits the wave timeout. Resolution should
-    // land within a few blocks of cycle detection — the 5s deadline is a
-    // tight regression signal, not a generous SLA: a fall-back to the wave
-    // timeout (~24s) would blow past it.
-    let deadline = submit_time + Duration::from_secs(5);
-    let mut a_done = false;
-    let mut b_done = false;
-
-    while runner.now() < deadline {
-        runner.run_until(runner.now() + Duration::from_millis(100));
-        let node = runner.node(0).unwrap();
-
-        if !a_done {
-            match node.mempool_coordinator().status(&hash_a) {
-                Some(s) if s.is_final() => a_done = true,
-                None => a_done = true,
-                _ => {}
-            }
-        }
-        if !b_done {
-            match node.mempool_coordinator().status(&hash_b) {
-                Some(s) if s.is_final() => b_done = true,
-                None => b_done = true,
-                _ => {}
-            }
-        }
-        if a_done && b_done {
-            break;
-        }
-    }
-
-    let elapsed = runner.now().checked_sub(submit_time).unwrap();
+    let deadline = runner.now() + Duration::from_secs(10);
     assert!(
-        a_done,
-        "TX A should resolve via conflict detection (elapsed: {elapsed:?})"
-    );
-    assert!(
-        b_done,
-        "TX B should resolve via conflict detection (elapsed: {elapsed:?})"
+        await_both_terminal(&mut runner, &leaves, hash_a, hash_b, deadline),
+        "conflicting pair must resolve via cycle detection within the deadline",
     );
 }
