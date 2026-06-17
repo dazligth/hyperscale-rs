@@ -85,6 +85,13 @@ fn validator_status(runner: &SimulationRunner, id: ValidatorId) -> Option<Valida
         .map(|r| r.status)
 }
 
+fn validator_pubkey(runner: &SimulationRunner, id: ValidatorId) -> Option<Bls12381G1PublicKey> {
+    committed_state(runner)?
+        .validators
+        .get(&id)
+        .map(|r| r.pubkey)
+}
+
 /// A well-formed 48-byte BLS pubkey for a registration — never verified, since
 /// no host runs the registered validator.
 fn dummy_pubkey(seed: u8) -> Bls12381G1PublicKey {
@@ -390,5 +397,128 @@ fn withdrawal_ejects_a_validator_that_a_deposit_reactivates() {
             )
         }),
         "the deposit never reactivated the ejected validator",
+    );
+}
+
+#[test]
+fn re_registration_of_a_live_validator_is_a_no_op() {
+    let payer = Ed25519PrivateKey::from_u64(42).unwrap();
+    let mut runner = booted(4, 0xDEAD, &payer);
+
+    let pool = StakePoolId::new(7777);
+    let id = ValidatorId::new(1000);
+    let first = dummy_pubkey(9);
+    let second = dummy_pubkey(99);
+
+    runner.submit_system_action(
+        &payer,
+        1,
+        &BeaconWitnessEvent::StakeDeposit {
+            pool_id: pool,
+            amount: Stake::from_whole_tokens(10_000_000),
+        },
+    );
+    assert!(
+        run_until(&mut runner, Duration::from_secs(30), |r| {
+            pool_total_stake(r, pool).is_some()
+        }),
+        "deposit never folded",
+    );
+
+    runner.submit_system_action(
+        &payer,
+        2,
+        &BeaconWitnessEvent::RegisterValidator {
+            pool_id: pool,
+            validator_id: id,
+            pubkey: first,
+        },
+    );
+    assert!(
+        run_until(&mut runner, Duration::from_secs(30), |r| {
+            validator_pubkey(r, id) == Some(first)
+        }),
+        "validator never registered",
+    );
+
+    // Re-register the same id with a different key; the id is dead for the life
+    // of the chain, so the record keeps its first key.
+    runner.submit_system_action(
+        &payer,
+        3,
+        &BeaconWitnessEvent::RegisterValidator {
+            pool_id: pool,
+            validator_id: id,
+            pubkey: second,
+        },
+    );
+    run_until(&mut runner, Duration::from_secs(20), |_| false);
+    assert_eq!(
+        validator_pubkey(&runner, id),
+        Some(first),
+        "re-registration must not overwrite the existing record",
+    );
+}
+
+#[test]
+fn pool_capacity_caps_registrations() {
+    let payer = Ed25519PrivateKey::from_u64(42).unwrap();
+    let mut runner = booted(4, 0xCA9A, &payer);
+
+    // Fund the pool for exactly three validators at the 1M floor.
+    let pool = StakePoolId::new(7777);
+    let candidates = [
+        ValidatorId::new(1000),
+        ValidatorId::new(1001),
+        ValidatorId::new(1002),
+        ValidatorId::new(1003),
+    ];
+    runner.submit_system_action(
+        &payer,
+        1,
+        &BeaconWitnessEvent::StakeDeposit {
+            pool_id: pool,
+            amount: Stake::from_whole_tokens(3_000_000),
+        },
+    );
+    assert!(
+        run_until(&mut runner, Duration::from_secs(30), |r| {
+            pool_total_stake(r, pool).is_some()
+        }),
+        "deposit never folded",
+    );
+
+    // Four registrations against capacity three: exactly three take.
+    for (i, id) in candidates.iter().enumerate() {
+        let offset = u8::try_from(i).expect("candidate index fits u8");
+        runner.submit_system_action(
+            &payer,
+            u32::from(offset) + 2,
+            &BeaconWitnessEvent::RegisterValidator {
+                pool_id: pool,
+                validator_id: *id,
+                pubkey: dummy_pubkey(20 + offset),
+            },
+        );
+    }
+    assert!(
+        run_until(&mut runner, Duration::from_secs(30), |r| {
+            candidates
+                .iter()
+                .filter(|id| validator_status(r, **id).is_some())
+                .count()
+                >= 3
+        }),
+        "registrations never folded",
+    );
+    // Let any fourth attempt commit; the cap must hold at three.
+    run_until(&mut runner, Duration::from_secs(10), |_| false);
+    let registered = candidates
+        .iter()
+        .filter(|id| validator_status(&runner, **id).is_some())
+        .count();
+    assert_eq!(
+        registered, 3,
+        "pool capacity must cap registrations at three",
     );
 }
