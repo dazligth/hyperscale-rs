@@ -18,11 +18,9 @@ use hyperscale_node::shard_loop::{ProcessScopedInput, ShardEvent};
 use hyperscale_simulation::SimulationRunner;
 use hyperscale_types::test_utils::test_validity_range;
 use hyperscale_types::{
-    BlockHeight, Ed25519PrivateKey, NodeId, RoutableTransaction, ShardId, TransactionStatus,
+    BlockHeight, Ed25519PrivateKey, RoutableTransaction, TransactionStatus,
     ed25519_keypair_from_seed, routable_from_notarized_v1, sign_and_notarize,
-    uniform_shard_for_node,
 };
-use radix_common::constants::XRD;
 use radix_common::crypto::Ed25519PublicKey;
 use radix_common::math::Decimal;
 use radix_common::network::NetworkDefinition;
@@ -30,22 +28,16 @@ use radix_common::types::ComponentAddress;
 use radix_transactions::builder::ManifestBuilder;
 use tracing_test::traced_test;
 
+mod common;
+use common::{
+    await_all_terminal, build_cross_shard_transfer, cross_shard_grow_config,
+    find_accounts_on_each_shard, grown_leaves, submit_to_shard, with_test_recorder,
+};
+
 /// Create a basic single-shard network configuration.
 fn single_shard_config() -> NetworkConfig {
     NetworkConfig {
         num_shards: 1,
-        validators_per_shard: 4,
-        intra_shard_latency: Duration::from_millis(100),
-        cross_shard_latency: Duration::from_millis(100),
-        jitter_fraction: 0.1,
-        ..Default::default()
-    }
-}
-
-/// Create a multi-shard network configuration.
-fn multi_shard_config() -> NetworkConfig {
-    NetworkConfig {
-        num_shards: 2,
         validators_per_shard: 4,
         intra_shard_latency: Duration::from_millis(100),
         cross_shard_latency: Duration::from_millis(100),
@@ -66,14 +58,6 @@ fn test_keypair_from_seed(seed: u8) -> Ed25519PrivateKey {
 fn test_account(seed: u8) -> ComponentAddress {
     let pk = Ed25519PublicKey([seed; 32]);
     ComponentAddress::preallocated_account_from_public_key(&pk)
-}
-
-/// Helper to create an account that can be controlled by the given Ed25519 keypair.
-/// This derives the account address from the keypair's actual public key,
-/// so withdrawals can be authorized by signing with the keypair.
-fn account_from_keypair(keypair: &Ed25519PrivateKey) -> ComponentAddress {
-    let radix_pk = keypair.public_key();
-    ComponentAddress::preallocated_account_from_public_key(&radix_pk)
 }
 
 /// Get the simulator network definition.
@@ -460,442 +444,88 @@ fn test_e2e_single_shard_determinism() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Multi-Shard Transaction Tests
+// Cross-Shard Transaction Tests
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Test end-to-end multi-shard consensus with separate shard transactions.
+/// End-to-end cross-shard transaction after growing to two shards.
 ///
-/// This test verifies that:
-/// 1. Multiple shards can run consensus independently
-/// 2. Each shard maintains its own block chain
-/// 3. Validators only vote on their own shard's blocks
+/// Genesis at one shard funds two accounts on ROOT, `grow_to(2)` splits them
+/// onto the two children by prefix, then a withdraw-from-shard-0,
+/// deposit-to-shard-1 transfer must reach a terminal outcome on every live
+/// committee member of both children, with no aborts.
 #[traced_test]
 #[test]
-fn test_e2e_multi_shard_consensus() {
-    println!("\n=== E2E Test: Multi-Shard Consensus (Deterministic) ===\n");
-
-    let config = multi_shard_config();
-    let mut runner = SimulationRunner::new(&config, 42);
-
-    // Initialize genesis for all shards
-    runner.initialize_genesis();
-
-    println!("✓ Genesis initialized for 2 shards (3 validators each)\n");
-
-    // Verify initial state
-    // Shard 0: nodes 0, 1, 2
-    // Shard 1: nodes 3, 4, 5
-    for node_idx in 0..6u32 {
-        let node = runner.node(node_idx).expect("Node should exist");
-        let shard = i32::from(node_idx >= 3);
-        println!(
-            "Node {} (Shard {}): committed_height={}",
-            node_idx,
-            shard,
-            node.shard_coordinator().committed_height()
-        );
-    }
-
-    // Run simulation
-    runner.run_until(Duration::from_secs(5));
-
-    println!("\n=== After 5 seconds ===");
-
-    // Check each shard's progress
-    let shard0_heights: Vec<BlockHeight> = (0..3)
-        .map(|i| {
-            runner
-                .node(i)
-                .unwrap()
-                .shard_coordinator()
-                .committed_height()
-        })
-        .collect();
-    let shard1_heights: Vec<BlockHeight> = (3..6)
-        .map(|i| {
-            runner
-                .node(i)
-                .unwrap()
-                .shard_coordinator()
-                .committed_height()
-        })
-        .collect();
-
-    println!("Shard 0 heights: {shard0_heights:?}");
-    println!("Shard 1 heights: {shard1_heights:?}");
-
-    // Validators within each shard should have similar heights
-    // (may differ slightly due to message timing)
-    let shard0_max = *shard0_heights.iter().max().unwrap();
-    let shard1_max = *shard1_heights.iter().max().unwrap();
-
-    assert!(
-        shard0_max >= BlockHeight::new(1),
-        "Shard 0 should have made progress"
-    );
-    assert!(
-        shard1_max >= BlockHeight::new(1),
-        "Shard 1 should have made progress"
-    );
-
-    let stats = runner.stats();
-    println!("\nFinal stats:");
-    println!("  Events processed: {}", stats.events_processed);
-    println!("  Messages sent: {}", stats.messages_sent);
-
-    println!("\n✅ E2E Multi-Shard Consensus Test PASSED!");
-    println!("   ✅ Both shards initialized");
-    println!("   ✅ Shard 0 max height: {shard0_max}, Shard 1 max height: {shard1_max}");
-}
-
-/// Test cross-shard transaction flow.
-///
-/// This test verifies the cross-shard atomic execution protocol:
-/// 1. Transaction touches accounts on both shards
-/// 2. Both shards execute and create certificates
-/// 3. Certificates are exchanged and aggregated
-/// 4. Transaction finalizes on all shards
-///
-/// Flow:
-/// ```text
-/// submit_transaction() → Mempool → shard consensus orders → Block committed
-///                                            ↓
-///                                    Execution Coordinator
-///                                            ↓
-///                        ┌──────────────────┴──────────────────┐
-///                        ▼                                      ▼
-///                   Shard 0: Execute                       Shard 1: Execute
-///                        ↓                                      ↓
-///                   Create vote                            Create vote
-///                        ↓                                      ↓
-///                   Aggregate → Certificate            Aggregate → Certificate
-///                        └──────────────────┬──────────────────┘
-///                                           ▼
-///                                   Finalize: Accept/Reject
-/// ```
-#[traced_test]
-#[test]
-#[allow(clippy::too_many_lines)] // straight-line e2e scenario
 fn test_e2e_cross_shard_transaction() {
-    println!("\n=== E2E Test: Cross-Shard Transaction (Deterministic) ===\n");
+    with_test_recorder(|recorder| {
+        let mut runner = SimulationRunner::new(&cross_shard_grow_config(), 42);
+        let ((kp_a, acc_a), (_kp_b, acc_b)) = find_accounts_on_each_shard(2);
+        runner.initialize_genesis_with_balances(&[
+            (acc_a, Decimal::from(10_000)),
+            (acc_b, Decimal::from(10_000)),
+        ]);
+        runner.grow_to(2);
 
-    let config = multi_shard_config();
-    let num_shards = u64::from(config.num_shards);
-    let mut runner = SimulationRunner::new(&config, 42);
+        let leaves = grown_leaves();
+        let tx = build_cross_shard_transfer(&kp_a, acc_a, acc_b, runner.now());
+        let tx_hash = tx.hash();
+        submit_to_shard(&mut runner, leaves[0], tx);
 
-    // Find accounts that route to different shards
-    let mut shard0_keypair = None;
-    let mut shard1_keypair = None;
+        let deadline = runner.now() + Duration::from_secs(150);
+        let latched = await_all_terminal(&mut runner, &leaves, tx_hash, deadline);
 
-    for seed in 10u8..=255 {
-        let kp = test_keypair_from_seed(seed);
-        let account = account_from_keypair(&kp);
-        let node_id = account.into_node_id();
-        // Convert Radix NodeId to Hyperscale NodeId (first 30 bytes)
-        let hs_node_id = NodeId(node_id.0[..30].try_into().unwrap());
-        let shard = uniform_shard_for_node(&hs_node_id, num_shards);
-
-        if shard == ShardId::leaf(1, 0) && shard0_keypair.is_none() {
-            shard0_keypair = Some((seed, kp, account));
-        } else if shard == ShardId::leaf(1, 1) && shard1_keypair.is_none() {
-            shard1_keypair = Some((seed, kp, account));
-        }
-
-        if shard0_keypair.is_some() && shard1_keypair.is_some() {
-            break;
-        }
-    }
-
-    let (seed0, account0_kp, account_shard0) =
-        shard0_keypair.expect("Should find keypair for shard 0");
-    let (seed1, _account1_kp, account_shard1) =
-        shard1_keypair.expect("Should find keypair for shard 1");
-
-    println!("✓ Found accounts on different shards:");
-    println!("  Shard 0 account: seed={seed0}");
-    println!("  Shard 1 account: seed={seed1}\n");
-
-    // Initialize genesis with pre-funded accounts (no funding transactions needed)
-    let initial_balance = Decimal::from(10000);
-    runner.initialize_genesis_with_balances(&[
-        (account_shard0, initial_balance),
-        (account_shard1, initial_balance),
-    ]);
-    println!("✓ Accounts funded at genesis\n");
-
-    // Run for a bit before starting the test to let consensus start producing blocks
-    runner.run_until(Duration::from_secs(3));
-
-    // Create cross-shard transaction: withdraw from shard 0, deposit to shard 1
-    // Use lock_fee on the source account (not faucet) to properly declare it as a write
-    let manifest = ManifestBuilder::new()
-        .lock_fee(account_shard0, Decimal::from(10))
-        .withdraw_from_account(account_shard0, XRD, Decimal::from(500))
-        .try_deposit_entire_worktop_or_abort(account_shard1, None)
-        .build();
-    let notarized =
-        sign_and_notarize(manifest, &simulator_network(), 200, &account0_kp).expect("should sign");
-    let cross_shard_tx: RoutableTransaction =
-        routable_from_notarized_v1(notarized, test_validity_range()).expect("valid transaction");
-    let tx_hash = cross_shard_tx.hash();
-
-    println!("Cross-shard transaction: {tx_hash:?}");
-
-    // Submit cross-shard transaction
-    runner.schedule_initial_event(
-        0,
-        Duration::ZERO,
-        ShardEvent::process(ProcessScopedInput::SubmitTransaction {
-            tx: Arc::new(cross_shard_tx),
-        }),
-    );
-
-    // Poll for transaction status progression
-    println!("Running cross-shard execution protocol...");
-
-    let start_time = runner.now();
-    let mut in_mempool = false;
-    let mut committed = false;
-    let mut executed = false;
-    let mut finalized = false;
-    let mut completed = false;
-
-    for iteration in 0..100 {
-        runner.run_until(runner.now() + Duration::from_millis(100));
-
-        let node0 = runner.node(0).unwrap();
-
-        // Check mempool status
-        // Transaction progresses: Pending -> Committed -> (Completed|Rejected)
-        if let Some(status) = node0.mempool_coordinator().status(&tx_hash) {
-            // If it's in the mempool at all (any status), it entered the mempool
-            if !in_mempool {
-                println!("  ✓ Transaction in mempool ({status:?})");
-                in_mempool = true;
-            }
-            if !committed && status.holds_state_lock() {
-                let elapsed = runner.now().checked_sub(start_time).unwrap();
-                println!("  ✓ Transaction committed (iteration {iteration}, {elapsed:?})");
-                committed = true;
-            }
-            // Also check for Completed status (which implies it was committed)
-            if !completed && matches!(status, TransactionStatus::Completed(_)) {
-                let elapsed = runner.now().checked_sub(start_time).unwrap();
-                println!("  ✓ Transaction completed (iteration {iteration}, {elapsed:?})");
-                completed = true;
-                // If completed, it must have been committed at some point
-                committed = true;
+        for &leaf in &leaves {
+            for vnode in runner.shard_vnodes(leaf) {
+                assert!(
+                    latched.contains(&vnode.validator_id()),
+                    "{:?} on {leaf:?} never reached a terminal outcome for {tx_hash:?}",
+                    vnode.validator_id(),
+                );
             }
         }
-
-        // Check execution status
-        if !executed && node0.execution_coordinator().is_finalized(tx_hash) {
-            let elapsed = runner.now().checked_sub(start_time).unwrap();
-            println!("  ✓ Transaction executed (iteration {iteration}, {elapsed:?})");
-            executed = true;
-        }
-
-        // Check finalization status (for cross-shard, this means certificate created)
-        if !finalized && node0.execution_coordinator().is_finalized(tx_hash) {
-            let elapsed = runner.now().checked_sub(start_time).unwrap();
-            println!(
-                "  ✓ Transaction finalized with certificate (iteration {iteration}, {elapsed:?})"
-            );
-            finalized = true;
-        }
-
-        // Early exit if fully processed
-        if completed && executed && finalized {
-            break;
-        }
-
-        // Progress report
-        if (iteration + 1) % 20 == 0 {
-            let elapsed = runner.now().checked_sub(start_time).unwrap();
-            println!(
-                "  Iteration {}: elapsed={:?}, committed={}, executed={}, finalized={}",
-                iteration + 1,
-                elapsed,
-                committed,
-                executed,
-                finalized
-            );
-        }
-    }
-
-    // Check final state
-    println!("\n=== Final State ===");
-
-    let stats = runner.stats();
-    println!("Events processed: {}", stats.events_processed);
-    println!("Messages sent: {}", stats.messages_sent);
-
-    // Check heights and transaction status on both shards
-    println!("\nShard 0 validators:");
-    for i in 0..3 {
-        let node = runner.node(i).unwrap();
-        let tx_state = node.mempool_coordinator().status(&tx_hash);
-        let is_final = node.execution_coordinator().is_finalized(tx_hash);
-        println!(
-            "  Node {}: height={}, tx_status={:?}, finalized={}",
-            i,
-            node.shard_coordinator().committed_height(),
-            tx_state,
-            is_final
-        );
-    }
-
-    println!("\nShard 1 validators:");
-    for i in 3..6 {
-        let node = runner.node(i).unwrap();
-        let tx_state = node.mempool_coordinator().status(&tx_hash);
-        let is_final = node.execution_coordinator().is_finalized(tx_hash);
-        println!(
-            "  Node {}: height={}, tx_status={:?}, finalized={}",
-            i,
-            node.shard_coordinator().committed_height(),
-            tx_state,
-            is_final
-        );
-    }
-
-    // Verify both shards made progress
-    let shard0_max: BlockHeight = (0..3)
-        .map(|i| {
-            runner
-                .node(i)
-                .unwrap()
-                .shard_coordinator()
-                .committed_height()
-        })
-        .max()
-        .unwrap();
-    let shard1_max: BlockHeight = (3..6)
-        .map(|i| {
-            runner
-                .node(i)
-                .unwrap()
-                .shard_coordinator()
-                .committed_height()
-        })
-        .max()
-        .unwrap();
-
-    // Assertions
-    assert!(
-        shard0_max >= BlockHeight::new(2),
-        "Shard 0 should have committed blocks"
-    );
-    assert!(
-        shard1_max >= BlockHeight::new(2),
-        "Shard 1 should have committed blocks"
-    );
-    assert!(in_mempool, "Transaction should have entered mempool");
-    assert!(
-        committed || completed,
-        "Transaction should have been committed to a block"
-    );
-    assert!(executed, "Transaction should have been executed");
-    // Note: finalized may or may not be true depending on cross-shard execution completion
-
-    println!("\n✅ E2E Cross-Shard Test PASSED!");
-    println!("   ✅ Both shards initialized");
-    println!("   ✅ Accounts funded at genesis");
-    println!("   ✅ Cross-shard transaction entered mempool");
-    println!("   ✅ Cross-shard transaction committed");
-    println!("   ✅ Cross-shard transaction executed");
-    if finalized {
-        println!("   ✅ Cross-shard transaction finalized with certificate");
-    } else {
-        println!("   ⚠️  Cross-shard finalization not yet complete (execution still in progress)");
-    }
-    println!("   ✅ Both shards made progress (S0: {shard0_max}, S1: {shard1_max})");
+        let aborts = recorder.counter("transactions_aborted", None);
+        assert_eq!(aborts, 0, "cross-shard transfer aborted ({aborts} events)");
+    });
 }
 
-/// Test determinism of cross-shard transactions.
+/// Two same-seed runs of genesis → `grow_to(2)` → cross-shard transfer must
+/// produce identical committed heights and event/message counts: the split
+/// lifecycle and the cross-shard execution are deterministic.
 #[traced_test]
 #[test]
 fn test_e2e_cross_shard_determinism() {
-    println!("\n=== E2E Test: Cross-Shard Determinism ===\n");
+    let run = |seed: u64| -> (Vec<BlockHeight>, u64, u64) {
+        let mut runner = SimulationRunner::new(&cross_shard_grow_config(), seed);
+        let ((kp_a, acc_a), (_kp_b, acc_b)) = find_accounts_on_each_shard(2);
+        runner.initialize_genesis_with_balances(&[
+            (acc_a, Decimal::from(10_000)),
+            (acc_b, Decimal::from(10_000)),
+        ]);
+        runner.grow_to(2);
 
-    let config = multi_shard_config();
-    let seed = 54321u64;
+        let leaves = grown_leaves();
+        let tx = build_cross_shard_transfer(&kp_a, acc_a, acc_b, runner.now());
+        submit_to_shard(&mut runner, leaves[0], tx);
+        let until = runner.now() + Duration::from_secs(60);
+        runner.run_until(until);
 
-    // Create cross-shard transaction (same for both runs)
-    let signer = test_keypair_from_seed(10);
-    let to_account = test_account(20);
-
-    let manifest = ManifestBuilder::new()
-        .lock_fee_from_faucet()
-        .get_free_xrd_from_faucet()
-        .try_deposit_entire_worktop_or_abort(to_account, None)
-        .build();
-    let notarized =
-        sign_and_notarize(manifest, &simulator_network(), 1, &signer).expect("should sign");
-    let transaction: RoutableTransaction =
-        routable_from_notarized_v1(notarized, test_validity_range()).expect("valid transaction");
-
-    // First run
-    let mut runner1 = SimulationRunner::new(&config, seed);
-    runner1.initialize_genesis();
-    runner1.schedule_initial_event(
-        0,
-        Duration::from_millis(100),
-        ShardEvent::process(ProcessScopedInput::SubmitTransaction {
-            tx: Arc::new(transaction.clone()),
-        }),
-    );
-    runner1.run_until(Duration::from_secs(5));
-
-    let stats1 = runner1.stats().clone();
-    let heights1: Vec<BlockHeight> = (0..6)
-        .map(|i| {
-            runner1
-                .node(i)
-                .unwrap()
-                .shard_coordinator()
-                .committed_height()
-        })
-        .collect();
-
-    // Second run with same seed
-    let mut runner2 = SimulationRunner::new(&config, seed);
-    runner2.initialize_genesis();
-    runner2.schedule_initial_event(
-        0,
-        Duration::from_millis(100),
-        ShardEvent::process(ProcessScopedInput::SubmitTransaction {
-            tx: Arc::new(transaction),
-        }),
-    );
-    runner2.run_until(Duration::from_secs(5));
-
-    let stats2 = runner2.stats().clone();
-    let heights2: Vec<BlockHeight> = (0..6)
-        .map(|i| {
-            runner2
-                .node(i)
-                .unwrap()
-                .shard_coordinator()
-                .committed_height()
-        })
-        .collect();
-
-    // Verify identical results
+        let heights: Vec<BlockHeight> = leaves
+            .iter()
+            .flat_map(|&leaf| {
+                runner
+                    .shard_vnodes(leaf)
+                    .into_iter()
+                    .map(|v| v.shard_coordinator().committed_height())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let stats = runner.stats();
+        (heights, stats.events_processed, stats.messages_sent)
+    };
     assert_eq!(
-        stats1.events_processed, stats2.events_processed,
-        "Events processed should match"
+        run(54321),
+        run(54321),
+        "same-seed grow + cross-shard runs must be identical",
     );
-    assert_eq!(
-        stats1.messages_sent, stats2.messages_sent,
-        "Messages sent should match"
-    );
-    assert_eq!(heights1, heights2, "Committed heights should match");
-
-    println!("✅ Cross-shard determinism verified!");
-    println!("   Events: {}", stats1.events_processed);
-    println!("   Messages: {}", stats1.messages_sent);
-    println!("   Heights: {heights1:?}");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
