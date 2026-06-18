@@ -63,8 +63,8 @@ pub use genesis::{
 };
 pub use limits::{
     MAX_BEACON_COMMITTEE, MAX_BEACON_WITNESS_EVENTS_PER_TX, MAX_EQUIVOCATIONS_PER_PROPOSER,
-    MAX_PREFIX_SIGS, MAX_READY_SIGNALS_PER_BLOCK, MAX_READY_WINDOW_BLOCKS, MAX_SHARDS,
-    MAX_VOTE_VECTOR_LEN, MAX_WITNESS_PROOF_DEPTH, MAX_WITNESSES_PER_FETCH, MAX_WITNESSES_PER_SHARD,
+    MAX_PREFIX_SIGS, MAX_READY_SIGNALS_PER_BLOCK, MAX_SHARDS, MAX_VOTE_VECTOR_LEN,
+    MAX_WITNESS_PROOF_DEPTH, MAX_WITNESSES_PER_FETCH, MAX_WITNESSES_PER_SHARD,
 };
 pub use pc::{
     PC_VALUE_ELEMENT_BYTES, PcCompactVote, PcDivergingProof, PcQc1, PcQc1VerifyError, PcQc2,
@@ -80,7 +80,7 @@ pub use proposal::{
     BeaconProposal, BeaconProposalEquivocationMismatch, BeaconProposalVerifyContext,
     BeaconProposalVerifyError,
 };
-pub use ready_signal::ReadySignal;
+pub use ready_signal::{ReadySignal, ready_signal_window};
 pub use skip::{
     SkipEpochCert, SkipEpochCertVerifyError, SkipRequest, SkipRequestVerifyError,
     SkipVerifyContext, build_skip_cert, sign_skip_request, verify_skip_cert, verify_skip_request,

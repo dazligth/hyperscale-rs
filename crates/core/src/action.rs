@@ -219,11 +219,12 @@ pub enum Action {
     /// their pools hold the signal until a proposer drains it into a block
     /// manifest and the beacon's `Ready` witness flips `ready: true`.
     SignAndBroadcastReadySignal {
-        /// First block height at which the signal is eligible for inclusion.
-        height_window_start: BlockHeight,
-        /// Last eligible inclusion height; the signer re-emits if the
-        /// window passes uncollected.
-        height_window_end: BlockHeight,
+        /// First weighted timestamp at which the signal is eligible for
+        /// inclusion.
+        wt_window_start: WeightedTimestamp,
+        /// Last eligible inclusion weighted timestamp; the signer re-emits
+        /// if the window passes uncollected.
+        wt_window_end: WeightedTimestamp,
         /// Local-shard committee members (full membership view).
         recipients: Vec<ValidatorId>,
     },

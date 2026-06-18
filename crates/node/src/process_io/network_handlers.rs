@@ -481,8 +481,8 @@ where
                     let msg = ready_signal_message(
                         topo.network(),
                         sender,
-                        signal.height_window_start(),
-                        signal.height_window_end(),
+                        signal.wt_window_start(),
+                        signal.wt_window_end(),
                     );
                     if !verify_bls_with_metrics(&msg, &public_key, &signal.sig(), "ready_signal") {
                         warn!(

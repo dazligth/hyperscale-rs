@@ -42,7 +42,7 @@ use hyperscale_types::{
     QcVerifyError, QuorumCertificate, ReadySignal, Round, RoutableTransaction, ShardId,
     ShardWitnessPayload, StateRoot, StateRootContext, StateRootVerifyError, StoredReceipt, Timeout,
     TimeoutContext, TopologySchedule, TransactionRoot, TransactionRootContext, TxHash,
-    TxRootVerifyError, ValidatorId, Verifiable, Verified, Verify, VoteCount,
+    TxRootVerifyError, ValidatorId, Verifiable, Verified, Verify, VoteCount, WeightedTimestamp,
     local_settled_wave_ids, ready_signal_message,
 };
 
@@ -482,26 +482,20 @@ impl ShardCoordinatorSim {
     }
 
     /// Sign a `ReadySignal` from `signer_idx` covering
-    /// `[height_window_start, height_window_end]` and deliver it
-    /// to every replica's `on_ready_signal_received`. Tests that
-    /// don't care about window eligibility should use a wide
-    /// window.
+    /// `[wt_window_start, wt_window_end]` and deliver it to every
+    /// replica's `on_ready_signal_received`. Tests that don't care about
+    /// window eligibility should use a wide window.
     pub fn emit_ready_signal(
         &mut self,
         signer_idx: usize,
-        height_window_start: BlockHeight,
-        height_window_end: BlockHeight,
+        wt_window_start: WeightedTimestamp,
+        wt_window_end: WeightedTimestamp,
     ) {
         let validator = self.members[signer_idx].0;
         let sk = &self.sks[signer_idx];
-        let msg = ready_signal_message(
-            &self.network,
-            validator,
-            height_window_start,
-            height_window_end,
-        );
+        let msg = ready_signal_message(&self.network, validator, wt_window_start, wt_window_end);
         let sig = Bls12381G2Signature(sk.sign_v1(&msg).0);
-        let signal = ReadySignal::new(validator, height_window_start, height_window_end, sig);
+        let signal = ReadySignal::new(validator, wt_window_start, wt_window_end, sig);
         for idx in 0..self.n() {
             self.coordinators[idx].on_ready_signal_received(&self.topology, signal.clone());
         }

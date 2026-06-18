@@ -128,6 +128,7 @@ impl SimulationRunner {
             validator,
             &self.signing_keys[usize::try_from(validator.inner()).expect("id fits usize")],
             anchor,
+            self.epoch_duration_ms,
         );
         let recipients: Vec<ValidatorId> = snapshot
             .committee_for_shard(via)

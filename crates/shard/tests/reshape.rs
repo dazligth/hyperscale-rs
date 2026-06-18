@@ -14,9 +14,8 @@ use std::time::Duration;
 use common::ShardCoordinatorSim;
 use hyperscale_shard::ready_signal_pool::MIN_READY_SIGNAL_DWELL;
 use hyperscale_types::{
-    BlockHeight, MAX_READY_WINDOW_BLOCKS, NetworkDefinition, ReshapeThresholds, ShardId,
-    ShardWitnessPayload, TopologySchedule, TopologySnapshot, ValidatorId, ValidatorInfo,
-    ValidatorSet,
+    NetworkDefinition, ReshapeThresholds, ShardId, ShardWitnessPayload, TopologySchedule,
+    TopologySnapshot, ValidatorId, ValidatorInfo, ValidatorSet, WeightedTimestamp,
 };
 
 const MAX_STEPS: usize = 5_000;
@@ -122,8 +121,8 @@ fn observer_ready_signal_commits_as_reshape_ready_leaf() {
 
     sim.emit_ready_signal(
         3,
-        BlockHeight::new(1),
-        BlockHeight::new(MAX_READY_WINDOW_BLOCKS),
+        WeightedTimestamp::from_millis(0),
+        WeightedTimestamp::from_millis(u64::MAX),
     );
     sim.advance_clock(MIN_READY_SIGNAL_DWELL + Duration::from_millis(10));
     sim.kick_off();

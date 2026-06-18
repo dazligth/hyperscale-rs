@@ -17,7 +17,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use hyperscale_types::{BlockHeight, LocalTimestamp, ReadySignal, ValidatorId};
+use hyperscale_types::{LocalTimestamp, ReadySignal, ValidatorId, WeightedTimestamp};
 
 /// Minimum dwell time before a [`ReadySignal`] is eligible to be
 /// drained into a block.
@@ -93,14 +93,14 @@ impl ReadySignalPool {
         );
     }
 
-    /// Drop entries whose window-end has passed `committed_height`.
+    /// Drop entries whose window-end has passed `committed_wt`.
     ///
     /// Run on every block commit to keep the pool bounded by window
     /// length. A validator whose signal expires uncollected re-emits
     /// with a fresh window.
-    pub fn evict_expired(&mut self, committed_height: BlockHeight) {
+    pub fn evict_expired(&mut self, committed_wt: WeightedTimestamp) {
         self.pending
-            .retain(|_, entry| entry.signal.height_window_end() >= committed_height);
+            .retain(|_, entry| entry.signal.wt_window_end() >= committed_wt);
     }
 
     /// Drop entries whose `validator_id` satisfies `is_already_ready`.
@@ -118,16 +118,16 @@ impl ReadySignalPool {
     ///
     /// A signal is dwell-eligible when `now - received_at >=
     /// min_dwell`. Drained entries are removed from the pool. Signals
-    /// whose `[start, end]` window does not cover `proposal_height`
-    /// stay in the pool unchanged — a not-yet-open window may still
-    /// be drained at a later height, and an expired one is reaped by
-    /// [`Self::evict_expired`] on the next commit rather than being
-    /// dropped mid-drain. Returns signals in ascending `validator_id`
-    /// order — matching the canonical leaf-derivation order
-    /// downstream.
+    /// whose `[start, end]` window does not cover `proposal_wt` (the
+    /// proposal's parent-QC weighted timestamp) stay in the pool
+    /// unchanged — a not-yet-open window may still be drained at a later
+    /// proposal, and an expired one is reaped by [`Self::evict_expired`]
+    /// on the next commit rather than being dropped mid-drain. Returns
+    /// signals in ascending `validator_id` order — matching the canonical
+    /// leaf-derivation order downstream.
     pub fn drain_eligible(
         &mut self,
-        proposal_height: BlockHeight,
+        proposal_wt: WeightedTimestamp,
         now: LocalTimestamp,
         min_dwell: Duration,
         max: usize,
@@ -142,8 +142,8 @@ impl ReadySignalPool {
             if dwell < min_dwell {
                 continue;
             }
-            if proposal_height < entry.signal.height_window_start()
-                || proposal_height > entry.signal.height_window_end()
+            if proposal_wt < entry.signal.wt_window_start()
+                || proposal_wt > entry.signal.wt_window_end()
             {
                 continue;
             }
@@ -172,10 +172,14 @@ mod tests {
     fn signal(validator: u64, start: u64, end: u64) -> ReadySignal {
         ReadySignal::new(
             ValidatorId::new(validator),
-            BlockHeight::new(start),
-            BlockHeight::new(end),
+            WeightedTimestamp::from_millis(start),
+            WeightedTimestamp::from_millis(end),
             Bls12381G2Signature([0xAB; 96]),
         )
+    }
+
+    fn wt(ms: u64) -> WeightedTimestamp {
+        WeightedTimestamp::from_millis(ms)
     }
 
     fn ts(ms: u64) -> LocalTimestamp {
@@ -206,7 +210,7 @@ mod tests {
         pool.admit(signal(3, 50, 200), ts(500));
         assert_eq!(pool.len(), 1);
         let (_, entry) = pool.iter().next().unwrap();
-        assert_eq!(entry.signal.height_window_end(), BlockHeight::new(200));
+        assert_eq!(entry.signal.wt_window_end(), wt(200));
         assert_eq!(entry.received_at, ts(500));
     }
 
@@ -215,7 +219,7 @@ mod tests {
         let mut pool = ReadySignalPool::new();
         pool.admit(signal(1, 0, 10), ts(0));
         pool.admit(signal(2, 0, 100), ts(0));
-        pool.evict_expired(BlockHeight::new(50));
+        pool.evict_expired(wt(50));
         assert_eq!(pool.len(), 1);
         assert!(pool.iter().any(|(id, _)| id.inner() == 2));
     }
@@ -226,7 +230,7 @@ mod tests {
         // eligible — only strict expiry drops it.
         let mut pool = ReadySignalPool::new();
         pool.admit(signal(1, 0, 50), ts(0));
-        pool.evict_expired(BlockHeight::new(50));
+        pool.evict_expired(wt(50));
         assert_eq!(pool.len(), 1);
     }
 
@@ -246,7 +250,7 @@ mod tests {
     fn drain_skips_signals_under_dwell() {
         let mut pool = ReadySignalPool::new();
         pool.admit(signal(1, 0, 100), ts(0));
-        let drained = pool.drain_eligible(BlockHeight::new(10), ts(50), DWELL, 32);
+        let drained = pool.drain_eligible(wt(10), ts(50), DWELL, 32);
         assert!(drained.is_empty());
         assert_eq!(pool.len(), 1);
     }
@@ -256,7 +260,7 @@ mod tests {
         let mut pool = ReadySignalPool::new();
         pool.admit(signal(1, 0, 100), ts(0));
         pool.admit(signal(2, 0, 100), ts(0));
-        let drained = pool.drain_eligible(BlockHeight::new(10), ts(150), DWELL, 32);
+        let drained = pool.drain_eligible(wt(10), ts(150), DWELL, 32);
         assert_eq!(drained.len(), 2);
         assert!(pool.is_empty());
     }
@@ -267,7 +271,7 @@ mod tests {
         pool.admit(signal(3, 0, 100), ts(0));
         pool.admit(signal(1, 0, 100), ts(0));
         pool.admit(signal(2, 0, 100), ts(0));
-        let drained = pool.drain_eligible(BlockHeight::new(10), ts(200), DWELL, 32);
+        let drained = pool.drain_eligible(wt(10), ts(200), DWELL, 32);
         let ids: Vec<u64> = drained.iter().map(|s| s.validator_id().inner()).collect();
         assert_eq!(ids, vec![1, 2, 3]);
     }
@@ -276,7 +280,7 @@ mod tests {
     fn drain_skips_signals_outside_window() {
         let mut pool = ReadySignalPool::new();
         pool.admit(signal(1, 100, 200), ts(0));
-        let drained = pool.drain_eligible(BlockHeight::new(50), ts(500), DWELL, 32);
+        let drained = pool.drain_eligible(wt(50), ts(500), DWELL, 32);
         assert!(drained.is_empty());
         assert_eq!(pool.len(), 1, "signal stays pending for a future proposal");
     }
@@ -287,7 +291,7 @@ mod tests {
         for i in 1..=5 {
             pool.admit(signal(i, 0, 100), ts(0));
         }
-        let drained = pool.drain_eligible(BlockHeight::new(10), ts(500), DWELL, 3);
+        let drained = pool.drain_eligible(wt(10), ts(500), DWELL, 3);
         assert_eq!(drained.len(), 3);
         assert_eq!(pool.len(), 2, "remainder stays for a future proposal");
     }

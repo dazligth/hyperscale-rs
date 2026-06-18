@@ -244,7 +244,7 @@ mod tests {
     use hyperscale_types::{
         BeaconWitnessRoot, BlockHeight, Bls12381G2Signature, NetworkDefinition, ReadySignal, Round,
         Stake, StakePoolId, TopologySnapshot, ValidatorId, ValidatorInfo, ValidatorSet,
-        compute_merkle_root,
+        WeightedTimestamp, compute_merkle_root,
     };
 
     use super::*;
@@ -295,8 +295,8 @@ mod tests {
     fn ready_signal_for(validator: u64) -> ReadySignal {
         ReadySignal::new(
             ValidatorId::new(validator),
-            BlockHeight::new(1),
-            BlockHeight::new(100),
+            WeightedTimestamp::from_millis(1),
+            WeightedTimestamp::from_millis(100),
             Bls12381G2Signature([0x42; 96]),
         )
     }

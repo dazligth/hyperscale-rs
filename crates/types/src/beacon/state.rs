@@ -40,7 +40,7 @@ use crate::topology::snapshot::{ShardAnchor, TopologySnapshot};
 use crate::topology::validator::{ValidatorInfo, ValidatorSet};
 use crate::{
     BeaconWitnessLeafCount, BlockHash, BlockHeight, Bls12381G1PublicKey, Epoch, Randomness,
-    SettledWavesRoot, ShardId, Stake, StakePoolId, StateRoot, ValidatorId,
+    SettledWavesRoot, ShardId, Stake, StakePoolId, StateRoot, ValidatorId, WeightedTimestamp,
 };
 
 // ─── pool types ──────────────────────────────────────────────────────────────
@@ -230,6 +230,11 @@ pub struct ShardBoundary {
     /// Height of that boundary block — where a snap-synced joiner's tail
     /// block-sync starts.
     pub height: BlockHeight,
+    /// Canonical (parent-QC) weighted timestamp at the boundary block.
+    /// Projects onto [`ShardAnchor`](crate::ShardAnchor) as the clock a
+    /// freshly placed member or cohort observer opens its
+    /// [`ReadySignal`](crate::ReadySignal) window from.
+    pub weighted_timestamp: WeightedTimestamp,
     /// Beacon-witness accumulator high-water mark at the boundary.
     pub witness_leaf_count: BeaconWitnessLeafCount,
     /// Epoch in which this boundary was last refreshed by an observed
@@ -1034,6 +1039,7 @@ impl BeaconState {
                         state_root: b.state_root,
                         block_hash: b.block_hash,
                         height: b.height,
+                        weighted_timestamp: b.weighted_timestamp,
                         settled_waves_root: b.settled_waves_root,
                     },
                 )
@@ -1305,6 +1311,7 @@ mod tests {
             state_root: StateRoot::ZERO,
             block_hash: BlockHash::ZERO,
             height: BlockHeight::GENESIS,
+            weighted_timestamp: WeightedTimestamp::ZERO,
             witness_leaf_count: BeaconWitnessLeafCount::ZERO,
             last_live_epoch: creation,
             consecutive_misses: 0,
@@ -1564,6 +1571,7 @@ mod tests {
                 state_root: StateRoot::ZERO,
                 block_hash: BlockHash::ZERO,
                 height: BlockHeight::GENESIS,
+                weighted_timestamp: WeightedTimestamp::ZERO,
                 witness_leaf_count: BeaconWitnessLeafCount::ZERO,
                 last_live_epoch: Epoch::GENESIS,
                 consecutive_misses: 0,

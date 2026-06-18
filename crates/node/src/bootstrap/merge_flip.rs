@@ -166,6 +166,7 @@ mod tests {
             state_root: composed,
             block_hash: expected.hash(),
             height: BlockHeight::new(10),
+            weighted_timestamp: WeightedTimestamp::ZERO,
             settled_waves_root: None,
         };
 
@@ -212,6 +213,7 @@ mod tests {
             state_root: StateRoot::ZERO,
             block_hash: BlockHash::ZERO,
             height: BlockHeight::new(10),
+            weighted_timestamp: WeightedTimestamp::ZERO,
             settled_waves_root: None,
         };
         assert!(

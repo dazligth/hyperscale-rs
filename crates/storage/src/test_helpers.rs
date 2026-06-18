@@ -637,6 +637,7 @@ pub fn pin_snap_sync_replica(
         state_root: storage.state_root(),
         block_hash,
         height: anchor_height,
+        weighted_timestamp: WeightedTimestamp::from_millis(anchor_height.inner()),
         settled_waves_root: None,
     }
 }

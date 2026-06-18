@@ -938,6 +938,7 @@ impl ShardSupervisor {
         let events = self.events_tx.clone();
         let beacon_network = self.beacon_network.clone();
         let signing_key = Arc::clone(signing_key);
+        let epoch_duration_ms = self.epoch_duration_ms;
         let task = self.tokio_handle.spawn(async move {
             // A leftover directory — an abandoned earlier duty or a
             // failed flip — holds state synced against a stale anchor;
@@ -984,7 +985,13 @@ impl ShardSupervisor {
             // Sync complete: tell the splitting shard's committee, where
             // the signal classifies as a ReshapeReady witness leaf and
             // folds into the split's readiness gate.
-            let signal = observer_ready_signal(&beacon_network, validator, &signing_key, anchor);
+            let signal = observer_ready_signal(
+                &beacon_network,
+                validator,
+                &signing_key,
+                anchor,
+                epoch_duration_ms,
+            );
             let recipients: Vec<ValidatorId> = process
                 .topology()
                 .load()
@@ -1153,6 +1160,7 @@ impl ShardSupervisor {
                         member.validator,
                         &member.signing_key,
                         anchor,
+                        epoch_duration_ms,
                     );
                     let recipients: Vec<ValidatorId> = topology
                         .committee_for_shard(member.own_child)

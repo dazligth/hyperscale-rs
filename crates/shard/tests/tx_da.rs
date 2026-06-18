@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use common::ShardCoordinatorSim;
 use hyperscale_types::test_utils::verified_test_transaction;
-use hyperscale_types::{BlockHeight, MAX_READY_WINDOW_BLOCKS, Round, ValidatorId};
+use hyperscale_types::{Round, ValidatorId, WeightedTimestamp};
 
 const TARGET_COMMITS: usize = 1;
 const MAX_STEPS: usize = 5_000;
@@ -106,8 +106,8 @@ fn ready_signal_below_min_dwell_excluded_from_proposal() {
 
     let mut sim = ShardCoordinatorSim::new(4, 0xD1_E1);
     let signer_idx = 2;
-    let window_start = BlockHeight::new(1);
-    let window_end = window_start + (MAX_READY_WINDOW_BLOCKS - 1);
+    let window_start = WeightedTimestamp::from_millis(0);
+    let window_end = WeightedTimestamp::from_millis(u64::MAX);
     sim.emit_ready_signal(signer_idx, window_start, window_end);
     // Bump the clock just shy of the dwell threshold so subsequent
     // proposals' `now` stays below the eligibility cutoff.

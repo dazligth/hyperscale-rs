@@ -15,10 +15,10 @@
 use hyperscale_core::{Action, CommitSource, ProtocolEvent, TimerId};
 use hyperscale_types::{
     BlockHash, Hash, LocalTimestamp, MAX_FINALIZED_TX_PER_BLOCK, MAX_PROGRESS_WAIT,
-    MAX_READY_SIGNALS_PER_BLOCK, MAX_READY_WINDOW_BLOCKS, MAX_TXS_PER_BLOCK, ProposerTimestamp,
-    ProvisionHash, QuiesceCut, RETENTION_HORIZON, ReadySignal, ReshapeThresholds, ReshapeTrigger,
-    ScheduleLookup, SettledSetVerdict, SettledWaveSet, ShardId, SplitAtBoundary, StoredReceipt,
-    WaveId, WeightedTimestamp, derive_reshape_trigger, settled_set_verdict,
+    MAX_READY_SIGNALS_PER_BLOCK, MAX_TXS_PER_BLOCK, ProposerTimestamp, ProvisionHash, QuiesceCut,
+    RETENTION_HORIZON, ReadySignal, ReshapeThresholds, ReshapeTrigger, ScheduleLookup,
+    SettledSetVerdict, SettledWaveSet, ShardId, SplitAtBoundary, StoredReceipt, WaveId,
+    WeightedTimestamp, derive_reshape_trigger, ready_signal_window, settled_set_verdict,
 };
 
 /// Shard consensus statistics for monitoring.
@@ -846,9 +846,9 @@ impl ShardCoordinator {
     /// `ready: true`. `None` for already-ready members (a routine
     /// catch-up resync stays silent) and for non-members.
     ///
-    /// The window opens at the next committable height and spans the
-    /// maximum the proposer-side checks accept; if it passes uncollected
-    /// the beacon's ready timeout remains the fallback.
+    /// The window opens at the current committed weighted timestamp and
+    /// spans [`ready_signal_window`] of the configured epoch; if it passes
+    /// uncollected the beacon's ready timeout remains the fallback.
     fn maybe_emit_ready_signal(&self, topology: &TopologySchedule) -> Option<Action> {
         let head = topology.head();
         let committee = head.committee_for_shard(self.local_shard);
@@ -859,8 +859,8 @@ impl ShardCoordinator {
         {
             return None;
         }
-        let height_window_start = self.committed_height + 1;
-        let height_window_end = height_window_start + (MAX_READY_WINDOW_BLOCKS - 1);
+        let wt_window_start = self.committed_ts;
+        let wt_window_end = wt_window_start.plus(ready_signal_window(topology.epoch_duration_ms()));
         let recipients: Vec<ValidatorId> = committee
             .iter()
             .copied()
@@ -868,13 +868,13 @@ impl ShardCoordinator {
             .collect();
         info!(
             validator = ?self.me,
-            window_start = height_window_start.inner(),
-            window_end = height_window_end.inner(),
+            window_start = wt_window_start.as_millis(),
+            window_end = wt_window_end.as_millis(),
             "Synced to tip while not yet ready — broadcasting ReadySignal"
         );
         Some(Action::SignAndBroadcastReadySignal {
-            height_window_start,
-            height_window_end,
+            wt_window_start,
+            wt_window_end,
             recipients,
         })
     }
@@ -1418,14 +1418,14 @@ impl ShardCoordinator {
         &mut self,
         topology: &TopologySchedule,
         committee: &TopologySnapshot,
-        height: BlockHeight,
+        proposal_wt: WeightedTimestamp,
         parent_block_hash: BlockHash,
         substate_bytes: Option<u64>,
         receipts: &[StoredReceipt],
         missed: &[ShardWitnessPayload],
     ) -> WitnessCommitmentPreview {
         let mut ready_signals = self.ready_signal_pool.drain_eligible(
-            height,
+            proposal_wt,
             self.now,
             MIN_READY_SIGNAL_DWELL,
             MAX_READY_SIGNALS_PER_BLOCK,
@@ -1583,7 +1583,7 @@ impl ShardCoordinator {
         let preview = self.preview_witness_commitment(
             topology,
             committee,
-            height,
+            parent_qc.weighted_timestamp(),
             parent_block_hash,
             substate_bytes,
             &receipts,
@@ -2634,7 +2634,7 @@ impl ShardCoordinator {
         {
             return;
         }
-        if signal.height_window_end() < self.committed_height {
+        if signal.wt_window_end() < self.committed_ts {
             return;
         }
         self.ready_signal_pool.admit(signal, self.now);
@@ -3738,7 +3738,7 @@ impl ShardCoordinator {
             leaf_count_at_block_end,
             prune_persisted_below,
         };
-        self.ready_signal_pool.evict_expired(height);
+        self.ready_signal_pool.evict_expired(commit_ts);
 
         // Reset backoff tracking — new height means fresh round counting.
         self.view_change.reset_for_height_advance();
@@ -7481,18 +7481,21 @@ mod tests {
             .iter()
             .filter_map(|a| match a {
                 Action::SignAndBroadcastReadySignal {
-                    height_window_start,
-                    height_window_end,
+                    wt_window_start,
+                    wt_window_end,
                     recipients,
-                } => Some((height_window_start, height_window_end, recipients)),
+                } => Some((wt_window_start, wt_window_end, recipients)),
                 _ => None,
             })
             .collect();
         let [(start, end, recipients)] = signals.as_slice() else {
             panic!("expected exactly one ready signal, got {actions:?}");
         };
-        assert_eq!(**start, state.committed_height + 1);
-        assert_eq!(**end, **start + (MAX_READY_WINDOW_BLOCKS - 1));
+        assert_eq!(**start, state.committed_ts);
+        assert_eq!(
+            **end,
+            start.plus(ready_signal_window(topology.epoch_duration_ms()))
+        );
         assert_eq!(recipients.len(), 3);
         assert!(!recipients.contains(&state.me));
     }

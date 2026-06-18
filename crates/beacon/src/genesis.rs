@@ -18,7 +18,7 @@ use hyperscale_types::{
     BeaconGenesisConfig, BeaconState, BeaconWitnessLeafCount, BlockHash, BlockHeight, Epoch,
     MAX_BEACON_COMMITTEE, MAX_VOTE_VECTOR_LEN, MIN_BEACON_COMMITTEE_SIZE, MIN_STAKE_FLOOR,
     ShardBoundary, ShardCommittee, ShardId, Stake, StakePool, StakePoolId, StateRoot, ValidatorId,
-    ValidatorRecord, ValidatorStatus,
+    ValidatorRecord, ValidatorStatus, WeightedTimestamp,
 };
 
 // ─── builder ───────────────────────────────────────────────────────────────
@@ -126,6 +126,7 @@ pub fn build_genesis_beacon_state(config: &BeaconGenesisConfig) -> BeaconState {
                     state_root: StateRoot::ZERO,
                     block_hash: BlockHash::ZERO,
                     height: BlockHeight::GENESIS,
+                    weighted_timestamp: WeightedTimestamp::ZERO,
                     witness_leaf_count: BeaconWitnessLeafCount::ZERO,
                     last_live_epoch: Epoch::GENESIS,
                     consecutive_misses: 0,

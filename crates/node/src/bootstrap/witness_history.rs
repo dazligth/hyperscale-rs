@@ -188,7 +188,9 @@ mod tests {
     use hyperscale_storage::test_helpers::{commit_block_with_witnesses, stake_deposit};
     use hyperscale_storage::{PendingChain, RecoveredState};
     use hyperscale_storage_memory::SimShardStorage;
-    use hyperscale_types::{BlockHash, BlockHeight, ShardWitnessPayload, StateRoot};
+    use hyperscale_types::{
+        BlockHash, BlockHeight, ShardWitnessPayload, StateRoot, WeightedTimestamp,
+    };
 
     use super::*;
     use crate::shard_io::fetch::witness_history_serve::serve_witness_history_request;
@@ -204,6 +206,7 @@ mod tests {
             state_root: StateRoot::ZERO,
             block_hash,
             height: BlockHeight::new(HEIGHT),
+            weighted_timestamp: WeightedTimestamp::ZERO,
             settled_waves_root: None,
         };
         (PendingChain::new(Arc::new(storage)), anchor)
@@ -282,6 +285,7 @@ mod tests {
             state_root: StateRoot::ZERO,
             block_hash,
             height: BlockHeight::new(HEIGHT),
+            weighted_timestamp: WeightedTimestamp::ZERO,
             settled_waves_root: None,
         };
         let peer = PendingChain::new(Arc::new(storage));

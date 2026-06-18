@@ -24,8 +24,8 @@ use hyperscale_storage::ImportLeaf;
 use hyperscale_types::network::request::GetBlockRequest;
 use hyperscale_types::network::response::{GetBlockResponse, GetStateRangeResponse};
 use hyperscale_types::{
-    BlockHash, BlockHeight, Bls12381G1PrivateKey, MAX_READY_WINDOW_BLOCKS, NetworkDefinition,
-    ReadySignal, ShardAnchor, ShardId, StateRoot, StoredReceipt, ValidatorId, ready_signal_message,
+    BlockHash, BlockHeight, Bls12381G1PrivateKey, NetworkDefinition, ReadySignal, ShardAnchor,
+    ShardId, StateRoot, StoredReceipt, ValidatorId, ready_signal_message, ready_signal_window,
     shard_prefix_path,
 };
 
@@ -35,22 +35,24 @@ use super::{BootstrapOutcome, BootstrapRequest, SPLIT_BITS, STATE_CHUNK_LIMIT};
 /// The self-signed ready signal an observer broadcasts to the
 /// splitting shard's committee on completing its child-span bootstrap.
 ///
-/// Windowed from the splitting shard's attested anchor — the freshest
-/// committed height the observer holds an authenticated view of. The
-/// anchor refreshes every epoch boundary, so the window comfortably
-/// covers the chain's progress since; a signal that somehow passes
-/// uncollected is re-emitted against a newer anchor. At the committee,
-/// the signal classifies as a `ReshapeReady` witness leaf — the
-/// sender's observer seat rides the window's topology snapshot.
+/// Windowed from the splitting shard's attested anchor weighted
+/// timestamp — the freshest committed clock the observer holds an
+/// authenticated view of. The anchor refreshes every epoch boundary, so
+/// the [`ready_signal_window`] span (scaled to `epoch_duration_ms`)
+/// comfortably covers the chain's progress since; a signal that somehow
+/// passes uncollected is re-emitted against a newer anchor. At the
+/// committee, the signal classifies as a `ReshapeReady` witness leaf —
+/// the sender's observer seat rides the window's topology snapshot.
 #[must_use]
 pub fn observer_ready_signal(
     network: &NetworkDefinition,
     validator: ValidatorId,
     signing_key: &Bls12381G1PrivateKey,
     anchor: ShardAnchor,
+    epoch_duration_ms: u64,
 ) -> ReadySignal {
-    let start = anchor.height + 1;
-    let end = start + (MAX_READY_WINDOW_BLOCKS - 1);
+    let start = anchor.weighted_timestamp;
+    let end = start.plus(ready_signal_window(epoch_duration_ms));
     let msg = ready_signal_message(network, validator, start, end);
     ReadySignal::new(validator, start, end, signing_key.sign_v1(&msg))
 }

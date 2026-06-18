@@ -549,14 +549,14 @@ mod tests {
     fn observer_signals_classify_as_reshape_ready_leaves() {
         use std::collections::BTreeMap;
 
-        use crate::{BlockHeight as Height, ReadySignal, zero_bls_signature};
+        use crate::{ReadySignal, WeightedTimestamp, zero_bls_signature};
 
         let shard = ShardId::ROOT;
         let observer = ValidatorId::new(0);
         let signals = vec![ReadySignal::new(
             observer,
-            Height::new(0),
-            Height::new(10),
+            WeightedTimestamp::from_millis(0),
+            WeightedTimestamp::from_millis(10),
             zero_bls_signature(),
         )];
         let leaf = ShardWitnessPayload::ReshapeReady {
@@ -587,15 +587,15 @@ mod tests {
     fn keeper_signals_classify_as_reshape_ready_leaves() {
         use std::collections::BTreeMap;
 
-        use crate::{BlockHeight as Height, ReadySignal, zero_bls_signature};
+        use crate::{ReadySignal, WeightedTimestamp, zero_bls_signature};
 
         let child = ShardId::leaf(1, 0);
         let parent = ShardId::ROOT;
         let keeper = ValidatorId::new(0);
         let signals = vec![ReadySignal::new(
             keeper,
-            Height::new(0),
-            Height::new(10),
+            WeightedTimestamp::from_millis(0),
+            WeightedTimestamp::from_millis(10),
             zero_bls_signature(),
         )];
         let leaf = ShardWitnessPayload::ReshapeReady { validator: keeper }.leaf_hash();

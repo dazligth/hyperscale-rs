@@ -19,7 +19,7 @@ use blake3::Hasher;
 use hyperscale_types::{
     BeaconState, BeaconWitnessLeafCount, BlockHash, BlockHeight, CohortSeat, KeeperSeat,
     PendingReshape, ShardBoundary, ShardCommittee, ShardId, StateRoot, ValidatorId,
-    ValidatorStatus, byzantine_threshold,
+    ValidatorStatus, WeightedTimestamp, byzantine_threshold,
 };
 use rand::RngExt;
 use rand_chacha::ChaCha20Rng;
@@ -313,6 +313,7 @@ fn try_execute_split(state: &mut BeaconState, target: ShardId) {
                 state_root: StateRoot::ZERO,
                 block_hash: BlockHash::ZERO,
                 height: BlockHeight::GENESIS,
+                weighted_timestamp: WeightedTimestamp::ZERO,
                 witness_leaf_count: BeaconWitnessLeafCount::ZERO,
                 last_live_epoch: state.current_epoch,
                 consecutive_misses: 0,
@@ -445,6 +446,7 @@ fn try_execute_merge(state: &mut BeaconState, parent: ShardId) {
             state_root: StateRoot::ZERO,
             block_hash: BlockHash::ZERO,
             height: BlockHeight::GENESIS,
+            weighted_timestamp: WeightedTimestamp::ZERO,
             witness_leaf_count: BeaconWitnessLeafCount::ZERO,
             last_live_epoch: state.current_epoch,
             consecutive_misses: 0,
@@ -902,6 +904,7 @@ mod tests {
                     state_root: StateRoot::ZERO,
                     block_hash: BlockHash::ZERO,
                     height: BlockHeight::new(10),
+                    weighted_timestamp: WeightedTimestamp::ZERO,
                     witness_leaf_count: BeaconWitnessLeafCount::ZERO,
                     last_live_epoch: Epoch::new(5),
                     consecutive_misses: 0,
