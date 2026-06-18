@@ -6,7 +6,7 @@ use thiserror::Error;
 use crate::{
     BeaconWitnessLeafCount, BeaconWitnessRoot, BlockHeight, ConsensusReceipt, Hash, ReadySignal,
     ReshapeThresholds, ReshapeTrigger, Round, ShardId, ShardWitnessPayload, StoredReceipt,
-    TopologySnapshot, Verified, Verify, compute_merkle_root,
+    TopologySnapshot, ValidatorId, Verified, Verify, compute_merkle_root,
 };
 
 /// Inputs the [`BeaconWitnessRoot`] verifier reads against.
@@ -212,20 +212,32 @@ pub fn derive_leaves(
     let mut sorted: Vec<&ReadySignal> = ready_signals.iter().collect();
     sorted.sort_by_key(|s| s.validator_id());
     for signal in sorted {
-        let id = signal.validator_id();
-        // A ready signal from a reshape participant — a split observer of
-        // this shard, or a merge keeper running it — classifies as
-        // `ReshapeReady`; everyone else's is a plain `Ready`.
-        let reshaping = topology.reshape_observer_child(shard, id).is_some()
-            || topology.reshape_keeper_parent(shard, id).is_some();
-        out.push(if reshaping {
-            ShardWitnessPayload::ReshapeReady { validator: id }
-        } else {
-            ShardWitnessPayload::Ready { id }
-        });
+        out.push(ready_leaf_payload(shard, topology, signal.validator_id()));
     }
     out.extend(reshape);
     out
+}
+
+/// Classify a validator's ready-signal leaf for `shard`: a split observer
+/// of this shard, or a merge keeper running it, emits `ReshapeReady`;
+/// everyone else emits a plain `Ready`.
+///
+/// Shared by [`derive_leaves`] and the proposer's per-window dedup, so the
+/// leaf a proposer skips as already-committed is byte-identical to the one
+/// the fold would apply.
+#[must_use]
+pub fn ready_leaf_payload(
+    shard: ShardId,
+    topology: &TopologySnapshot,
+    id: ValidatorId,
+) -> ShardWitnessPayload {
+    let reshaping = topology.reshape_observer_child(shard, id).is_some()
+        || topology.reshape_keeper_parent(shard, id).is_some();
+    if reshaping {
+        ShardWitnessPayload::ReshapeReady { validator: id }
+    } else {
+        ShardWitnessPayload::Ready { id }
+    }
 }
 
 impl Verified<BeaconWitnessRoot> {

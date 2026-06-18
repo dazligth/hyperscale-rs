@@ -30,7 +30,7 @@ pub mod transaction;
 
 pub use beacon_witness::{
     BeaconWitnessRootContext, BeaconWitnessRootVerifyError, derive_leaves, derive_reshape_trigger,
-    missed_proposals_since_prev_commit,
+    missed_proposals_since_prev_commit, ready_leaf_payload,
 };
 pub use certificate::{
     CertRootVerifyError, CertificateRootContext, certificate_root_from_receipt_hashes,

@@ -89,7 +89,7 @@ use hyperscale_types::{
     QcVerifyError, QuorumCertificate, Round, RoutableTransaction, ShardWitnessPayload, StateRoot,
     StateRootVerifyError, Timeout, TopologySchedule, TopologySnapshot, TransactionRoot, TxHash,
     TxRootVerifyError, ValidatorId, Verifiable, Verified, Verify, VoteCount, derive_leaves,
-    missed_proposals_since_prev_commit,
+    missed_proposals_since_prev_commit, ready_leaf_payload,
 };
 use tracing::field::Empty;
 use tracing::{debug, info, instrument, trace, warn};
@@ -1424,7 +1424,7 @@ impl ShardCoordinator {
         receipts: &[StoredReceipt],
         missed: &[ShardWitnessPayload],
     ) -> WitnessCommitmentPreview {
-        let ready_signals = self.ready_signal_pool.drain_eligible(
+        let mut ready_signals = self.ready_signal_pool.drain_eligible(
             height,
             self.now,
             MIN_READY_SIGNAL_DWELL,
@@ -1460,6 +1460,17 @@ impl ShardCoordinator {
             .unwrap_or(usize::MAX)
             .min(parent_leaves.len());
         parent_leaves.drain(..trim);
+
+        // A ready signal whose leaf already sits in this window is committed
+        // for good — the merkle accumulator retains it and the beacon folds
+        // it once, so re-emitting only bloats the chunk the beacon must
+        // fetch. Drop it, mirroring the reshape-trigger dedup against the
+        // same window. The re-emission that landed it here is absorbed: the
+        // pool already dropped it on drain.
+        ready_signals.retain(|signal| {
+            let leaf = ready_leaf_payload(self.local_shard, committee, signal.validator_id());
+            !parent_leaves.contains(&leaf.leaf_hash())
+        });
 
         let reshape_trigger =
             self.derive_proposal_reshape_trigger(topology, substate_bytes, &parent_leaves);
