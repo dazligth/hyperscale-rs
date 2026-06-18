@@ -31,11 +31,12 @@ use hyperscale_types::{
     LeafIndex, LocalTimestamp, MAX_EQUIVOCATIONS_PER_PROPOSER, MAX_WITNESSES_PER_FETCH,
     NetworkDefinition, PcValueElement, PcVector, PcVote1, PcVote1VerifyError, PcVote2,
     PcVote2VerifyError, PcVote3, PcVote3VerifyError, PcVoteEquivocation, PcVoteEquivocationContext,
-    RETENTION_HORIZON, SKIP_TIMEOUT, SPC_INPUT_DWELL, ShardCommittee, ShardId, ShardWitness,
-    SkipEpochCert, SkipRequest, SkipRequestVerifyError, SlotEffects, SpcCert, SpcEmptyViewMsg,
-    SpcEmptyViewMsgVerifyError, SpcNewCommitMsg, SpcNewCommitMsgVerifyError, SpcProposalObject,
-    SpcProposalObjectVerifyError, SpcView, TopologySchedule, TopologySnapshot, ValidatorId,
-    ValidatorStatus, Verifiable, Verified, Verify, WeightedTimestamp, byzantine_threshold,
+    RETENTION_HORIZON, SKIP_TIMEOUT, SPC_INPUT_DWELL, SPC_VIEW_TIMEOUT, ShardCommittee, ShardId,
+    ShardWitness, SkipEpochCert, SkipRequest, SkipRequestVerifyError, SlotEffects, SpcCert,
+    SpcEmptyViewMsg, SpcEmptyViewMsgVerifyError, SpcNewCommitMsg, SpcNewCommitMsgVerifyError,
+    SpcProposalObject, SpcProposalObjectVerifyError, SpcView, TopologySchedule, TopologySnapshot,
+    ValidatorId, ValidatorStatus, Verifiable, Verified, Verify, WeightedTimestamp,
+    byzantine_threshold,
 };
 use tracing::{trace, warn};
 
@@ -327,7 +328,7 @@ impl BeaconCoordinator {
                 id: TimerId::BeaconSkipTrigger,
                 duration: self
                     .duration_until_next_epoch_boundary()
-                    .saturating_add(SKIP_TIMEOUT),
+                    .saturating_add(self.skip_timeout()),
             },
         ]
     }
@@ -368,14 +369,38 @@ impl BeaconCoordinator {
         self.now.as_millis() >= epoch_boundary.as_millis()
     }
 
+    /// How long the committee waits past an epoch's expected block time before
+    /// a member broadcasts a [`SkipRequest`](hyperscale_types::SkipRequest).
+    ///
+    /// [`SKIP_TIMEOUT`] is sized for the 5-minute production epoch (a small
+    /// fraction of it). Clamped into `[SPC_VIEW_TIMEOUT, SKIP_TIMEOUT]` against
+    /// `epoch_duration`:
+    ///
+    /// - The upper clamp at the epoch keeps a genuinely dead epoch (no proposer
+    ///   the committee can rally behind) carried within ~one epoch — inside the
+    ///   schedule's `L=1` lookahead — at a faster sim epoch, instead of
+    ///   cascading many epochs behind.
+    /// - The lower clamp at [`SPC_VIEW_TIMEOUT`](hyperscale_types::SPC_VIEW_TIMEOUT)
+    ///   keeps the skip above one SPC view change at every epoch length, so a
+    ///   single down proposer rotates to the next proposer (a real block)
+    ///   rather than skipping, and the skip never pre-empts a healthy commit at
+    ///   an epoch shorter than the consensus floor.
+    ///
+    /// Consensus-critical, but `epoch_duration_ms` rides in the shared genesis
+    /// config, so every validator derives the same instant.
+    fn skip_timeout(&self) -> Duration {
+        Duration::from_millis(self.state.chain_config.epoch_duration_ms)
+            .clamp(SPC_VIEW_TIMEOUT, SKIP_TIMEOUT)
+    }
+
     /// Whether the skip-trigger timer is due — i.e. wall-clock time
-    /// has reached `expected_block_time + SKIP_TIMEOUT`. The
+    /// has reached `expected_block_time + skip_timeout`. The
     /// runner combines this with its own "expected block hasn't
     /// arrived" + "local on active pool" checks before actually
     /// broadcasting a [`SkipRequest`](hyperscale_types::SkipRequest).
     #[must_use]
     pub fn skip_trigger_due(&self, expected_block_time: LocalTimestamp) -> bool {
-        self.now.as_millis() >= expected_block_time.plus(SKIP_TIMEOUT).as_millis()
+        self.now.as_millis() >= expected_block_time.plus(self.skip_timeout()).as_millis()
     }
 
     /// `TimerId::BeaconSkipTrigger` fired — the next epoch's expected
@@ -1490,13 +1515,13 @@ impl BeaconCoordinator {
                 routing_committees: Arc::new(self.topology.routing_committees()),
             },
             // Re-arm the skip-trigger timer against the new tip. Fires
-            // `SKIP_TIMEOUT` after the upcoming epoch's boundary if no
+            // `skip_timeout` after the upcoming epoch's boundary if no
             // commit lands by then.
             Action::SetTimer {
                 id: TimerId::BeaconSkipTrigger,
                 duration: self
                     .duration_until_next_epoch_boundary()
-                    .saturating_add(SKIP_TIMEOUT),
+                    .saturating_add(self.skip_timeout()),
             },
         ];
 
