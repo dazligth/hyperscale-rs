@@ -4187,6 +4187,7 @@ mod tests {
             last_live_epoch: Epoch::new(epoch),
             consecutive_misses: 0,
             terminal_epoch: None,
+            terminal_qc_wt: None,
             settled_waves_root: None,
         }
     }

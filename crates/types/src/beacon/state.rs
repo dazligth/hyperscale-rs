@@ -252,6 +252,15 @@ pub struct ShardBoundary {
     /// parent) and drain the witness backlog, and drops once both have
     /// happened. `None` for a live shard.
     pub terminal_epoch: Option<Epoch>,
+    /// Weighted timestamp of the QC certifying the terminal block. A merge
+    /// parent floors it to its epoch start to anchor the composed genesis,
+    /// the same value the keeper reads off the child's terminal QC, so both
+    /// reconstruct identical genesis bytes regardless of how far the child
+    /// coasted past its cut. `Some` once the terminal contribution has
+    /// folded — which lets the parent compose across separate folds when its
+    /// two children's terminals land in different epochs. `None` for a live
+    /// shard or a scheduled terminal whose contribution hasn't folded yet.
+    pub terminal_qc_wt: Option<WeightedTimestamp>,
     /// The terminal header's `settled_waves_root` — the beacon-attested
     /// commitment over the wave-ids this shard settled in its retention
     /// window up to its terminal block. `Some` only on a terminated
@@ -1316,6 +1325,7 @@ mod tests {
             last_live_epoch: creation,
             consecutive_misses: 0,
             terminal_epoch: None,
+            terminal_qc_wt: None,
             settled_waves_root: None,
         };
         state.boundaries.insert(child, pending(Epoch::new(4)));
@@ -1576,6 +1586,7 @@ mod tests {
                 last_live_epoch: Epoch::GENESIS,
                 consecutive_misses: 0,
                 terminal_epoch: None,
+                terminal_qc_wt: None,
                 settled_waves_root: None,
             })
             .witness_leaf_count = BeaconWitnessLeafCount::new(7);

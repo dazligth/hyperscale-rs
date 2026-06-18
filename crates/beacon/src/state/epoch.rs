@@ -10,7 +10,7 @@ use hyperscale_types::{
     CertifiedBeaconBlock, Epoch, EpochWindows, KeptSeat, NetworkDefinition, ObserverSeat,
     PendingReshape, QuorumCertificate, RETENTION_HORIZON, ShardBoundary, ShardEpochContribution,
     ShardId, SlotEffects, SplitAdoption, SplitChildRoots, TransitionCause, ValidatorId,
-    ValidatorStatus, WeightedTimestamp,
+    ValidatorStatus,
 };
 
 use crate::rules::{canonical_boundary_qcs, chunk_bounds, is_boundary_crossing};
@@ -426,16 +426,11 @@ fn record_boundaries(
     let mut refreshed: BTreeSet<ShardId> = BTreeSet::new();
     // Merge children whose terminal contribution — the coast block past
     // their cut, carrying their frozen terminal root — landed this fold.
-    // A parent composes only once both its children appear here, so the
-    // composition reads each child's actual terminal root, never the
-    // pre-terminal anchor `execute_ready_merges` left on the record.
+    // Drives the compose attempt below: the children's terminal records (and
+    // their persisted `terminal_qc_wt`) linger across folds, so a parent
+    // composes once both children have folded, whichever fold completes the
+    // pair.
     let mut terminal_recorded: BTreeSet<ShardId> = BTreeSet::new();
-    // Each terminal contribution's certifying QC weighted timestamp, the
-    // clock anchor the merged genesis floors to its epoch start. It is the
-    // same value the keeper reads off the child's terminal QC, so both
-    // reconstruct identical genesis bytes regardless of how far the child
-    // coasted past its cut.
-    let mut terminal_qc_wts: BTreeMap<ShardId, WeightedTimestamp> = BTreeMap::new();
     for (shard, contribution) in shard_contributions {
         let header = &contribution.boundary_header;
         let block_hash = header.hash();
@@ -476,6 +471,17 @@ fn record_boundaries(
             continue;
         }
         let terminal_epoch = state.boundaries.get(shard).and_then(|b| b.terminal_epoch);
+        // Once this contribution is the chain's terminal block — its crossing
+        // lands in an epoch past the scheduled terminal — record the
+        // certifying QC's timestamp. A merge parent floors it to the cut, and
+        // persisting it lets the parent compose even when its two children's
+        // terminals fold in separate epochs. A split parent seeds in-fold and
+        // never composes, so only merge children (no `split_child_roots`)
+        // carry it.
+        let is_terminal_contribution =
+            terminal_epoch.is_some_and(|t| windows.epoch_for(qc.weighted_timestamp()) > t);
+        let terminal_qc_wt = (is_terminal_contribution && header.split_child_roots().is_none())
+            .then(|| qc.weighted_timestamp());
         state.boundaries.insert(
             *shard,
             ShardBoundary {
@@ -487,6 +493,7 @@ fn record_boundaries(
                 last_live_epoch: epoch,
                 consecutive_misses: 0,
                 terminal_epoch,
+                terminal_qc_wt,
                 settled_waves_root: header.settled_waves_root(),
             },
         );
@@ -500,14 +507,11 @@ fn record_boundaries(
         // carrying the terminated shard's `settled_waves_root` for
         // surviving counterparts to read, until the retention GC below
         // drops it.
-        if let Some(t) = terminal_epoch
-            && windows.epoch_for(qc.weighted_timestamp()) > t
-        {
+        if is_terminal_contribution {
             if header.split_child_roots().is_some() {
                 seed_split_children(state, *shard, header, qc, epoch);
             } else {
                 terminal_recorded.insert(*shard);
-                terminal_qc_wts.insert(*shard, qc.weighted_timestamp());
             }
         }
     }
@@ -523,10 +527,10 @@ fn record_boundaries(
         }
     }
 
-    // Compose any merge parent whose two children both delivered their
-    // terminal contribution this fold, after the miss bump so the freshly
-    // composed anchor starts clean.
-    compose_merge_parents(state, epoch, windows, &terminal_recorded, &terminal_qc_wts);
+    // Compose any merge parent whose two children have both delivered their
+    // terminal contribution, after the miss bump so the freshly composed
+    // anchor starts clean.
+    compose_merge_parents(state, epoch, windows, &terminal_recorded);
 
     // Drop terminal records past their retention horizon. A terminated
     // shard's record lingers only to project its `settled_waves_root` to
@@ -601,6 +605,7 @@ fn seed_split_children(
                 last_live_epoch: epoch,
                 consecutive_misses: 0,
                 terminal_epoch: None,
+                terminal_qc_wt: None,
                 settled_waves_root: None,
             },
         );
@@ -623,20 +628,27 @@ fn compose_merge_parents(
     epoch: Epoch,
     windows: EpochWindows,
     terminal_recorded: &BTreeSet<ShardId>,
-    terminal_qc_wts: &BTreeMap<ShardId, WeightedTimestamp>,
 ) {
     let mut parents: BTreeSet<ShardId> = BTreeSet::new();
     for child in terminal_recorded {
         let Some(parent) = child.parent() else {
             continue;
         };
-        let (left, right) = parent.children();
-        // Both children recorded their terminal this fold, and the parent
-        // is still a pending placeholder (zero hash, post-genesis) — a
-        // split-child placeholder has no children, so this never matches
-        // one.
-        if terminal_recorded.contains(&left)
-            && terminal_recorded.contains(&right)
+        // Both children have folded their terminal contribution — each
+        // carries a `terminal_qc_wt` — and the parent is still a pending
+        // placeholder (zero hash, post-genesis; a split-child placeholder has
+        // no children, so this never matches one). The two children's
+        // terminals may have landed in separate folds: each terminal record
+        // lingers until the parent composes, so whichever fold completes the
+        // pair triggers here.
+        let children: [ShardId; 2] = parent.children().into();
+        let both_terminal = children.iter().all(|c| {
+            state
+                .boundaries
+                .get(c)
+                .is_some_and(|b| b.terminal_qc_wt.is_some())
+        });
+        if both_terminal
             && state.boundaries.get(&parent).is_some_and(|b| {
                 b.block_hash == BlockHash::ZERO && b.last_live_epoch > Epoch::GENESIS
             })
@@ -645,7 +657,7 @@ fn compose_merge_parents(
         }
     }
     for parent in parents {
-        compose_merge_parent(state, parent, epoch, windows, terminal_qc_wts);
+        compose_merge_parent(state, parent, epoch, windows);
     }
 }
 
@@ -654,7 +666,6 @@ fn compose_merge_parent(
     parent: ShardId,
     epoch: Epoch,
     windows: EpochWindows,
-    terminal_qc_wts: &BTreeMap<ShardId, WeightedTimestamp>,
 ) {
     let (left, right) = parent.children();
     let left_b = state.boundaries[&left];
@@ -666,7 +677,9 @@ fn compose_merge_parent(
     // window end instead would diverge whenever a child coasted more than
     // one epoch past its cut, so the keeper's reconstruction would not
     // reproduce this genesis hash.
-    let left_terminal_wt = terminal_qc_wts[&left];
+    let left_terminal_wt = left_b
+        .terminal_qc_wt
+        .expect("a child in compose has folded its terminal");
     let cut_wt = windows.window_of(windows.epoch_for(left_terminal_wt)).start;
     let composed = SplitChildRoots {
         left: left_b.state_root,
@@ -691,6 +704,7 @@ fn compose_merge_parent(
             last_live_epoch: epoch,
             consecutive_misses: 0,
             terminal_epoch: None,
+            terminal_qc_wt: None,
             settled_waves_root: None,
         },
     );
@@ -957,6 +971,7 @@ mod tests {
                 last_live_epoch: Epoch::GENESIS,
                 consecutive_misses: 0,
                 terminal_epoch: None,
+                terminal_qc_wt: None,
                 settled_waves_root: None,
             },
         );
@@ -1032,6 +1047,7 @@ mod tests {
                 last_live_epoch: Epoch::GENESIS,
                 consecutive_misses: 0,
                 terminal_epoch: None,
+                terminal_qc_wt: None,
                 settled_waves_root: None,
             },
         );
@@ -1091,6 +1107,7 @@ mod tests {
                 last_live_epoch: Epoch::GENESIS,
                 consecutive_misses: 0,
                 terminal_epoch: None,
+                terminal_qc_wt: None,
                 settled_waves_root: None,
             },
         );
@@ -1461,6 +1478,7 @@ mod tests {
                 last_live_epoch: Epoch::new(1),
                 consecutive_misses: 0,
                 terminal_epoch: Some(Epoch::new(1)),
+                terminal_qc_wt: None,
                 settled_waves_root: None,
             },
         );
@@ -1476,6 +1494,7 @@ mod tests {
                     last_live_epoch: Epoch::new(1),
                     consecutive_misses: 0,
                     terminal_epoch: None,
+                    terminal_qc_wt: None,
                     settled_waves_root: None,
                 },
             );
@@ -1741,6 +1760,7 @@ mod tests {
                     last_live_epoch: Epoch::new(1),
                     consecutive_misses: 0,
                     terminal_epoch: Some(Epoch::new(1)),
+                    terminal_qc_wt: None,
                     settled_waves_root: None,
                 },
             );
@@ -1756,6 +1776,7 @@ mod tests {
                 last_live_epoch: Epoch::new(1),
                 consecutive_misses: 0,
                 terminal_epoch: None,
+                terminal_qc_wt: None,
                 settled_waves_root: None,
             },
         );
@@ -1898,9 +1919,11 @@ mod tests {
             "parent still pending"
         );
 
-        // Fold E+1: the right child lands while the left re-sources; both
-        // terminals are recorded this fold, so the parent composes.
-        let (committed, contributions) = both(2_500, 2_500);
+        // Fold E+1: only the right child lands — the left does not re-source
+        // this fold. The parent composes anyway, off the left's persisted
+        // terminal record, so the compose no longer hinges on both terminals
+        // landing in a single fold (the case staggered witness fetches miss).
+        let (committed, contributions) = contribution_for(right, rh.clone(), rw.clone(), 2_500);
         record_boundaries(&mut state, Epoch::new(3), &committed, &contributions);
         let anchor = expected_merge_anchor(parent, &lh, &rh, 2_000);
         assert_eq!(state.boundaries[&parent].block_hash, anchor.hash());

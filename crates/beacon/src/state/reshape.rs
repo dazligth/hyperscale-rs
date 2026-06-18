@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 
 use blake3::Hasher;
 use hyperscale_types::{
-    BeaconState, BeaconWitnessLeafCount, BlockHash, BlockHeight, CohortSeat, KeeperSeat,
+    BeaconState, BeaconWitnessLeafCount, BlockHash, BlockHeight, CohortSeat, Epoch, KeeperSeat,
     PendingReshape, ShardBoundary, ShardCommittee, ShardId, StateRoot, ValidatorId,
     ValidatorStatus, WeightedTimestamp, byzantine_threshold,
 };
@@ -198,6 +198,26 @@ pub(super) fn execute_ready_splits(state: &mut BeaconState) {
     }
 }
 
+/// The zero-hash placeholder a reshape leaves on a not-yet-live shard's
+/// boundary — a split child or a composing merge parent. The zero block hash
+/// keeps it from projecting as a snap-sync anchor until the shard's genesis
+/// lands: a split child's seed from the parent's terminal, or a merge
+/// parent's composition from both children's terminals.
+const fn pending_placeholder_boundary(epoch: Epoch) -> ShardBoundary {
+    ShardBoundary {
+        state_root: StateRoot::ZERO,
+        block_hash: BlockHash::ZERO,
+        height: BlockHeight::GENESIS,
+        weighted_timestamp: WeightedTimestamp::ZERO,
+        witness_leaf_count: BeaconWitnessLeafCount::ZERO,
+        last_live_epoch: epoch,
+        consecutive_misses: 0,
+        terminal_epoch: None,
+        terminal_qc_wt: None,
+        settled_waves_root: None,
+    }
+}
+
 fn try_execute_split(state: &mut BeaconState, target: ShardId) {
     let Some(PendingReshape::Split { cohort, .. }) = state.pending_reshapes.get(&target) else {
         return;
@@ -305,22 +325,9 @@ fn try_execute_split(state: &mut BeaconState, target: ShardId) {
             .next_shard_committees
             .insert(child, ShardCommittee { members });
 
-        // Pending placeholder, the genesis-seeding pattern: a zero
-        // block hash keeps it from projecting as a snap-sync anchor.
-        state.boundaries.insert(
-            child,
-            ShardBoundary {
-                state_root: StateRoot::ZERO,
-                block_hash: BlockHash::ZERO,
-                height: BlockHeight::GENESIS,
-                weighted_timestamp: WeightedTimestamp::ZERO,
-                witness_leaf_count: BeaconWitnessLeafCount::ZERO,
-                last_live_epoch: state.current_epoch,
-                consecutive_misses: 0,
-                terminal_epoch: None,
-                settled_waves_root: None,
-            },
-        );
+        state
+            .boundaries
+            .insert(child, pending_placeholder_boundary(state.current_epoch));
     }
 }
 
@@ -437,23 +444,12 @@ fn try_execute_merge(state: &mut BeaconState, parent: ShardId) {
         .next_shard_committees
         .insert(parent, ShardCommittee { members });
 
-    // Pending placeholder, the genesis-seeding pattern: a zero block
-    // hash keeps it from projecting as a snap-sync anchor until the
-    // beacon composes `r_p` from the two terminal child anchors.
-    state.boundaries.insert(
-        parent,
-        ShardBoundary {
-            state_root: StateRoot::ZERO,
-            block_hash: BlockHash::ZERO,
-            height: BlockHeight::GENESIS,
-            weighted_timestamp: WeightedTimestamp::ZERO,
-            witness_leaf_count: BeaconWitnessLeafCount::ZERO,
-            last_live_epoch: state.current_epoch,
-            consecutive_misses: 0,
-            terminal_epoch: None,
-            settled_waves_root: None,
-        },
-    );
+    // The parent's `r_p` is composed from the two terminal child anchors
+    // once they fold; until then a zero block hash keeps the placeholder
+    // from projecting as a snap-sync anchor.
+    state
+        .boundaries
+        .insert(parent, pending_placeholder_boundary(state.current_epoch));
 }
 
 /// PRNG bound to `(domain, randomness, epoch, shard)` — the seeding
@@ -909,6 +905,7 @@ mod tests {
                     last_live_epoch: Epoch::new(5),
                     consecutive_misses: 0,
                     terminal_epoch: None,
+                    terminal_qc_wt: None,
                     settled_waves_root: None,
                 },
             );
