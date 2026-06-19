@@ -29,7 +29,7 @@ use hyperscale_storage::{BoundaryStore, ImportLeaf, RecoveredState, ShardChainRe
 use hyperscale_storage_memory::SimShardStorage;
 use hyperscale_types::network::notification::ReadySignalNotification;
 use hyperscale_types::{
-    CertifiedBlock, ShardId, StateRoot, ValidatorId, Verified, shard_prefix_path,
+    CertifiedBlock, ShardAnchor, ShardId, StateRoot, ValidatorId, Verified, shard_prefix_path,
 };
 
 use super::SimulationRunner;
@@ -95,25 +95,32 @@ impl SimulationRunner {
             .notify(&recipients, &ReadySignalNotification::new(signal));
     }
 
-    /// Flip a keeper onto the reformed `parent` at the boundary, seating
-    /// the vnode on `node`'s host: build a `parent`-rooted store from
-    /// both terminated children's halves, derive the deterministic merged
-    /// genesis from their terminal pair, adopt it against the beacon's
-    /// composed anchor, and commit the genesis through the normal
-    /// pipeline. Returns the adopted merged state root.
+    /// Flip the keepers co-hosted on `node` onto the reformed `parent` at
+    /// the boundary, seating one `parent` vnode per validator on the host:
+    /// build a `parent`-rooted store from both terminated children's
+    /// halves, derive the deterministic merged genesis from their terminal
+    /// pair, adopt it against the beacon's composed anchor, and commit the
+    /// genesis through the normal pipeline. Returns the adopted merged
+    /// state root.
+    ///
+    /// A merge converges every keeper onto the one parent shard, so a host
+    /// carrying keepers drawn from both children seats more than one
+    /// `parent` vnode against the single shared merged store — unlike a
+    /// split, whose members fan out across two distinct children.
     ///
     /// # Panics
     ///
-    /// Panics if the beacon's parent anchor hasn't composed yet, if a
-    /// child's terminal block is missing, or if the adoption doesn't
-    /// reconstruct the beacon-composed genesis — each a protocol
-    /// regression the calling test should surface loudly.
+    /// Panics if `validators` is empty, if the beacon's parent anchor
+    /// hasn't composed yet, if a child's terminal block is missing, or if
+    /// the adoption doesn't reconstruct the beacon-composed genesis — each
+    /// a protocol regression the calling test should surface loudly.
     pub fn flip_merge_parent(
         &mut self,
         node: NodeIndex,
-        validator: ValidatorId,
+        validators: &[ValidatorId],
         parent: ShardId,
     ) -> StateRoot {
+        assert!(!validators.is_empty(), "flip needs at least one keeper");
         let snapshot = self.hosts[node as usize].process().topology().load_full();
         let anchor = snapshot
             .boundary(parent)
@@ -136,7 +143,7 @@ impl SimulationRunner {
 
         // Build the merged store: the union of both halves, imported at
         // the genesis version, gives a tree whose root is the stitched
-        // `r_p` by construction.
+        // `r_p` by construction. Every keeper on this host shares it.
         let storage = SimShardStorage::new(shard_prefix_path(parent));
         replicate_engine_bootstrap(&storage, snapshot.network(), &GenesisConfig::test_default());
         let mut leaves = left_leaves;
@@ -159,13 +166,17 @@ impl SimulationRunner {
             chain_origin: origin,
             ..RecoveredState::default()
         };
-        let init = self.runtime_vnode_init(node, validator, parent, &recovered);
-        self.network.bind_validator(validator, node);
-        self.hosts[node as usize].add_shard(
-            vec![init],
-            storage,
-            self.event_txs[node as usize].clone(),
-        );
+        let mut inits = Vec::with_capacity(validators.len());
+        for &validator in validators {
+            inits.push(self.runtime_vnode_init(node, validator, parent, &recovered));
+            self.network.bind_validator(validator, node);
+        }
+        // Tear down any stale chain this host still carries under the
+        // parent's id before seating the merged shard. When the merge
+        // target is the grown topology's genesis shard, the grow's split
+        // left the terminated parent vnode in place under the same id.
+        let _ = self.hosts[node as usize].remove_shard(parent);
+        self.hosts[node as usize].add_shard(inits, storage, self.event_txs[node as usize].clone());
 
         self.hosts[node as usize].initialize_shard_genesis(&genesis);
         self.hosts[node as usize].flush_all_batches();
@@ -212,10 +223,31 @@ impl SimulationRunner {
             !serving.is_empty(),
             "no serving host for {shard:?} — leaf collection needs a live committee",
         );
+        // The beacon-attested anchor while the shard is still live or
+        // draining. Once a merge composes, both children drop from the
+        // beacon boundaries, but the serving host still holds the
+        // terminated chain — rebuild the dropped record from its crossing
+        // block `B` (one below the coast tip), whose root is the terminal
+        // state the parent composed from.
         let snapshot = self.hosts[serving[0]].process().topology().load_full();
-        let anchor = snapshot
-            .boundary(shard)
-            .expect("leaf collection requires an attested anchor");
+        let anchor = snapshot.boundary(shard).unwrap_or_else(|| {
+            let storage = &self.hosts[serving[0]].shard_io(shard).storage;
+            let crossing = storage
+                .committed_height()
+                .prev()
+                .expect("a terminated child sits above its genesis");
+            let block = storage
+                .get_block(crossing)
+                .expect("the serving host holds its crossing block");
+            let header = block.block().header();
+            ShardAnchor {
+                state_root: header.state_root(),
+                block_hash: block.block().hash(),
+                height: crossing,
+                weighted_timestamp: header.parent_qc().weighted_timestamp(),
+                settled_waves_root: header.settled_waves_root(),
+            }
+        });
         let mut bootstrap = ShardBootstrap::new(shard, anchor);
         let mut peer = 0usize;
         for _ in 0..MAX_BOOTSTRAP_ROUNDS {

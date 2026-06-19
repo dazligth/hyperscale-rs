@@ -1,19 +1,24 @@
-//! End-to-end merge of two cold sibling shards back into their parent.
+//! End-to-end merge of two cold sibling shards back into their parent,
+//! reached the way mainnet would: grow a single-shard genesis into two
+//! shards through the real split lifecycle, then govern the reshape
+//! threshold up so the cold grown children fall below the merge threshold.
 //!
-//! Boots a two-shard network whose chain config makes both shards
-//! merge-eligible from genesis (their genesis substate byte totals sit below
-//! `MERGE_THRESHOLD = split_bytes / 8`), lets each child's quorum
-//! assert the merge and the beacon pair it — drawing half of each
-//! child's committee as the keeper set — then runs each keeper's real
-//! duty: the sibling-half sync served by the sibling's committee, and
-//! the self-signed ready signal delivered over its own child's network,
-//! BLS-verified, pooled, drained into a block, classified as a
-//! `ReshapeReady` leaf, and folded into the merge gate. The gate fires,
-//! the trie collapses both children into their parent in the lookahead,
-//! the children coast to their crossing and the beacon composes the
-//! parent anchor from their terminal roots, and the keepers flip onto
-//! the parent — its committed root the `hash_internal` of the two child
-//! terminal roots, its chain continuing past the merged genesis.
+//! A grown topology cannot merge under a frozen threshold — the threshold
+//! that splits a parent always leaves children too large to fall back under
+//! `merge_bytes = split_bytes / 8`. Raising `split_bytes` with a stake-pool
+//! parameter vote is the honest trigger: once it activates, both children
+//! sit below the new merge threshold and assert the merge. From there each
+//! child's quorum pairs the merge and the beacon draws the keeper set —
+//! half of each child's committee — then runs each keeper's real duty: the
+//! sibling-half sync served by the sibling's committee, and the self-signed
+//! ready signal delivered over its own child's network, BLS-verified,
+//! pooled, drained into a block, classified as a `ReshapeReady` leaf, and
+//! folded into the merge gate. The gate fires, the trie collapses both
+//! children into their parent in the lookahead, the children coast to their
+//! crossing and the beacon composes the parent anchor from their terminal
+//! roots, and the keepers flip onto the parent — its committed root the
+//! `hash_internal` of the two child terminal roots, its chain continuing
+//! past the merged genesis.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,43 +27,58 @@ use hyperscale_network_memory::NetworkConfig;
 use hyperscale_simulation::{EPOCH_MS, SimulationRunner};
 use hyperscale_storage::{ShardChainReader, SubstateStore};
 use hyperscale_types::{
-    BeaconChainConfig, BeaconState, BlockHash, KeeperSeat, PendingReshape,
-    RESHAPE_READY_TTL_EPOCHS, ReshapeThresholds, ShardId, SplitChildRoots, StateRoot, ValidatorId,
-    ValidatorStatus,
+    BeaconChainConfig, BeaconState, BlockHash, Ed25519PrivateKey, Epoch, KeeperSeat,
+    PendingReshape, RESHAPE_READY_TTL_EPOCHS, ReshapeThresholds, ShardId, SplitChildRoots,
+    StateRoot, ValidatorId, ValidatorStatus,
 };
+use radix_common::math::Decimal;
+use radix_common::types::ComponentAddress;
 use tracing_test::traced_test;
 
-/// Committee size on each child shard.
+/// Committee size on each shard — also the cohort `grow_to(2)` draws for the
+/// one split, so `pool_extra_validators` matches it exactly.
 const PER_SHARD: u32 = 4;
 
-/// `split_bytes / 8` is the merge threshold; at `5_200_000` it is
-/// `650_000`, comfortably above the genesis byte total each child carries
-/// (the heavier `leaf(1,0)` half is ~611k, the lighter ~377k), so both
-/// children assert the merge from genesis and neither splits.
-const SPLIT_BYTES: u64 = 5_200_000;
+/// Reshape threshold armed for the grow: ROOT's ~988k genesis byte total
+/// sits above it so ROOT splits once, while each child's half (the heavier
+/// `leaf(1,0)` ~611k, the lighter ~377k) sits below it so neither child
+/// re-splits and `merge_bytes = 100k` is far below both so neither merges —
+/// the children rest stable until the vote lands.
+const GROW_SPLIT_BYTES: u64 = 800_000;
 
-const ADMISSION_BUDGET_EPOCHS: u64 = 8;
+/// Reshape threshold the parameter vote installs after the grow:
+/// `merge_bytes = 1_000_000`, comfortably above each cold child's byte
+/// total, so both assert the merge once the change activates.
+const MERGE_VOTE_SPLIT_BYTES: u64 = 8_000_000;
+
+/// Epochs after the post-grow epoch at which the threshold vote activates —
+/// enough lead for the vote transaction to commit and fold into
+/// `param_votes` before the tally reads it.
+const ACTIVATE_LEAD: u64 = 4;
+
+const ADMISSION_BUDGET_EPOCHS: u64 = 12;
 const GATE_BUDGET_EPOCHS: u64 = 8;
 const COMPOSE_BUDGET_EPOCHS: u64 = 14;
 const PARENT_RUN_BUDGET_EPOCHS: u64 = 6;
 
-/// Two sibling shards (`leaf(1,0)`, `leaf(1,1)`) merging into `ROOT`,
-/// paced epochs, merge armed from genesis.
+/// Single-shard genesis with the split trigger armed for one generation and
+/// one cohort of pooled extras — `grow_to(2)` drives it to the two sibling
+/// shards (`leaf(1,0)`, `leaf(1,1)`) through the real split lifecycle.
 fn merge_config() -> NetworkConfig {
     NetworkConfig {
-        num_shards: 2,
+        num_shards: 1,
         validators_per_shard: PER_SHARD,
         jitter_fraction: 0.1,
         beacon_chain_config: Some(BeaconChainConfig {
             epoch_duration_ms: EPOCH_MS,
-            num_shards: 2,
+            num_shards: 1,
             shard_size: PER_SHARD,
             reshape_thresholds: ReshapeThresholds {
-                split_bytes: SPLIT_BYTES,
+                split_bytes: GROW_SPLIT_BYTES,
             },
             ..BeaconChainConfig::default()
         }),
-        pool_extra_validators: 0,
+        pool_extra_validators: PER_SHARD,
         ..Default::default()
     }
 }
@@ -66,6 +86,28 @@ fn merge_config() -> NetworkConfig {
 fn beacon_state(runner: &SimulationRunner) -> Option<Arc<BeaconState>> {
     let (_, state) = runner.beacon_storage(0)?.latest_committed()?;
     Some(state)
+}
+
+/// Boot single-shard, grow to the two sibling shards through the real split
+/// lifecycle, then vote the reshape threshold up so the cold grown children
+/// fall under the merge threshold. Returns the runner with the vote
+/// submitted and activating `ACTIVATE_LEAD` epochs out — the
+/// grow-then-merge step that is impossible under a frozen threshold.
+fn grown_and_voted_to_merge(seed: u64) -> SimulationRunner {
+    // The threshold vote is a fee-paying system transaction; fund the payer
+    // at genesis so its `lock_fee` succeeds.
+    let payer = Ed25519PrivateKey::from_u64(42).expect("payer key");
+    let account = ComponentAddress::preallocated_account_from_public_key(&payer.public_key());
+    let mut runner = SimulationRunner::new(&merge_config(), seed);
+    runner.initialize_genesis_with_balances(&[(account, Decimal::from(100_000))]);
+    runner.grow_to(2);
+
+    let epoch = beacon_state(&runner)
+        .expect("post-grow beacon state")
+        .current_epoch;
+    let activate_at = Epoch::new(epoch.inner() + ACTIVATE_LEAD);
+    runner.vote_reshape_thresholds(&payer, 1, MERGE_VOTE_SPLIT_BYTES, activate_at);
+    runner
 }
 
 /// The pending merge's keepers as `(validator, the child it runs)`
@@ -112,18 +154,19 @@ const fn epochs(n: u64) -> Duration {
 #[allow(clippy::too_many_lines)] // one merge lifecycle asserted end to end
 fn keepers_merge_two_cold_siblings_into_their_parent() {
     let (left, right) = ShardId::ROOT.children();
-    let mut runner = SimulationRunner::new(&merge_config(), 8);
-    runner.initialize_genesis();
+    let mut runner = grown_and_voted_to_merge(8);
 
-    // ── Admission: each child asserts the merge; the beacon pairs and
-    // draws the keeper committee ──
-    let paired = run_until(&mut runner, epochs(ADMISSION_BUDGET_EPOCHS), |r| {
+    // ── Admission: the vote activates, each child asserts the merge against
+    // the raised threshold, and the beacon pairs and draws the keeper
+    // committee ──
+    let admission_deadline = runner.now() + epochs(ADMISSION_BUDGET_EPOCHS);
+    let paired = run_until(&mut runner, admission_deadline, |r| {
         pending_keepers(r).is_some_and(|k| k.len() == PER_SHARD as usize)
     });
     assert!(
         paired,
-        "both children must assert the merge and pair a full keeper set within \
-         {ADMISSION_BUDGET_EPOCHS} epochs",
+        "the threshold vote must activate and both children pair a full keeper \
+         set within {ADMISSION_BUDGET_EPOCHS} epochs",
     );
     let mut keepers = pending_keepers(&runner).expect("keepers just observed");
     for child in [left, right] {
@@ -204,27 +247,43 @@ fn keepers_merge_two_cold_siblings_into_their_parent() {
         })
     });
     if !composed {
+        use std::fmt::Write;
         let s = beacon_state(&runner).expect("state");
         let mut detail = String::new();
+        // What does each host's head trie carry — has the merge dropped the
+        // children for ROOT, or do they linger as live leaves?
+        for node in 0..runner.num_hosts() {
+            if let Some(topo) = runner.host_topology(node) {
+                let leaves: Vec<ShardId> = topo.shard_trie().leaves().collect();
+                let _ = write!(detail, "\n  node {node} head trie leaves: {leaves:?}");
+            }
+        }
+        // Per child: tip height and the tip block's weighted timestamp →
+        // epoch, to compare the children's clock against the beacon's.
         for child in [left, right] {
             for node in 0..runner.num_hosts() {
                 if let Some(storage) = runner.hosts_shard(node, child) {
-                    use std::fmt::Write;
+                    let tip = storage.committed_height();
+                    let tip_wt_ms = storage
+                        .get_block(tip)
+                        .map_or(0, |b| b.block().header().timestamp().as_millis());
                     let _ = write!(
                         detail,
-                        "\n  node {node} {child:?}: committed {:?} root {:?}",
-                        storage.committed_height(),
+                        "\n  node {node} {child:?}: committed {tip:?} tip_wt={tip_wt_ms}ms \
+                         (epoch {}) root {:?}",
+                        tip_wt_ms / EPOCH_MS,
                         storage.state_root(),
                     );
                 }
             }
         }
         panic!(
-            "compose timed out; epoch {:?}; boundaries {:?}; pending {:?}; committee {:?}; stores:{detail}",
+            "compose timed out; beacon epoch {:?}; committee {}; pending {:?}; boundaries {:?}; \
+             detail:{detail}",
             s.current_epoch,
-            s.boundaries,
-            s.pending_reshapes.keys().collect::<Vec<_>>(),
             s.committee.len(),
+            s.pending_reshapes.keys().collect::<Vec<_>>(),
+            s.boundaries,
         );
     }
 
@@ -247,12 +306,21 @@ fn keepers_merge_two_cold_siblings_into_their_parent() {
     let left_count = child_terminal_count(&runner, left);
     let right_count = child_terminal_count(&runner, right);
 
-    // ── The flip: each keeper builds the merged store from both halves
-    // and seats onto the parent ──
+    // ── The flip: each host's keepers build the merged store from both
+    // halves and seat onto the parent. Keepers drawn from both children can
+    // share a host, and a merge converges them all onto the one parent
+    // shard, so group by host and seat each host's keepers together. ──
     let parent_anchor = state.boundaries[&ShardId::ROOT];
+    let mut keepers_by_node: std::collections::BTreeMap<_, Vec<ValidatorId>> =
+        std::collections::BTreeMap::new();
     for (validator, _) in &keepers {
-        let node = u32::try_from(validator.inner()).expect("host per keeper");
-        let adopted = runner.flip_merge_parent(node, *validator, ShardId::ROOT);
+        keepers_by_node
+            .entry(runner.network().validator_to_node(*validator))
+            .or_default()
+            .push(*validator);
+    }
+    for (node, validators) in &keepers_by_node {
+        let adopted = runner.flip_merge_parent(*node, validators, ShardId::ROOT);
         assert_eq!(
             adopted, parent_anchor.state_root,
             "every keeper adopts the same beacon-composed merged root",
@@ -276,13 +344,15 @@ fn keepers_merge_two_cold_siblings_into_their_parent() {
         genesis_height.inner(),
     );
 
-    // Every merged store holds the deterministic genesis as its committed
-    // base, and every committed chain extends it.
+    // Every keeper's merged store holds the deterministic genesis as its
+    // committed base, and every committed chain extends it. Only the keeper
+    // hosts carry the reformed parent; non-keeper hosts still hold the dead
+    // pre-grow genesis chain under the same id.
     let mut merged_count = None;
-    for node in 0..runner.num_hosts() {
-        let Some(storage) = runner.hosts_shard(node, ShardId::ROOT) else {
-            continue;
-        };
+    for &node in keepers_by_node.keys() {
+        let storage = runner
+            .hosts_shard(node, ShardId::ROOT)
+            .expect("a keeper host carries the merged shard");
         let genesis = storage
             .get_block(genesis_height)
             .expect("the adoption recorded the merged genesis as the committed tip");
@@ -343,10 +413,10 @@ fn child_terminal_count(runner: &SimulationRunner, child: ShardId) -> u64 {
 #[test]
 fn the_merge_gate_requires_keeper_readiness() {
     let (left, right) = ShardId::ROOT.children();
-    let mut runner = SimulationRunner::new(&merge_config(), 8);
-    runner.initialize_genesis();
+    let mut runner = grown_and_voted_to_merge(8);
 
-    let paired = run_until(&mut runner, epochs(ADMISSION_BUDGET_EPOCHS), |r| {
+    let admission_deadline = runner.now() + epochs(ADMISSION_BUDGET_EPOCHS);
+    let paired = run_until(&mut runner, admission_deadline, |r| {
         pending_keepers(r).is_some()
     });
     assert!(
