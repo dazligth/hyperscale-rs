@@ -68,10 +68,9 @@ impl NodeStateMachine {
             return Vec::new();
         }
 
-        let topology = self.beacon_coordinator.current_topology_snapshot();
         let mut actions = self
             .remote_headers_coordinator
-            .flush_expected_headers(topology);
+            .flush_expected_headers(self.beacon_coordinator.topology_schedule());
         actions.extend(self.provisions_coordinator.flush_expected_provisions());
         actions.extend(self.execution_coordinator.flush_expected_certs());
         actions.extend(self.mempool_coordinator.flush_expected_txs());

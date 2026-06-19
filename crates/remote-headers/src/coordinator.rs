@@ -456,7 +456,7 @@ impl RemoteHeaderCoordinator {
     /// 3. Checks for timed-out remote shards and emits fallback requests
     pub fn on_block_committed(
         &mut self,
-        topology: &TopologySnapshot,
+        topology: &TopologySchedule,
         certified: &CertifiedBlock,
     ) -> Vec<Action> {
         let new_ts = certified.block().header().parent_qc().weighted_timestamp();
@@ -480,7 +480,7 @@ impl RemoteHeaderCoordinator {
         }
 
         // Seed expected headers for remote shards we haven't seen yet.
-        for shard in topology.shard_trie().leaves() {
+        for shard in topology.head().shard_trie().leaves() {
             if shard == self.local_shard {
                 continue;
             }
@@ -508,7 +508,7 @@ impl RemoteHeaderCoordinator {
                 continue;
             }
 
-            if topology.committee_for_shard(shard).is_empty() {
+            if !Self::shard_routable(topology, shard, now) {
                 continue;
             }
 
@@ -540,11 +540,11 @@ impl RemoteHeaderCoordinator {
     ///
     /// Called on sync-complete so the validator quickly discovers provision
     /// needs for blocks committed during the sync window.
-    pub fn flush_expected_headers(&mut self, topology: &TopologySnapshot) -> Vec<Action> {
+    pub fn flush_expected_headers(&mut self, topology: &TopologySchedule) -> Vec<Action> {
         let mut actions = vec![];
 
         for (&shard, expected) in &self.expected {
-            if topology.committee_for_shard(shard).is_empty() {
+            if !Self::shard_routable(topology, shard, self.local_committed_ts) {
                 continue;
             }
 
@@ -718,6 +718,19 @@ impl RemoteHeaderCoordinator {
             shard,
             height,
         }]
+    }
+
+    /// Whether `shard` resolves a non-empty committee for request routing at
+    /// `wt`, terminal-clamped. A live shard resolves its head committee; a
+    /// drained reshape shard past its final window — a split parent or a
+    /// merge child — resolves the committee that served it, so its terminal
+    /// crossing keeps syncing to the beacon fold until the schedule evicts
+    /// it. A fully-evicted shard resolves nothing and is skipped.
+    fn shard_routable(topology: &TopologySchedule, shard: ShardId, wt: WeightedTimestamp) -> bool {
+        matches!(
+            topology.lookup_for_shard(shard, wt).0,
+            ScheduleLookup::Committee(snapshot) if !snapshot.committee_for_shard(shard).is_empty()
+        )
     }
 }
 

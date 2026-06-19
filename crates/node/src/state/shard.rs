@@ -398,10 +398,12 @@ impl NodeStateMachine {
         ));
 
         // Remote header coordinator: update liveness and check for timeouts.
-        actions.extend(self.remote_headers_coordinator.on_block_committed(
-            self.beacon_coordinator.current_topology_snapshot(),
-            certified,
-        ));
+        // The schedule (not the head snapshot) so the probe can terminal-clamp
+        // a drained reshape shard to the committee still serving it.
+        actions.extend(
+            self.remote_headers_coordinator
+                .on_block_committed(self.beacon_coordinator.topology_schedule(), certified),
+        );
 
         // Provisions coordinator: prune + schedule fallback timeouts. Reads
         // provision hashes directly off the block — `Live` carries them

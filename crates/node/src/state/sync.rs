@@ -25,11 +25,13 @@ impl NodeStateMachine {
             // expected provisions + flush expected headers, all in one
             // pass.
             ProtocolEvent::BlockSyncComplete { .. } => {
-                let topo = self.beacon_coordinator.current_topology_snapshot();
                 let mut actions = self
                     .shard_coordinator
                     .on_block_sync_complete(self.beacon_coordinator.topology_schedule());
-                actions.extend(self.remote_headers_coordinator.flush_expected_headers(topo));
+                actions.extend(
+                    self.remote_headers_coordinator
+                        .flush_expected_headers(self.beacon_coordinator.topology_schedule()),
+                );
                 actions.extend(self.provisions_coordinator.flush_expected_provisions());
                 actions
             }
