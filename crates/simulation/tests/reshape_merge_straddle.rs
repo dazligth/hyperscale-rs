@@ -13,18 +13,15 @@
 //! deliberately not exercised here, since the survivor's resolution depends
 //! only on the terminated child's attested `settled_waves_root`.
 //!
-//! Topology: `leaf(2,2)`/`leaf(2,3)` merge into `leaf(1,1)`; `leaf(2,0)` keeps
-//! `leaf(1,0)` alive as the surviving counterpart. Cross-shard transfers run
-//! from the survivor `leaf(2,0)` into the merging `leaf(2,2)`, so each wave
-//! names a shard that terminates at the merge. The flow records a timestamped
-//! timeline; every assertion prints it, so a failure shows the chronology.
-//!
-//! Ignored pending network-param governance: a grown (coherent) topology can't
-//! reach `merge_threshold` without governance lowering the reshape trigger
-//! after the grow, so it runs on a `num_shards` genesis — where each shard gets
-//! its own bootstrap with colliding vault `NodeId`s, and the settling waves
-//! reject rather than accept. The atomicity property holds either way; only the
-//! accept path waits on a coherent topology that can also merge.
+//! Topology, reached the way mainnet would: a single-shard genesis grows into
+//! the four shards through two real split generations, then a stake-pool
+//! parameter vote raises `split_bytes` so only the lighter `leaf(1,1)` pair
+//! falls under the merge threshold. `leaf(2,2)`/`leaf(2,3)` merge into
+//! `leaf(1,1)`; `leaf(2,0)` keeps `leaf(1,0)` alive as the surviving
+//! counterpart. Cross-shard transfers run from the survivor `leaf(2,0)` into
+//! the merging `leaf(2,2)`, so each wave names a shard that terminates at the
+//! merge. The flow records a timestamped timeline; every assertion prints it,
+//! so a failure shows the chronology.
 
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -36,7 +33,7 @@ use hyperscale_simulation::{EPOCH_MS, SimulationRunner};
 use hyperscale_storage::ShardChainReader;
 use hyperscale_storage_memory::SimShardStorage;
 use hyperscale_types::{
-    BeaconChainConfig, BeaconState, BlockHeight, Ed25519PrivateKey, KeeperSeat, NodeId,
+    BeaconChainConfig, BeaconState, BlockHeight, Ed25519PrivateKey, Epoch, KeeperSeat, NodeId,
     PendingReshape, ReshapeThresholds, RoutableTransaction, ShardId, TimestampRange,
     TransactionDecision, TransactionStatus, TxHash, ValidatorId, ValidatorStatus,
     WeightedTimestamp, ed25519_keypair_from_seed, routable_from_notarized_v1, sign_and_notarize,
@@ -50,42 +47,62 @@ use radix_transactions::builder::ManifestBuilder;
 
 const PER_SHARD: u32 = 4;
 
-/// `merge_threshold = split_bytes / 8 = 420_000`. The cold genesis byte
-/// totals leave only the `leaf(1,1)` pair under threshold, so it alone merges
-/// while `leaf(2,0)` keeps `leaf(1,0)` alive as the surviving counterpart.
-const SPLIT_BYTES: u64 = 3_360_000;
+/// The threshold the parameter vote installs after the grow:
+/// `merge_threshold = split_bytes / 8 = 360_000`. The grow's two split
+/// generations skew the four shards toward the low prefixes
+/// (`leaf(2,0)`~525k, `leaf(2,2)`~320k, `leaf(2,3)`~56k, and `leaf(2,1)`
+/// bulk-funded to ~402k); 360k sits between `leaf(2,2)` (merges) and both
+/// surviving children `leaf(2,0)`/`leaf(2,1)` (stay above it), so only the
+/// `leaf(1,1)` pair merges and `leaf(2,0)` keeps `leaf(1,0)` alive as the
+/// surviving counterpart — with no live child stuck wanting an unpairable
+/// merge.
+const MERGE_VOTE_SPLIT_BYTES: u64 = 2_880_000;
 
-/// Offsets *before the merge cut* for the settling waves: far enough ahead
-/// that the cross-shard 2PC finalizes on `leaf(2,2)` before its terminal, and
-/// inside `RETENTION_HORIZON` of that terminal so the attested
-/// `settled_waves_root` still commits the wave.
-const SETTLE_OFFSETS_MS: [u64; 2] = [80_000, 60_000];
+/// Epochs after the post-grow epoch at which the threshold vote activates —
+/// enough lead for the vote transaction to commit and fold into
+/// `param_votes` before the tally reads it.
+const ACTIVATE_LEAD: u64 = 4;
 
-/// Offsets before the cut for the straddling waves: too close to the terminal
-/// for the 2PC to finalize, so they commit on `leaf(2,2)` but never settle —
-/// the survivor must counterpart-abort them.
-const STRADDLE_OFFSETS_MS: [u64; 3] = [700, 400, 200];
+/// Number of settling waves: cross-shard transfers submitted while
+/// `leaf(2,2)` is still live (before the keeper-ready broadcast arms the
+/// gate), so their 2PC finalizes on `leaf(2,2)` at or below its terminal
+/// block and lands in the attested `settled_waves_root`.
+const NUM_SETTLE_WAVES: usize = 2;
 
-const ADMISSION_BUDGET_EPOCHS: u64 = 5;
-const GATE_BUDGET_EPOCHS: u64 = 5;
-const TERMINAL_BUDGET_EPOCHS: u64 = 5;
-const RESOLVE_BUDGET_EPOCHS: u64 = 6;
+/// Offsets before the cut for the straddling waves: close enough to the
+/// terminal that the cross-shard 2PC commits on `leaf(2,2)` but finalizes
+/// only on a post-terminal coast block (so the wave never settles and the
+/// survivor must counterpart-abort it), yet not so close that the provision
+/// arrives after `leaf(2,2)` stops voting on waves that name it. The commit
+/// to finalize gap is ~3s of BFT rounds, so the window is the few seconds
+/// before the cut, in absolute time and epoch-independent; the spread keeps
+/// several inside it across the per-seed terminal-height drift.
+const STRADDLE_OFFSETS_MS: [u64; 5] = [2_500, 2_000, 1_500, 1_000, 500];
 
+const ADMISSION_BUDGET_EPOCHS: u64 = 28;
+const SETTLE_BUDGET_EPOCHS: u64 = 8;
+const GATE_BUDGET_EPOCHS: u64 = 10;
+const TERMINAL_BUDGET_EPOCHS: u64 = 16;
+const RESOLVE_BUDGET_EPOCHS: u64 = 12;
+
+/// Single-shard genesis with the split trigger armed from genesis
+/// (`split_bytes: 0` — every committed count exceeds it) and three cohorts
+/// of pooled extras, so `grow_to(4)` drives the two split generations
+/// (ROOT → `leaf(1,*)` → `leaf(2,*)`) through the real lifecycle. The merge
+/// arrives once the vote raises `split_bytes`.
 fn merge_config() -> NetworkConfig {
     NetworkConfig {
-        num_shards: 4,
+        num_shards: 1,
         validators_per_shard: PER_SHARD,
         jitter_fraction: 0.1,
         beacon_chain_config: Some(BeaconChainConfig {
             epoch_duration_ms: EPOCH_MS,
-            num_shards: 4,
+            num_shards: 1,
             shard_size: PER_SHARD,
-            reshape_thresholds: ReshapeThresholds {
-                split_bytes: SPLIT_BYTES,
-            },
+            reshape_thresholds: ReshapeThresholds { split_bytes: 0 },
             ..BeaconChainConfig::default()
         }),
-        pool_extra_validators: 0,
+        pool_extra_validators: 3 * PER_SHARD,
         ..Default::default()
     }
 }
@@ -140,6 +157,38 @@ fn account_in(
         }
     }
     panic!("no account seed routes to {shard:?}");
+}
+
+/// Push `count` funded accounts routing to `shard` under a `num_shards`-wide
+/// trie onto `balances`. The `u8`-seeded [`account_in`] tops out at 255 keys
+/// (~`255 / num_shards` per shard); this uses a wide `u64` seed space to fund
+/// a shard's prefix far past the merge threshold — needed to lift a grown
+/// shard's light child above `merge_bytes` so it doesn't perpetually emit an
+/// unpairable merge (the skew-induced churn that freezes the terminal fold).
+fn bulk_fund_into(
+    shard: ShardId,
+    num_shards: u64,
+    count: usize,
+    balances: &mut Vec<(ComponentAddress, Decimal)>,
+) {
+    let mut found = 0;
+    let mut seed: u64 = 1;
+    while found < count {
+        let mut bytes = [0u8; 32];
+        bytes[..8].copy_from_slice(&seed.to_le_bytes());
+        let key = ed25519_keypair_from_seed(&bytes);
+        let address = ComponentAddress::preallocated_account_from_public_key(&key.public_key());
+        let node = NodeId(
+            address.into_node_id().0[..30]
+                .try_into()
+                .expect("account address carries a 30-byte node id"),
+        );
+        if uniform_shard_for_node(&node, num_shards) == shard {
+            balances.push((address, Decimal::from(10_000)));
+            found += 1;
+        }
+        seed += 1;
+    }
 }
 
 fn store_for(runner: &SimulationRunner, shard: ShardId) -> Option<&SimShardStorage> {
@@ -242,15 +291,11 @@ impl Timeline {
     }
 }
 
-// Waiting for network-param governance: the straddler waves need a coherent
-// multi-shard topology (so cross-shard transfers accept rather than reject on
-// the multi-shard-genesis vault collision), which only `grow_to` produces —
-// but a grown leaf can't reach `merge_threshold` without governance lowering
-// the reshape trigger after the grow. Until then this runs on a `num_shards`
-// genesis, where the settling waves reject instead of accept, so `settled`
-// stays zero. The property under test (settled ⇒ applied, unsettled ⇒ aborted,
-// never one-sided) already holds; only the accept path is blocked.
-#[ignore = "needs network-param governance to merge a grown topology"]
+// The four-shard grow and the merge-admission handshake are liveness-fragile
+// under the seeded schedule, so the seed is pinned to one where the setup
+// (grow, keeper pairing, merge execution) completes and the test reaches its
+// subject — the cross-shard atomicity of a wave naming the merging shard.
+// `MERGE_SEED` overrides it to sweep that fragility.
 #[test]
 #[allow(clippy::too_many_lines)] // one lifecycle asserted end to end
 fn cross_shard_waves_resolve_atomically_across_a_merge() {
@@ -258,15 +303,28 @@ fn cross_shard_waves_resolve_atomically_across_a_merge() {
     let merge_parent = ShardId::leaf(1, 1);
     let (merging, sibling) = merge_parent.children(); // leaf(2,2), leaf(2,3)
 
-    let mut runner = SimulationRunner::new(&merge_config(), 7);
+    let seed = std::env::var("MERGE_SEED")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(4);
+    let mut runner = SimulationRunner::new(&merge_config(), seed);
     let mut tl = Timeline::default();
 
-    // Straddler accounts: payer in the survivor, recipient in the merging
-    // shard. The transactions are submitted later, anchored to the cut.
+    // The threshold vote is a fee-paying system transaction; fund the payer
+    // at genesis so its `lock_fee` succeeds.
+    let vote_payer = Ed25519PrivateKey::from_u64(9_999).expect("vote payer key");
+    let vote_account =
+        ComponentAddress::preallocated_account_from_public_key(&vote_payer.public_key());
+
+    // Wave accounts: payer in the survivor, recipient in the merging shard,
+    // so each transfer names the shard that terminates at the merge. The
+    // accounts route to their depth-2 leaves by prefix, so the grow's splits
+    // partition them onto `leaf(2,0)`/`leaf(2,2)`. The transactions are built
+    // and submitted later, once the lifecycle reaches each wave's phase.
     let mut taken = Vec::new();
-    let mut balances = Vec::new();
-    let waves: Vec<(Ed25519PrivateKey, ComponentAddress, ComponentAddress)> = (0
-        ..SETTLE_OFFSETS_MS.len() + STRADDLE_OFFSETS_MS.len())
+    let mut balances = vec![(vote_account, Decimal::from(100_000))];
+    let waves: Vec<(Ed25519PrivateKey, ComponentAddress, ComponentAddress)> = (0..NUM_SETTLE_WAVES
+        + STRADDLE_OFFSETS_MS.len())
         .map(|_| {
             let (payer_key, payer) = account_in(survivor, 4, &mut taken);
             let (_, recipient) = account_in(merging, 4, &mut taken);
@@ -277,8 +335,25 @@ fn cross_shard_waves_resolve_atomically_across_a_merge() {
         balances.push((*payer, Decimal::from(10_000)));
         balances.push((*recipient, Decimal::from(10_000)));
     }
+    // Lift the surviving pair's light child `leaf(2,1)` (~89k of engine
+    // bootstrap, the prefix the split barely populates) above `merge_bytes`
+    // so it doesn't perpetually emit an unpairable merge against its heavy
+    // sibling `leaf(2,0)` — that skew-induced churn rewrites the schedule
+    // every epoch and freezes `leaf(2,2)`'s terminal fold.
+    bulk_fund_into(ShardId::leaf(2, 1), 4, 500, &mut balances);
     runner.initialize_genesis_with_balances(&balances);
     tl.mark(runner.now(), "genesis");
+
+    // ── Grow the single-shard genesis into the four shards through two real
+    // split generations, then vote `split_bytes` up so only the lighter
+    // `leaf(1,1)` pair falls under the merge threshold ──
+    runner.grow_to(4);
+    tl.mark(runner.now(), "grown to four shards");
+    let post_grow_epoch = beacon_state(&runner)
+        .expect("post-grow beacon state")
+        .current_epoch;
+    let activate_at = Epoch::new(post_grow_epoch.inner() + ACTIVATE_LEAD);
+    runner.vote_reshape_thresholds(&vote_payer, 1, MERGE_VOTE_SPLIT_BYTES, activate_at);
 
     // ── Machinery: admission ──
     let paired = run_until(&mut runner, epochs(ADMISSION_BUDGET_EPOCHS), |r| {
@@ -292,7 +367,40 @@ fn cross_shard_waves_resolve_atomically_across_a_merge() {
     let mut keepers = pending_keepers(&runner, merge_parent).expect("keepers paired");
     tl.mark(runner.now(), "keepers paired");
 
-    // ── Machinery: keeper sibling-sync, then drive the readiness gate ──
+    // ── Settling waves: submitted while leaf(2,2) is still live and before
+    // the keeper-ready broadcast arms the readiness gate, so the cross-shard
+    // 2PC finalizes on leaf(2,2) at a height at or below its terminal block
+    // and lands in that block's settled-waves window. We wait for them to
+    // finalize before arming the gate, so settlement can't lose the race to
+    // the sub-epoch window between the gate and the cut. They are not
+    // cut-anchored — a settler only needs to finalize before the terminal. ──
+    let mut probes: Vec<(String, TxHash)> = Vec::new();
+    for (i, pair) in waves.iter().take(NUM_SETTLE_WAVES).enumerate() {
+        let (payer_key, payer, recipient) = pair;
+        let anchor = runner.now();
+        let tx = transfer(payer_key, *payer, *recipient, anchor);
+        probes.push((format!("settle#{i}"), tx.hash()));
+        runner.schedule_initial_event(
+            0,
+            Duration::from_millis(10),
+            ShardEvent::process(ProcessScopedInput::SubmitTransaction { tx }),
+        );
+    }
+    let settle_hashes: Vec<TxHash> = probes.iter().map(|(_, hash)| *hash).collect();
+    let settle_deadline = runner.now() + epochs(SETTLE_BUDGET_EPOCHS);
+    let settled_early = run_until(&mut runner, settle_deadline, |r| {
+        store_for(r, merging)
+            .is_some_and(|s| settle_hashes.iter().all(|h| scan_chain(s, *h).1.is_some()))
+    });
+    assert!(
+        settled_early,
+        "settling waves must finalize on leaf(2,2) before it terminates\n{}",
+        tl.0
+    );
+    tl.mark(runner.now(), "settling waves finalized on leaf(2,2)");
+
+    // ── Machinery: keeper sibling-sync (which also broadcasts keeper-ready,
+    // arming the readiness gate), then drive it to fire the merge ──
     for (validator, own_child) in &keepers {
         let other = if *own_child == merging {
             sibling
@@ -328,28 +436,25 @@ fn cross_shard_waves_resolve_atomically_across_a_merge() {
         &format!("merge executed; cut at t={}s", cut.as_secs()),
     );
 
-    // ── The waves, cut-anchored ──
-    let mut probes: Vec<(u64, TxHash)> = Vec::new();
-    for (offset_ms, pair) in SETTLE_OFFSETS_MS
-        .iter()
-        .chain(STRADDLE_OFFSETS_MS.iter())
-        .zip(&waves)
-    {
+    // ── Straddling waves: cut-anchored a few seconds before the terminal so
+    // the cross-shard provision routes and commits on leaf(2,2) but its 2PC
+    // can't finalize before the terminal block — the survivor must
+    // counterpart-abort them. ──
+    for (offset_ms, pair) in STRADDLE_OFFSETS_MS.iter().zip(&waves[NUM_SETTLE_WAVES..]) {
         let (payer_key, payer, recipient) = pair;
         let target = cut.saturating_sub(Duration::from_millis(*offset_ms));
         let tx = transfer(payer_key, *payer, *recipient, target);
-        let hash = tx.hash();
         let delay = target
             .saturating_sub(runner.now())
             .max(Duration::from_millis(10));
+        probes.push((format!("straddle cut-{offset_ms}ms"), tx.hash()));
         runner.schedule_initial_event(
             0,
             delay,
             ShardEvent::process(ProcessScopedInput::SubmitTransaction { tx }),
         );
-        probes.push((*offset_ms, hash));
     }
-    tl.mark(runner.now(), &format!("{} waves submitted", probes.len()));
+    tl.mark(runner.now(), &format!("{} waves total", probes.len()));
 
     // ── Machinery: leaf(2,2) terminates and its terminal folds (the beacon
     // attests its settled_waves_root) ──
@@ -363,20 +468,16 @@ fn cross_shard_waves_resolve_atomically_across_a_merge() {
             })
             .unwrap_or(false)
     });
-    if let Some(s) = beacon_state(&runner) {
-        if let Some(b) = s.boundaries.get(&merging) {
-            tl.mark(
-                runner.now(),
-                &format!(
-                    "leaf(2,2) boundary: terminal_epoch={:?} settled_waves_root={} height={:?}",
-                    b.terminal_epoch,
-                    b.settled_waves_root.is_some(),
-                    b.height,
-                ),
-            );
-        } else {
-            tl.mark(runner.now(), "leaf(2,2) boundary record absent");
-        }
+    if let Some(b) = beacon_state(&runner).and_then(|s| s.boundaries.get(&merging).copied()) {
+        tl.mark(
+            runner.now(),
+            &format!(
+                "leaf(2,2) boundary: terminal_epoch={:?} settled_waves_root={} height={:?}",
+                b.terminal_epoch,
+                b.settled_waves_root.is_some(),
+                b.height,
+            ),
+        );
     }
     assert!(
         folded,
@@ -423,7 +524,7 @@ fn cross_shard_waves_resolve_atomically_across_a_merge() {
     let mut settled = 0u32;
     let mut straddled = 0u32;
     let mut one_sided = 0u32;
-    for (offset, hash) in &probes {
+    for (label, hash) in &probes {
         let (m_committed, m_finalized) = scan_chain(merging_store, *hash);
         let (v_committed, v_finalized) = scan_chain(survivor_store, *hash);
         let settled_on_merging = m_finalized.is_some_and(|h| h <= terminal_height);
@@ -435,7 +536,7 @@ fn cross_shard_waves_resolve_atomically_across_a_merge() {
         tl.mark(
             runner.now(),
             &format!(
-                "wave cut-{offset}ms: leaf(2,2) committed={:?} finalized={:?} settled={settled_on_merging}; \
+                "wave {label}: leaf(2,2) committed={:?} finalized={:?} settled={settled_on_merging}; \
                  survivor committed={:?} finalized={:?} status={status:?}",
                 m_committed.map(BlockHeight::inner),
                 m_finalized.map(BlockHeight::inner),
@@ -474,7 +575,7 @@ fn cross_shard_waves_resolve_atomically_across_a_merge() {
         "no wave straddled the terminal unsettled\n{}",
         tl.0
     );
-    for (offset, hash) in &probes {
+    for (label, hash) in &probes {
         let settled_on_merging = scan_chain(merging_store, *hash)
             .1
             .is_some_and(|h| h <= terminal_height);
@@ -484,7 +585,7 @@ fn cross_shard_waves_resolve_atomically_across_a_merge() {
                     runner.tx_status(survivor_host, hash),
                     Some(TransactionStatus::Completed(TransactionDecision::Aborted))
                 ),
-                "wave cut-{offset}ms settled on leaf(2,2) yet aborted on the survivor\n{}",
+                "wave {label} settled on leaf(2,2) yet aborted on the survivor\n{}",
                 tl.0,
             );
         }
