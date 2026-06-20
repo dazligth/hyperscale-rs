@@ -21,8 +21,8 @@ use hyperscale_mempool::MempoolConfig;
 use hyperscale_network_memory::NodeIndex;
 use hyperscale_node::bootstrap::{BootstrapRequest, ShardBootstrap};
 use hyperscale_node::{
-    NodeStateMachine, SeatVnodeGroup, VnodeInit, seat_vnode_group, serve_state_range_request,
-    serve_witness_history_request,
+    NodeStateMachine, SeatFollower, SeatVnodeGroup, VnodeInit, seat_follower, seat_vnode_group,
+    serve_state_range_request, serve_witness_history_request,
 };
 use hyperscale_provisions::ProvisionConfig;
 use hyperscale_shard::ShardConsensusConfig;
@@ -105,6 +105,10 @@ impl SimulationRunner {
             storage,
             self.event_txs[node as usize].clone(),
         );
+        // Parity with the production supervisor's `unfollow_in_pool`: the
+        // seated validator now drives its beacon from this shard, so retire
+        // its pool follower if it had one (it drained here earlier).
+        self.hosts[node as usize].drop_pooled_vnode(validator);
         kind
     }
 
@@ -132,16 +136,42 @@ impl SimulationRunner {
         let shard_loop = self.hosts[node as usize]
             .remove_shard(shard)
             .expect("leave of an unhosted shard");
+        let departed: Vec<ValidatorId> = shard_loop.vnodes.iter().map(|v| v.validator_id).collect();
         // The loop is detached and never steps again — release its
         // vnodes' beacon-signing seats so each validator's surviving
         // vnode can claim signing at the funnel's epoch fence,
         // mirroring the production supervisor's teardown.
-        for vnode in &shard_loop.vnodes {
+        for &validator in &departed {
             self.hosts[node as usize]
                 .process()
-                .release_beacon_signer(vnode.validator_id, shard);
+                .release_beacon_signer(validator, shard);
         }
-        (*shard_loop.io.storage).clone()
+        let storage = (*shard_loop.io.storage).clone();
+
+        // Parity with the production supervisor's `on_torn_down`: a validator
+        // that drains off its last shard keeps following the beacon in the
+        // pool (its storage stays warm and it raises its own re-seat trigger)
+        // rather than going dark. One still on another shard keeps that
+        // coordinator and needs no follower.
+        let now = LocalTimestamp::from_millis(u64::try_from(self.now.as_millis()).unwrap_or(0));
+        for validator in departed {
+            if self.hosts[node as usize].hosts_validator(validator) {
+                continue;
+            }
+            let signing_key = Arc::clone(
+                &self.signing_keys[usize::try_from(validator.inner()).expect("id fits usize")],
+            );
+            let init = seat_follower(SeatFollower {
+                beacon_storage: self.hosts[node as usize].beacon_storage().as_ref(),
+                beacon_network: self.beacon_network.clone(),
+                beacon_config_hash: self.beacon_config_hash,
+                now,
+                validator,
+                signing_key,
+            });
+            self.hosts[node as usize].add_pooled_vnode(init);
+        }
+        storage
     }
 
     /// Drive the [`ShardBootstrap`] sequencer to completion against the

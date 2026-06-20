@@ -352,6 +352,28 @@ where
         }
     }
 
+    /// Add a shard-less beacon follower to the host's pool, creating the
+    /// pool if the host had none. Used when a validator drains off its last
+    /// shard and keeps following the beacon (see
+    /// [`seat_follower`](crate::seat_follower)).
+    pub fn add_pooled_vnode(&mut self, init: VnodeInit) {
+        let vnode = init.into_vnode();
+        match &mut self.pool {
+            Some(pool) => pool.vnodes.push(vnode),
+            None => self.pool = Some(PoolLoop::new(Arc::clone(&self.process), vec![vnode])),
+        }
+    }
+
+    /// Whether this host runs a vnode for `validator` on any hosted shard.
+    /// Drives the drain-to-pool decision: a departing validator still on
+    /// another shard keeps that shard's coordinator and needs no follower.
+    #[must_use]
+    pub fn hosts_validator(&self, validator: ValidatorId) -> bool {
+        self.shards
+            .values()
+            .any(|sl| sl.vnodes.iter().any(|v| v.validator_id == validator))
+    }
+
     /// Access the state machine of the vnode at index `vnode_idx` within
     /// `shard`'s group.
     ///

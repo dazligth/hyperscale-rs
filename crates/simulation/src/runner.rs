@@ -581,6 +581,25 @@ impl SimulationRunner {
         self.hosts.get(node as usize).map(NodeHost::beacon_storage)
     }
 
+    /// Number of shard-less beacon-following vnodes in `node`'s pool.
+    #[must_use]
+    pub fn pooled_len(&self, node: NodeIndex) -> usize {
+        self.hosts
+            .get(node as usize)
+            .map_or(0, NodeHost::pooled_len)
+    }
+
+    /// The shards `node` currently hosts. A grown host retains its
+    /// terminated parent alongside its active child, so this can hold more
+    /// than the live leaf.
+    #[must_use]
+    pub fn hosted_shards_of(&self, node: NodeIndex) -> Vec<ShardId> {
+        self.hosts
+            .get(node as usize)
+            .map(|h| h.hosted_shards().collect())
+            .unwrap_or_default()
+    }
+
     /// Get the last emitted transaction status for a node.
     #[must_use]
     pub fn tx_status(&self, node: NodeIndex, tx_hash: &TxHash) -> Option<TransactionStatus> {
