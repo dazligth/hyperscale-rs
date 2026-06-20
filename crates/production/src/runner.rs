@@ -559,6 +559,11 @@ impl ProductionRunnerBuilder {
             .iter()
             .map(|(s, tx)| (*s, tx.clone()))
             .collect();
+        // Beacon channel for a host's shard-less follower pool. The runner
+        // builds only seated vnodes, so this host constructs no pool and
+        // registers no beacon follower; the channel stays idle and its
+        // receiver drops at the end of construction.
+        let (beacon_event_tx, _beacon_event_rx) = unbounded::<HostEvent>();
         let host = NodeHost::new(
             vnode_inits,
             shared_storages,
@@ -568,6 +573,7 @@ impl ProductionRunnerBuilder {
             libp2p_network,
             (*dispatch).clone(),
             shard_event_senders,
+            beacon_event_tx,
             topology.clone(),
             NodeConfig::default(),
             tx_validator,

@@ -190,6 +190,15 @@ impl Network for SimNetworkAdapter {
         self.registry.register_gossip(handler);
     }
 
+    fn register_host_gossip_handler<M: GossipMessage + 'static>(
+        &self,
+        handler: impl Fn(M) + Send + Sync + 'static,
+    ) {
+        // `flush_gossip` invokes this for Global, source-`None` deliveries
+        // so a shard-less host folds committed beacon blocks.
+        self.registry.register_host_gossip_handler(handler);
+    }
+
     fn notify<M: NetworkMessage + 'static>(&self, recipients: &[ValidatorId], message: &M) {
         // Note: compression happens here at send-time, then accept_notifications()
         // decompresses before queueing for delivery. In production (Libp2pNetwork),

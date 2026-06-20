@@ -415,6 +415,7 @@ impl SimulationRunner {
                 ),
                 SyncDispatch,
                 shard_event_senders,
+                event_tx.clone(),
                 topology_arc_for_host,
                 NodeConfig::default(),
                 tx_validator,

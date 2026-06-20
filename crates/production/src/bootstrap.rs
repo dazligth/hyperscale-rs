@@ -725,6 +725,12 @@ mod tests {
         ) {
             unimplemented!("bootstrap registers no handlers")
         }
+        fn register_host_gossip_handler<M: GossipMessage + 'static>(
+            &self,
+            _handler: impl Fn(M) + Send + Sync + 'static,
+        ) {
+            unimplemented!("bootstrap registers no handlers")
+        }
         fn register_request_handler<R: Request + Send + 'static>(
             &self,
             _shard: ShardId,

@@ -118,6 +118,14 @@ where
     /// runtime is observed immediately.
     pub(crate) shard_event_senders: SharedShardSenders,
 
+    /// Per-host channel back to the runner for beacon events routed to the
+    /// shard-less follower pool. In the sim this is the host's single event
+    /// channel (shared with the per-shard senders); the beacon-block gossip
+    /// follower pushes [`HostEvent::Beacon`] here for the pool to fold.
+    /// Carries no traffic on a host with no follower pool (none is
+    /// registered).
+    pub(crate) beacon_event_sender: Sender<HostEvent>,
+
     /// Lock-free topology snapshot shared with network handler closures
     /// and delegated dispatch jobs. The pinned thread is the sole writer
     /// (via `Action::TopologyChanged`); all other readers `.load()` for
@@ -188,6 +196,7 @@ where
         network: Arc<N>,
         dispatch: D,
         shard_event_senders: BTreeMap<ShardId, Sender<HostEvent>>,
+        beacon_event_sender: Sender<HostEvent>,
         topology_snapshot: SharedTopologySnapshot,
         dispatch_handles: Arc<DispatchHandles<S, N>>,
         tx_validator: Arc<TransactionValidation>,
@@ -197,6 +206,7 @@ where
             network,
             dispatch,
             shard_event_senders: Arc::new(ArcSwap::from_pointee(shard_event_senders)),
+            beacon_event_sender,
             topology_snapshot,
             dispatch_handles,
             tx_validator,

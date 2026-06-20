@@ -103,6 +103,10 @@ where
     /// of hosted shards is derived from `vnodes` (each vnode's
     /// `local_shard()`); `storages` must cover all of them.
     ///
+    /// `beacon_event_sender` is the channel a shard-less host's beacon
+    /// follower routes committed-block gossip to; it carries no traffic on
+    /// a host that runs no follower pool.
+    ///
     /// # Panics
     ///
     /// Panics if `vnodes` is empty, or if any hosted shard lacks a
@@ -124,6 +128,7 @@ where
         network: N,
         dispatch: D,
         shard_event_senders: BTreeMap<ShardId, Sender<HostEvent>>,
+        beacon_event_sender: Sender<HostEvent>,
         topology_snapshot: SharedTopologySnapshot,
         config: NodeConfig,
         tx_validator: Arc<TransactionValidation>,
@@ -189,6 +194,7 @@ where
             network,
             dispatch,
             shard_event_senders,
+            beacon_event_sender,
             topology_snapshot,
             dispatch_handles,
             tx_validator,

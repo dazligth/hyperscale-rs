@@ -12,7 +12,6 @@ use arc_swap::ArcSwap;
 use crossbeam::channel::unbounded;
 use hyperscale_beacon::coordinator::BeaconCoordinator;
 use hyperscale_beacon::genesis::build_genesis_beacon_state;
-use hyperscale_core::ProtocolEvent;
 use hyperscale_dispatch_sync::SyncDispatch;
 use hyperscale_engine::{RadixExecutor, TransactionValidation};
 use hyperscale_execution::{ExecCertStore, FinalizedWaveStore};
@@ -27,6 +26,7 @@ use hyperscale_storage::{BeaconStorage, RecoveredState};
 use hyperscale_storage_memory::{SimBeaconStorage, SimShardStorage};
 use hyperscale_test_helpers::TestCommittee;
 use hyperscale_types::network::gossip::TransactionGossip;
+use hyperscale_types::network::gossip::beacon::BeaconBlockGossip;
 use hyperscale_types::network::request::GetBlockRequest;
 use hyperscale_types::test_utils::test_transaction;
 use hyperscale_types::{
@@ -196,6 +196,7 @@ fn add_and_remove_shard_at_runtime() {
         network,
         SyncDispatch,
         std::iter::once((SHARD_A, event_tx.clone())).collect(),
+        event_tx.clone(),
         Arc::new(ArcSwap::from(Arc::clone(&fix.topology))),
         NodeConfig::default(),
         Arc::new(TransactionValidation::new(NetworkDefinition::simulator())),
@@ -277,18 +278,19 @@ fn add_and_remove_shard_at_runtime() {
 }
 
 /// A host built with only shard-less vnodes hosts no shards but drives a
-/// beacon-follower pool: the vnode lands in the pool, and routing a beacon
-/// event to it folds without panic. A block at/behind the tip is ignored, so
-/// no seat trigger surfaces.
+/// beacon-follower pool. A `BeaconBlockGossip` delivered through the network
+/// registry — Global scope, no source shard, no hosted shards — reaches the
+/// pool's beacon channel via the additive global follower (the per-shard fan
+/// is empty), and the host folds it. The genesis block is at the tip, so the
+/// fold raises no seat trigger.
 #[test]
-fn pooled_vnode_builds_into_the_pool_and_follows_the_beacon() {
+fn pooled_vnode_follows_the_beacon_via_the_network_path() {
     let fix = fixture();
     let registry = Arc::new(HandlerRegistry::new(BTreeSet::new()));
     let network = SimNetworkAdapter::new(Arc::clone(&registry));
-    let (event_tx, _event_rx) = unbounded::<HostEvent>();
+    let (event_tx, event_rx) = unbounded::<HostEvent>();
     let beacon_storage: Arc<dyn BeaconStorage> = Arc::new(SimBeaconStorage::new());
     beacon_storage.commit_beacon_block(&fix.genesis_block, &Arc::new(fix.genesis_state.clone()));
-    drop(event_tx);
 
     let mut host = NodeHost::new(
         vec![fix.pooled_vnode_init(0)],
@@ -299,6 +301,7 @@ fn pooled_vnode_builds_into_the_pool_and_follows_the_beacon() {
         network,
         SyncDispatch,
         BTreeMap::new(),
+        event_tx,
         Arc::new(ArcSwap::from(Arc::clone(&fix.topology))),
         NodeConfig::default(),
         Arc::new(TransactionValidation::new(NetworkDefinition::simulator())),
@@ -312,13 +315,23 @@ fn pooled_vnode_builds_into_the_pool_and_follows_the_beacon() {
     );
     assert_eq!(host.pooled_len(), 1, "the follower built into the pool");
 
-    // Route a beacon event to the pool. The genesis block is at the tip, so the
-    // coordinator ignores it — the assertion is that it routes and folds
-    // without panic and raises no seat trigger.
+    // Deliver a beacon block through the registry's Global-scope dispatch
+    // (`shard == None`). With no hosted shards the per-shard fan is empty;
+    // the global follower routes the block to the pool's beacon channel.
+    let gossip = BeaconBlockGossip::new(Arc::new(Verifiable::from((*fix.genesis_block).clone())));
+    let _ = registry.local_dispatch_gossip(&gossip, None);
+    let event = event_rx
+        .try_recv()
+        .expect("the global follower routes the beacon block to the pool channel");
+    assert!(
+        matches!(event, HostEvent::Beacon(_)),
+        "the follower delivers a beacon-scoped envelope"
+    );
+
+    // The host folds it. The genesis block is at the tip, so the coordinator
+    // ignores it and raises no seat trigger.
     host.set_time(LocalTimestamp::from_millis(1_000));
-    let out = host.step(HostEvent::beacon(ProtocolEvent::BeaconBlockReceived {
-        block: Arc::new(Verifiable::from((*fix.genesis_block).clone())),
-    }));
+    let out = host.step(event);
     assert!(
         out.reconfigurations.is_empty(),
         "re-delivering the tip raises no participation change"
@@ -343,7 +356,8 @@ fn remove_unknown_shard_is_none() {
         RadixExecutor::new(NetworkDefinition::simulator()),
         network,
         SyncDispatch,
-        std::iter::once((SHARD_A, event_tx)).collect(),
+        std::iter::once((SHARD_A, event_tx.clone())).collect(),
+        event_tx,
         Arc::new(ArcSwap::from(Arc::clone(&fix.topology))),
         NodeConfig::default(),
         Arc::new(TransactionValidation::new(NetworkDefinition::simulator())),

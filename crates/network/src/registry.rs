@@ -34,6 +34,14 @@ use crate::traits::{GossipHandler, GossipVerdict, NotificationHandler, RequestHa
 /// verdict.
 pub type RawGossipHandler = dyn Fn(Vec<u8>, Option<ShardId>) -> GossipVerdict + Send + Sync;
 
+/// Type-erased host-level gossip handler: receives decompressed SBOR bytes.
+///
+/// Invoked once per host for a [`TopicScope::Global`],
+/// [`source_shard`](GossipMessage::source_shard) `None` gossip message to
+/// deliver it to a shard-less host. Fire and forget — the per-hosted-shard
+/// Global fan owns the forward verdict.
+pub type RawHostGossipHandler = dyn Fn(Vec<u8>) + Send + Sync;
+
 /// Type-erased notification handler: receives decompressed SBOR bytes, no return value.
 pub type RawNotificationHandler = dyn Fn(Vec<u8>) + Send + Sync;
 
@@ -65,6 +73,15 @@ pub trait LocalGossipDispatcher: Send + Sync {
     /// clones internally. `shard` is the broadcast target shard for
     /// shard-scoped messages and `None` for global-scoped messages.
     fn dispatch(&self, msg: &dyn Any, shard: Option<ShardId>) -> GossipVerdict;
+}
+
+/// Counterpart to [`LocalGossipDispatcher`] for the host-level path
+/// (see [`HandlerRegistry::register_host_gossip_handler`]). No verdict: the
+/// per-hosted-shard Global fan owns it.
+pub trait LocalHostGossipDispatcher: Send + Sync {
+    /// Dispatch `msg` (downcast from `&dyn Any` to the registered `M`) to
+    /// the host-level handler.
+    fn dispatch(&self, msg: &dyn Any);
 }
 
 /// Counterpart to [`LocalGossipDispatcher`] for fire-and-forget notifications.
@@ -176,6 +193,24 @@ where
     }
 }
 
+struct TypedHostGossipDispatcher<M, F> {
+    handler: Arc<F>,
+    _phantom: PhantomData<fn() -> M>,
+}
+
+impl<M, F> LocalHostGossipDispatcher for TypedHostGossipDispatcher<M, F>
+where
+    M: GossipMessage + 'static,
+    F: Fn(M) + Send + Sync + 'static,
+{
+    fn dispatch(&self, msg: &dyn Any) {
+        let typed = msg
+            .downcast_ref::<M>()
+            .expect("local host-gossip dispatch type mismatch");
+        (self.handler)(typed.clone());
+    }
+}
+
 struct TypedNotificationDispatcher<M, H> {
     handler: Arc<H>,
     _phantom: PhantomData<fn() -> M>,
@@ -243,6 +278,11 @@ pub struct HandlerRegistry {
     gossip: ArcSwap<HashMap<&'static str, Arc<RawGossipHandler>>>,
     request: ArcSwap<HashMap<(&'static str, ShardId), Arc<RawRequestHandler>>>,
     notification: ArcSwap<HashMap<&'static str, Arc<RawNotificationHandler>>>,
+    /// Per-host gossip handlers keyed by message type id (wire path). A
+    /// shard-less host registers a beacon-block handler so the committed-
+    /// block broadcast reaches it even with no hosted shards; dispatch is
+    /// additive — the per-hosted-shard Global fan is untouched.
+    host_gossip: ArcSwap<HashMap<&'static str, Arc<RawHostGossipHandler>>>,
     /// Typed gossip dispatchers keyed by message `TypeId` for
     /// zero-encode local delivery to colocated subscribers.
     local_gossip: ArcSwap<HashMap<TypeId, Arc<dyn LocalGossipDispatcher>>>,
@@ -253,6 +293,9 @@ pub struct HandlerRegistry {
     /// the target shard — bypasses libp2p and preserves `Arc`-shared
     /// payloads on the response.
     local_request: ArcSwap<HashMap<(TypeId, ShardId), Arc<dyn LocalRequestDispatcher>>>,
+    /// Typed host-level gossip dispatchers keyed by message `TypeId` for
+    /// zero-encode local delivery (counterpart to [`Self::host_gossip`]).
+    local_host_gossip: ArcSwap<HashMap<TypeId, Arc<dyn LocalHostGossipDispatcher>>>,
 }
 
 impl HandlerRegistry {
@@ -264,9 +307,11 @@ impl HandlerRegistry {
             gossip: ArcSwap::from_pointee(HashMap::new()),
             request: ArcSwap::from_pointee(HashMap::new()),
             notification: ArcSwap::from_pointee(HashMap::new()),
+            host_gossip: ArcSwap::from_pointee(HashMap::new()),
             local_gossip: ArcSwap::from_pointee(HashMap::new()),
             local_notification: ArcSwap::from_pointee(HashMap::new()),
             local_request: ArcSwap::from_pointee(HashMap::new()),
+            local_host_gossip: ArcSwap::from_pointee(HashMap::new()),
         }
     }
 
@@ -370,6 +415,54 @@ impl HandlerRegistry {
 
         let typed: Arc<dyn LocalGossipDispatcher> = dispatcher;
         arcswap_insert(&self.local_gossip, TypeId::of::<M>(), typed);
+    }
+
+    /// Register a handler invoked once per host for a [`TopicScope::Global`],
+    /// [`source_shard`](GossipMessage::source_shard) `None` gossip message
+    /// of type `M`, independent of the hosted-shard set.
+    ///
+    /// A shard-less host (the beacon-follower pool) registers this so a
+    /// committed beacon block reaches it even though it hosts no shards and
+    /// the per-hosted-shard Global fan from
+    /// [`TypedGossipDispatcher::target_shards`] is empty. Additive: the
+    /// per-shard fan is unchanged, and only the source-`None` Global path
+    /// gains a delivery.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a handler is already registered for this message type. All
+    /// registrations happen once at init; a duplicate is a programmer error.
+    pub fn register_host_gossip_handler<M>(&self, handler: impl Fn(M) + Send + Sync + 'static)
+    where
+        M: GossipMessage + 'static,
+    {
+        let handler = Arc::new(handler);
+
+        let bytes_handler = Arc::clone(&handler);
+        let raw: Arc<RawHostGossipHandler> =
+            Arc::new(move |payload: Vec<u8>| match basic_decode::<M>(&payload) {
+                Ok(msg) => bytes_handler(msg),
+                Err(e) => {
+                    tracing::warn!(
+                        message_type = M::message_type_id(),
+                        error = ?e,
+                        "Failed to SBOR-decode host-level gossip — dropping"
+                    );
+                }
+            });
+        let prior = arcswap_insert(&self.host_gossip, M::message_type_id(), raw);
+        assert!(
+            prior.is_none(),
+            "duplicate host gossip handler registration for {}",
+            M::message_type_id(),
+        );
+
+        let typed: Arc<dyn LocalHostGossipDispatcher> =
+            Arc::new(TypedHostGossipDispatcher::<M, _> {
+                handler,
+                _phantom: PhantomData,
+            });
+        arcswap_insert(&self.local_host_gossip, TypeId::of::<M>(), typed);
     }
 
     /// Register a typed request handler for a message type on `shard`.
@@ -521,6 +614,15 @@ impl HandlerRegistry {
         self.gossip.load().get(message_type_id).cloned()
     }
 
+    /// Look up the host-level gossip handler for a message type (wire path).
+    /// A backend's inbound delivery for a [`TopicScope::Global`],
+    /// source-`None` message invokes this in addition to the per-shard fan
+    /// so a shard-less host folds the message.
+    #[must_use]
+    pub fn get_host_gossip(&self, message_type_id: &str) -> Option<Arc<RawHostGossipHandler>> {
+        self.host_gossip.load().get(message_type_id).cloned()
+    }
+
     /// Look up the request handler for `(type_id, shard)`.
     #[must_use]
     pub fn get_request(
@@ -549,10 +651,20 @@ impl HandlerRegistry {
     where
         M: NetworkMessage + 'static,
     {
-        self.local_gossip
+        let verdict = self
+            .local_gossip
             .load()
             .get(&TypeId::of::<M>())
-            .map(|d| d.dispatch(msg as &dyn Any, shard))
+            .map(|d| d.dispatch(msg as &dyn Any, shard));
+        // A Global-scoped, source-`None` publish (carried with `shard ==
+        // None`) also reaches any registered host-level handler, so a
+        // shard-less host folds it even though the per-shard fan is empty.
+        if shard.is_none()
+            && let Some(host_handler) = self.local_host_gossip.load().get(&TypeId::of::<M>())
+        {
+            host_handler.dispatch(msg as &dyn Any);
+        }
+        verdict
     }
 
     /// Dispatch a typed notification message into its in-process handler,
@@ -882,5 +994,69 @@ mod tests {
             "local dispatch must preserve the verified marker across the boundary"
         );
         assert_eq!(*received, 42, "inner value must round-trip");
+    }
+
+    /// A registered host-level gossip handler receives a Global, source-`None`
+    /// message even on a host with no hosted shards — on both the wire path
+    /// (`get_host_gossip`) and the local-dispatch path — while a
+    /// shard-scoped publish never reaches it.
+    #[test]
+    fn host_gossip_receives_source_none_global_gossip() {
+        use hyperscale_types::NetworkMessage;
+        use sbor::{Decode, Encode, basic_encode};
+
+        #[derive(Debug, Clone, Encode, Decode)]
+        struct GlobalMsg(u32);
+        impl NetworkMessage for GlobalMsg {
+            fn message_type_id() -> &'static str {
+                "test.host_gossip"
+            }
+        }
+        impl GossipMessage for GlobalMsg {
+            const SCOPE: TopicScope = TopicScope::Global;
+        }
+
+        // No hosted shards: the per-shard Global fan is empty.
+        let registry = HandlerRegistry::new(BTreeSet::new());
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_clone = Arc::clone(&hits);
+        registry.register_host_gossip_handler(move |_msg: GlobalMsg| {
+            hits_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+        // Wire path.
+        let host_handler = registry.get_host_gossip("test.host_gossip").unwrap();
+        host_handler(basic_encode(&GlobalMsg(1)).unwrap());
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+        // Local-dispatch path (global publish carries `shard == None`).
+        let _ = registry.local_dispatch_gossip(&GlobalMsg(2), None);
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+
+        // A shard-scoped publish does not reach the host-level handler.
+        let _ = registry.local_dispatch_gossip(&GlobalMsg(3), Some(ShardId::leaf(1, 0)));
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate host gossip handler registration")]
+    fn host_gossip_double_registration_panics() {
+        use hyperscale_types::NetworkMessage;
+        use sbor::{Decode, Encode};
+
+        #[derive(Debug, Clone, Encode, Decode)]
+        struct GlobalMsg(u32);
+        impl NetworkMessage for GlobalMsg {
+            fn message_type_id() -> &'static str {
+                "test.host_gossip_dup"
+            }
+        }
+        impl GossipMessage for GlobalMsg {
+            const SCOPE: TopicScope = TopicScope::Global;
+        }
+
+        let registry = HandlerRegistry::default();
+        registry.register_host_gossip_handler(|_: GlobalMsg| {});
+        registry.register_host_gossip_handler(|_: GlobalMsg| {});
     }
 }

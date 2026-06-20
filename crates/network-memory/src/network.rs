@@ -1354,20 +1354,44 @@ impl SimulatedNetwork {
     /// number of messages delivered.
     pub fn flush_gossip(&mut self, now: Duration) -> usize {
         flush_heap(&mut self.pending_gossip, now, |scheduled| {
-            if let Some(handler) = self
-                .registries
-                .get(scheduled.target_node as usize)
-                .and_then(|r| r.get_gossip(scheduled.message_type))
-            {
-                let _ = handler(scheduled.payload, scheduled.shard);
-                true
-            } else {
+            let Some(registry) = self.registries.get(scheduled.target_node as usize) else {
                 debug!(
                     target_node = scheduled.target_node,
                     message_type = scheduled.message_type,
-                    "No gossip handler for message type on target node, dropping"
+                    "No registry for target node, dropping gossip"
                 );
-                false
+                return false;
+            };
+            let gossip = registry.get_gossip(scheduled.message_type);
+            // A Global broadcast (no topic shard) also reaches a shard-less
+            // host's beacon follower pool; shard-scoped deliveries never do.
+            let host_handler = if scheduled.shard.is_none() {
+                registry.get_host_gossip(scheduled.message_type)
+            } else {
+                None
+            };
+            match (gossip, host_handler) {
+                (Some(gossip), Some(host_handler)) => {
+                    let _ = gossip(scheduled.payload.clone(), scheduled.shard);
+                    host_handler(scheduled.payload);
+                    true
+                }
+                (Some(gossip), None) => {
+                    let _ = gossip(scheduled.payload, scheduled.shard);
+                    true
+                }
+                (None, Some(host_handler)) => {
+                    host_handler(scheduled.payload);
+                    true
+                }
+                (None, None) => {
+                    debug!(
+                        target_node = scheduled.target_node,
+                        message_type = scheduled.message_type,
+                        "No gossip handler for message type on target node, dropping"
+                    );
+                    false
+                }
             }
         })
     }

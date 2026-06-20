@@ -28,7 +28,7 @@ use hyperscale_types::network::response::GetProvisionResponse;
 use hyperscale_types::{ExecutionCertificate, ShardId, Verifiable, ready_signal_message};
 use tracing::warn;
 
-use crate::event::ShardScopedInput;
+use crate::event::{HostEvent, ShardScopedInput};
 use crate::host::NodeHost;
 use crate::process_io::ProcessIo;
 use crate::shard_io::ShardIo;
@@ -168,6 +168,28 @@ where
                     GossipVerdict::Accept
                 },
             );
+
+        // ── beacon.block → pool follower (additive, shard-less hosts) ──
+        //
+        // The per-hosted-shard Global fan above never reaches a host with
+        // no hosted shards. When this host runs a follower pool, register
+        // an additive host-level handler that routes the committed block to
+        // the pool's beacon channel. Shard hosts run no pool and register
+        // nothing here, so their delivery is untouched.
+        if self.pool.is_some() {
+            let beacon_sender = self.process.beacon_event_sender.clone();
+            self.process
+                .network
+                .register_host_gossip_handler::<BeaconBlockGossip>(
+                    move |gossip: BeaconBlockGossip| {
+                        let _ = beacon_sender.send(HostEvent::beacon(
+                            ProtocolEvent::BeaconBlockReceived {
+                                block: gossip.block,
+                            },
+                        ));
+                    },
+                );
+        }
 
         // ── beacon.skip_request → ProtocolEvent::UnverifiedSkipRequestReceived ──
         let senders = self.process.shard_event_senders.clone();

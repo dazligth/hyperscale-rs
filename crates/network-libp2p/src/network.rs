@@ -267,6 +267,17 @@ impl Network for Libp2pNetwork {
         }
     }
 
+    fn register_host_gossip_handler<M: GossipMessage + 'static>(
+        &self,
+        _handler: impl Fn(M) + Send + Sync + 'static,
+    ) {
+        // Shard-less hosts aren't served on the libp2p path: inbound
+        // host-level gossip dispatch and pool-host topic wiring are absent.
+        // Reached only on a host that runs a follower pool, which this
+        // backend never builds.
+        unimplemented!("libp2p does not serve shard-less hosts")
+    }
+
     fn subscribe_shard(&self, shard: ShardId) {
         self.registry.add_hosted_shard(shard);
         self.adapter.add_local_shard(shard);
