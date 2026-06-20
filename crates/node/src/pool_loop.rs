@@ -97,6 +97,18 @@ where
         self.actions_generated = 0;
     }
 
+    /// Drive one beacon event through every pooled vnode and return the
+    /// placement deltas they surfaced (the seat triggers the supervisor acts
+    /// on). Clears per-step scratch first, mirroring
+    /// [`ShardLoop::run_step`](crate::shard_loop::ShardLoop::run_step); used by
+    /// the production pool thread, which owns the `PoolLoop` directly rather
+    /// than driving it through [`NodeHost::step`](crate::host::NodeHost::step).
+    pub fn run_step(&mut self, event: ProtocolEvent) -> Vec<ParticipationChange> {
+        self.clear_scratch();
+        self.dispatch_event(event);
+        std::mem::take(&mut self.pending_reconfigurations)
+    }
+
     /// Fan a beacon [`ProtocolEvent`] across every pooled vnode, driving each
     /// one's follower cascade to quiescence.
     pub(crate) fn dispatch_event(&mut self, event: ProtocolEvent) {

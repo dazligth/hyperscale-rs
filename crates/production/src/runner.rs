@@ -40,6 +40,7 @@ use hyperscale_network_libp2p::{
     RequestStreamPool, generate_random_keypair,
 };
 use hyperscale_node::bootstrap::EngineBootstrap;
+use hyperscale_node::pool_loop::PoolLoop;
 use hyperscale_node::shard_loop::{HostEvent, ShardLoop, TimerOp, timer_event};
 use hyperscale_node::{
     NodeConfig, NodeHost, SeatVnodeGroup, SharedTopologySnapshot, TxStatusCache, VnodeInit,
@@ -559,11 +560,11 @@ impl ProductionRunnerBuilder {
             .iter()
             .map(|(s, tx)| (*s, tx.clone()))
             .collect();
-        // Beacon channel for a host's shard-less follower pool. The runner
-        // builds only seated vnodes, so this host constructs no pool and
-        // registers no beacon follower; the channel stays idle and its
-        // receiver drops at the end of construction.
-        let (beacon_event_tx, _beacon_event_rx) = unbounded::<HostEvent>();
+        // Beacon channel for a host's shard-less follower pool. The host-level
+        // gossip handler pushes committed beacon blocks onto the sender; the
+        // supervisor clones the receiver into each pool thread it spawns. The
+        // channel stays idle on a host that runs no follower pool.
+        let (beacon_event_tx, beacon_event_rx) = unbounded::<HostEvent>();
         let host = NodeHost::new(
             vnode_inits,
             shared_storages,
@@ -607,6 +608,7 @@ impl ProductionRunnerBuilder {
             participation_tx,
             chain_config.epoch_duration_ms,
             chain_config.genesis_timestamp_ms,
+            beacon_event_rx,
         );
 
         Ok(ProductionRunner {
@@ -942,7 +944,7 @@ impl ProductionRunner {
             .host
             .take()
             .expect("host already taken (run called twice?)");
-        let (_process, shards) = host.into_parts();
+        let (_process, shards, pool) = host.into_parts();
 
         let mut shard_channels = self
             .shard_channels
@@ -968,6 +970,14 @@ impl ProductionRunner {
             let initial_timer_ops = timer_ops_by_shard.remove(&shard).unwrap_or_default();
             let vnode_count = self.shard_vnode_counts.get(&shard).copied().unwrap_or(1);
             supervisor.spawn_recorded(shard_loop, channels, initial_timer_ops, vnode_count);
+        }
+
+        // A startup host built shard-less (a registered-but-unseated
+        // validator) carries a follower pool; spawn its pinned thread so it
+        // follows the beacon until a placement delta seats it. Startup hosts
+        // with shards carry no pool, so this is `None` for them.
+        if let Some(pool) = pool {
+            supervisor.install_pool(pool);
         }
 
         // ── 4. Metrics + maintenance + reconfiguration + shutdown loop.
@@ -1675,4 +1685,71 @@ pub fn spawn_shard_loop(
         .name(format!("shard-loop-{}", shard.inner()))
         .spawn(move || run_shard_loop(shard_loop, config))
         .expect("failed to spawn shard-loop thread")
+}
+
+/// Concrete `PoolLoop` type for the production runner: the host's
+/// shard-less beacon followers.
+pub type ProdPoolLoop = PoolLoop<SharedStorage, Libp2pNetwork, PooledDispatch>;
+
+/// Configuration for a host's pinned pool thread — the lightweight sibling
+/// of [`ShardLoopConfig`]. A follower runs no shard consensus, so there are
+/// no timers, batches, or callbacks: it drains beacon gossip and surfaces
+/// the seat triggers its fold raises.
+pub struct PoolLoopConfig {
+    /// Beacon-block gossip routed here by the host-level gossip handler
+    /// (see `register_host_gossip_handler`), plus any self-driven beacon
+    /// continuations.
+    pub(crate) beacon_rx: Receiver<HostEvent>,
+    /// Stops the pool thread on teardown.
+    pub(crate) shutdown_rx: Receiver<()>,
+    /// Placement deltas the followers surface (their own seat triggers),
+    /// forwarded to the runner's reconfiguration loop.
+    pub(crate) participation_tx: mpsc::UnboundedSender<ParticipationChange>,
+    /// Genesis instant the consensus clock is measured against.
+    pub(crate) genesis_offset_ms: u64,
+}
+
+/// Drive a host's [`PoolLoop`] on its pinned thread, blocking until the
+/// shutdown signal fires. A follower only consumes beacon events
+/// ([`HostEvent::Beacon`]); shard / process envelopes never reach this
+/// channel, and a follower's beacon timers are dropped by the `PoolLoop`,
+/// so there is no timer manager and no batch flushing.
+fn run_pool_loop(mut pool: ProdPoolLoop, config: PoolLoopConfig) {
+    let PoolLoopConfig {
+        beacon_rx,
+        shutdown_rx,
+        participation_tx,
+        genesis_offset_ms,
+    } = config;
+    info!("Pool event loop starting");
+    loop {
+        if shutdown_rx.try_recv().is_ok() {
+            info!("Pool event loop received shutdown signal");
+            break;
+        }
+        pool.set_time(consensus_clock(genesis_offset_ms));
+        let event = crossbeam::channel::select! {
+            recv(shutdown_rx) -> _ => {
+                info!("Pool event loop received shutdown signal (select)");
+                return;
+            }
+            recv(beacon_rx) -> e => e.ok(),
+        };
+        let Some(HostEvent::Beacon(event)) = event else {
+            continue;
+        };
+        for change in pool.run_step(*event) {
+            // Send failure means the runner is shutting down.
+            let _ = participation_tx.send(change);
+        }
+    }
+    info!("Pool event loop exiting");
+}
+
+/// Spawn the host's pool thread, mirroring [`spawn_shard_loop`].
+pub fn spawn_pool_loop(pool: ProdPoolLoop, config: PoolLoopConfig) -> std::thread::JoinHandle<()> {
+    std::thread::Builder::new()
+        .name("pool-loop".to_string())
+        .spawn(move || run_pool_loop(pool, config))
+        .expect("failed to spawn pool-loop thread")
 }

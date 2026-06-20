@@ -42,11 +42,15 @@ use crate::shard_loop::{
 };
 use crate::vnode::{Vnode, VnodeInit};
 
-/// Output of [`NodeHost::into_parts`]: shared process-scoped resources
-/// plus the per-shard drivers, keyed by hosted shard id.
+/// Output of [`NodeHost::into_parts`].
+///
+/// The shared process-scoped resources, the per-shard drivers keyed by
+/// hosted shard id, and the host's shard-less beacon-follower pool (present
+/// only when the host carries followers).
 pub type NodeHostParts<S, N, D> = (
     Arc<ProcessIo<S, N, D>>,
     BTreeMap<ShardId, ShardLoop<S, N, D>>,
+    Option<PoolLoop<S, N, D>>,
 );
 
 /// Top-level node composition: process-scoped resources plus one
@@ -287,15 +291,16 @@ where
     }
 
     /// Consume the host and yield its constituent parts: the shared
-    /// process-scoped resources and one [`ShardLoop`] per hosted shard.
+    /// process-scoped resources, one [`ShardLoop`] per hosted shard, and the
+    /// shard-less beacon-follower pool (if any).
     ///
-    /// The production runner uses this to move each `ShardLoop` onto its
-    /// own pinned thread while keeping the `Arc<ProcessIo>` shared across
-    /// them. Simulation never calls this — sim drives the whole host
-    /// single-threaded via [`Self::step`].
+    /// The production runner uses this to move each `ShardLoop` (and the
+    /// `PoolLoop`) onto its own pinned thread while keeping the
+    /// `Arc<ProcessIo>` shared across them. Simulation never calls this — sim
+    /// drives the whole host single-threaded via [`Self::step`].
     #[must_use]
     pub fn into_parts(self) -> NodeHostParts<S, N, D> {
-        (self.process, self.shards)
+        (self.process, self.shards, self.pool)
     }
 
     /// Borrow the shared process-scoped resources. Callers `Arc::clone`

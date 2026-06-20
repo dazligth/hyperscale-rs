@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use crossbeam::channel::{Sender, unbounded};
+use crossbeam::channel::{Receiver, Sender, unbounded};
 use hyperscale_core::ParticipationChange;
 use hyperscale_dispatch_pooled::PooledDispatch;
 use hyperscale_mempool::MempoolConfig;
@@ -31,6 +31,7 @@ use hyperscale_node::bootstrap::observer::observer_ready_signal;
 use hyperscale_node::bootstrap::split_flip::split_genesis_from_terminal;
 use hyperscale_node::host::{attach_shard, detach_shard};
 use hyperscale_node::process_io::ProcessIo;
+use hyperscale_node::shard_loop::HostEvent;
 use hyperscale_node::{NodeConfig, SeatVnodeGroup, TimerOp, VnodeInit, seat_vnode_group};
 use hyperscale_provisions::ProvisionConfig;
 use hyperscale_shard::ShardConsensusConfig;
@@ -53,7 +54,8 @@ use crate::bootstrap::{
 };
 use crate::rpc::RpcPublishers;
 use crate::runner::{
-    ProdShardLoop, ShardChannels, ShardLoopConfig, VnodeConfig, consensus_clock, spawn_shard_loop,
+    PoolLoopConfig, ProdPoolLoop, ProdShardLoop, ShardChannels, ShardLoopConfig, VnodeConfig,
+    consensus_clock, spawn_pool_loop, spawn_shard_loop,
 };
 
 /// The process-scoped resource bundle as the production runner types it.
@@ -318,6 +320,12 @@ struct ShardThread {
     validator_ids: Vec<u64>,
 }
 
+/// The host's pinned pool thread plus the handle to stop it.
+struct PoolThread {
+    join: std::thread::JoinHandle<()>,
+    shutdown_tx: Sender<()>,
+}
+
 /// Owns the per-shard pinned threads and executes runtime membership
 /// changes. Lives on the runner's tokio loop — never on a shard thread.
 pub struct ShardSupervisor {
@@ -378,6 +386,14 @@ pub struct ShardSupervisor {
     events_tx: mpsc::UnboundedSender<SupervisorEvent>,
     /// Receiver side, taken by the runner's `run()` loop.
     events_rx: Option<mpsc::UnboundedReceiver<SupervisorEvent>>,
+    /// The host's pinned beacon-follower pool thread, present only while the
+    /// host carries shard-less followers. A drain off the last shard builds
+    /// one; seating its last follower tears it down.
+    pool: Option<PoolThread>,
+    /// The host's beacon-event channel receiver, cloned into each pool
+    /// thread the supervisor spawns. The host-level gossip handler pushes
+    /// committed beacon blocks onto the paired sender.
+    beacon_event_rx: Receiver<HostEvent>,
 }
 
 impl ShardSupervisor {
@@ -398,6 +414,7 @@ impl ShardSupervisor {
         participation_tx: mpsc::UnboundedSender<ParticipationChange>,
         epoch_duration_ms: u64,
         genesis_offset_ms: u64,
+        beacon_event_rx: Receiver<HostEvent>,
     ) -> Self {
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         Self {
@@ -424,6 +441,8 @@ impl ShardSupervisor {
             epoch_duration_ms,
             draining: HashSet::new(),
             pending_joins: HashMap::new(),
+            pool: None,
+            beacon_event_rx,
             events_tx,
             events_rx: Some(events_rx),
         }
@@ -489,6 +508,42 @@ impl ShardSupervisor {
                 validator_ids,
             },
         );
+    }
+
+    /// Spawn the host's beacon-follower pool thread from a pre-built
+    /// `PoolLoop` — the startup pooled host (a registered-but-unseated
+    /// validator). A pool already running is left in place.
+    pub(crate) fn install_pool(&mut self, pool: ProdPoolLoop) {
+        if self.pool.is_some() {
+            warn!("install_pool called while a pool thread already runs; ignored");
+            return;
+        }
+        self.start_pool_thread(pool);
+    }
+
+    /// Spawn a pinned thread for `pool`, recording its handle. The thread
+    /// drains a clone of the host's beacon channel; the host-level gossip
+    /// handler pushes committed beacon blocks onto the paired sender.
+    fn start_pool_thread(&mut self, pool: ProdPoolLoop) {
+        let (shutdown_tx, shutdown_rx) = unbounded();
+        let cfg = PoolLoopConfig {
+            beacon_rx: self.beacon_event_rx.clone(),
+            shutdown_rx,
+            participation_tx: self.participation_tx.clone(),
+            genesis_offset_ms: self.genesis_offset_ms,
+        };
+        let join = spawn_pool_loop(pool, cfg);
+        self.pool = Some(PoolThread { join, shutdown_tx });
+    }
+
+    /// Stop the pool thread if one runs, joining it.
+    fn teardown_pool(&mut self) {
+        if let Some(pt) = self.pool.take() {
+            let _ = pt.shutdown_tx.send(());
+            if pt.join.join().is_err() {
+                warn!("Pool thread panicked before teardown");
+            }
+        }
     }
 
     /// Execute one membership command.
@@ -1498,8 +1553,10 @@ impl ShardSupervisor {
     }
 
     /// Stop every shard thread: fan the shutdown signals first so the
-    /// threads wind down in parallel, then join them all.
+    /// threads wind down in parallel, then join them all. The pool thread,
+    /// if any, is stopped alongside them.
     pub(crate) fn shutdown_all(&mut self) {
+        self.teardown_pool();
         for (shard, entry) in &self.shards {
             if entry.shutdown_tx.send(()).is_err() {
                 tracing::debug!(shard = ?shard, "Shard already exited");
