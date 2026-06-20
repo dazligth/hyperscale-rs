@@ -373,6 +373,9 @@ where
                         touched_shards,
                     });
             }
+            SubmitFanout::NoHostedShard => {
+                tracing::warn!("Dropping locally-submitted transaction: host carries no shard");
+            }
         }
     }
 }

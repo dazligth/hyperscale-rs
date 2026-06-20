@@ -181,17 +181,32 @@ pub(super) fn handle_gossipsub_event(
                 return;
             };
 
+            // A Global-topic message (no shard in the topic) also reaches a
+            // shard-less host's beacon-follower pool through the host-level
+            // handler, additively to the per-hosted-shard fan above. Only
+            // beacon-block gossip registers one; everything else resolves to
+            // `None` and runs exactly as before.
+            let topic_shard = parsed.shard_id;
+            let host_handler = topic_shard
+                .is_none()
+                .then(|| registry.get_host_gossip(msg_type))
+                .flatten();
+
             // Spawn decompress + handler off the event loop.
             // LZ4 decompression is fast (~4GB/s) but the handler includes
             // SBOR decode which we don't want to stall the swarm poll on.
             // `VerdictGuard` ensures gossipsub gets exactly one verdict per
             // message even if `handler` panics or the task is cancelled.
             let vtx = validation_tx.clone();
-            let topic_shard = parsed.shard_id;
             spawn(async move {
                 let mut guard = VerdictGuard::new(message_id, propagation_source, vtx);
                 match decompress(&message.data) {
                     Ok(payload) => {
+                        // The host-level follower delivers fire and forget;
+                        // the per-shard fan owns the forward verdict.
+                        if let Some(host_handler) = host_handler {
+                            host_handler(payload.clone());
+                        }
                         let verdict = handler(payload, topic_shard);
                         let acceptance = match verdict {
                             GossipVerdict::Accept => {

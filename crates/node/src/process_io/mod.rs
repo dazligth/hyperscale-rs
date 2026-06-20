@@ -374,18 +374,17 @@ where
                 passive: hosted_touched.collect(),
                 touched_shards,
             }
-        } else {
-            // `NodeHost::new` asserts at least one hosted shard, so
-            // there is always a host available to flush gossip.
-            let host = senders
-                .keys()
-                .copied()
-                .next()
-                .expect("ProcessIo hosts at least one shard");
+        } else if let Some(host) = senders.keys().copied().next() {
+            // No touched shard is hosted, but the host carries some shard
+            // it can flush outbound gossip through.
             SubmitFanout::GossipOnly {
                 host,
                 touched_shards,
             }
+        } else {
+            // A pooled-only beacon follower hosts no shard at all — it runs
+            // no pipeline to admit or gossip through.
+            SubmitFanout::NoHostedShard
         }
     }
 
@@ -446,6 +445,10 @@ where
                     ok = false;
                 }
             }
+            SubmitFanout::NoHostedShard => {
+                tracing::warn!("Dropping locally-submitted transaction: host carries no shard");
+                ok = false;
+            }
         }
         ok
     }
@@ -501,4 +504,8 @@ pub enum SubmitFanout {
         /// Every shard the tx touches (declared reads ∪ writes).
         touched_shards: Vec<ShardId>,
     },
+    /// The host carries no shard at all — a pooled-only beacon follower.
+    /// It runs no shard pipeline to admit or gossip through, so a
+    /// locally-submitted tx is dropped.
+    NoHostedShard,
 }

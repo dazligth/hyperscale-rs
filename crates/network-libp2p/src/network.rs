@@ -269,13 +269,14 @@ impl Network for Libp2pNetwork {
 
     fn register_host_gossip_handler<M: GossipMessage + 'static>(
         &self,
-        _handler: impl Fn(M) + Send + Sync + 'static,
+        handler: impl Fn(M) + Send + Sync + 'static,
     ) {
-        // Shard-less hosts aren't served on the libp2p path: inbound
-        // host-level gossip dispatch and pool-host topic wiring are absent.
-        // Reached only on a host that runs a follower pool, which this
-        // backend never builds.
-        unimplemented!("libp2p does not serve shard-less hosts")
+        // Registry owns SBOR decode — just forward. The Global-topic
+        // subscription is brought up by the matching `register_gossip_handler`
+        // (every host-level type is also a `TopicScope::Global` gossip type),
+        // so the inbound dispatch in `gossipsub.rs` invokes this for a
+        // shard-less host alongside the per-hosted-shard fan.
+        self.registry.register_host_gossip_handler(handler);
     }
 
     fn subscribe_shard(&self, shard: ShardId) {
