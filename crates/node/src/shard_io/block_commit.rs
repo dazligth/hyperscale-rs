@@ -31,7 +31,7 @@ use hyperscale_types::{
 };
 use tracing::debug;
 
-use crate::shard_loop::{ShardEvent, push_protocol_event};
+use crate::shard_loop::{HostEvent, push_protocol_event};
 
 /// Handle to the assembled `Verified<CertifiedBlock>` that the
 /// `io_loop` forwards to `BlockCommitted`. Cloned `Arc` to the commit
@@ -636,7 +636,7 @@ impl BlockCommitCoordinator {
     /// the pinned thread via `event_tx`; see `ProcessIo::shard_event_senders`
     /// for the off-thread → pinned-thread routing convention.
     #[allow(clippy::significant_drop_tightening, clippy::too_many_lines)]
-    pub fn flush<D: Dispatch>(&mut self, event_tx: &Sender<ShardEvent>, dispatch: &D) {
+    pub fn flush<D: Dispatch>(&mut self, event_tx: &Sender<HostEvent>, dispatch: &D) {
         if self.pending.is_empty() {
             return;
         }
@@ -925,9 +925,9 @@ mod tests {
         TAG_GEN.fetch_add(1, Ordering::Relaxed)
     }
 
-    fn drain_protocol_events(rx: &Receiver<ShardEvent>) -> Vec<ProtocolEvent> {
+    fn drain_protocol_events(rx: &Receiver<HostEvent>) -> Vec<ProtocolEvent> {
         let mut out = Vec::new();
-        while let Ok(ShardEvent::Shard(_, ShardScopedInput::Protocol(event))) = rx.try_recv() {
+        while let Ok(HostEvent::Shard(_, ShardScopedInput::Protocol(event))) = rx.try_recv() {
             out.push(*event);
         }
         out

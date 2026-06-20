@@ -20,7 +20,7 @@ use hyperscale_metrics::{MetricsRecorder, with_scoped_recorder};
 use hyperscale_metrics_memory::MemoryRecorder;
 use hyperscale_network_memory::NetworkConfig;
 use hyperscale_node::NodeStateMachine;
-use hyperscale_node::shard_loop::{ProcessScopedInput, ShardEvent};
+use hyperscale_node::shard_loop::{HostEvent, ProcessScopedInput};
 use hyperscale_simulation::{EPOCH_MS, SimulationRunner};
 use hyperscale_types::{
     BeaconChainConfig, Ed25519PrivateKey, NodeId, ReshapeThresholds, RoutableTransaction, ShardId,
@@ -198,7 +198,7 @@ pub fn submit_to_shard(
     runner.schedule_initial_event(
         submit_host,
         Duration::ZERO,
-        ShardEvent::process(ProcessScopedInput::SubmitTransaction { tx: Arc::new(tx) }),
+        HostEvent::process(ProcessScopedInput::SubmitTransaction { tx: Arc::new(tx) }),
     );
 }
 

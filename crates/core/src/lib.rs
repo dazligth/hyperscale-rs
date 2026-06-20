@@ -6,7 +6,7 @@
 //! - [`Action`]: All possible outputs from the state machine
 //! - [`StateMachine`]: The trait that all state machines implement
 //!
-//! The I/O-loop-specific input types (`ShardEvent`, `ShardScopedInput`,
+//! The I/O-loop-specific input types (`HostEvent`, `ShardScopedInput`,
 //! `ProcessScopedInput`, `FetchFailureKind`, `EventPriority`) live in
 //! `hyperscale_node::io_loop`, since they're not part of the
 //! deterministic state-machine contract.
@@ -16,7 +16,7 @@
 //! The core is built on a two-level event model:
 //!
 //! ```text
-//! ShardEvent → IoLoop (intercepts I/O events) → ProtocolEvent → StateMachine::handle() → Actions
+//! HostEvent → IoLoop (intercepts I/O events) → ProtocolEvent → StateMachine::handle() → Actions
 //! ```
 //!
 //! The state machine is:

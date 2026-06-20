@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hyperscale_network_memory::{NetworkConfig, NodeIndex};
-use hyperscale_node::shard_loop::{ProcessScopedInput, ShardEvent};
+use hyperscale_node::shard_loop::{HostEvent, ProcessScopedInput};
 use hyperscale_simulation::{EPOCH_MS, SimulationRunner};
 use hyperscale_storage::{ShardChainReader, SubstateStore};
 use hyperscale_storage_memory::SimShardStorage;
@@ -408,7 +408,7 @@ fn surviving_sibling_reconstructs_a_split_shards_settled_set() {
         runner.schedule_initial_event(
             0,
             delay,
-            ShardEvent::process(ProcessScopedInput::SubmitTransaction { tx }),
+            HostEvent::process(ProcessScopedInput::SubmitTransaction { tx }),
         );
         probes.push((*offset_ms, hash));
     }
@@ -701,7 +701,7 @@ fn surviving_sibling_reconstructs_a_split_shards_settled_set() {
     runner.schedule_initial_event(
         survivor_host,
         Duration::from_millis(10),
-        ShardEvent::process(ProcessScopedInput::SubmitTransaction { tx: lock_probe }),
+        HostEvent::process(ProcessScopedInput::SubmitTransaction { tx: lock_probe }),
     );
     let probe_deadline = runner.now() + epochs(SETTLE_BUDGET_EPOCHS);
     let probe_completed = run_until(&mut runner, probe_deadline, |r| {

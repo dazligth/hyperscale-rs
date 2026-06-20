@@ -206,7 +206,7 @@ impl Network for Libp2pNetwork {
         // shard — gossipsub never loops the publication back to the
         // publisher, so colocated vnodes would otherwise miss it. The
         // registry computes the per-vnode fan-out from `hosted_shards`.
-        // Cheap: the registry pushes a `ShardEvent` onto an unbounded
+        // Cheap: the registry pushes a `HostEvent` onto an unbounded
         // channel; the encode/decode is skipped on the local path.
         let _ = self.registry.local_dispatch_gossip(message, Some(shard));
 

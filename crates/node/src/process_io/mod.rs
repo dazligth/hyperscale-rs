@@ -24,12 +24,15 @@ pub(crate) use canonical_txs::CanonicalTxs;
 use crossbeam::channel::Sender;
 use hyperscale_dispatch::Dispatch;
 use hyperscale_engine::TransactionValidation;
+use hyperscale_network::Network;
 use hyperscale_storage::{BeaconStorage, ShardStorage};
-use hyperscale_types::{Epoch, RoutableTransaction, ShardId, ValidatorId};
+use hyperscale_types::{
+    Epoch, RoutableTransaction, RoutingCommittees, ShardId, TopologySnapshot, ValidatorId,
+};
 pub(crate) use network_handlers::register_shard_request_handlers;
 pub use tx_status::TxStatusCache;
 
-use crate::event::{ShardEvent, ShardScopedInput};
+use crate::event::{HostEvent, ShardScopedInput};
 use crate::shard_loop::{DispatchHandles, SharedTopologySnapshot};
 
 /// Lock-free per-shard event-sender map.
@@ -37,7 +40,7 @@ use crate::shard_loop::{DispatchHandles, SharedTopologySnapshot};
 /// Handler closures and RPC fan-out `.load()` for an atomic snapshot on
 /// every use; the map is swapped only when shard participation changes,
 /// and the reconfiguring thread is the sole writer.
-pub(crate) type SharedShardSenders = Arc<ArcSwap<BTreeMap<ShardId, Sender<ShardEvent>>>>;
+pub(crate) type SharedShardSenders = Arc<ArcSwap<BTreeMap<ShardId, Sender<HostEvent>>>>;
 
 /// Beacon-signing seat for one hosted validator: which shard's vnode
 /// currently signs beacon consensus under the validator's identity,
@@ -107,7 +110,7 @@ where
     /// Per-shard channels back to each shard's driver.
     ///
     /// Off-thread work spawned via `dispatch.spawn(pool, ...)` returns
-    /// results here as [`ShardEvent`] envelopes (a `NodeInput` plus its
+    /// results here as [`HostEvent`] envelopes (a `NodeInput` plus its
     /// hosted-shard tag), routed to the shard's sender so the right
     /// driver picks them up on its next iteration. Inbound network
     /// handlers route by the shard tag inside the decoded payload,
@@ -184,7 +187,7 @@ where
     pub(crate) fn new(
         network: Arc<N>,
         dispatch: D,
-        shard_event_senders: BTreeMap<ShardId, Sender<ShardEvent>>,
+        shard_event_senders: BTreeMap<ShardId, Sender<HostEvent>>,
         topology_snapshot: SharedTopologySnapshot,
         dispatch_handles: Arc<DispatchHandles<S, N>>,
         tx_validator: Arc<TransactionValidation>,
@@ -299,7 +302,7 @@ where
     ///
     /// # Panics
     /// Panics if `shard` isn't hosted by this `ProcessIo`.
-    pub(crate) fn shard_sender(&self, shard: ShardId) -> Sender<ShardEvent> {
+    pub(crate) fn shard_sender(&self, shard: ShardId) -> Sender<HostEvent> {
         self.shard_event_senders
             .load()
             .get(&shard)
@@ -310,7 +313,7 @@ where
     /// Install the event sender for a newly hosted `shard`. The
     /// reconfiguring thread is the sole writer, so the clone-modify-store
     /// needs no CAS retry; concurrent readers keep their loaded snapshot.
-    pub(crate) fn insert_shard_sender(&self, shard: ShardId, sender: Sender<ShardEvent>) {
+    pub(crate) fn insert_shard_sender(&self, shard: ShardId, sender: Sender<HostEvent>) {
         let mut map = (**self.shard_event_senders.load()).clone();
         map.insert(shard, sender);
         self.shard_event_senders.store(Arc::new(map));
@@ -398,7 +401,7 @@ where
                 passive,
                 touched_shards,
             } => {
-                let env = ShardEvent::shard(
+                let env = HostEvent::shard(
                     source,
                     ShardScopedInput::AdmitAndGossipTransaction {
                         tx: Arc::clone(tx),
@@ -409,7 +412,7 @@ where
                     ok = false;
                 }
                 for shard in passive {
-                    let env = ShardEvent::shard(
+                    let env = HostEvent::shard(
                         shard,
                         ShardScopedInput::AdmitTransaction { tx: Arc::clone(tx) },
                     );
@@ -422,7 +425,7 @@ where
                 host,
                 touched_shards,
             } => {
-                let env = ShardEvent::shard(
+                let env = HostEvent::shard(
                     host,
                     ShardScopedInput::GossipTransaction {
                         tx: Arc::clone(tx),
@@ -435,6 +438,29 @@ where
             }
         }
         ok
+    }
+}
+
+impl<S, N, D> ProcessIo<S, N, D>
+where
+    S: ShardStorage,
+    N: Network,
+    D: Dispatch,
+{
+    /// Adopt a fresh topology snapshot: publish it through the lock-free
+    /// `ArcSwap` so off-thread closures pick it up on their next `.load()`, and
+    /// push it to the network adapter (which keys validator pubkeys and shard
+    /// committees off the snapshot, and fetch routing off the terminal-clamped
+    /// committees). Shared by every driver's `Action::TopologyChanged` handling
+    /// — idempotent across them, the final stored value is identical.
+    pub(crate) fn apply_topology(
+        &self,
+        topology: &Arc<TopologySnapshot>,
+        routing_committees: Arc<RoutingCommittees>,
+    ) {
+        self.topology_snapshot.store(Arc::clone(topology));
+        self.network.update_topology(Arc::clone(topology));
+        self.network.update_routing_committees(routing_committees);
     }
 }
 

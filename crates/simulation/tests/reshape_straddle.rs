@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hyperscale_network_memory::NetworkConfig;
-use hyperscale_node::shard_loop::{ProcessScopedInput, ShardEvent};
+use hyperscale_node::shard_loop::{HostEvent, ProcessScopedInput};
 use hyperscale_simulation::{EPOCH_MS, SimulationRunner};
 use hyperscale_storage::ShardChainReader;
 use hyperscale_storage_memory::SimShardStorage;
@@ -307,7 +307,7 @@ fn transfers_around_the_split_boundary_settle_atomically() {
         runner.schedule_initial_event(
             0,
             delay,
-            ShardEvent::process(ProcessScopedInput::SubmitTransaction { tx }),
+            HostEvent::process(ProcessScopedInput::SubmitTransaction { tx }),
         );
         probes.push((*offset_ms, hash));
     }
@@ -384,7 +384,7 @@ fn transfers_around_the_split_boundary_settle_atomically() {
     runner.schedule_initial_event(
         0,
         Duration::from_millis(10),
-        ShardEvent::process(ProcessScopedInput::SubmitTransaction { tx: control_tx }),
+        HostEvent::process(ProcessScopedInput::SubmitTransaction { tx: control_tx }),
     );
     let control_deadline = runner.now() + epochs(CONTROL_BUDGET_EPOCHS);
     let control_settled = run_until(&mut runner, control_deadline, |r| {

@@ -771,15 +771,7 @@ where
         topology: &Arc<TopologySnapshot>,
         routing_committees: Arc<RoutingCommittees>,
     ) {
-        self.process.topology_snapshot.store(Arc::clone(topology));
-
-        // Network impl reads validator keys off the snapshot for identity;
-        // fetch routing keys on the terminal-clamped committees so a request
-        // to a split parent draining out of the head still reaches it.
-        self.process.network.update_topology(Arc::clone(topology));
-        self.process
-            .network
-            .update_routing_committees(routing_committees);
+        self.process.apply_topology(topology, routing_committees);
 
         tracing::info!(
             local_shard = self.shard.inner(),

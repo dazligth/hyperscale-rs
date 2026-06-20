@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hyperscale_network_memory::NetworkConfig;
-use hyperscale_node::shard_loop::{ProcessScopedInput, ShardEvent};
+use hyperscale_node::shard_loop::{HostEvent, ProcessScopedInput};
 use hyperscale_simulation::SimulationRunner;
 use hyperscale_types::test_utils::test_validity_range;
 use hyperscale_types::{
@@ -130,7 +130,7 @@ fn test_e2e_single_shard_transaction() {
     runner.schedule_initial_event(
         0,
         Duration::ZERO,
-        ShardEvent::process(ProcessScopedInput::SubmitTransaction {
+        HostEvent::process(ProcessScopedInput::SubmitTransaction {
             tx: Arc::new(transaction),
         }),
     );
@@ -380,7 +380,7 @@ fn test_e2e_single_shard_determinism() {
     runner1.schedule_initial_event(
         0,
         Duration::from_millis(100),
-        ShardEvent::process(ProcessScopedInput::SubmitTransaction {
+        HostEvent::process(ProcessScopedInput::SubmitTransaction {
             tx: Arc::new(transaction.clone()),
         }),
     );
@@ -403,7 +403,7 @@ fn test_e2e_single_shard_determinism() {
     runner2.schedule_initial_event(
         0,
         Duration::from_millis(100),
-        ShardEvent::process(ProcessScopedInput::SubmitTransaction {
+        HostEvent::process(ProcessScopedInput::SubmitTransaction {
             tx: Arc::new(transaction),
         }),
     );
@@ -570,7 +570,7 @@ fn test_e2e_transaction_throughput() {
         runner.schedule_initial_event(
             u32::try_from(i % 4).unwrap_or(0), // Distribute across validators
             Duration::from_millis(u64::try_from(i).unwrap_or(u64::MAX) * 50),
-            ShardEvent::process(ProcessScopedInput::SubmitTransaction { tx: Arc::new(tx) }),
+            HostEvent::process(ProcessScopedInput::SubmitTransaction { tx: Arc::new(tx) }),
         );
     }
 
@@ -665,7 +665,7 @@ fn test_wave_leader_failure_recovers_via_rotation() {
         runner.schedule_initial_event(
             submit_node,
             Duration::ZERO,
-            ShardEvent::process(ProcessScopedInput::SubmitTransaction {
+            HostEvent::process(ProcessScopedInput::SubmitTransaction {
                 tx: Arc::new(transaction),
             }),
         );

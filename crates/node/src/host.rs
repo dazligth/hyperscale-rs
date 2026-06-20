@@ -2,8 +2,8 @@
 //!
 //! `NodeHost` bundles `Arc<ProcessIo>` (process-scoped resources) plus
 //! one [`ShardLoop`] per hosted shard. It owns the event-routing seam:
-//! [`Self::step`] dispatches `ShardEvent::Shard` to the targeted
-//! `ShardLoop::step` and `ShardEvent::Process` to cross-shard handlers
+//! [`Self::step`] dispatches `HostEvent::Shard` to the targeted
+//! `ShardLoop::step` and `HostEvent::Process` to cross-shard handlers
 //! (transaction submission fan-out, fetch tick) that need access to
 //! every hosted shard.
 //!
@@ -26,6 +26,7 @@ use hyperscale_types::{
 use crate::NodeStateMachine;
 use crate::batch_accumulator::BatchAccumulator;
 use crate::config::NodeConfig;
+use crate::pool_loop::PoolLoop;
 use crate::process_io::{BeaconProposalCache, ProcessIo, register_shard_request_handlers};
 use crate::shard_io::ShardIo;
 use crate::shard_io::block_commit::{BlockCommitCoordinator, BoundaryMemo};
@@ -36,7 +37,7 @@ use crate::shard_io::settled_set::SettledWavesAcquisitionHost;
 use crate::shard_io::sync::SyncHost;
 use crate::shard_io::sync::block::BlockSyncInput;
 use crate::shard_loop::{
-    DispatchHandles, ProcessScopedInput, ShardDispatchHandles, ShardEvent, ShardLoop,
+    DispatchHandles, HostEvent, ProcessScopedInput, ShardDispatchHandles, ShardLoop,
     SharedTopologySnapshot, StepOutput,
 };
 use crate::vnode::{Vnode, VnodeInit};
@@ -66,6 +67,11 @@ where
     /// Ordered so that whole-host sweeps (step, drains, batch flushes)
     /// visit shards deterministically regardless of join order.
     pub(crate) shards: BTreeMap<ShardId, ShardLoop<S, N, D>>,
+
+    /// The host's shard-less, beacon-following vnodes, present only when the
+    /// host carries any. Driven for beacon events routed via
+    /// [`HostEvent::Beacon`](crate::event::HostEvent::Beacon).
+    pub(crate) pool: Option<PoolLoop<S, N, D>>,
 
     /// Process-scoped shared resources: network adapter, dispatch pool,
     /// tx validator, topology snapshot, dispatch handles, event sender.
@@ -117,16 +123,12 @@ where
         executor: RadixExecutor,
         network: N,
         dispatch: D,
-        shard_event_senders: BTreeMap<ShardId, Sender<ShardEvent>>,
+        shard_event_senders: BTreeMap<ShardId, Sender<HostEvent>>,
         topology_snapshot: SharedTopologySnapshot,
         config: NodeConfig,
         tx_validator: Arc<TransactionValidation>,
     ) -> Self {
         assert!(!vnodes.is_empty(), "NodeHost requires at least one Vnode");
-
-        // Distinct shards this host carries, derived from the supplied
-        // vnodes. Used to allocate one `ShardIo` per shard.
-        let hosted_shards: HashSet<ShardId> = vnodes.iter().map(|v| v.state.shard_id()).collect();
 
         let b = &config.batch;
         let network = Arc::new(network);
@@ -138,11 +140,18 @@ where
         let mut shard_builds: HashMap<ShardId, (ShardIo<S>, Vec<Vnode>)> = HashMap::new();
         let mut per_shard_dispatch: HashMap<ShardId, ShardDispatchHandles<S>> = HashMap::new();
 
+        // Split the vnodes into per-shard groups (seated) and the
+        // beacon-follower pool (`shard: None`). The hosted-shard set — one
+        // `ShardIo` apiece — is exactly the seated groups' keys.
         let mut by_shard: HashMap<ShardId, Vec<VnodeInit>> = HashMap::new();
+        let mut pool_inits: Vec<VnodeInit> = Vec::new();
         for init in vnodes {
-            let shard = init.state.shard_id();
-            by_shard.entry(shard).or_default().push(init);
+            match init.state.seated_shard() {
+                Some(shard) => by_shard.entry(shard).or_default().push(init),
+                None => pool_inits.push(init),
+            }
         }
+        let hosted_shards: HashSet<ShardId> = by_shard.keys().copied().collect();
 
         for shard in &hosted_shards {
             let inits = by_shard
@@ -211,8 +220,18 @@ where
             })
             .collect();
 
+        // The beacon-follower pool, present only when the host carries
+        // shard-less vnodes.
+        let pool = (!pool_inits.is_empty()).then(|| {
+            PoolLoop::new(
+                Arc::clone(&process),
+                pool_inits.into_iter().map(VnodeInit::into_vnode).collect(),
+            )
+        });
+
         Self {
             shards,
+            pool,
             process,
             now: LocalTimestamp::ZERO,
             config,
@@ -233,7 +252,7 @@ where
     ///
     /// Panics if `vnodes` is empty, targets mixed shards, or names a
     /// shard this host already serves.
-    pub fn add_shard(&mut self, vnodes: Vec<VnodeInit>, storage: S, sender: Sender<ShardEvent>) {
+    pub fn add_shard(&mut self, vnodes: Vec<VnodeInit>, storage: S, sender: Sender<HostEvent>) {
         let shard = vnodes
             .first()
             .expect("add_shard requires at least one vnode")
@@ -292,6 +311,9 @@ where
         for sl in self.shards.values_mut() {
             sl.set_time(now);
         }
+        if let Some(pool) = &mut self.pool {
+            pool.set_time(now);
+        }
     }
 
     // ─── Accessors ──────────────────────────────────────────────────────
@@ -300,6 +322,12 @@ where
     #[must_use]
     pub fn vnodes_len(&self, shard: ShardId) -> usize {
         self.shards.get(&shard).map_or(0, |g| g.vnodes.len())
+    }
+
+    /// Number of shard-less, beacon-following vnodes in the host's pool.
+    #[must_use]
+    pub fn pooled_len(&self) -> usize {
+        self.pool.as_ref().map_or(0, PoolLoop::len)
     }
 
     /// Access the state machine of the vnode at index `vnode_idx` within
@@ -398,23 +426,32 @@ where
     /// 3. Process `emitted_statuses` from the returned [`StepOutput`]
     /// 4. Drain any events produced through the event channel (simulation only —
     ///    production receives these via its crossbeam channel receivers)
-    #[allow(clippy::too_many_lines)] // single dispatch over ShardEvent; one arm per variant
-    pub fn step(&mut self, event: ShardEvent) -> StepOutput {
+    #[allow(clippy::too_many_lines)] // single dispatch over HostEvent; one arm per variant
+    pub fn step(&mut self, event: HostEvent) -> StepOutput {
         for sl in self.shards.values_mut() {
             sl.pending_timer_ops.clear();
             sl.emitted_statuses.clear();
             sl.pending_reconfigurations.clear();
             sl.actions_generated = 0;
         }
+        if let Some(pool) = &mut self.pool {
+            pool.clear_scratch();
+        }
 
         match event {
-            ShardEvent::Shard(shard, input) => {
+            HostEvent::Shard(shard, input) => {
                 // Silently drop events whose shard isn't hosted by this host.
                 if let Some(sl) = self.shards.get_mut(&shard) {
                     sl.step(input);
                 }
             }
-            ShardEvent::Process(input) => self.step_process_input(input),
+            HostEvent::Process(input) => self.step_process_input(input),
+            HostEvent::Beacon(event) => {
+                // Drop beacon events on a host with no pooled vnodes.
+                if let Some(pool) = &mut self.pool {
+                    pool.dispatch_event(*event);
+                }
+            }
         }
 
         self.drain_pending_output()
@@ -449,6 +486,11 @@ where
             out.timer_ops.append(&mut sl.pending_timer_ops);
             out.reconfigurations
                 .append(&mut sl.pending_reconfigurations);
+        }
+        if let Some(pool) = &mut self.pool {
+            out.actions_generated += std::mem::replace(&mut pool.actions_generated, 0);
+            out.reconfigurations
+                .append(&mut pool.pending_reconfigurations);
         }
         out
     }
@@ -505,7 +547,7 @@ pub fn attach_shard<S, N, D>(
     config: &NodeConfig,
     vnodes: Vec<VnodeInit>,
     storage: S,
-    sender: Sender<ShardEvent>,
+    sender: Sender<HostEvent>,
 ) -> ShardLoop<S, N, D>
 where
     S: ShardStorage,

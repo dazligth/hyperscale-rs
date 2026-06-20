@@ -40,7 +40,7 @@ use hyperscale_network_libp2p::{
     RequestStreamPool, generate_random_keypair,
 };
 use hyperscale_node::bootstrap::EngineBootstrap;
-use hyperscale_node::shard_loop::{ShardEvent, ShardLoop, TimerOp, timer_event};
+use hyperscale_node::shard_loop::{HostEvent, ShardLoop, TimerOp, timer_event};
 use hyperscale_node::{
     NodeConfig, NodeHost, SeatVnodeGroup, SharedTopologySnapshot, TxStatusCache, VnodeInit,
     seat_vnode_group,
@@ -405,7 +405,7 @@ impl ProductionRunnerBuilder {
         // `ShardChannels` carries both ends; the supervisor keeps the
         // shutdown/callback senders alive for the shard's lifetime.
         let mut shard_channels: HashMap<ShardId, ShardChannels> = HashMap::new();
-        let mut shard_callback_txs: HashMap<ShardId, Sender<ShardEvent>> = HashMap::new();
+        let mut shard_callback_txs: HashMap<ShardId, Sender<HostEvent>> = HashMap::new();
         for shard in &local_shards {
             let (timer_tx, timer_rx) = unbounded();
             let (callback_tx, callback_rx) = unbounded();
@@ -555,7 +555,7 @@ impl ProductionRunnerBuilder {
         // shard's own pinned-thread callback channel — callbacks,
         // network handlers, and RPC fanout for that shard land on its
         // thread directly.
-        let shard_event_senders: BTreeMap<ShardId, Sender<ShardEvent>> = shard_callback_txs
+        let shard_event_senders: BTreeMap<ShardId, Sender<HostEvent>> = shard_callback_txs
             .iter()
             .map(|(s, tx)| (*s, tx.clone()))
             .collect();
@@ -875,7 +875,7 @@ impl ProductionRunner {
                 genesis_block.header().state_root(),
                 ChainOrigin::ROOT,
             ));
-            let genesis_commit_output = host.step(ShardEvent::protocol(
+            let genesis_commit_output = host.step(HostEvent::protocol(
                 shard,
                 ProtocolEvent::BlockCommitted {
                     certified: genesis_certified,
@@ -1311,9 +1311,9 @@ pub type ProdShardLoop = ShardLoop<SharedStorage, Libp2pNetwork, PooledDispatch>
 /// during construction and consumed when [`ProductionRunner::run`]
 /// hands the bundle to [`run_shard_loop`].
 pub struct ShardChannels {
-    pub(crate) timer_tx: Sender<ShardEvent>,
-    pub(crate) timer_rx: Receiver<ShardEvent>,
-    pub(crate) callback_rx: Receiver<ShardEvent>,
+    pub(crate) timer_tx: Sender<HostEvent>,
+    pub(crate) timer_rx: Receiver<HostEvent>,
+    pub(crate) callback_rx: Receiver<HostEvent>,
     pub(crate) shutdown_tx: Sender<()>,
     pub(crate) shutdown_rx: Receiver<()>,
 }
@@ -1324,12 +1324,12 @@ pub struct ShardChannels {
 /// into the crossbeam timer channel.
 struct ProdTimerManager {
     tokio_handle: TokioHandle,
-    timer_tx: Sender<ShardEvent>,
+    timer_tx: Sender<HostEvent>,
     active: HashMap<(ShardId, TimerId), JoinHandle<()>>,
 }
 
 impl ProdTimerManager {
-    fn new(tokio_handle: TokioHandle, timer_tx: Sender<ShardEvent>) -> Self {
+    fn new(tokio_handle: TokioHandle, timer_tx: Sender<HostEvent>) -> Self {
         Self {
             tokio_handle,
             timer_tx,
@@ -1440,9 +1440,9 @@ pub fn consensus_clock(genesis_offset_ms: u64) -> LocalTimestamp {
 
 /// Per-shard pinned-thread configuration.
 pub struct ShardLoopConfig {
-    pub(crate) timer_tx: Sender<ShardEvent>,
-    pub(crate) timer_rx: Receiver<ShardEvent>,
-    pub(crate) callback_rx: Receiver<ShardEvent>,
+    pub(crate) timer_tx: Sender<HostEvent>,
+    pub(crate) timer_rx: Receiver<HostEvent>,
+    pub(crate) callback_rx: Receiver<HostEvent>,
     pub(crate) shutdown_rx: Receiver<()>,
     pub(crate) tokio_handle: TokioHandle,
     pub(crate) initial_timer_ops: Vec<TimerOp>,
@@ -1516,13 +1516,19 @@ fn run_shard_loop(mut shard_loop: ProdShardLoop, mut config: ShardLoopConfig) {
 
         if let Some(event) = event {
             let input = match event {
-                ShardEvent::Shard(s, input) if s == shard => input,
-                ShardEvent::Shard(other, _) => {
+                HostEvent::Shard(s, input) if s == shard => input,
+                HostEvent::Shard(other, _) => {
                     warn!(received_shard = ?other, this_shard = ?shard, "Dropping cross-shard event");
                     continue;
                 }
-                ShardEvent::Process(_) => {
+                HostEvent::Process(_) => {
                     warn!(shard = ?shard, "Dropping process-scoped event on shard channel");
+                    continue;
+                }
+                HostEvent::Beacon(_) => {
+                    // Pooled followers run on their own driver (deferred to the
+                    // production pool path); never on a shard's thread.
+                    warn!(shard = ?shard, "Dropping beacon-pool event on shard channel");
                     continue;
                 }
             };

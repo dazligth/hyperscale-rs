@@ -124,6 +124,19 @@ impl NodeStateMachine {
         }
     }
 
+    /// Create a beacon-following node state machine that runs no shard
+    /// consensus (`shard: None`). It folds the beacon, tracks topology, and is
+    /// drawable/seatable; the shard half is attached only when it is seated.
+    #[must_use]
+    pub const fn follower(me: ValidatorId, beacon_coordinator: BeaconCoordinator) -> Self {
+        Self {
+            beacon_coordinator,
+            now: LocalTimestamp::ZERO,
+            me,
+            shard: None,
+        }
+    }
+
     // ─── Accessors ──────────────────────────────────────────────────────
 
     /// The seated shard half. Panics if this vnode only follows the beacon —
@@ -139,6 +152,14 @@ impl NodeStateMachine {
     #[must_use]
     pub const fn shard_id(&self) -> ShardId {
         self.participation().local_shard
+    }
+
+    /// This vnode's seated shard, or `None` when it only follows the beacon.
+    /// Used by [`NodeHost::new`](crate::host::NodeHost::new) to split vnodes
+    /// into per-shard groups and the beacon-follower pool.
+    #[must_use]
+    pub fn seated_shard(&self) -> Option<ShardId> {
+        self.shard.as_ref().map(|s| s.local_shard)
     }
 
     /// Get this node's validator identity.

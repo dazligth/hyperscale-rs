@@ -34,6 +34,7 @@ pub mod bootstrap;
 mod config;
 pub mod event;
 pub mod host;
+pub mod pool_loop;
 pub mod process_io;
 mod shard_io;
 pub mod shard_loop;

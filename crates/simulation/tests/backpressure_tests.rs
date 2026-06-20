@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hyperscale_network_memory::NetworkConfig;
-use hyperscale_node::shard_loop::{ProcessScopedInput, ShardEvent};
+use hyperscale_node::shard_loop::{HostEvent, ProcessScopedInput};
 use hyperscale_simulation::SimulationRunner;
 use hyperscale_types::test_utils::test_validity_range;
 use hyperscale_types::{
@@ -101,7 +101,7 @@ fn test_single_shard_unaffected_by_backpressure() {
     runner.schedule_initial_event(
         0,
         Duration::ZERO,
-        ShardEvent::process(ProcessScopedInput::SubmitTransaction {
+        HostEvent::process(ProcessScopedInput::SubmitTransaction {
             tx: Arc::new(transaction),
         }),
     );
@@ -164,7 +164,7 @@ fn test_provision_coordinator_tracking() {
     runner.schedule_initial_event(
         0,
         Duration::ZERO,
-        ShardEvent::process(ProcessScopedInput::SubmitTransaction {
+        HostEvent::process(ProcessScopedInput::SubmitTransaction {
             tx: Arc::new(transaction),
         }),
     );
@@ -221,7 +221,7 @@ fn test_mempool_backpressure_integration() {
         runner.schedule_initial_event(
             0,
             Duration::from_millis(u64::from(i) * 10),
-            ShardEvent::process(ProcessScopedInput::SubmitTransaction {
+            HostEvent::process(ProcessScopedInput::SubmitTransaction {
                 tx: Arc::new(transaction),
             }),
         );
@@ -360,7 +360,7 @@ fn test_completed_tx_cleanup() {
     runner.schedule_initial_event(
         0,
         Duration::ZERO,
-        ShardEvent::process(ProcessScopedInput::SubmitTransaction {
+        HostEvent::process(ProcessScopedInput::SubmitTransaction {
             tx: Arc::new(transaction),
         }),
     );

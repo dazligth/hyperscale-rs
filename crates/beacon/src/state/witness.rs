@@ -35,13 +35,13 @@ pub(super) struct WitnessOutcome {
 
 impl WitnessOutcome {
     /// Route a per-witness validator-status event into the matching list.
-    fn record(&mut self, event: ShardEvent) {
+    fn record(&mut self, event: HostEvent) {
         match event {
-            ShardEvent::Registered(id) => self.registered.push(id),
-            ShardEvent::Deactivated(id) => self.deactivated.push(id),
-            ShardEvent::Jailed(id) => self.jailed.push(id),
-            ShardEvent::Unjailed(id) => self.unjailed.push(id),
-            ShardEvent::Readied(id) => self.readied.push(id),
+            HostEvent::Registered(id) => self.registered.push(id),
+            HostEvent::Deactivated(id) => self.deactivated.push(id),
+            HostEvent::Jailed(id) => self.jailed.push(id),
+            HostEvent::Unjailed(id) => self.unjailed.push(id),
+            HostEvent::Readied(id) => self.readied.push(id),
         }
     }
 
@@ -60,7 +60,7 @@ impl WitnessOutcome {
 /// `StakeDeposit` and `StakeWithdraw` payloads mutate pool state but
 /// produce no validator-level event (caller sees `None`).
 #[derive(Clone, Copy)]
-pub(super) enum ShardEvent {
+pub(super) enum HostEvent {
     Registered(ValidatorId),
     Deactivated(ValidatorId),
     Jailed(ValidatorId),
@@ -158,7 +158,7 @@ pub(super) fn apply_contribution_witnesses(
 /// `StakeDeposit` and `StakeWithdraw` mutate pool state without
 /// producing a validator-level event — they return `None`. Variants
 /// that change validator status return the corresponding
-/// [`ShardEvent`] for [`apply_contribution_witnesses`] to route into
+/// [`HostEvent`] for [`apply_contribution_witnesses`] to route into
 /// [`WitnessOutcome`].
 ///
 /// `source_shard` is the shard that emitted the witness (carried in
@@ -172,7 +172,7 @@ pub(super) fn apply_shard_payload(
     state: &mut BeaconState,
     source_shard: ShardId,
     payload: &ShardWitnessPayload,
-) -> Option<ShardEvent> {
+) -> Option<HostEvent> {
     match payload {
         ShardWitnessPayload::StakeDeposit { pool_id, amount } => {
             // Implicit pool creation on first deposit; subsequent
@@ -250,7 +250,7 @@ pub(super) fn apply_shard_payload(
                 .expect("pool existence checked above")
                 .validators
                 .insert(*validator_id);
-            Some(ShardEvent::Registered(*validator_id))
+            Some(HostEvent::Registered(*validator_id))
         }
         ShardWitnessPayload::DeactivateValidator { validator_id } => {
             // Operator-initiated retirement. Flips to
@@ -274,7 +274,7 @@ pub(super) fn apply_shard_payload(
                 return None;
             }
             deactivate_to_insufficient_stake(state, *validator_id);
-            Some(ShardEvent::Deactivated(*validator_id))
+            Some(HostEvent::Deactivated(*validator_id))
         }
         ShardWitnessPayload::Unjail { id } => {
             // Fault-cause jails return to `Pooled` once cooldown has
@@ -310,7 +310,7 @@ pub(super) fn apply_shard_payload(
                 .get_mut(id)
                 .expect("rec read above guarantees presence")
                 .status = ValidatorStatus::Pooled;
-            Some(ShardEvent::Unjailed(*id))
+            Some(HostEvent::Unjailed(*id))
         }
         ShardWitnessPayload::ParamVote(vote) => {
             // The source committee attests `pool` voted this way; the
@@ -352,7 +352,7 @@ pub(super) fn apply_shard_payload(
                     ready: true,
                     placed_at_epoch,
                 };
-                Some(ShardEvent::Readied(*id))
+                Some(HostEvent::Readied(*id))
             } else {
                 None
             }
@@ -391,7 +391,7 @@ pub(super) fn apply_shard_payload(
                 JailReason::Performance,
                 state.current_epoch,
             );
-            Some(ShardEvent::Jailed(*proposer_id))
+            Some(HostEvent::Jailed(*proposer_id))
         }
         ShardWitnessPayload::ScheduleSplit { shard } => {
             // Source pinning: only the shard itself asserts its split.

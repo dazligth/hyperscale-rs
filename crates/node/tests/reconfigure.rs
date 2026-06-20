@@ -5,20 +5,21 @@
 //! registry's request map (serving), gossip fan-out into the event
 //! channel (routing), and the host's own shard accessors.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use crossbeam::channel::unbounded;
 use hyperscale_beacon::coordinator::BeaconCoordinator;
 use hyperscale_beacon::genesis::build_genesis_beacon_state;
+use hyperscale_core::ProtocolEvent;
 use hyperscale_dispatch_sync::SyncDispatch;
 use hyperscale_engine::{RadixExecutor, TransactionValidation};
 use hyperscale_execution::{ExecCertStore, FinalizedWaveStore};
 use hyperscale_mempool::{MempoolConfig, TxStore};
 use hyperscale_network::HandlerRegistry;
 use hyperscale_network_memory::SimNetworkAdapter;
-use hyperscale_node::shard_loop::{ShardEvent, ShardScopedInput};
+use hyperscale_node::shard_loop::{HostEvent, ShardScopedInput};
 use hyperscale_node::{NodeConfig, NodeHost, NodeStateMachine, VnodeInit};
 use hyperscale_provisions::{ProvisionConfig, ProvisionStore};
 use hyperscale_shard::ShardConsensusConfig;
@@ -30,10 +31,10 @@ use hyperscale_types::network::request::GetBlockRequest;
 use hyperscale_types::test_utils::test_transaction;
 use hyperscale_types::{
     BeaconChainConfig, BeaconGenesisConfig, BeaconState, BlockHeight, Bls12381G1PrivateKey,
-    CertifiedBeaconBlock, GenesisConfigHash, GenesisPool, GenesisValidator, MIN_STAKE_FLOOR,
-    NetworkDefinition, Randomness, ShardId, Stake, StakePoolId, TopologySnapshot, ValidatorId,
-    ValidatorInfo, ValidatorSet, Verified, WeightedTimestamp, genesis_config_hash,
-    shard_prefix_path,
+    CertifiedBeaconBlock, GenesisConfigHash, GenesisPool, GenesisValidator, LocalTimestamp,
+    MIN_STAKE_FLOOR, NetworkDefinition, Randomness, ShardId, Stake, StakePoolId, TopologySnapshot,
+    ValidatorId, ValidatorInfo, ValidatorSet, Verifiable, Verified, WeightedTimestamp,
+    genesis_config_hash, shard_prefix_path,
 };
 
 const SHARD_A: ShardId = ShardId::leaf(1, 0);
@@ -150,6 +151,27 @@ impl Fixture {
             ),
         }
     }
+
+    /// A shard-less, beacon-following vnode for `committee[idx]`.
+    fn pooled_vnode_init(&self, idx: usize) -> VnodeInit {
+        let me = self.committee.validator_id(idx);
+        let beacon = BeaconCoordinator::new(
+            Arc::clone(&self.genesis_block),
+            vec![self.genesis_state.clone()],
+            me,
+            ShardId::ROOT,
+            WeightedTimestamp::ZERO,
+            NetworkDefinition::simulator(),
+            self.config_hash,
+        );
+        VnodeInit {
+            state: NodeStateMachine::follower(me, beacon),
+            signing_key: Arc::new(
+                Bls12381G1PrivateKey::from_bytes(&self.committee.keypair(idx).to_bytes())
+                    .expect("valid key bytes"),
+            ),
+        }
+    }
 }
 
 fn block_request() -> GetBlockRequest {
@@ -216,7 +238,7 @@ fn add_and_remove_shard_at_runtime() {
     let event = event_rx
         .try_recv()
         .expect("gossip for the added shard routes to its channel");
-    assert!(matches!(event, ShardEvent::Shard(s, _) if s == SHARD_B));
+    assert!(matches!(event, HostEvent::Shard(s, _) if s == SHARD_B));
     // The host steps the routed event without panicking.
     let _ = host.step(event);
 
@@ -238,7 +260,7 @@ fn add_and_remove_shard_at_runtime() {
         "gossip for a dropped shard must not route"
     );
     // Events still addressed to the dropped shard are discarded, not a panic.
-    let _ = host.step(ShardEvent::shard(SHARD_B, ShardScopedInput::FetchTick));
+    let _ = host.step(HostEvent::shard(SHARD_B, ShardScopedInput::FetchTick));
 
     // Re-join: the shard registers afresh.
     host.add_shard(
@@ -251,6 +273,55 @@ fn add_and_remove_shard_at_runtime() {
             .local_dispatch_request(SHARD_B, block_request())
             .is_some(),
         "a re-added shard serves again"
+    );
+}
+
+/// A host built with only shard-less vnodes hosts no shards but drives a
+/// beacon-follower pool: the vnode lands in the pool, and routing a beacon
+/// event to it folds without panic. A block at/behind the tip is ignored, so
+/// no seat trigger surfaces.
+#[test]
+fn pooled_vnode_builds_into_the_pool_and_follows_the_beacon() {
+    let fix = fixture();
+    let registry = Arc::new(HandlerRegistry::new(BTreeSet::new()));
+    let network = SimNetworkAdapter::new(Arc::clone(&registry));
+    let (event_tx, _event_rx) = unbounded::<HostEvent>();
+    let beacon_storage: Arc<dyn BeaconStorage> = Arc::new(SimBeaconStorage::new());
+    beacon_storage.commit_beacon_block(&fix.genesis_block, &Arc::new(fix.genesis_state.clone()));
+    drop(event_tx);
+
+    let mut host = NodeHost::new(
+        vec![fix.pooled_vnode_init(0)],
+        HashMap::<ShardId, SimShardStorage>::new(),
+        Arc::clone(&beacon_storage),
+        NetworkDefinition::simulator(),
+        RadixExecutor::new(NetworkDefinition::simulator()),
+        network,
+        SyncDispatch,
+        BTreeMap::new(),
+        Arc::new(ArcSwap::from(Arc::clone(&fix.topology))),
+        NodeConfig::default(),
+        Arc::new(TransactionValidation::new(NetworkDefinition::simulator())),
+    );
+    host.register_inbound_handlers();
+
+    assert_eq!(
+        host.hosted_shards().count(),
+        0,
+        "a host of only followers carries no shards"
+    );
+    assert_eq!(host.pooled_len(), 1, "the follower built into the pool");
+
+    // Route a beacon event to the pool. The genesis block is at the tip, so the
+    // coordinator ignores it — the assertion is that it routes and folds
+    // without panic and raises no seat trigger.
+    host.set_time(LocalTimestamp::from_millis(1_000));
+    let out = host.step(HostEvent::beacon(ProtocolEvent::BeaconBlockReceived {
+        block: Arc::new(Verifiable::from((*fix.genesis_block).clone())),
+    }));
+    assert!(
+        out.reconfigurations.is_empty(),
+        "re-delivering the tip raises no participation change"
     );
 }
 

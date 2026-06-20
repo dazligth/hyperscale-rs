@@ -1,17 +1,20 @@
 //! Inputs to the I/O loop, partitioned by routing scope.
 //!
-//! [`ShardEvent`] is the envelope the runner pushes into the event
-//! channel. It is a typed sum over the two routing scopes:
+//! [`HostEvent`] is the envelope the runner pushes into the event
+//! channel. It is a typed sum over the three drivers a
+//! [`NodeHost`](crate::host::NodeHost) routes to:
 //!
-//! - [`ShardEvent::Shard`] carries a [`ShardScopedInput`] tagged with
+//! - [`HostEvent::Shard`] carries a [`ShardScopedInput`] tagged with
 //!   the hosted-shard id it routes to. Every shard-coherent input
 //!   (gossip, sync, fetch results, BLS-verified headers, protocol
 //!   events) lives here.
-//! - [`ShardEvent::Process`] carries a [`ProcessScopedInput`] with no
+//! - [`HostEvent::Process`] carries a [`ProcessScopedInput`] with no
 //!   shard tag — inputs that fan out across every hosted shard.
+//! - [`HostEvent::Beacon`] carries a beacon [`ProtocolEvent`] routed to
+//!   the host's pool of shard-less followers.
 //!
 //! The typed sum lets `step()` dispatch via exhaustive match without a
-//! runtime shard-presence check.
+//! runtime scope check.
 
 use std::sync::Arc;
 
@@ -83,7 +86,7 @@ pub enum FetchFailureKind {
 /// Every variant either targets the consensus of one shard (the
 /// `Protocol(_)` passthrough, gossip arrivals, sync callbacks) or is
 /// a tracking-set fixup for that shard's pipeline (`*FetchFailed`,
-/// `TransactionValidated`, …). The [`ShardEvent::Shard`] envelope
+/// `TransactionValidated`, …). The [`HostEvent::Shard`] envelope
 /// carries the routing tag alongside; downstream callbacks capture
 /// the shard at dispatch time and stamp every result.
 #[derive(Debug, Clone, strum::IntoStaticStr)]
@@ -378,7 +381,7 @@ pub enum ShardScopedInput {
     /// pinned thread — rayon workers swallow panics by default, so the
     /// worker reports the divergence through this input rather than
     /// panicking itself. Boxed because the variant is rare and would
-    /// otherwise inflate every other `ShardEvent` in the queue.
+    /// otherwise inflate every other `HostEvent` in the queue.
     QcOnlyCommitDiverged(Box<QcOnlyDivergence>),
 }
 
@@ -481,22 +484,27 @@ impl ProcessScopedInput {
     }
 }
 
-/// An input plus the routing scope the I/O loop's `step()` uses to
-/// dispatch it.
+/// An input plus the driver the I/O loop's `step()` routes it to.
 ///
-/// The shard variant carries the hosted-shard tag inline; the process
-/// variant has no tag because it isn't anchored to one shard.
+/// The shard variant carries the hosted-shard tag inline; the process and
+/// beacon variants have no tag — the process fan is host-wide, and a host runs
+/// at most one follower pool.
 #[derive(Debug, Clone)]
-pub enum ShardEvent {
+pub enum HostEvent {
     /// Routed to the hosted shard identified by [`ShardId`]. Fans
     /// to every vnode in that shard for state-machine events; handled
     /// once for shard-scoped pipeline fixups.
     Shard(ShardId, ShardScopedInput),
     /// Process-scoped — not anchored to a single shard.
     Process(ProcessScopedInput),
+    /// Beacon-scoped — routed to the host's pool of shard-less
+    /// followers (the [`PoolLoop`](crate::pool_loop::PoolLoop)). Carries
+    /// a beacon [`ProtocolEvent`] the pooled vnodes fold; shard hosts
+    /// receive beacon events through their per-shard channels instead.
+    Beacon(Box<ProtocolEvent>),
 }
 
-impl ShardEvent {
+impl HostEvent {
     /// Construct a shard-scoped envelope.
     #[must_use]
     pub const fn shard(shard: ShardId, input: ShardScopedInput) -> Self {
@@ -515,12 +523,24 @@ impl ShardEvent {
         Self::Shard(shard, ShardScopedInput::Protocol(Box::new(event)))
     }
 
+    /// Construct a beacon-scoped envelope for the host's pool.
+    #[must_use]
+    pub fn beacon(event: ProtocolEvent) -> Self {
+        Self::Beacon(Box::new(event))
+    }
+
     /// Priority for ordering events at the same simulation timestamp.
     #[must_use]
     pub fn priority(&self) -> EventPriority {
         match self {
             Self::Shard(_, input) => input.priority(),
             Self::Process(input) => input.priority(),
+            // Inbound beacon gossip is a network input; everything else a
+            // pooled follower sees is a self-driven continuation.
+            Self::Beacon(event) => match event.as_ref() {
+                ProtocolEvent::BeaconBlockReceived { .. } => EventPriority::Network,
+                _ => EventPriority::Internal,
+            },
         }
     }
 
@@ -530,6 +550,7 @@ impl ShardEvent {
         match self {
             Self::Shard(_, input) => input.type_name(),
             Self::Process(input) => input.type_name(),
+            Self::Beacon(event) => event.type_name(),
         }
     }
 }

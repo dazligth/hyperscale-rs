@@ -4,7 +4,7 @@ use std::cmp::Ordering;
 use std::time::Duration;
 
 use hyperscale_network_memory::NodeIndex;
-use hyperscale_node::shard_loop::{EventPriority, ShardEvent};
+use hyperscale_node::shard_loop::{EventPriority, HostEvent};
 
 /// Key for ordering events in the queue.
 ///
@@ -26,8 +26,8 @@ pub struct EventKey {
 }
 
 impl EventKey {
-    /// Create a new event key from a [`ShardEvent`].
-    pub fn new(time: Duration, event: &ShardEvent, node_index: NodeIndex, sequence: u64) -> Self {
+    /// Create a new event key from a [`HostEvent`].
+    pub fn new(time: Duration, event: &HostEvent, node_index: NodeIndex, sequence: u64) -> Self {
         Self {
             time,
             priority: event.priority(),

@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hyperscale_network_memory::NetworkConfig;
-use hyperscale_node::shard_loop::{ProcessScopedInput, ShardEvent};
+use hyperscale_node::shard_loop::{HostEvent, ProcessScopedInput};
 use hyperscale_simulation::{EPOCH_MS, SimulationRunner};
 use hyperscale_storage::{ShardChainReader, SubstateStore};
 use hyperscale_storage_memory::SimShardStorage;
@@ -272,7 +272,7 @@ fn observers_grow_a_split_through_its_readiness_gate() {
     runner.schedule_initial_event(
         0,
         Duration::from_millis(50),
-        ShardEvent::process(ProcessScopedInput::SubmitTransaction {
+        HostEvent::process(ProcessScopedInput::SubmitTransaction {
             tx: Arc::new(transfer),
         }),
     );

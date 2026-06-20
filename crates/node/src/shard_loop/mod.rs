@@ -42,7 +42,7 @@ pub use status::{NodeStatusSnapshot, ShardStatus, VnodeStatus};
 
 use crate::batch_accumulator::BatchAccumulator;
 pub use crate::event::{
-    EventPriority, FetchFailureKind, ProcessScopedInput, ShardEvent, ShardScopedInput,
+    EventPriority, FetchFailureKind, HostEvent, ProcessScopedInput, ShardScopedInput,
 };
 use crate::process_io::{BeaconProposalCache, ProcessIo};
 use crate::shard_io::ShardIo;
@@ -151,22 +151,22 @@ pub enum TimerOp {
     },
 }
 
-/// Translate a fired [`TimerId`] back into the [`ShardEvent`] the runner
+/// Translate a fired [`TimerId`] back into the [`HostEvent`] the runner
 /// pushes onto its event channel. Every variant produces a
-/// [`ShardEvent::Shard`] envelope tagged with the owning shard.
+/// [`HostEvent::Shard`] envelope tagged with the owning shard.
 #[must_use]
-pub fn timer_event(id: &TimerId, shard: ShardId) -> ShardEvent {
+pub fn timer_event(id: &TimerId, shard: ShardId) -> HostEvent {
     match id {
-        TimerId::ViewChange => ShardEvent::protocol(shard, ProtocolEvent::ViewChangeTimer),
-        TimerId::Cleanup => ShardEvent::protocol(shard, ProtocolEvent::CleanupTimer),
-        TimerId::FetchTick => ShardEvent::shard(shard, ShardScopedInput::FetchTick),
+        TimerId::ViewChange => HostEvent::protocol(shard, ProtocolEvent::ViewChangeTimer),
+        TimerId::Cleanup => HostEvent::protocol(shard, ProtocolEvent::CleanupTimer),
+        TimerId::FetchTick => HostEvent::shard(shard, ShardScopedInput::FetchTick),
         TimerId::BeaconCommitteeStart => {
-            ShardEvent::protocol(shard, ProtocolEvent::BeaconCommitteeStartTimer)
+            HostEvent::protocol(shard, ProtocolEvent::BeaconCommitteeStartTimer)
         }
-        TimerId::BeaconSkipTrigger => ShardEvent::protocol(shard, ProtocolEvent::BeaconSkipTimer),
-        TimerId::BeaconSpcView => ShardEvent::protocol(shard, ProtocolEvent::BeaconSpcViewTimer),
+        TimerId::BeaconSkipTrigger => HostEvent::protocol(shard, ProtocolEvent::BeaconSkipTimer),
+        TimerId::BeaconSpcView => HostEvent::protocol(shard, ProtocolEvent::BeaconSpcViewTimer),
         TimerId::BeaconSpcInputDwell => {
-            ShardEvent::protocol(shard, ProtocolEvent::BeaconSpcInputDwellTimer)
+            HostEvent::protocol(shard, ProtocolEvent::BeaconSpcInputDwellTimer)
         }
     }
 }
@@ -182,16 +182,16 @@ pub fn timer_event(id: &TimerId, shard: ShardId) -> ShardEvent {
 /// failure is silently ignored by design (the only failure mode is the
 /// receiver having been dropped at shutdown, in which case there's
 /// nothing to do).
-pub(crate) fn push_shard_input(tx: &Sender<ShardEvent>, shard: ShardId, input: ShardScopedInput) {
-    let _ = tx.send(ShardEvent::shard(shard, input));
+pub(crate) fn push_shard_input(tx: &Sender<HostEvent>, shard: ShardId, input: ShardScopedInput) {
+    let _ = tx.send(HostEvent::shard(shard, input));
 }
 
 /// Push a [`ProtocolEvent`] (wrapped in
 /// [`ShardScopedInput::Protocol`]) into the event channel.
 /// The receiver fans the event across every hosted vnode in `shard`.
 /// See [`push_shard_input`] for the drop-on-shutdown convention.
-pub(crate) fn push_protocol_event(tx: &Sender<ShardEvent>, shard: ShardId, event: ProtocolEvent) {
-    let _ = tx.send(ShardEvent::protocol(shard, event));
+pub(crate) fn push_protocol_event(tx: &Sender<HostEvent>, shard: ShardId, event: ProtocolEvent) {
+    let _ = tx.send(HostEvent::protocol(shard, event));
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -244,7 +244,7 @@ where
     /// with the loop and torn down with it, so the handle is cached here
     /// rather than looked up through `ProcessIo`'s swappable map on
     /// every dispatch.
-    pub(crate) event_tx: Sender<ShardEvent>,
+    pub(crate) event_tx: Sender<HostEvent>,
     /// Process-scoped resources shared with every other hosted shard:
     /// network adapter, dispatch pool, tx validator, topology snapshot,
     /// dispatch handles, event sender. Cloned `Arc` so off-thread
@@ -299,7 +299,7 @@ where
     /// every callback this loop spawns (block-commit completions, fetch
     /// results, BLS-verify outcomes) and every protocol event it pushes
     /// back to itself.
-    pub(crate) const fn event_sender(&self) -> &Sender<ShardEvent> {
+    pub(crate) const fn event_sender(&self) -> &Sender<HostEvent> {
         &self.event_tx
     }
 

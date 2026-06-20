@@ -20,7 +20,7 @@ use hyperscale_network_memory::{
     BandwidthReport, HostingMode, NetworkConfig, NetworkTrafficAnalyzer, NodeIndex,
     SimNetworkAdapter, SimulatedNetwork,
 };
-use hyperscale_node::shard_loop::{ShardEvent, StepOutput};
+use hyperscale_node::shard_loop::{HostEvent, StepOutput};
 use hyperscale_node::{NodeConfig, NodeHost, NodeStateMachine, TimerOp, VnodeInit, timer_event};
 use hyperscale_provisions::{ProvisionConfig, ProvisionStore};
 use hyperscale_shard::ShardConsensusConfig;
@@ -77,11 +77,11 @@ pub struct SimulationRunner {
     hosts: Vec<SimHost>,
 
     /// Per-node event receivers (from crossbeam channels passed to `NodeHost`).
-    event_rxs: Vec<Receiver<ShardEvent>>,
+    event_rxs: Vec<Receiver<HostEvent>>,
 
     /// Per-node event senders, retained so a shard added at runtime
     /// (vnode relocation) can be wired onto the host's existing channel.
-    event_txs: Vec<Sender<ShardEvent>>,
+    event_txs: Vec<Sender<HostEvent>>,
 
     /// Signing keys for every registered validator, retained so a
     /// relocated vnode's state machine can be rebuilt on its new shard.
@@ -102,7 +102,7 @@ pub struct SimulationRunner {
     pending_reconfigurations: Vec<(NodeIndex, ParticipationChange)>,
 
     /// Global event queue, ordered deterministically.
-    event_queue: BTreeMap<EventKey, ShardEvent>,
+    event_queue: BTreeMap<EventKey, HostEvent>,
 
     /// Sequence counter for deterministic ordering.
     sequence: u64,
@@ -402,7 +402,7 @@ impl SimulationRunner {
             // Single receiver per host: every hosted shard's sender is a
             // clone of the same `event_tx`, and the harness drains all
             // shards through `event_rx` deterministically.
-            let shard_event_senders: BTreeMap<ShardId, Sender<ShardEvent>> =
+            let shard_event_senders: BTreeMap<ShardId, Sender<HostEvent>> =
                 by_shard.keys().map(|s| (*s, event_tx.clone())).collect();
             let host = NodeHost::new(
                 vnode_inits,
@@ -677,10 +677,10 @@ impl SimulationRunner {
 
     /// Schedule an initial event (e.g., to start the simulation).
     /// Schedule an event for initial delivery. The event must be wrapped
-    /// in the appropriate [`ShardEvent`] envelope: shard-scoped variants
-    /// via [`ShardEvent::shard`] / [`ShardEvent::protocol`],
-    /// `SubmitTransaction` via [`ShardEvent::process`].
-    pub fn schedule_initial_event(&mut self, node: NodeIndex, delay: Duration, event: ShardEvent) {
+    /// in the appropriate [`HostEvent`] envelope: shard-scoped variants
+    /// via [`HostEvent::shard`] / [`HostEvent::protocol`],
+    /// `SubmitTransaction` via [`HostEvent::process`].
+    pub fn schedule_initial_event(&mut self, node: NodeIndex, delay: Duration, event: HostEvent) {
         let time = self.now + delay;
         self.schedule_event(node, time, event);
     }
@@ -841,7 +841,7 @@ impl SimulationRunner {
                     genesis_jmt_root,
                     ChainOrigin::ROOT,
                 ));
-                let genesis_commit_event = ShardEvent::protocol(
+                let genesis_commit_event = HostEvent::protocol(
                     shard,
                     ProtocolEvent::BlockCommitted {
                         certified: genesis_certified,
@@ -1077,7 +1077,7 @@ impl SimulationRunner {
     // Helpers
     // ═══════════════════════════════════════════════════════════════════════
 
-    fn schedule_event(&mut self, node: NodeIndex, time: Duration, event: ShardEvent) -> EventKey {
+    fn schedule_event(&mut self, node: NodeIndex, time: Duration, event: HostEvent) -> EventKey {
         self.sequence += 1;
         let key = EventKey::new(time, &event, node, self.sequence);
         self.event_queue.insert(key, event);

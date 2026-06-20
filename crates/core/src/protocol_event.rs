@@ -58,7 +58,7 @@ impl CommitSource {
 /// These are the typed protocol events that `NodeStateMachine::handle()`
 /// receives. No I/O callbacks, no intercepted events, no dead arms.
 ///
-/// `IoLoop` translates each `ShardEvent` into a `ProtocolEvent` before
+/// `IoLoop` translates each `HostEvent` into a `ProtocolEvent` before
 /// passing it to the state machine.
 #[derive(Debug, Clone, strum::IntoStaticStr)]
 pub enum ProtocolEvent {

@@ -39,7 +39,7 @@ use hyperscale_types::{
 
 use super::Fetch;
 use super::host::FetchHost;
-use crate::shard_loop::{ShardEvent, ShardScopedInput, push_protocol_event, push_shard_input};
+use crate::shard_loop::{HostEvent, ShardScopedInput, push_protocol_event, push_shard_input};
 
 // ─── Type aliases used across the module tree ──────────────────────────
 
@@ -102,7 +102,7 @@ pub trait FetchBinding: 'static {
         preferred: Option<ValidatorId>,
         class: Option<MessageClass>,
         network: &N,
-        sender: &Sender<ShardEvent>,
+        sender: &Sender<HostEvent>,
     );
 }
 
@@ -177,7 +177,7 @@ impl FetchBinding for TransactionBinding {
         preferred: Option<ValidatorId>,
         class: Option<MessageClass>,
         network: &N,
-        sender: &Sender<ShardEvent>,
+        sender: &Sender<HostEvent>,
     ) {
         let es = sender.clone();
         let hs = ids.clone();
@@ -245,7 +245,7 @@ impl FetchBinding for LocalProvisionBinding {
         preferred: Option<ValidatorId>,
         class: Option<MessageClass>,
         network: &N,
-        sender: &Sender<ShardEvent>,
+        sender: &Sender<HostEvent>,
     ) {
         let es = sender.clone();
         let hs = ids.clone();
@@ -331,7 +331,7 @@ impl FetchBinding for FinalizedWaveBinding {
         preferred: Option<ValidatorId>,
         class: Option<MessageClass>,
         network: &N,
-        sender: &Sender<ShardEvent>,
+        sender: &Sender<HostEvent>,
     ) {
         let es = sender.clone();
         let requested_ids = ids.clone();
@@ -406,7 +406,7 @@ impl FetchBinding for ExecCertBinding {
         preferred: Option<ValidatorId>,
         class: Option<MessageClass>,
         network: &N,
-        sender: &Sender<ShardEvent>,
+        sender: &Sender<HostEvent>,
     ) {
         let es = sender.clone();
         let failed_ids = ids.clone();
@@ -486,7 +486,7 @@ impl FetchBinding for ProvisionBinding {
         preferred: Option<ValidatorId>,
         class: Option<MessageClass>,
         network: &N,
-        sender: &Sender<ShardEvent>,
+        sender: &Sender<HostEvent>,
     ) {
         // PER_ID means the dispatcher hands us exactly one id at a time.
         debug_assert_eq!(ids.len(), 1);
@@ -587,7 +587,7 @@ impl FetchBinding for ShardWitnessBinding {
         preferred: Option<ValidatorId>,
         class: Option<MessageClass>,
         network: &N,
-        sender: &Sender<ShardEvent>,
+        sender: &Sender<HostEvent>,
     ) {
         debug_assert_eq!(ids.len(), 1, "PER_ID binding hands one id per chunk");
         let (source_shard, block_height, committed_block_hash, leaf_index) = ids[0];
@@ -668,7 +668,7 @@ impl FetchBinding for BeaconProposalBinding {
         preferred: Option<ValidatorId>,
         class: Option<MessageClass>,
         network: &N,
-        sender: &Sender<ShardEvent>,
+        sender: &Sender<HostEvent>,
     ) {
         debug_assert_eq!(ids.len(), 1, "PER_ID binding hands one id per chunk");
         let (epoch, validator) = ids[0];

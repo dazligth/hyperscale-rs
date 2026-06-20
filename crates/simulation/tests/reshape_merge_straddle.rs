@@ -28,7 +28,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hyperscale_network_memory::NetworkConfig;
-use hyperscale_node::shard_loop::{ProcessScopedInput, ShardEvent};
+use hyperscale_node::shard_loop::{HostEvent, ProcessScopedInput};
 use hyperscale_simulation::{EPOCH_MS, SimulationRunner};
 use hyperscale_storage::ShardChainReader;
 use hyperscale_storage_memory::SimShardStorage;
@@ -383,7 +383,7 @@ fn cross_shard_waves_resolve_atomically_across_a_merge() {
         runner.schedule_initial_event(
             0,
             Duration::from_millis(10),
-            ShardEvent::process(ProcessScopedInput::SubmitTransaction { tx }),
+            HostEvent::process(ProcessScopedInput::SubmitTransaction { tx }),
         );
     }
     let settle_hashes: Vec<TxHash> = probes.iter().map(|(_, hash)| *hash).collect();
@@ -451,7 +451,7 @@ fn cross_shard_waves_resolve_atomically_across_a_merge() {
         runner.schedule_initial_event(
             0,
             delay,
-            ShardEvent::process(ProcessScopedInput::SubmitTransaction { tx }),
+            HostEvent::process(ProcessScopedInput::SubmitTransaction { tx }),
         );
     }
     tl.mark(runner.now(), &format!("{} waves total", probes.len()));

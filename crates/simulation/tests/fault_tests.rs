@@ -15,7 +15,7 @@ use hyperscale_metrics::{MetricsRecorder, with_scoped_recorder};
 use hyperscale_metrics_memory::MemoryRecorder;
 use hyperscale_network_memory::{NetworkConfig, RuleHandle};
 use hyperscale_node::NodeStateMachine;
-use hyperscale_node::shard_loop::{ProcessScopedInput, ShardEvent};
+use hyperscale_node::shard_loop::{HostEvent, ProcessScopedInput};
 use hyperscale_simulation::{EPOCH_MS, SimulationRunner};
 use hyperscale_types::test_utils::test_validity_range;
 use hyperscale_types::{
@@ -205,7 +205,7 @@ fn transaction_fetch_fallback_when_gossip_dropped() {
         runner.schedule_initial_event(
             0,
             Duration::ZERO,
-            ShardEvent::process(ProcessScopedInput::SubmitTransaction { tx: Arc::new(tx) }),
+            HostEvent::process(ProcessScopedInput::SubmitTransaction { tx: Arc::new(tx) }),
         );
 
         runner.run_until(Duration::from_secs(10));
@@ -360,7 +360,7 @@ where
         runner.schedule_initial_event(
             submit_host,
             Duration::ZERO,
-            ShardEvent::process(ProcessScopedInput::SubmitTransaction { tx: Arc::new(tx) }),
+            HostEvent::process(ProcessScopedInput::SubmitTransaction { tx: Arc::new(tx) }),
         );
 
         // Cross-shard recovery in the grown sim runs a few cleanup-timer
