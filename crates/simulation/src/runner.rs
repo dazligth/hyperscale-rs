@@ -9,30 +9,31 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use crossbeam::channel::{Receiver, Sender, unbounded};
-use hyperscale_beacon::coordinator::BeaconCoordinator;
 use hyperscale_beacon::genesis::build_genesis_beacon_state;
 use hyperscale_core::{ParticipationChange, ProtocolEvent, TimerId};
 use hyperscale_dispatch_sync::SyncDispatch;
 use hyperscale_engine::{GenesisConfig, RadixExecutor, TransactionValidation};
-use hyperscale_execution::{ExecCertStore, FinalizedWaveStore};
-use hyperscale_mempool::{MempoolConfig, TxStore};
+use hyperscale_mempool::MempoolConfig;
 use hyperscale_network_memory::{
     BandwidthReport, HostingMode, NetworkConfig, NetworkTrafficAnalyzer, NodeIndex,
     SimNetworkAdapter, SimulatedNetwork,
 };
 use hyperscale_node::shard_loop::{HostEvent, StepOutput};
-use hyperscale_node::{NodeConfig, NodeHost, NodeStateMachine, TimerOp, VnodeInit, timer_event};
-use hyperscale_provisions::{ProvisionConfig, ProvisionStore};
+use hyperscale_node::{
+    NodeConfig, NodeHost, NodeStateMachine, SeatFollower, SeatVnodeGroup, TimerOp, VnodeInit,
+    seat_follower, seat_vnode_group, timer_event,
+};
+use hyperscale_provisions::ProvisionConfig;
 use hyperscale_shard::ShardConsensusConfig;
 use hyperscale_storage::{BeaconStorage, RecoveredState, ShardChainReader};
 use hyperscale_storage_memory::{SimBeaconStorage, SimShardStorage};
 use hyperscale_types::{
-    BeaconGenesisConfig, BeaconState, BlockHeight, Bls12381G1PrivateKey, Bls12381G1PublicKey,
-    CertifiedBeaconBlock, CertifiedBlock, ChainOrigin, Epoch, GenesisConfigHash, GenesisPool,
+    BeaconGenesisConfig, BlockHeight, Bls12381G1PrivateKey, Bls12381G1PublicKey,
+    CertifiedBeaconBlock, CertifiedBlock, ChainOrigin, GenesisConfigHash, GenesisPool,
     GenesisValidator, LocalTimestamp, MIN_STAKE_FLOOR, NodeId, Randomness, ShardId, Stake,
     StakePoolId, TopologySnapshot, TransactionStatus, TxHash, ValidatorId, ValidatorInfo,
-    ValidatorSet, Verified, WeightedTimestamp, bls_keypair_from_seed, genesis_config_hash,
-    shard_prefix_path, uniform_shard_for_node,
+    ValidatorSet, Verified, bls_keypair_from_seed, genesis_config_hash, shard_prefix_path,
+    uniform_shard_for_node,
 };
 use radix_common::math::Decimal;
 use radix_common::network::NetworkDefinition;
@@ -52,17 +53,6 @@ pub mod system_action;
 
 /// Type alias for the simulation's concrete `NodeHost`.
 type SimHost = NodeHost<SimShardStorage, SimNetworkAdapter, SyncDispatch>;
-
-/// Per-(host, shard) shared store bundle — `ProvisionStore`, `TxStore`,
-/// `ExecCertStore`, and `FinalizedWaveStore` cloned into every same-shard
-/// vnode on the host so the per-shard coordinators converge on one
-/// canonical view.
-type ShardStoreBundle = (
-    Arc<ProvisionStore>,
-    Arc<TxStore>,
-    Arc<ExecCertStore>,
-    Arc<FinalizedWaveStore>,
-);
 
 /// Deterministic simulation runner.
 ///
@@ -310,25 +300,6 @@ impl SimulationRunner {
                 by_shard.entry(shard).or_default().push(validator_idx);
             }
 
-            // Build per-(host, shard) store bundles. Vnodes in the same
-            // shard on the same host share the bundle. Per-shard scoping
-            // for `ProvisionStore` keeps a co-hosted source shard's
-            // `OutboundProvisionTracker` from evicting entries the target
-            // shard's inbound coordinator still needs to verify proposals
-            // against.
-            let mut shard_stores: HashMap<ShardId, ShardStoreBundle> = HashMap::new();
-            for shard in by_shard.keys() {
-                shard_stores.insert(
-                    *shard,
-                    (
-                        Arc::new(ProvisionStore::new()),
-                        Arc::new(TxStore::new()),
-                        Arc::new(ExecCertStore::new()),
-                        Arc::new(FinalizedWaveStore::new()),
-                    ),
-                );
-            }
-
             // Per-host beacon storage. Warm-restart: resume from the latest
             // committed (block, state); commit the genesis pair first on an
             // empty store so fresh-start and restart share one load path.
@@ -336,83 +307,53 @@ impl SimulationRunner {
             if beacon_storage.latest_committed_epoch().is_none() {
                 beacon_storage.commit_beacon_block(&beacon_genesis_block, &beacon_genesis_state);
             }
-            let (beacon_latest_block, _) = beacon_storage
-                .latest_committed()
-                .expect("beacon chain is non-empty after the genesis commit above");
 
-            // Load the full committed history: sim vnodes start with fresh
-            // shard chains (`RecoveredState::default()` anchors at genesis),
-            // so every committed epoch is still within the chain frontier.
-            let beacon_history: Vec<BeaconState> = beacon_storage
-                .states_since(Epoch::GENESIS)
-                .into_iter()
-                .map(|state| state.as_ref().clone())
-                .collect();
-
+            // Seat each host's vnodes. Same-shard vnodes share one store
+            // bundle, created inside `seat_vnode_group`; a dedicated pool
+            // host's validators follow the beacon shard-less. Genesis boots a
+            // fresh chain, so `recovered` is default and `now` is zero.
             let mut vnode_inits: Vec<VnodeInit> =
                 Vec::with_capacity(plan.seated.len() + plan.followers.len());
             for (shard, validator_idxs) in &by_shard {
-                let (provision_store, tx_store, exec_cert_store, fw_store) =
-                    shard_stores.get(shard).expect("shard bundle just inserted");
-                for &validator_idx in validator_idxs {
-                    let validator_id = ValidatorId::new(u64::from(validator_idx));
-                    let key_bytes = keys[validator_idx as usize].to_bytes();
-                    let signing_key = Arc::new(
-                        Bls12381G1PrivateKey::from_bytes(&key_bytes).expect("valid key bytes"),
-                    );
-
-                    let beacon_coordinator = BeaconCoordinator::new(
-                        Arc::clone(&beacon_latest_block),
-                        beacon_history.clone(),
-                        validator_id,
-                        *shard,
-                        WeightedTimestamp::ZERO,
-                        beacon_network.clone(),
-                        beacon_config_hash,
-                    );
-
-                    let state = NodeStateMachine::new(
-                        validator_id,
-                        *shard,
-                        &ShardConsensusConfig::default(),
-                        RecoveredState::default(),
-                        beacon_coordinator,
-                        MempoolConfig::default(),
-                        ProvisionConfig::default(),
-                        Arc::clone(provision_store),
-                        Arc::clone(tx_store),
-                        Arc::clone(exec_cert_store),
-                        Arc::clone(fw_store),
-                    );
-
-                    vnode_inits.push(VnodeInit { state, signing_key });
-                }
+                let vnodes: Vec<(ValidatorId, Arc<Bls12381G1PrivateKey>)> = validator_idxs
+                    .iter()
+                    .map(|&idx| {
+                        let key_bytes = keys[idx as usize].to_bytes();
+                        (
+                            ValidatorId::new(u64::from(idx)),
+                            Arc::new(
+                                Bls12381G1PrivateKey::from_bytes(&key_bytes)
+                                    .expect("valid key bytes"),
+                            ),
+                        )
+                    })
+                    .collect();
+                vnode_inits.extend(seat_vnode_group(SeatVnodeGroup {
+                    beacon_storage: beacon_storage.as_ref(),
+                    beacon_network: beacon_network.clone(),
+                    beacon_config_hash,
+                    now: LocalTimestamp::ZERO,
+                    shard: *shard,
+                    recovered: &RecoveredState::default(),
+                    shard_config: &ShardConsensusConfig::default(),
+                    mempool_config: MempoolConfig::default(),
+                    provision_config: ProvisionConfig::default(),
+                    vnodes,
+                }));
             }
-
-            // Shard-less beacon followers (dedicated pool hosts). Each runs
-            // the beacon spine with `shard: None`, keeping the host's beacon
-            // storage and topology warm until a grow or shuffle seats it; its
-            // `BeaconCoordinator` carries `ShardId::ROOT` as the placeholder
-            // home (only seeds the retention floor — no consensus effect).
             for &validator_idx in &plan.followers {
-                let validator_id = ValidatorId::new(u64::from(validator_idx));
                 let key_bytes = keys[validator_idx as usize].to_bytes();
                 let signing_key = Arc::new(
                     Bls12381G1PrivateKey::from_bytes(&key_bytes).expect("valid key bytes"),
                 );
-                let beacon_coordinator = BeaconCoordinator::new(
-                    Arc::clone(&beacon_latest_block),
-                    beacon_history.clone(),
-                    validator_id,
-                    ShardId::ROOT,
-                    WeightedTimestamp::ZERO,
-                    beacon_network.clone(),
+                vnode_inits.push(seat_follower(SeatFollower {
+                    beacon_storage: beacon_storage.as_ref(),
+                    beacon_network: beacon_network.clone(),
                     beacon_config_hash,
-                );
-                vnode_inits.push(VnodeInit {
-                    state: NodeStateMachine::follower(validator_id, beacon_coordinator),
+                    now: LocalTimestamp::ZERO,
+                    validator: ValidatorId::new(u64::from(validator_idx)),
                     signing_key,
-                });
+                }));
             }
             let topology_arc_for_host = Arc::new(ArcSwap::from(Arc::clone(&shared_topology)));
 
