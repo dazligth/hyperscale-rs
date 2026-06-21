@@ -101,7 +101,9 @@ impl Libp2pAdapter {
     ///
     /// # Panics
     ///
-    /// Panics if `vnodes` or `local_shards` is empty.
+    /// Panics if `vnodes` is empty. An empty `local_shards` is valid: a
+    /// shard-less beacon-follower (pool-only) host hosts no shard and joins
+    /// shards at runtime via [`Self::add_local_shard`].
     // Single setup path mirroring the libp2p builder structure.
     // `config` is taken by value: every caller constructs a fresh config and hands
     // it over, and the body picks fields out, so converting to `&Libp2pConfig`
@@ -119,10 +121,6 @@ impl Libp2pAdapter {
         assert!(
             !vnodes.is_empty(),
             "Libp2pAdapter needs at least one hosted vnode"
-        );
-        assert!(
-            !local_shards.is_empty(),
-            "Libp2pAdapter needs at least one hosted shard"
         );
         let local_peer_id = Libp2pPeerId::from(keypair.public());
         let local_validator_ids: Vec<ValidatorId> = vnodes.iter().map(|(vid, _)| *vid).collect();

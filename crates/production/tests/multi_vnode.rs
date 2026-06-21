@@ -12,17 +12,16 @@
 mod fixtures;
 mod support;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use fixtures::TestFixtures;
 use hyperscale_network_libp2p::Libp2pConfig;
-use hyperscale_production::{ProductionRunner, VnodeConfig};
+use hyperscale_production::{LocalValidator, ProductionRunner};
 use hyperscale_shard::ShardConsensusConfig;
 use hyperscale_storage::BeaconStorage;
-use hyperscale_storage_rocksdb::{RocksDbBeaconStorage, RocksDbShardStorage};
-use hyperscale_types::{ShardId, ValidatorId, shard_prefix_path};
+use hyperscale_storage_rocksdb::RocksDbBeaconStorage;
+use hyperscale_types::ValidatorId;
 use serial_test::serial;
 use support::{temp_storage_dir, temp_storage_factory};
 use tempfile::TempDir;
@@ -30,6 +29,15 @@ use tokio::task::spawn;
 use tokio::time::{sleep, timeout};
 use tracing::info;
 use tracing_subscriber::fmt;
+
+/// One validator this host runs; the runner derives its shard from the
+/// fixture topology's beacon genesis.
+fn validator(fixtures: &TestFixtures, idx: u32) -> LocalValidator {
+    LocalValidator {
+        validator_id: ValidatorId::new(u64::from(idx)),
+        signing_key: fixtures.signing_key(idx),
+    }
+}
 
 /// Spin up two hosts that each carry two same-shard vnodes, let them peer,
 /// and check that the multi-validator bind plumbing lands every hosted
@@ -48,20 +56,6 @@ async fn test_v2_same_shard_production_runner_binds_all_vnodes() {
 
     let temp_dir0 = TempDir::new().unwrap();
     let temp_dir1 = TempDir::new().unwrap();
-    let storage0 = Arc::new(
-        RocksDbShardStorage::open(
-            temp_dir0.path().join("db0"),
-            shard_prefix_path(ShardId::ROOT),
-        )
-        .unwrap(),
-    );
-    let storage1 = Arc::new(
-        RocksDbShardStorage::open(
-            temp_dir1.path().join("db1"),
-            shard_prefix_path(ShardId::ROOT),
-        )
-        .unwrap(),
-    );
 
     let network_config0 = Libp2pConfig {
         listen_addresses: vec!["/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()],
@@ -69,25 +63,13 @@ async fn test_v2_same_shard_production_runner_binds_all_vnodes() {
         ..Default::default()
     };
 
-    let host0_vnodes = vec![
-        VnodeConfig {
-            validator_id: ValidatorId::new(0),
-            local_shard: ShardId::ROOT,
-            signing_key: fixtures.signing_key(0),
-        },
-        VnodeConfig {
-            validator_id: ValidatorId::new(1),
-            local_shard: ShardId::ROOT,
-            signing_key: fixtures.signing_key(1),
-        },
-    ];
+    let host0_vnodes = vec![validator(&fixtures, 0), validator(&fixtures, 1)];
     let beacon_storage0: Arc<dyn BeaconStorage> =
         Arc::new(RocksDbBeaconStorage::open(temp_dir0.path().join("beacon_db")).unwrap());
     let mut runner0 = ProductionRunner::builder(
         host0_vnodes,
         fixtures.topology(),
         ShardConsensusConfig::default(),
-        HashMap::from([(ShardId::ROOT, storage0)]),
         beacon_storage0,
         network_config0,
         temp_storage_factory(&temp_dir0),
@@ -114,25 +96,13 @@ async fn test_v2_same_shard_production_runner_binds_all_vnodes() {
         bootstrap_peers: vec![host0_addr],
         ..Default::default()
     };
-    let host1_vnodes = vec![
-        VnodeConfig {
-            validator_id: ValidatorId::new(2),
-            local_shard: ShardId::ROOT,
-            signing_key: fixtures.signing_key(2),
-        },
-        VnodeConfig {
-            validator_id: ValidatorId::new(3),
-            local_shard: ShardId::ROOT,
-            signing_key: fixtures.signing_key(3),
-        },
-    ];
+    let host1_vnodes = vec![validator(&fixtures, 2), validator(&fixtures, 3)];
     let beacon_storage1: Arc<dyn BeaconStorage> =
         Arc::new(RocksDbBeaconStorage::open(temp_dir1.path().join("beacon_db")).unwrap());
     let mut runner1 = ProductionRunner::builder(
         host1_vnodes,
         fixtures.topology(),
         ShardConsensusConfig::default(),
-        HashMap::from([(ShardId::ROOT, storage1)]),
         beacon_storage1,
         network_config1,
         temp_storage_factory(&temp_dir1),
@@ -214,36 +184,6 @@ async fn test_v2_different_shard_production_runner_binds_all_vnodes() {
     let temp_dir0 = TempDir::new().unwrap();
     let temp_dir1 = TempDir::new().unwrap();
 
-    // Two RocksDB stores per host — one per hosted shard.
-    let host0_s0 = Arc::new(
-        RocksDbShardStorage::open(
-            temp_dir0.path().join("db0_s0"),
-            shard_prefix_path(ShardId::leaf(1, 0)),
-        )
-        .unwrap(),
-    );
-    let host0_s1 = Arc::new(
-        RocksDbShardStorage::open(
-            temp_dir0.path().join("db0_s1"),
-            shard_prefix_path(ShardId::leaf(1, 1)),
-        )
-        .unwrap(),
-    );
-    let host1_s0 = Arc::new(
-        RocksDbShardStorage::open(
-            temp_dir1.path().join("db1_s0"),
-            shard_prefix_path(ShardId::leaf(1, 0)),
-        )
-        .unwrap(),
-    );
-    let host1_s1 = Arc::new(
-        RocksDbShardStorage::open(
-            temp_dir1.path().join("db1_s1"),
-            shard_prefix_path(ShardId::leaf(1, 1)),
-        )
-        .unwrap(),
-    );
-
     let network_config0 = Libp2pConfig {
         listen_addresses: vec!["/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()],
         bootstrap_peers: vec![],
@@ -251,28 +191,13 @@ async fn test_v2_different_shard_production_runner_binds_all_vnodes() {
     };
 
     // Host 0: validator 0 (shard 0) + validator 2 (shard 1).
-    let host0_vnodes = vec![
-        VnodeConfig {
-            validator_id: ValidatorId::new(0),
-            local_shard: ShardId::leaf(1, 0),
-            signing_key: fixtures.signing_key(0),
-        },
-        VnodeConfig {
-            validator_id: ValidatorId::new(2),
-            local_shard: ShardId::leaf(1, 1),
-            signing_key: fixtures.signing_key(2),
-        },
-    ];
+    let host0_vnodes = vec![validator(&fixtures, 0), validator(&fixtures, 2)];
     let beacon_storage0: Arc<dyn BeaconStorage> =
         Arc::new(RocksDbBeaconStorage::open(temp_dir0.path().join("beacon_db")).unwrap());
     let mut runner0 = ProductionRunner::builder(
         host0_vnodes,
         fixtures.topology(),
         ShardConsensusConfig::default(),
-        HashMap::from([
-            (ShardId::leaf(1, 0), host0_s0),
-            (ShardId::leaf(1, 1), host0_s1),
-        ]),
         beacon_storage0,
         network_config0,
         temp_storage_factory(&temp_dir0),
@@ -299,28 +224,13 @@ async fn test_v2_different_shard_production_runner_binds_all_vnodes() {
         ..Default::default()
     };
     // Host 1: validator 1 (shard 0) + validator 3 (shard 1).
-    let host1_vnodes = vec![
-        VnodeConfig {
-            validator_id: ValidatorId::new(1),
-            local_shard: ShardId::leaf(1, 0),
-            signing_key: fixtures.signing_key(1),
-        },
-        VnodeConfig {
-            validator_id: ValidatorId::new(3),
-            local_shard: ShardId::leaf(1, 1),
-            signing_key: fixtures.signing_key(3),
-        },
-    ];
+    let host1_vnodes = vec![validator(&fixtures, 1), validator(&fixtures, 3)];
     let beacon_storage1: Arc<dyn BeaconStorage> =
         Arc::new(RocksDbBeaconStorage::open(temp_dir1.path().join("beacon_db")).unwrap());
     let mut runner1 = ProductionRunner::builder(
         host1_vnodes,
         fixtures.topology(),
         ShardConsensusConfig::default(),
-        HashMap::from([
-            (ShardId::leaf(1, 0), host1_s0),
-            (ShardId::leaf(1, 1), host1_s1),
-        ]),
         beacon_storage1,
         network_config1,
         temp_storage_factory(&temp_dir1),

@@ -28,7 +28,8 @@ use hyperscale_network_libp2p::{Libp2pAdapter, Libp2pConfig};
 use hyperscale_node::TxStatusCache;
 use hyperscale_production::rpc::{NodeStatusState, TxSubmissionSender};
 use hyperscale_production::{
-    ProductionRunner, RunnerError, ShutdownHandle, StorageDirResolver, StorageFactory, VnodeConfig,
+    LocalValidator, ProductionRunner, RunnerError, ShutdownHandle, StorageDirResolver,
+    StorageFactory,
 };
 use hyperscale_shard::ShardConsensusConfig;
 use hyperscale_storage::{BeaconChainReader, BeaconStorage, ShardChainReader};
@@ -96,16 +97,17 @@ fn capturing_storage_factory(dir: &TempDir, registry: StoreRegistry) -> StorageF
     })
 }
 
-/// One host's seating: the vnodes it runs. The hosted shard set is
-/// derived from the vnodes' `local_shard`s.
+/// One host's seating: the validators it runs. Shard participation is not
+/// named — the runner derives each validator's seat (or pool membership)
+/// from the committed beacon state, which mirrors the cluster topology.
 pub struct HostSpec {
-    pub vnodes: Vec<VnodeConfig>,
+    pub validators: Vec<LocalValidator>,
 }
 
 impl HostSpec {
-    /// A host running exactly the given vnodes.
-    pub const fn new(vnodes: Vec<VnodeConfig>) -> Self {
-        Self { vnodes }
+    /// A host running exactly the given validators.
+    pub const fn new(validators: Vec<LocalValidator>) -> Self {
+        Self { validators }
     }
 }
 
@@ -198,7 +200,7 @@ impl Cluster {
             let built_host = build_host(BuildHostArgs {
                 temp_dir: &temp_dir,
                 topology: &topology,
-                vnodes: host.vnodes,
+                validators: host.validators,
                 beacon_chain_config: chain_config,
                 genesis_config: genesis_config.clone(),
                 bootstrap_peers,
@@ -613,28 +615,18 @@ struct BuiltHost {
 struct BuildHostArgs<'a> {
     temp_dir: &'a TempDir,
     topology: &'a Arc<TopologySnapshot>,
-    vnodes: Vec<VnodeConfig>,
+    validators: Vec<LocalValidator>,
     beacon_chain_config: BeaconChainConfig,
     genesis_config: Option<GenesisConfig>,
     bootstrap_peers: Vec<Multiaddr>,
     simulated_outbound_latency: Duration,
 }
 
-/// Open a host's stores and build its runner (the adapter binds and
-/// starts peering immediately; the runner is spawned separately).
+/// Build a host's runner (the adapter binds and starts peering immediately;
+/// the runner is spawned separately). The runner derives the host's seats
+/// from the beacon genesis and opens their stores through the factory, so
+/// nothing is pre-opened here.
 fn build_host(args: BuildHostArgs<'_>) -> BuiltHost {
-    let hosted_shards: HashSet<ShardId> = args.vnodes.iter().map(|v| v.local_shard).collect();
-    let resolve = temp_storage_dir(args.temp_dir);
-    let storages: HashMap<ShardId, Arc<RocksDbShardStorage>> = hosted_shards
-        .iter()
-        .map(|shard| {
-            let store = RocksDbShardStorage::open(resolve(*shard), shard_prefix_path(*shard))
-                .map(Arc::new)
-                .expect("open shard store");
-            (*shard, store)
-        })
-        .collect();
-
     let beacon_storage = Arc::new(
         RocksDbBeaconStorage::open(args.temp_dir.path().join("beacon_db")).expect("open beacon db"),
     );
@@ -650,16 +642,15 @@ fn build_host(args: BuildHostArgs<'_>) -> BuiltHost {
         ..Default::default()
     };
 
-    // Seed the registry with the startup stores, then hand the supervisor
-    // a factory that records every reshape-opened store into the same map.
-    let stores: StoreRegistry = Arc::new(Mutex::new(storages.clone()));
+    // The factory records every store it opens — startup seats and
+    // reshape-opened children alike — into this registry, which starts empty.
+    let stores: StoreRegistry = Arc::new(Mutex::new(HashMap::new()));
 
     let beacon_reader: Arc<dyn BeaconStorage> = beacon_storage.clone();
     let mut builder = ProductionRunner::builder(
-        args.vnodes,
+        args.validators,
         Arc::clone(args.topology),
         ShardConsensusConfig::default(),
-        storages,
         beacon_reader,
         network_config,
         capturing_storage_factory(args.temp_dir, Arc::clone(&stores)),

@@ -63,8 +63,8 @@ use hyperscale_mempool::MempoolConfig;
 use hyperscale_network_libp2p::{Libp2pConfig, VersionInteroperabilityMode};
 use hyperscale_production::rpc::{MempoolSnapshot, NodeStatusState, RpcServer, RpcServerConfig};
 use hyperscale_production::{
-    ProductionRunner, StorageDirResolver, StorageFactory, SyncStatus, TelemetryConfig,
-    TelemetryGuard, VnodeConfig, init_telemetry,
+    LocalValidator, ProductionRunner, StorageDirResolver, StorageFactory, SyncStatus,
+    TelemetryConfig, TelemetryGuard, init_telemetry,
 };
 use hyperscale_provisions::ProvisionConfig;
 use hyperscale_shard::ShardConsensusConfig;
@@ -237,14 +237,14 @@ mod network_serde {
 }
 
 /// One hosted validator's identity inputs.
+///
+/// No shard is named here — shard participation is a projection of beacon
+/// state, derived by the runner at startup (an obsolete `shard = N` line in
+/// an existing config is ignored).
 #[derive(Debug, Clone, Deserialize)]
 pub struct VnodeEntry {
     /// Validator ID (index in the committee)
     pub validator_id: u64,
-
-    /// Shard group this validator belongs to
-    #[serde(default)]
-    pub shard: u64,
 
     /// Path to this validator's signing key file
     pub key_path: PathBuf,
@@ -1043,9 +1043,10 @@ async fn async_main(cli: Cli, config: ValidatorConfig) -> Result<()> {
         Basic(Option<WorkerGuard>),
     }
 
-    // Telemetry's `shard` resource attribute reports the primary (first-
-    // listed) vnode's shard. Per-vnode labels are an open follow-up.
-    let primary_shard_label = config.vnodes.first().map_or(0, |v| v.shard);
+    // Telemetry's `validator` resource attribute reports the primary
+    // (first-listed) vnode's id. Shard participation is beacon-derived and
+    // can change over the node's life, so it isn't a stable startup label.
+    let primary_validator_label = config.vnodes.first().map_or(0, |v| v.validator_id);
 
     let _log_guard = if config.telemetry.enabled {
         let telemetry_config = TelemetryConfig {
@@ -1054,7 +1055,10 @@ async fn async_main(cli: Cli, config: ValidatorConfig) -> Result<()> {
             sampling_ratio: 1.0,
             prometheus_enabled: false, // We handle metrics separately
             prometheus_port: 9090,
-            resource_attributes: vec![("shard".to_string(), primary_shard_label.to_string())],
+            resource_attributes: vec![(
+                "validator".to_string(),
+                primary_validator_label.to_string(),
+            )],
             log_file: config.telemetry.log_file.clone(),
         };
         UnifiedGuard::Telemetry(init_telemetry(&telemetry_config)?)
@@ -1110,11 +1114,7 @@ async fn async_main(cli: Cli, config: ValidatorConfig) -> Result<()> {
         "Host configuration loaded"
     );
     for v in &config.vnodes {
-        info!(
-            validator_id = v.validator_id,
-            shard = v.shard,
-            "Hosting vnode"
-        );
+        info!(validator_id = v.validator_id, "Hosting vnode");
     }
 
     // Clean data directory if requested via cli parameter
@@ -1159,12 +1159,8 @@ async fn async_main(cli: Cli, config: ValidatorConfig) -> Result<()> {
             .context("Failed to initialize thread pools")?,
     );
 
-    // Open one RocksDB per unique hosted shard. Same-shard vnodes share
-    // the storage Arc; different-shard vnodes each provision their own.
-    let hosted_shards: std::collections::BTreeSet<u64> =
-        config.vnodes.iter().map(|v| v.shard).collect();
     let shard_depth = config.node.num_shards.trailing_zeros();
-    // One directory convention for every open — startup, runtime joins,
+    // One directory convention for every open — startup seats, runtime joins,
     // and split-flip seeding. Depth qualifies the name: trie paths alone
     // collide across depths once shards split (a child `leaf(2, 0)` and
     // its parent `leaf(1, 0)` share the path value 0).
@@ -1172,25 +1168,12 @@ async fn async_main(cli: Cli, config: ValidatorConfig) -> Result<()> {
     let storage_dir: StorageDirResolver = Arc::new(move |shard: ShardId| {
         dir_data_dir.join(format!("shard-d{}p{}", shard.depth(), shard.path()))
     });
-    let mut storages: HashMap<ShardId, Arc<RocksDbShardStorage>> = HashMap::new();
-    for shard in &hosted_shards {
-        let shard_id = ShardId::leaf(shard_depth, *shard);
-        // The shard's storage directory: the database lives at `db/`
-        // inside it, the snap-sync checkpoint ring at `checkpoints/`.
-        let shard_dir = storage_dir(shard_id);
-        let storage = RocksDbShardStorage::open_with_config(
-            &shard_dir,
-            &rocksdb_config,
-            shard_prefix_path(shard_id),
-        )
-        .with_context(|| format!("Failed to open database at {}", shard_dir.display()))?;
-        info!(shard = shard, path = %shard_dir.display(), "Storage opened");
-        storages.insert(shard_id, Arc::new(storage));
-    }
 
-    // Opens storage for shards joined at runtime (beacon-driven placement
-    // changes), at the same directory convention as the startup loop above
-    // so a restart reopens what a runtime join created.
+    // Opens a shard's storage when the runner seats this host on it — a
+    // beacon-derived startup seat or a runtime placement change — at one
+    // directory convention so a restart reopens what an earlier seat created.
+    // The runner derives which shards to open from the committed beacon
+    // state, so the host opens none up front.
     let factory_rocksdb_config = rocksdb_config.clone();
     let factory_storage_dir = Arc::clone(&storage_dir);
     let storage_factory: StorageFactory = Arc::new(move |shard: ShardId| {
@@ -1223,15 +1206,17 @@ async fn async_main(cli: Cli, config: ValidatorConfig) -> Result<()> {
         let keypair = load_or_generate_keypair(Some(&entry.key_path))?;
         info!(
             validator_id = entry.validator_id,
-            shard = entry.shard,
             public_key = %format_public_key(&keypair.public_key()),
             "Loaded vnode signing keypair"
         );
         hosted_keypairs.push((ValidatorId::new(entry.validator_id), Arc::new(keypair)));
     }
 
-    // Build the host's single identity-agnostic topology snapshot.
-    let fallback_shard = ShardId::leaf(shard_depth, config.vnodes[0].shard);
+    // Build the host's single identity-agnostic topology snapshot. The
+    // fallback shard is consulted only for a hosted validator absent from
+    // `[[genesis.validators]]` (a degenerate config); committee placement
+    // otherwise comes from the genesis assignments.
+    let fallback_shard = ShardId::leaf(shard_depth, 0);
     let topology = build_topology(
         config.node.network.clone(),
         config.node.num_shards,
@@ -1240,28 +1225,16 @@ async fn async_main(cli: Cli, config: ValidatorConfig) -> Result<()> {
         fallback_shard,
     )?;
 
-    // Pass 2: assemble per-vnode configs from the loaded keypairs.
-    let mut vnode_configs: Vec<VnodeConfig> = Vec::with_capacity(config.vnodes.len());
-    for entry in &config.vnodes {
-        let validator_id = ValidatorId::new(entry.validator_id);
-        let local_shard = ShardId::leaf(shard_depth, entry.shard);
-        let signing_key = hosted_keypairs
-            .iter()
-            .find_map(|(vid, k)| (*vid == validator_id).then(|| Arc::clone(k)))
-            .expect("keypair populated in pass 1");
-        info!(
-            validator_id = entry.validator_id,
-            shard = entry.shard,
-            committee_size = topology.committee_for_shard(local_shard).len(),
-            quorum_threshold = topology.quorum_threshold_for_shard(local_shard).inner(),
-            "Topology initialized for vnode"
-        );
-        vnode_configs.push(VnodeConfig {
-            validator_id,
-            local_shard,
-            signing_key,
-        });
-    }
+    // The validators this host runs. Shard participation is not named here —
+    // the runner derives each validator's seat (or pool membership) from the
+    // committed beacon state and opens any seated shard's storage itself.
+    let validators: Vec<LocalValidator> = hosted_keypairs
+        .iter()
+        .map(|(validator_id, signing_key)| LocalValidator {
+            validator_id: *validator_id,
+            signing_key: Arc::clone(signing_key),
+        })
+        .collect();
 
     // Shared RPC state objects used by both runner and RPC server. ArcSwap gives
     // HTTP handlers lock-free reads. Per-vnode entries are filled in by the
@@ -1277,10 +1250,9 @@ async fn async_main(cli: Cli, config: ValidatorConfig) -> Result<()> {
     // The runner is built before the RPC server because it owns the crossbeam
     // event channel the RPC server submits transactions through.
     let mut runner_builder = ProductionRunner::builder(
-        vnode_configs,
+        validators,
         topology,
         shard_config,
-        storages,
         beacon_storage,
         network_config,
         storage_factory,

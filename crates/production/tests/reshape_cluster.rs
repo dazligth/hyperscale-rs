@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use cluster::{Cluster, ClusterSpec, HostSpec};
 use fixtures::TestFixtures;
-use hyperscale_production::VnodeConfig;
+use hyperscale_production::LocalValidator;
 use hyperscale_types::{BeaconChainConfig, ReshapeThresholds, ShardId, ValidatorId};
 use serial_test::serial;
 use tracing_subscriber::fmt;
@@ -29,10 +29,9 @@ const EPOCH_MS: u64 = 2000;
 /// consensus to the liveness targets.
 const LIVENESS_TIMEOUT: Duration = Duration::from_secs(60);
 
-fn vnode(fixtures: &TestFixtures, idx: u32, shard: ShardId) -> VnodeConfig {
-    VnodeConfig {
+fn validator(fixtures: &TestFixtures, idx: u32) -> LocalValidator {
+    LocalValidator {
         validator_id: ValidatorId::new(u64::from(idx)),
-        local_shard: shard,
         signing_key: fixtures.signing_key(idx),
     }
 }
@@ -60,8 +59,8 @@ async fn cluster_folds_epochs_and_commits_blocks() {
     let cluster = Cluster::start(ClusterSpec {
         topology: fixtures.topology(),
         hosts: vec![
-            HostSpec::new(vec![vnode(&fixtures, 0, shard), vnode(&fixtures, 1, shard)]),
-            HostSpec::new(vec![vnode(&fixtures, 2, shard), vnode(&fixtures, 3, shard)]),
+            HostSpec::new(vec![validator(&fixtures, 0), validator(&fixtures, 1)]),
+            HostSpec::new(vec![validator(&fixtures, 2), validator(&fixtures, 3)]),
         ],
         beacon_chain_config: chain_config,
         genesis_config: None,

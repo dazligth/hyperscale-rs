@@ -43,8 +43,8 @@ use hyperscale_node::bootstrap::EngineBootstrap;
 use hyperscale_node::pool_loop::PoolLoop;
 use hyperscale_node::shard_loop::{HostEvent, ShardLoop, TimerOp, timer_event};
 use hyperscale_node::{
-    NodeConfig, NodeHost, SeatVnodeGroup, SharedTopologySnapshot, TxStatusCache, VnodeInit,
-    seat_vnode_group,
+    NodeConfig, NodeHost, SeatFollower, SeatVnodeGroup, SharedTopologySnapshot, TxStatusCache,
+    VnodeInit, seat_follower, seat_vnode_group,
 };
 use hyperscale_provisions::ProvisionConfig;
 use hyperscale_shard::ShardConsensusConfig;
@@ -55,7 +55,7 @@ use hyperscale_types::{
     CertifiedBeaconBlock, CertifiedBlock, ChainOrigin, GenesisPool, GenesisValidator,
     InFlightCount, LocalTimestamp, MAX_TX_IN_FLIGHT, MIN_STAKE_FLOOR, NodeId, Randomness,
     RoutableTransaction, ShardId, ShardTrie, Stake, StakePoolId, TopologySnapshot, ValidatorId,
-    Verified, genesis_config_hash,
+    ValidatorStatus, Verified, genesis_config_hash,
 };
 use libp2p::identity::Keypair;
 use radix_common::types::ComponentAddress;
@@ -148,6 +148,25 @@ pub struct VnodeConfig {
     pub signing_key: Arc<Bls12381G1PrivateKey>,
 }
 
+/// One validator a host runs, as supplied to the runner at startup.
+///
+/// Shard participation is **not** named here — it is a projection of beacon
+/// state, so the runner derives it: a validator the committed beacon state
+/// places `OnShard` is seated on that shard (its storage opened via the
+/// factory); one that is `Pooled` (or otherwise unseated) follows the beacon
+/// in the host's pool until a placement delta seats it. `VnodeConfig` (which
+/// does carry a shard) is the runtime-join shape the supervisor builds from a
+/// `ParticipationChange`, where the target shard is known.
+#[derive(Clone)]
+pub struct LocalValidator {
+    /// The validator identity this host runs.
+    pub validator_id: ValidatorId,
+    /// BLS signing key for votes, proposals, and the validator-bind
+    /// attestation. `Arc` so the bind service, state machine, and dispatch
+    /// closures share one allocation.
+    pub signing_key: Arc<Bls12381G1PrivateKey>,
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // ProductionRunnerBuilder
 // ═══════════════════════════════════════════════════════════════════════════
@@ -160,26 +179,24 @@ pub struct VnodeConfig {
 /// is called.
 ///
 /// Required fields (taken at construction):
-/// - `vnodes` - One [`VnodeConfig`] per hosted validator. Vnodes may
-///   target different shards; the host derives its `local_shards` set
-///   from the supplied vnodes.
+/// - `validators` - One [`LocalValidator`] per validator this host runs.
+///   Shard participation is not supplied; the runner derives each
+///   validator's seat (or pool membership) from the committed beacon state
+///   and opens any seated shard's storage via `storage_factory`.
 /// - `topology` - Identity-agnostic [`TopologySnapshot`] shared across every
 ///   hosted vnode and seeded into the `ProcessIo`'s `ArcSwap`.
 /// - `shard_config` - Consensus configuration parameters
-/// - `storages` - One `RocksDB` storage per hosted shard. Every shard
-///   referenced by a vnode must have a matching entry.
 /// - `network` - libp2p configuration for peer-to-peer communication
-/// - `storage_factory` - Opens storage for shards joined at runtime
-///   (beacon-driven placement changes).
+/// - `storage_factory` - Opens a shard's storage (at startup for a derived
+///   seat, and at runtime for a beacon-driven join).
 ///
 /// Optional fields:
 /// - `dispatch` - Dispatch implementation (defaults to auto-configured)
 /// - `channel_capacity` - Event channel capacity (defaults to 10,000)
 pub struct ProductionRunnerBuilder {
-    vnodes: Vec<VnodeConfig>,
+    validators: Vec<LocalValidator>,
     topology: Arc<TopologySnapshot>,
     shard_config: ShardConsensusConfig,
-    storages: HashMap<ShardId, Arc<RocksDbShardStorage>>,
     beacon_storage: Arc<dyn BeaconStorage>,
     network_config: Libp2pConfig,
     dispatch: Option<Arc<PooledDispatch>>,
@@ -210,28 +227,26 @@ impl ProductionRunnerBuilder {
     ///
     /// # Panics
     ///
-    /// Panics if `vnodes` is empty.
+    /// Panics if `validators` is empty.
     #[must_use]
     #[allow(clippy::too_many_arguments)] // storage + identity threading
     pub fn new(
-        vnodes: Vec<VnodeConfig>,
+        validators: Vec<LocalValidator>,
         topology: Arc<TopologySnapshot>,
         shard_config: ShardConsensusConfig,
-        storages: HashMap<ShardId, Arc<RocksDbShardStorage>>,
         beacon_storage: Arc<dyn BeaconStorage>,
         network_config: Libp2pConfig,
         storage_factory: StorageFactory,
         storage_dir: StorageDirResolver,
     ) -> Self {
         assert!(
-            !vnodes.is_empty(),
-            "ProductionRunnerBuilder needs at least one vnode"
+            !validators.is_empty(),
+            "ProductionRunnerBuilder needs at least one validator"
         );
         Self {
-            vnodes,
+            validators,
             topology,
             shard_config,
-            storages,
             beacon_storage,
             network_config,
             dispatch: None,
@@ -338,16 +353,15 @@ impl ProductionRunnerBuilder {
         // Install the Prometheus metrics backend before anything records metrics.
         install();
 
-        let vnode_configs = self.vnodes;
-        // Per-vnode signing keys, retained so a placement delta can be
-        // translated into a `ShardCommand::Join` for the moved vnode.
-        let vnode_keys: HashMap<ValidatorId, Arc<Bls12381G1PrivateKey>> = vnode_configs
+        let validators = self.validators;
+        // Per-validator signing keys, retained so a placement delta can be
+        // translated into a `ShardCommand::Join` for the moved validator.
+        let vnode_keys: HashMap<ValidatorId, Arc<Bls12381G1PrivateKey>> = validators
             .iter()
             .map(|v| (v.validator_id, Arc::clone(&v.signing_key)))
             .collect();
         let shared_topology = self.topology;
         let shard_config = self.shard_config;
-        let storages = self.storages;
         let network_config = self.network_config;
         let chain_config = self.beacon_chain_config.unwrap_or_default();
         let dispatch = match self.dispatch {
@@ -359,26 +373,6 @@ impl ProductionRunnerBuilder {
         };
 
         let ed25519_keypair = generate_random_keypair();
-
-        // Derive the hosted shard set from the vnodes; every shard
-        // referenced by a vnode must have a matching storage entry.
-        let local_shards: HashSet<ShardId> =
-            vnode_configs.iter().map(|cfg| cfg.local_shard).collect();
-        for shard in &local_shards {
-            assert!(
-                storages.contains_key(shard),
-                "ProductionRunnerBuilder: missing storage for hosted shard {shard:?}"
-            );
-        }
-        // Recovery reads from a single shard's storage. Pick the first
-        // hosted shard arbitrarily — every hosted storage exposes the
-        // same `RecoveredState` shape.
-        let recovery_shard = vnode_configs[0].local_shard;
-        let recovery_storage = Arc::clone(
-            storages
-                .get(&recovery_shard)
-                .expect("hosted shard derived from vnodes"),
-        );
 
         let topology: SharedTopologySnapshot =
             Arc::new(ArcSwap::from(Arc::clone(&shared_topology)));
@@ -394,38 +388,11 @@ impl ProductionRunnerBuilder {
         );
 
         // `Arc::clone` lets the bind service and the state machine share the
-        // single key allocation each `VnodeConfig` carries.
-        let bind_vnodes: Vec<(ValidatorId, Arc<Bls12381G1PrivateKey>)> = vnode_configs
+        // single key allocation each validator carries.
+        let bind_vnodes: Vec<(ValidatorId, Arc<Bls12381G1PrivateKey>)> = validators
             .iter()
-            .map(|cfg| (cfg.validator_id, Arc::clone(&cfg.signing_key)))
+            .map(|v| (v.validator_id, Arc::clone(&v.signing_key)))
             .collect();
-
-        // Build one (timer / callback / shutdown) channel triple per
-        // hosted shard up front so the per-shard event senders inside
-        // `ProcessIo` can point at each shard's own callback channel.
-        // `ShardChannels` carries both ends; the supervisor keeps the
-        // shutdown/callback senders alive for the shard's lifetime.
-        let mut shard_channels: HashMap<ShardId, ShardChannels> = HashMap::new();
-        let mut shard_callback_txs: HashMap<ShardId, Sender<HostEvent>> = HashMap::new();
-        for shard in &local_shards {
-            let (timer_tx, timer_rx) = unbounded();
-            let (callback_tx, callback_rx) = unbounded();
-            let (shutdown_tx, shutdown_rx) = unbounded();
-            shard_callback_txs.insert(*shard, callback_tx.clone());
-            shard_channels.insert(
-                *shard,
-                ShardChannels {
-                    timer_tx,
-                    timer_rx,
-                    callback_rx,
-                    shutdown_tx,
-                    shutdown_rx,
-                },
-            );
-        }
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-
-        let recovered = recovery_storage.load_recovered_state();
 
         // Beacon genesis: one config + derived (block, state) reused
         // across every per-vnode `BeaconCoordinator`. All validators
@@ -487,31 +454,96 @@ impl ProductionRunnerBuilder {
                 .commit_beacon_block(&beacon_genesis_block, &beacon_genesis_state);
         }
 
-        let mut vnodes_by_shard: BTreeMap<ShardId, Vec<(ValidatorId, Arc<Bls12381G1PrivateKey>)>> =
+        // Participation is a projection of the committed beacon state: a
+        // validator placed `OnShard` is seated on that shard; one that is
+        // `Pooled` (or otherwise unseated) follows the beacon in the host's
+        // pool until a placement delta seats it. The operator names no shard.
+        let (_, beacon_state) = self
+            .beacon_storage
+            .latest_committed()
+            .expect("beacon chain is non-empty after the genesis commit above");
+        let mut seated_by_shard: BTreeMap<ShardId, Vec<(ValidatorId, Arc<Bls12381G1PrivateKey>)>> =
             BTreeMap::new();
-        for cfg in vnode_configs {
-            vnodes_by_shard
-                .entry(cfg.local_shard)
-                .or_default()
-                .push((cfg.validator_id, cfg.signing_key));
+        let mut pooled: Vec<(ValidatorId, Arc<Bls12381G1PrivateKey>)> = Vec::new();
+        for v in &validators {
+            match beacon_state
+                .validators
+                .get(&v.validator_id)
+                .map(|r| r.status)
+            {
+                Some(ValidatorStatus::OnShard { shard, .. }) => seated_by_shard
+                    .entry(shard)
+                    .or_default()
+                    .push((v.validator_id, Arc::clone(&v.signing_key))),
+                _ => pooled.push((v.validator_id, Arc::clone(&v.signing_key))),
+            }
         }
-        let vnode_inits: Vec<VnodeInit> = vnodes_by_shard
-            .into_iter()
-            .flat_map(|(shard, vnodes)| {
-                seat_vnode_group(SeatVnodeGroup {
-                    beacon_storage: self.beacon_storage.as_ref(),
-                    beacon_network: beacon_network.clone(),
-                    beacon_config_hash,
-                    now: consensus_clock(chain_config.genesis_timestamp_ms),
-                    shard,
-                    recovered: &recovered,
-                    shard_config: &shard_config,
-                    mempool_config: self.mempool_config.clone(),
-                    provision_config: self.provision_config,
-                    vnodes,
-                })
-            })
-            .collect();
+        let local_shards: HashSet<ShardId> = seated_by_shard.keys().copied().collect();
+
+        // Open each seated shard's storage through the same factory a runtime
+        // join uses. A fresh store's genesis is installed by
+        // `maybe_initialize_genesis` once the host is assembled.
+        let mut storages: HashMap<ShardId, Arc<RocksDbShardStorage>> = HashMap::new();
+        for shard in &local_shards {
+            let store = (self.storage_factory)(*shard)
+                .map_err(|e| RunnerError::SendError(format!("open storage for {shard:?}: {e}")))?;
+            storages.insert(*shard, store);
+        }
+
+        // Build one (timer / callback / shutdown) channel triple per
+        // hosted shard so the per-shard event senders inside `ProcessIo`
+        // can point at each shard's own callback channel. `ShardChannels`
+        // carries both ends; the supervisor keeps the shutdown/callback
+        // senders alive for the shard's lifetime.
+        let mut shard_channels: HashMap<ShardId, ShardChannels> = HashMap::new();
+        let mut shard_callback_txs: HashMap<ShardId, Sender<HostEvent>> = HashMap::new();
+        for shard in &local_shards {
+            let (timer_tx, timer_rx) = unbounded();
+            let (callback_tx, callback_rx) = unbounded();
+            let (shutdown_tx, shutdown_rx) = unbounded();
+            shard_callback_txs.insert(*shard, callback_tx.clone());
+            shard_channels.insert(
+                *shard,
+                ShardChannels {
+                    timer_tx,
+                    timer_rx,
+                    callback_rx,
+                    shutdown_tx,
+                    shutdown_rx,
+                },
+            );
+        }
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+        // Seated validators boot from their own shard's recovered state;
+        // pooled validators boot as shard-less beacon followers.
+        let now = consensus_clock(chain_config.genesis_timestamp_ms);
+        let mut vnode_inits: Vec<VnodeInit> = Vec::new();
+        for (shard, shard_vnodes) in &seated_by_shard {
+            let recovered = storages[shard].load_recovered_state();
+            vnode_inits.extend(seat_vnode_group(SeatVnodeGroup {
+                beacon_storage: self.beacon_storage.as_ref(),
+                beacon_network: beacon_network.clone(),
+                beacon_config_hash,
+                now,
+                shard: *shard,
+                recovered: &recovered,
+                shard_config: &shard_config,
+                mempool_config: self.mempool_config.clone(),
+                provision_config: self.provision_config,
+                vnodes: shard_vnodes.clone(),
+            }));
+        }
+        for (validator, signing_key) in pooled {
+            vnode_inits.push(seat_follower(SeatFollower {
+                beacon_storage: self.beacon_storage.as_ref(),
+                beacon_network: beacon_network.clone(),
+                beacon_config_hash,
+                now,
+                validator,
+                signing_key,
+            }));
+        }
 
         // Wrap each per-shard `RocksDbShardStorage` in a `SharedStorage` for
         // `NodeHost::new`'s `HashMap<ShardId, S>` argument; the
@@ -718,20 +750,18 @@ impl ProductionRunner {
     #[must_use]
     #[allow(clippy::too_many_arguments)] // storage handles threaded explicitly
     pub fn builder(
-        vnodes: Vec<VnodeConfig>,
+        validators: Vec<LocalValidator>,
         topology: Arc<TopologySnapshot>,
         shard_config: ShardConsensusConfig,
-        storages: HashMap<ShardId, Arc<RocksDbShardStorage>>,
         beacon_storage: Arc<dyn BeaconStorage>,
         network_config: Libp2pConfig,
         storage_factory: StorageFactory,
         storage_dir: StorageDirResolver,
     ) -> ProductionRunnerBuilder {
         ProductionRunnerBuilder::new(
-            vnodes,
+            validators,
             topology,
             shard_config,
-            storages,
             beacon_storage,
             network_config,
             storage_factory,

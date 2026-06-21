@@ -11,7 +11,6 @@
 mod cluster;
 mod fixtures;
 
-use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,16 +19,16 @@ use cluster::{Cluster, ClusterSpec, HostSpec};
 use fixtures::TestFixtures;
 use hyperscale_engine::GenesisConfig;
 use hyperscale_network_libp2p::Libp2pConfig;
-use hyperscale_production::{ProductionRunner, VnodeConfig};
+use hyperscale_production::{LocalValidator, ProductionRunner};
 use hyperscale_shard::ShardConsensusConfig;
 use hyperscale_storage::{BeaconChainReader, BeaconStorage};
-use hyperscale_storage_rocksdb::{RocksDbBeaconStorage, RocksDbShardStorage};
+use hyperscale_storage_rocksdb::RocksDbBeaconStorage;
 use hyperscale_types::test_utils::test_validity_range;
 use hyperscale_types::{
     BeaconChainConfig, BlockHeight, Ed25519PrivateKey, NodeId, ReshapeThresholds,
     RoutableTransaction, ShardId, ShardTrie, TransactionDecision, TransactionStatus, TxHash,
-    ValidatorId, ed25519_keypair_from_seed, routable_from_notarized_v1, shard_prefix_path,
-    sign_and_notarize, uniform_shard_for_node,
+    ValidatorId, ed25519_keypair_from_seed, routable_from_notarized_v1, sign_and_notarize,
+    uniform_shard_for_node,
 };
 use radix_common::constants::XRD;
 use radix_common::math::Decimal;
@@ -47,10 +46,9 @@ use tracing_subscriber::fmt;
 /// timeout.
 const EPOCH_MS: u64 = 2000;
 
-fn vnode(fixtures: &TestFixtures, idx: u32, shard: ShardId) -> VnodeConfig {
-    VnodeConfig {
+fn validator(fixtures: &TestFixtures, idx: u32) -> LocalValidator {
+    LocalValidator {
         validator_id: ValidatorId::new(u64::from(idx)),
-        local_shard: shard,
         signing_key: fixtures.signing_key(idx),
     }
 }
@@ -69,13 +67,6 @@ async fn beacon_chain_config_reaches_genesis() {
     let fixtures = TestFixtures::new(42, 1);
 
     let temp_dir = TempDir::new().unwrap();
-    let storage = Arc::new(
-        RocksDbShardStorage::open(
-            temp_dir.path().join("test_db"),
-            shard_prefix_path(ShardId::ROOT),
-        )
-        .unwrap(),
-    );
     let network_config = Libp2pConfig {
         listen_addresses: vec!["/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()],
         bootstrap_peers: vec![],
@@ -94,14 +85,9 @@ async fn beacon_chain_config_reaches_genesis() {
 
     let beacon_reader: Arc<dyn BeaconStorage> = beacon_storage.clone();
     let runner = ProductionRunner::builder(
-        vec![VnodeConfig {
-            validator_id: ValidatorId::new(0),
-            local_shard: ShardId::ROOT,
-            signing_key: fixtures.signing_key(0),
-        }],
+        vec![validator(&fixtures, 0)],
         fixtures.topology(),
         ShardConsensusConfig::default(),
-        HashMap::from([(ShardId::ROOT, storage)]),
         beacon_reader,
         network_config,
         cluster::temp_storage_factory(&temp_dir),
@@ -170,13 +156,13 @@ async fn split_seats_both_children_from_composed_anchors() {
     // its own dir while a colocated observer would still hold that dir's
     // store open, so packing both seats of one child onto a host would
     // collide on the per-directory store lock. One vnode per host keeps
-    // each adoption and observer flip on its own store. All eight start on
-    // ROOT; the surplus are passive followers there until drawn as
-    // observers.
+    // each adoption and observer flip on its own store. The four committee
+    // validators seat on ROOT; the four surplus follow the beacon in their
+    // hosts' pools until the split draws them as observers.
     let cluster = Cluster::start(ClusterSpec {
         topology: fixtures.topology(),
         hosts: (0..8)
-            .map(|v| HostSpec::new(vec![vnode(&fixtures, v, parent)]))
+            .map(|v| HostSpec::new(vec![validator(&fixtures, v)]))
             .collect(),
         beacon_chain_config: chain_config,
         genesis_config: None,
@@ -290,12 +276,7 @@ async fn keepers_merge_two_siblings_into_their_parent() {
     let cluster = Cluster::start(ClusterSpec {
         topology: fixtures.topology(),
         hosts: (0..4)
-            .map(|h| {
-                HostSpec::new(vec![
-                    vnode(&fixtures, h, left),
-                    vnode(&fixtures, h + 4, right),
-                ])
-            })
+            .map(|h| HostSpec::new(vec![validator(&fixtures, h), validator(&fixtures, h + 4)]))
             .collect(),
         beacon_chain_config: chain_config,
         genesis_config: None,
@@ -610,13 +591,8 @@ async fn surviving_sibling_settles_a_split_straddler() {
     // member hosts — a separate store directory, no flip — keeping the
     // cluster at eight libp2p endpoints.
     let hosts: Vec<HostSpec> = (0..4)
-        .map(|h| {
-            HostSpec::new(vec![
-                vnode(&fixtures, h, splitter),
-                vnode(&fixtures, h + 4, survivor),
-            ])
-        })
-        .chain((8..12).map(|v| HostSpec::new(vec![vnode(&fixtures, v, splitter)])))
+        .map(|h| HostSpec::new(vec![validator(&fixtures, h), validator(&fixtures, h + 4)]))
+        .chain((8..12).map(|v| HostSpec::new(vec![validator(&fixtures, v)])))
         .collect();
 
     let cluster = Cluster::start(ClusterSpec {
@@ -832,9 +808,9 @@ async fn survivor_settles_a_merge_straddler() {
     let hosts: Vec<HostSpec> = (0..4)
         .map(|h| {
             HostSpec::new(vec![
-                vnode(&fixtures, h, survivor),
-                vnode(&fixtures, h + 4, merge_left),
-                vnode(&fixtures, h + 8, merge_right),
+                validator(&fixtures, h),
+                validator(&fixtures, h + 4),
+                validator(&fixtures, h + 8),
             ])
         })
         .collect();
