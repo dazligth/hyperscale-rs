@@ -736,12 +736,13 @@ impl SimulatedNetwork {
         Some(self.sample_latency(from, to, rng))
     }
 
-    /// Sample latency for a message between two nodes.
+    /// Sample latency for a message between two nodes. Two hosts that
+    /// serve a shard in common take `intra_shard_latency`; otherwise
+    /// `cross_shard_latency`. Co-location is read from the live registries
+    /// (see [`Self::hosts_share_shard`]), so a host that joins a shard at
+    /// runtime becomes near to that shard's peers.
     pub fn sample_latency(&self, from: NodeIndex, to: NodeIndex, rng: &mut ChaCha8Rng) -> Duration {
-        let from_shard = self.shard_for_node(from);
-        let to_shard = self.shard_for_node(to);
-
-        let base = if from_shard == to_shard {
+        let base = if self.hosts_share_shard(from, to) {
             self.config.intra_shard_latency
         } else {
             self.config.cross_shard_latency
@@ -755,32 +756,16 @@ impl SimulatedNetwork {
         Duration::from_secs_f64(latency_secs)
     }
 
-    /// Get a representative shard for a host (`IoLoop`) index. Used by
-    /// the latency model to pick `intra_shard_latency` vs
-    /// `cross_shard_latency` for inter-host messages.
-    ///
-    /// - [`HostingMode::SameShardBundled`]: each host is in exactly one
-    ///   shard; that's the answer.
-    /// - [`HostingMode::CrossShard`]: each host serves every shard.
-    ///   Returns shard 0 by convention; the latency model collapses
-    ///   "all hosts share every shard" to intra-shard for all
-    ///   inter-host gossip.
+    /// Whether hosts `a` and `b` serve at least one shard in common — the
+    /// latency model's "near" classifier. Reads each host's registry
+    /// hosted set, the same source [`Self::peers_in_shard`] routes on, so it
+    /// tracks reshape: a shard-less follower (empty hosted set) shares with
+    /// nobody and is far from every peer.
     #[must_use]
-    pub fn shard_for_node(&self, node: NodeIndex) -> ShardId {
-        match self.config.hosting_mode {
-            HostingMode::SameShardBundled => {
-                let hosts_per_shard =
-                    self.config.validators_per_shard / self.config.vnodes_per_host;
-                let num_shards = u64::from(self.config.num_shards);
-                ShardId::leaf(
-                    num_shards.trailing_zeros(),
-                    u64::from(node / hosts_per_shard),
-                )
-            }
-            HostingMode::CrossShard => {
-                ShardId::leaf(u64::from(self.config.num_shards).trailing_zeros(), 0)
-            }
-        }
+    fn hosts_share_shard(&self, a: NodeIndex, b: NodeIndex) -> bool {
+        let a_shards = self.registries[a as usize].hosted_shards();
+        let b_shards = self.registries[b as usize].hosted_shards();
+        a_shards.iter().any(|shard| b_shards.contains(shard))
     }
 
     /// Get all hosts (`IoLoop` indices) that have at least one
@@ -1526,19 +1511,23 @@ mod tests {
     type SharedRequestResult = Arc<std::sync::Mutex<Option<Result<Vec<u8>, RequestError>>>>;
 
     #[test]
-    fn test_shard_assignment() {
+    fn latency_classifies_by_shared_shard() {
         let network = SimulatedNetwork::new(NetworkConfig {
             validators_per_shard: 4,
             num_shards: 2,
             ..Default::default()
         });
 
-        assert_eq!(network.shard_for_node(0), ShardId::leaf(1, 0));
-        assert_eq!(network.shard_for_node(1), ShardId::leaf(1, 0));
-        assert_eq!(network.shard_for_node(2), ShardId::leaf(1, 0));
-        assert_eq!(network.shard_for_node(3), ShardId::leaf(1, 0));
-        assert_eq!(network.shard_for_node(4), ShardId::leaf(1, 1));
-        assert_eq!(network.shard_for_node(5), ShardId::leaf(1, 1));
+        // Hosts 0-3 serve shard 0; hosts 4-7 serve shard 1.
+        assert!(network.hosts_share_shard(0, 3), "same-shard hosts are near");
+        assert!(
+            network.hosts_share_shard(0, 0),
+            "a host shares its own shards"
+        );
+        assert!(
+            !network.hosts_share_shard(0, 4),
+            "cross-shard hosts are far"
+        );
     }
 
     #[test]
