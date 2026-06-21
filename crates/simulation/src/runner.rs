@@ -3,7 +3,7 @@
 //! Uses [`NodeHost`] to process all actions per-node, with the simulation harness
 //! controlling event scheduling, network delivery, and time.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,7 +15,7 @@ use hyperscale_dispatch_sync::SyncDispatch;
 use hyperscale_engine::{GenesisConfig, RadixExecutor, TransactionValidation};
 use hyperscale_mempool::MempoolConfig;
 use hyperscale_network_memory::{
-    BandwidthReport, HostingMode, NetworkConfig, NetworkTrafficAnalyzer, NodeIndex,
+    BandwidthReport, HostLayout, HostingMode, NetworkConfig, NetworkTrafficAnalyzer, NodeIndex,
     SimNetworkAdapter, SimulatedNetwork,
 };
 use hyperscale_node::shard_loop::{HostEvent, StepOutput};
@@ -184,7 +184,15 @@ impl SimulationRunner {
     #[must_use]
     #[allow(clippy::too_many_lines)] // straight-line construction of per-shard hosts
     pub fn new(network_config: &NetworkConfig, seed: u64) -> Self {
-        let network = SimulatedNetwork::new(network_config.clone());
+        assert!(
+            network_config.vnodes_per_host >= 1,
+            "vnodes_per_host must be at least 1"
+        );
+        // The harness owns cluster placement: the host layout drives both the
+        // transport's routing tables and the per-host vnode seating below.
+        let host_layout = build_host_layout(network_config);
+        let num_hosts = host_layout.len();
+        let network = SimulatedNetwork::new(network_config.clone(), network_layout(&host_layout));
         let rng = ChaCha8Rng::seed_from_u64(seed);
 
         // Generate keys for all registered validators using deterministic
@@ -282,10 +290,6 @@ impl SimulationRunner {
 
         // Build the host→validators layout based on the hosting mode.
         // Each host carries a list of (validator_idx, shard) tuples.
-        let vnodes_per_host = network_config.vnodes_per_host;
-        assert!(vnodes_per_host >= 1, "vnodes_per_host must be at least 1");
-        let host_layout = build_host_layout(network_config);
-        let num_hosts = host_layout.len();
         let mut hosts = Vec::with_capacity(num_hosts);
         let mut event_rxs = Vec::with_capacity(num_hosts);
         let mut host_event_txs = Vec::with_capacity(num_hosts);
@@ -1071,6 +1075,30 @@ impl SimulationRunner {
         let key = EventKey::new(time, &event, node, self.sequence);
         self.event_queue.insert(key, event);
         key
+    }
+}
+
+/// Project the host plans into the [`HostLayout`] the simulated transport
+/// routes on: each host's hosted-shard set (empty for a follower-only host)
+/// and the validator→host map.
+fn network_layout(plans: &[HostPlan]) -> HostLayout {
+    let mut hosted = Vec::with_capacity(plans.len());
+    let mut validator_to_host = HashMap::new();
+    for (host_index, plan) in plans.iter().enumerate() {
+        let host = NodeIndex::try_from(host_index).expect("host index fits NodeIndex");
+        let mut shards = BTreeSet::new();
+        for &(validator_idx, shard) in &plan.seated {
+            shards.insert(shard);
+            validator_to_host.insert(ValidatorId::new(u64::from(validator_idx)), host);
+        }
+        for &validator_idx in &plan.followers {
+            validator_to_host.insert(ValidatorId::new(u64::from(validator_idx)), host);
+        }
+        hosted.push(shards);
+    }
+    HostLayout {
+        hosted,
+        validator_to_host,
     }
 }
 

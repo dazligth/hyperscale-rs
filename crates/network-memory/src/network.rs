@@ -37,7 +37,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hyperscale_network::{HandlerRegistry, RequestError, ResponseVerdict, compression};
-use hyperscale_types::{BeaconChainConfig, ShardId, ShardTrie, ValidatorId};
+use hyperscale_types::{BeaconChainConfig, ShardId, ValidatorId};
 use rand::RngExt;
 use rand_chacha::ChaCha8Rng;
 use tracing::{debug, trace};
@@ -174,25 +174,20 @@ impl Default for NetworkConfig {
     }
 }
 
-/// Hosts that carry a shard committee at construction — the formula-derived
-/// count, excluding any dedicated pool-extra hosts appended past them.
-const fn committee_host_count(config: &NetworkConfig) -> usize {
-    match config.hosting_mode {
-        HostingMode::SameShardBundled => {
-            (config.num_shards * config.validators_per_shard / config.vnodes_per_host) as usize
-        }
-        HostingMode::CrossShard => config.validators_per_shard as usize,
-    }
-}
-
-/// Hosts appended past the committee for the pool extras when
-/// [`NetworkConfig::dedicated_pool_hosts`] is set; zero otherwise.
-const fn dedicated_pool_host_count(config: &NetworkConfig) -> usize {
-    if config.dedicated_pool_hosts {
-        config.pool_extra_validators as usize
-    } else {
-        0
-    }
+/// The per-host shard layout the simulated transport routes on, supplied by
+/// the harness that owns cluster placement.
+///
+/// `hosted[h]` is host `h`'s shard set — empty for a shard-less
+/// beacon-follower host — and becomes that host's [`HandlerRegistry`] hosted
+/// set; `validator_to_host` maps each hosted validator to its host index. The
+/// transport holds these as its routing tables and never derives placement
+/// itself.
+pub struct HostLayout {
+    /// Per-host hosted-shard set, indexed by host (`NodeIndex`).
+    pub hosted: Vec<BTreeSet<ShardId>>,
+    /// Hosted validator → host index. Validators absent from the map run on
+    /// no host (an unplaced pool extra).
+    pub validator_to_host: HashMap<ValidatorId, NodeIndex>,
 }
 
 /// Stats returned by [`SimulatedNetwork::accept_requests`],
@@ -483,63 +478,18 @@ impl std::fmt::Debug for SimulatedNetwork {
 }
 
 impl SimulatedNetwork {
-    /// Create a new simulated network with per-host handler registries.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `config.vnodes_per_host` does not divide
-    /// `config.validators_per_shard` (host count must be integral).
+    /// Create a new simulated network from an explicit per-host
+    /// [`HostLayout`]. The harness computes the layout (host→shard and
+    /// validator→host); the transport builds one [`HandlerRegistry`] per host
+    /// from `layout.hosted` and seeds its validator→host bindings, deriving no
+    /// placement of its own.
     #[must_use]
-    pub fn new(config: NetworkConfig) -> Self {
-        assert!(
-            config.vnodes_per_host >= 1,
-            "vnodes_per_host must be at least 1"
-        );
-        if matches!(config.hosting_mode, HostingMode::SameShardBundled) {
-            assert_eq!(
-                config.validators_per_shard % config.vnodes_per_host,
-                0,
-                "vnodes_per_host must divide validators_per_shard"
-            );
-        }
-        // Dedicated pool hosts are appended at validator-index host slots, so
-        // the `validator_to_node` formula (id / vnodes_per_host) lands each
-        // pool extra on its own host only under one-vnode same-shard bundling.
-        assert!(
-            !config.dedicated_pool_hosts
-                || (matches!(config.hosting_mode, HostingMode::SameShardBundled)
-                    && config.vnodes_per_host == 1),
-            "dedicated_pool_hosts requires SameShardBundled with vnodes_per_host == 1"
-        );
-        let committee_hosts = committee_host_count(&config);
-        let num_hosts = committee_hosts + dedicated_pool_host_count(&config);
-        let num_shards = u64::from(config.num_shards);
-        let registries = (0..num_hosts)
-            .map(|host_index| {
-                // Dedicated pool-extra hosts (appended past the committee
-                // hosts) serve no shard until a grow or shuffle seats one;
-                // their shard-less follower receives global beacon gossip.
-                let hosted: BTreeSet<ShardId> = if host_index >= committee_hosts {
-                    BTreeSet::new()
-                } else {
-                    let host_index = u32::try_from(host_index).expect("host_index fits u32");
-                    match config.hosting_mode {
-                        HostingMode::SameShardBundled => {
-                            let hosts_per_shard =
-                                config.validators_per_shard / config.vnodes_per_host;
-                            std::iter::once(ShardId::leaf(
-                                num_shards.trailing_zeros(),
-                                u64::from(host_index / hosts_per_shard),
-                            ))
-                            .collect()
-                        }
-                        HostingMode::CrossShard => {
-                            ShardTrie::uniform_from_count(num_shards).leaves().collect()
-                        }
-                    }
-                };
-                Arc::new(HandlerRegistry::new(hosted))
-            })
+    pub fn new(config: NetworkConfig, layout: HostLayout) -> Self {
+        let num_hosts = layout.hosted.len();
+        let registries: Vec<Arc<HandlerRegistry>> = layout
+            .hosted
+            .into_iter()
+            .map(|hosted| Arc::new(HandlerRegistry::new(hosted)))
             .collect();
         Self {
             config,
@@ -552,43 +502,29 @@ impl SimulatedNetwork {
             pending_responses: BinaryHeap::new(),
             response_sequence: 0,
             traffic_analyzer: None,
-            validator_bindings: HashMap::new(),
+            validator_bindings: layout.validator_to_host,
             gossip_seen: (0..num_hosts).map(|_| HashSet::new()).collect(),
             faults: FaultInjector::default(),
             peer_health: HashMap::new(),
         }
     }
 
-    /// Translate a `ValidatorId` to its hosting `NodeIndex`.
-    ///
-    /// Runtime bindings (vnodes seated after construction — pool draws,
-    /// split-child flips) take precedence; otherwise the hosting-mode
-    /// formula applies:
-    ///
-    /// - [`HostingMode::SameShardBundled`]: consecutive validators
-    ///   share a host. `validator_id / vnodes_per_host`.
-    /// - [`HostingMode::CrossShard`]: shard `s` owns ids
-    ///   `[s * VPS, (s+1) * VPS)`; host `h` carries validator `s * VPS + h`
-    ///   for every `s`. So `validator_id % validators_per_shard`.
+    /// Translate a `ValidatorId` to its hosting `NodeIndex`, from the
+    /// validator→host map seeded at construction and updated by
+    /// [`Self::bind_validator`] as vnodes relocate. A validator that runs on
+    /// no host (an unplaced pool extra) maps to an out-of-range index, which
+    /// the delivery guards drop the same as an unreachable peer.
     #[must_use]
     pub fn validator_to_node(&self, validator: ValidatorId) -> NodeIndex {
-        if let Some(&node) = self.validator_bindings.get(&validator) {
-            return node;
-        }
-        match self.config.hosting_mode {
-            HostingMode::SameShardBundled => {
-                (validator.inner() / u64::from(self.config.vnodes_per_host)) as NodeIndex
-            }
-            HostingMode::CrossShard => {
-                (validator.inner() % u64::from(self.config.validators_per_shard)) as NodeIndex
-            }
-        }
+        self.validator_bindings
+            .get(&validator)
+            .copied()
+            .unwrap_or(self.registries.len() as NodeIndex)
     }
 
-    /// Bind `validator` to `node`, overriding the hosting-mode formula.
-    /// Harnesses call this when seating a vnode at runtime on a host the
-    /// formula doesn't cover (a pool extra has no construction-time
-    /// host).
+    /// Bind `validator` to `node`, overriding its construction-time host.
+    /// Harnesses call this when seating a vnode at runtime on a different
+    /// host (a pool draw or a split-child flip).
     pub fn bind_validator(&mut self, validator: ValidatorId, node: NodeIndex) {
         self.validator_bindings.insert(validator, node);
     }
@@ -797,10 +733,10 @@ impl SimulatedNetwork {
     }
 
     /// Get the total number of hosts (`IoLoop`s), including any dedicated
-    /// pool-extra hosts.
+    /// pool-extra hosts — one per registry.
     #[must_use]
     pub const fn total_nodes(&self) -> usize {
-        committee_host_count(&self.config) + dedicated_pool_host_count(&self.config)
+        self.registries.len()
     }
 
     /// Get network configuration.
@@ -1510,9 +1446,72 @@ mod tests {
 
     type SharedRequestResult = Arc<std::sync::Mutex<Option<Result<Vec<u8>, RequestError>>>>;
 
+    /// Construct a network over the uniform host layout `config` describes —
+    /// the production harness builds richer layouts, but these transport
+    /// tests only need the formula counterpart.
+    fn sim_network(config: NetworkConfig) -> SimulatedNetwork {
+        let layout = uniform_layout(&config);
+        SimulatedNetwork::new(config, layout)
+    }
+
+    /// The uniform host layout for `config`: committee hosts per the hosting
+    /// mode, then one shard-less host per pool extra when
+    /// `dedicated_pool_hosts` is set.
+    fn uniform_layout(config: &NetworkConfig) -> HostLayout {
+        let shard_depth = config.num_shards.trailing_zeros();
+        let mut hosted: Vec<BTreeSet<ShardId>> = Vec::new();
+        let mut validator_to_host: HashMap<ValidatorId, NodeIndex> = HashMap::new();
+        let mut add_host = |shards: BTreeSet<ShardId>, validators: Vec<u32>| {
+            let host = hosted.len() as NodeIndex;
+            for v in validators {
+                validator_to_host.insert(ValidatorId::new(u64::from(v)), host);
+            }
+            hosted.push(shards);
+        };
+        match config.hosting_mode {
+            HostingMode::SameShardBundled => {
+                assert_eq!(config.validators_per_shard % config.vnodes_per_host, 0);
+                let hosts_per_shard = config.validators_per_shard / config.vnodes_per_host;
+                for shard_id in 0..config.num_shards {
+                    let shard = ShardId::leaf(shard_depth, u64::from(shard_id));
+                    for h in 0..hosts_per_shard {
+                        let first =
+                            shard_id * config.validators_per_shard + h * config.vnodes_per_host;
+                        add_host(
+                            std::iter::once(shard).collect(),
+                            (0..config.vnodes_per_host).map(|v| first + v).collect(),
+                        );
+                    }
+                }
+            }
+            HostingMode::CrossShard => {
+                for h in 0..config.validators_per_shard {
+                    add_host(
+                        (0..config.num_shards)
+                            .map(|s| ShardId::leaf(shard_depth, u64::from(s)))
+                            .collect(),
+                        (0..config.num_shards)
+                            .map(|s| s * config.validators_per_shard + h)
+                            .collect(),
+                    );
+                }
+            }
+        }
+        if config.dedicated_pool_hosts {
+            let total_validators = config.num_shards * config.validators_per_shard;
+            for k in 0..config.pool_extra_validators {
+                add_host(BTreeSet::new(), vec![total_validators + k]);
+            }
+        }
+        HostLayout {
+            hosted,
+            validator_to_host,
+        }
+    }
+
     #[test]
     fn latency_classifies_by_shared_shard() {
-        let network = SimulatedNetwork::new(NetworkConfig {
+        let network = sim_network(NetworkConfig {
             validators_per_shard: 4,
             num_shards: 2,
             ..Default::default()
@@ -1532,7 +1531,7 @@ mod tests {
 
     #[test]
     fn test_hyperscale_latency() {
-        let network = SimulatedNetwork::new(NetworkConfig::default());
+        let network = sim_network(NetworkConfig::default());
         let mut rng1 = ChaCha8Rng::seed_from_u64(42);
         let mut rng2 = ChaCha8Rng::seed_from_u64(42);
 
@@ -1546,7 +1545,7 @@ mod tests {
 
     #[test]
     fn test_unidirectional_partition() {
-        let mut network = SimulatedNetwork::new(NetworkConfig::default());
+        let mut network = sim_network(NetworkConfig::default());
 
         // No partition initially
         assert!(!network.is_partitioned(0, 1));
@@ -1565,7 +1564,7 @@ mod tests {
 
     #[test]
     fn test_bidirectional_partition() {
-        let mut network = SimulatedNetwork::new(NetworkConfig::default());
+        let mut network = sim_network(NetworkConfig::default());
 
         network.partition_bidirectional(0, 1);
 
@@ -1579,7 +1578,7 @@ mod tests {
 
     #[test]
     fn test_group_partition() {
-        let mut network = SimulatedNetwork::new(NetworkConfig {
+        let mut network = sim_network(NetworkConfig {
             validators_per_shard: 2,
             num_shards: 2,
             ..Default::default()
@@ -1609,7 +1608,7 @@ mod tests {
 
     #[test]
     fn test_isolate_node() {
-        let mut network = SimulatedNetwork::new(NetworkConfig {
+        let mut network = sim_network(NetworkConfig {
             validators_per_shard: 4,
             num_shards: 1,
             ..Default::default()
@@ -1634,7 +1633,7 @@ mod tests {
 
     #[test]
     fn test_no_packet_loss_by_default() {
-        let network = SimulatedNetwork::new(NetworkConfig::default());
+        let network = sim_network(NetworkConfig::default());
         let mut rng = ChaCha8Rng::seed_from_u64(42);
 
         // With 0% loss rate, no packets should be dropped
@@ -1645,7 +1644,7 @@ mod tests {
 
     #[test]
     fn test_packet_loss_rate() {
-        let mut network = SimulatedNetwork::new(NetworkConfig {
+        let mut network = sim_network(NetworkConfig {
             packet_loss_rate: 0.5, // 50% loss rate
             ..Default::default()
         });
@@ -1683,7 +1682,7 @@ mod tests {
 
     #[test]
     fn test_hyperscale_packet_loss() {
-        let network = SimulatedNetwork::new(NetworkConfig {
+        let network = sim_network(NetworkConfig {
             packet_loss_rate: 0.3,
             ..Default::default()
         });
@@ -1704,7 +1703,7 @@ mod tests {
 
     #[test]
     fn test_should_deliver_with_partition() {
-        let mut network = SimulatedNetwork::new(NetworkConfig::default());
+        let mut network = sim_network(NetworkConfig::default());
         let mut rng = ChaCha8Rng::seed_from_u64(42);
 
         // Normal delivery works
@@ -1721,7 +1720,7 @@ mod tests {
 
     #[test]
     fn test_should_deliver_with_packet_loss() {
-        let network = SimulatedNetwork::new(NetworkConfig {
+        let network = sim_network(NetworkConfig {
             packet_loss_rate: 1.0, // 100% loss
             ..Default::default()
         });
@@ -1735,7 +1734,7 @@ mod tests {
 
     #[test]
     fn test_partition_takes_precedence_over_packet_loss() {
-        let mut network = SimulatedNetwork::new(NetworkConfig {
+        let mut network = sim_network(NetworkConfig {
             packet_loss_rate: 0.0, // No random loss
             ..Default::default()
         });
@@ -1795,7 +1794,7 @@ mod tests {
 
     #[test]
     fn test_accept_requests_happy_path() {
-        let mut network = SimulatedNetwork::new(NetworkConfig {
+        let mut network = sim_network(NetworkConfig {
             validators_per_shard: 4,
             num_shards: 1,
             ..Default::default()
@@ -1828,7 +1827,7 @@ mod tests {
 
     #[test]
     fn test_accept_requests_rotates_around_partitioned_peer() {
-        let mut network = SimulatedNetwork::new(NetworkConfig {
+        let mut network = sim_network(NetworkConfig {
             validators_per_shard: 4,
             num_shards: 1,
             ..Default::default()
@@ -1864,7 +1863,7 @@ mod tests {
 
     #[test]
     fn test_accept_requests_retries_transient_loss_then_succeeds() {
-        let mut network = SimulatedNetwork::new(NetworkConfig {
+        let mut network = sim_network(NetworkConfig {
             validators_per_shard: 4,
             num_shards: 1,
             packet_loss_rate: 0.5, // transient loss — recoverable on retry
@@ -1892,7 +1891,7 @@ mod tests {
 
     #[test]
     fn test_accept_requests_exhausts_when_all_packets_dropped() {
-        let mut network = SimulatedNetwork::new(NetworkConfig {
+        let mut network = sim_network(NetworkConfig {
             validators_per_shard: 4,
             num_shards: 1,
             packet_loss_rate: 1.0, // 100% loss — no peer ever answers
@@ -1926,7 +1925,7 @@ mod tests {
 
     #[test]
     fn test_accept_requests_no_handler_anywhere_exhausts() {
-        let mut network = SimulatedNetwork::new(NetworkConfig {
+        let mut network = sim_network(NetworkConfig {
             validators_per_shard: 4,
             num_shards: 1,
             ..Default::default()
@@ -1948,7 +1947,7 @@ mod tests {
 
     #[test]
     fn test_accept_requests_empty_response_exhausts() {
-        let mut network = SimulatedNetwork::new(NetworkConfig {
+        let mut network = sim_network(NetworkConfig {
             validators_per_shard: 4,
             num_shards: 1,
             ..Default::default()
@@ -1977,7 +1976,7 @@ mod tests {
 
     #[test]
     fn test_peer_health_weighting_prefers_successful_peer() {
-        let network = SimulatedNetwork::new(NetworkConfig {
+        let network = sim_network(NetworkConfig {
             validators_per_shard: 4,
             num_shards: 1,
             ..Default::default()
@@ -2005,7 +2004,7 @@ mod tests {
 
     #[test]
     fn test_accept_requests_random_peer_selection() {
-        let mut network = SimulatedNetwork::new(NetworkConfig {
+        let mut network = sim_network(NetworkConfig {
             validators_per_shard: 4,
             num_shards: 1,
             ..Default::default()
@@ -2035,7 +2034,7 @@ mod tests {
 
     #[test]
     fn test_accept_requests_single_node_no_peers() {
-        let mut network = SimulatedNetwork::new(NetworkConfig {
+        let mut network = sim_network(NetworkConfig {
             validators_per_shard: 1,
             num_shards: 1,
             ..Default::default()
@@ -2058,7 +2057,7 @@ mod tests {
 
     #[test]
     fn test_accept_requests_response_latency() {
-        let mut network = SimulatedNetwork::new(NetworkConfig {
+        let mut network = sim_network(NetworkConfig {
             validators_per_shard: 4,
             num_shards: 1,
             packet_loss_rate: 0.0,
@@ -2158,7 +2157,7 @@ mod tests {
 
     #[test]
     fn test_accept_gossip_shard_scoped() {
-        let mut network = SimulatedNetwork::new(NetworkConfig {
+        let mut network = sim_network(NetworkConfig {
             validators_per_shard: 2,
             num_shards: 2,
             packet_loss_rate: 0.0,
@@ -2182,7 +2181,7 @@ mod tests {
 
     #[test]
     fn test_accept_gossip_global() {
-        let mut network = SimulatedNetwork::new(NetworkConfig {
+        let mut network = sim_network(NetworkConfig {
             validators_per_shard: 2,
             num_shards: 2,
             packet_loss_rate: 0.0,
@@ -2205,7 +2204,7 @@ mod tests {
 
     #[test]
     fn test_accept_gossip_excludes_sender() {
-        let mut network = SimulatedNetwork::new(NetworkConfig {
+        let mut network = sim_network(NetworkConfig {
             validators_per_shard: 4,
             num_shards: 1,
             packet_loss_rate: 0.0,
@@ -2227,7 +2226,7 @@ mod tests {
 
     #[test]
     fn test_accept_gossip_partition_blocks() {
-        let mut network = SimulatedNetwork::new(NetworkConfig {
+        let mut network = sim_network(NetworkConfig {
             validators_per_shard: 2,
             num_shards: 2,
             packet_loss_rate: 0.0,
@@ -2253,7 +2252,7 @@ mod tests {
 
     #[test]
     fn test_accept_gossip_100_percent_loss() {
-        let mut network = SimulatedNetwork::new(NetworkConfig {
+        let mut network = sim_network(NetworkConfig {
             validators_per_shard: 4,
             num_shards: 1,
             packet_loss_rate: 1.0,
@@ -2276,7 +2275,7 @@ mod tests {
 
     #[test]
     fn test_accept_gossip_latency_varies() {
-        let mut network = SimulatedNetwork::new(NetworkConfig {
+        let mut network = sim_network(NetworkConfig {
             validators_per_shard: 4,
             num_shards: 1,
             jitter_fraction: 0.5, // High jitter
@@ -2307,7 +2306,7 @@ mod tests {
 
     #[test]
     fn test_accept_gossip_payload_decompressed() {
-        let mut network = SimulatedNetwork::new(NetworkConfig {
+        let mut network = sim_network(NetworkConfig {
             validators_per_shard: 2,
             num_shards: 1,
             packet_loss_rate: 0.0,
@@ -2329,7 +2328,7 @@ mod tests {
 
     #[test]
     fn test_accept_gossip_invalid_compressed_data() {
-        let mut network = SimulatedNetwork::new(NetworkConfig {
+        let mut network = sim_network(NetworkConfig {
             validators_per_shard: 2,
             num_shards: 1,
             ..Default::default()
@@ -2356,7 +2355,7 @@ mod tests {
 
     #[test]
     fn test_accept_gossip_stats_accurate() {
-        let mut network = SimulatedNetwork::new(NetworkConfig {
+        let mut network = sim_network(NetworkConfig {
             validators_per_shard: 2,
             num_shards: 2, // nodes 0,1 in shard 0; nodes 2,3 in shard 1
             packet_loss_rate: 0.0,
@@ -2383,7 +2382,7 @@ mod tests {
 
     #[test]
     fn test_next_gossip_delivery_time() {
-        let mut network = SimulatedNetwork::new(NetworkConfig {
+        let mut network = sim_network(NetworkConfig {
             validators_per_shard: 2,
             num_shards: 1,
             packet_loss_rate: 0.0,
@@ -2411,7 +2410,7 @@ mod tests {
 
     #[test]
     fn test_create_adapter_shares_handler_slot() {
-        let mut network = SimulatedNetwork::new(NetworkConfig {
+        let mut network = sim_network(NetworkConfig {
             validators_per_shard: 2,
             num_shards: 1,
             ..Default::default()
@@ -2442,7 +2441,7 @@ mod tests {
         use hyperscale_types::network::gossip::TransactionGossip;
         use hyperscale_types::test_utils::{test_node, test_transaction_with_nodes};
 
-        let mut network = SimulatedNetwork::new(NetworkConfig {
+        let mut network = sim_network(NetworkConfig {
             validators_per_shard: 2,
             num_shards: 1,
             packet_loss_rate: 0.0,
