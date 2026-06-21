@@ -1446,61 +1446,34 @@ mod tests {
 
     type SharedRequestResult = Arc<std::sync::Mutex<Option<Result<Vec<u8>, RequestError>>>>;
 
-    /// Construct a network over the uniform host layout `config` describes —
-    /// the production harness builds richer layouts, but these transport
-    /// tests only need the formula counterpart.
-    fn sim_network(config: NetworkConfig) -> SimulatedNetwork {
-        let layout = uniform_layout(&config);
-        SimulatedNetwork::new(config, layout)
+    /// Construct a network over a uniform layout (default transport config).
+    fn sim_network(num_shards: u32, validators_per_shard: u32) -> SimulatedNetwork {
+        sim_network_cfg(NetworkConfig::default(), num_shards, validators_per_shard)
     }
 
-    /// The uniform host layout for `config`: committee hosts per the hosting
-    /// mode, then one shard-less host per pool extra when
-    /// `dedicated_pool_hosts` is set.
-    fn uniform_layout(config: &NetworkConfig) -> HostLayout {
-        let shard_depth = config.num_shards.trailing_zeros();
+    /// Construct a network over a uniform layout with a given transport config.
+    fn sim_network_cfg(
+        config: NetworkConfig,
+        num_shards: u32,
+        validators_per_shard: u32,
+    ) -> SimulatedNetwork {
+        SimulatedNetwork::new(config, layout(num_shards, validators_per_shard))
+    }
+
+    /// A uniform single-vnode-per-host layout: `validators_per_shard` hosts on
+    /// each of `num_shards` shards, with validator id equal to host index.
+    /// Enough for the transport tests, which exercise delivery and routing,
+    /// not cluster placement.
+    fn layout(num_shards: u32, validators_per_shard: u32) -> HostLayout {
+        let shard_depth = num_shards.trailing_zeros();
         let mut hosted: Vec<BTreeSet<ShardId>> = Vec::new();
         let mut validator_to_host: HashMap<ValidatorId, NodeIndex> = HashMap::new();
-        let mut add_host = |shards: BTreeSet<ShardId>, validators: Vec<u32>| {
-            let host = hosted.len() as NodeIndex;
-            for v in validators {
-                validator_to_host.insert(ValidatorId::new(u64::from(v)), host);
-            }
-            hosted.push(shards);
-        };
-        match config.hosting_mode {
-            HostingMode::SameShardBundled => {
-                assert_eq!(config.validators_per_shard % config.vnodes_per_host, 0);
-                let hosts_per_shard = config.validators_per_shard / config.vnodes_per_host;
-                for shard_id in 0..config.num_shards {
-                    let shard = ShardId::leaf(shard_depth, u64::from(shard_id));
-                    for h in 0..hosts_per_shard {
-                        let first =
-                            shard_id * config.validators_per_shard + h * config.vnodes_per_host;
-                        add_host(
-                            std::iter::once(shard).collect(),
-                            (0..config.vnodes_per_host).map(|v| first + v).collect(),
-                        );
-                    }
-                }
-            }
-            HostingMode::CrossShard => {
-                for h in 0..config.validators_per_shard {
-                    add_host(
-                        (0..config.num_shards)
-                            .map(|s| ShardId::leaf(shard_depth, u64::from(s)))
-                            .collect(),
-                        (0..config.num_shards)
-                            .map(|s| s * config.validators_per_shard + h)
-                            .collect(),
-                    );
-                }
-            }
-        }
-        if config.dedicated_pool_hosts {
-            let total_validators = config.num_shards * config.validators_per_shard;
-            for k in 0..config.pool_extra_validators {
-                add_host(BTreeSet::new(), vec![total_validators + k]);
+        for shard_idx in 0..num_shards {
+            let shard = ShardId::leaf(shard_depth, u64::from(shard_idx));
+            for _ in 0..validators_per_shard {
+                let host = hosted.len() as NodeIndex;
+                validator_to_host.insert(ValidatorId::new(u64::from(host)), host);
+                hosted.push(std::iter::once(shard).collect());
             }
         }
         HostLayout {
@@ -1511,11 +1484,7 @@ mod tests {
 
     #[test]
     fn latency_classifies_by_shared_shard() {
-        let network = sim_network(NetworkConfig {
-            validators_per_shard: 4,
-            num_shards: 2,
-            ..Default::default()
-        });
+        let network = sim_network(2, 4);
 
         // Hosts 0-3 serve shard 0; hosts 4-7 serve shard 1.
         assert!(network.hosts_share_shard(0, 3), "same-shard hosts are near");
@@ -1531,7 +1500,7 @@ mod tests {
 
     #[test]
     fn test_hyperscale_latency() {
-        let network = sim_network(NetworkConfig::default());
+        let network = sim_network(2, 4);
         let mut rng1 = ChaCha8Rng::seed_from_u64(42);
         let mut rng2 = ChaCha8Rng::seed_from_u64(42);
 
@@ -1545,7 +1514,7 @@ mod tests {
 
     #[test]
     fn test_unidirectional_partition() {
-        let mut network = sim_network(NetworkConfig::default());
+        let mut network = sim_network(2, 4);
 
         // No partition initially
         assert!(!network.is_partitioned(0, 1));
@@ -1564,7 +1533,7 @@ mod tests {
 
     #[test]
     fn test_bidirectional_partition() {
-        let mut network = sim_network(NetworkConfig::default());
+        let mut network = sim_network(2, 4);
 
         network.partition_bidirectional(0, 1);
 
@@ -1578,11 +1547,7 @@ mod tests {
 
     #[test]
     fn test_group_partition() {
-        let mut network = sim_network(NetworkConfig {
-            validators_per_shard: 2,
-            num_shards: 2,
-            ..Default::default()
-        });
+        let mut network = sim_network(2, 2);
 
         // Partition shard 0 (nodes 0,1) from shard 1 (nodes 2,3)
         let group_a = vec![0, 1];
@@ -1608,11 +1573,7 @@ mod tests {
 
     #[test]
     fn test_isolate_node() {
-        let mut network = sim_network(NetworkConfig {
-            validators_per_shard: 4,
-            num_shards: 1,
-            ..Default::default()
-        });
+        let mut network = sim_network(1, 4);
 
         network.isolate_node(0);
 
@@ -1633,7 +1594,7 @@ mod tests {
 
     #[test]
     fn test_no_packet_loss_by_default() {
-        let network = sim_network(NetworkConfig::default());
+        let network = sim_network(2, 4);
         let mut rng = ChaCha8Rng::seed_from_u64(42);
 
         // With 0% loss rate, no packets should be dropped
@@ -1644,10 +1605,14 @@ mod tests {
 
     #[test]
     fn test_packet_loss_rate() {
-        let mut network = sim_network(NetworkConfig {
-            packet_loss_rate: 0.5, // 50% loss rate
-            ..Default::default()
-        });
+        let mut network = sim_network_cfg(
+            NetworkConfig {
+                packet_loss_rate: 0.5, // 50% loss rate
+                ..Default::default()
+            },
+            2,
+            4,
+        );
 
         let mut rng = ChaCha8Rng::seed_from_u64(42);
 
@@ -1682,10 +1647,14 @@ mod tests {
 
     #[test]
     fn test_hyperscale_packet_loss() {
-        let network = sim_network(NetworkConfig {
-            packet_loss_rate: 0.3,
-            ..Default::default()
-        });
+        let network = sim_network_cfg(
+            NetworkConfig {
+                packet_loss_rate: 0.3,
+                ..Default::default()
+            },
+            2,
+            4,
+        );
 
         // Same seed should produce same drop decisions
         let mut rng1 = ChaCha8Rng::seed_from_u64(12345);
@@ -1703,7 +1672,7 @@ mod tests {
 
     #[test]
     fn test_should_deliver_with_partition() {
-        let mut network = sim_network(NetworkConfig::default());
+        let mut network = sim_network(2, 4);
         let mut rng = ChaCha8Rng::seed_from_u64(42);
 
         // Normal delivery works
@@ -1720,10 +1689,14 @@ mod tests {
 
     #[test]
     fn test_should_deliver_with_packet_loss() {
-        let network = sim_network(NetworkConfig {
-            packet_loss_rate: 1.0, // 100% loss
-            ..Default::default()
-        });
+        let network = sim_network_cfg(
+            NetworkConfig {
+                packet_loss_rate: 1.0, // 100% loss
+                ..Default::default()
+            },
+            2,
+            4,
+        );
         let mut rng = ChaCha8Rng::seed_from_u64(42);
 
         // All packets should be dropped
@@ -1734,10 +1707,14 @@ mod tests {
 
     #[test]
     fn test_partition_takes_precedence_over_packet_loss() {
-        let mut network = sim_network(NetworkConfig {
-            packet_loss_rate: 0.0, // No random loss
-            ..Default::default()
-        });
+        let mut network = sim_network_cfg(
+            NetworkConfig {
+                packet_loss_rate: 0.0, // No random loss
+                ..Default::default()
+            },
+            2,
+            4,
+        );
 
         network.partition_bidirectional(0, 1);
 
@@ -1794,11 +1771,7 @@ mod tests {
 
     #[test]
     fn test_accept_requests_happy_path() {
-        let mut network = sim_network(NetworkConfig {
-            validators_per_shard: 4,
-            num_shards: 1,
-            ..Default::default()
-        });
+        let mut network = sim_network(1, 4);
         host_shard_everywhere(&network, ShardId::leaf(1, 0));
         let mut rng = ChaCha8Rng::seed_from_u64(42);
 
@@ -1827,11 +1800,7 @@ mod tests {
 
     #[test]
     fn test_accept_requests_rotates_around_partitioned_peer() {
-        let mut network = sim_network(NetworkConfig {
-            validators_per_shard: 4,
-            num_shards: 1,
-            ..Default::default()
-        });
+        let mut network = sim_network(1, 4);
         host_shard_everywhere(&network, ShardId::leaf(1, 0));
         let mut rng = ChaCha8Rng::seed_from_u64(42);
 
@@ -1863,12 +1832,14 @@ mod tests {
 
     #[test]
     fn test_accept_requests_retries_transient_loss_then_succeeds() {
-        let mut network = sim_network(NetworkConfig {
-            validators_per_shard: 4,
-            num_shards: 1,
-            packet_loss_rate: 0.5, // transient loss — recoverable on retry
-            ..Default::default()
-        });
+        let mut network = sim_network_cfg(
+            NetworkConfig {
+                packet_loss_rate: 0.5, // transient loss — recoverable on retry
+                ..Default::default()
+            },
+            1,
+            4,
+        );
         host_shard_everywhere(&network, ShardId::leaf(1, 0));
         let mut rng = ChaCha8Rng::seed_from_u64(42);
 
@@ -1891,12 +1862,14 @@ mod tests {
 
     #[test]
     fn test_accept_requests_exhausts_when_all_packets_dropped() {
-        let mut network = sim_network(NetworkConfig {
-            validators_per_shard: 4,
-            num_shards: 1,
-            packet_loss_rate: 1.0, // 100% loss — no peer ever answers
-            ..Default::default()
-        });
+        let mut network = sim_network_cfg(
+            NetworkConfig {
+                packet_loss_rate: 1.0, // 100% loss — no peer ever answers
+                ..Default::default()
+            },
+            1,
+            4,
+        );
         host_shard_everywhere(&network, ShardId::leaf(1, 0));
         let mut rng = ChaCha8Rng::seed_from_u64(42);
 
@@ -1925,11 +1898,7 @@ mod tests {
 
     #[test]
     fn test_accept_requests_no_handler_anywhere_exhausts() {
-        let mut network = sim_network(NetworkConfig {
-            validators_per_shard: 4,
-            num_shards: 1,
-            ..Default::default()
-        });
+        let mut network = sim_network(1, 4);
         host_shard_everywhere(&network, ShardId::leaf(1, 0));
         let mut rng = ChaCha8Rng::seed_from_u64(42);
 
@@ -1947,11 +1916,7 @@ mod tests {
 
     #[test]
     fn test_accept_requests_empty_response_exhausts() {
-        let mut network = sim_network(NetworkConfig {
-            validators_per_shard: 4,
-            num_shards: 1,
-            ..Default::default()
-        });
+        let mut network = sim_network(1, 4);
         host_shard_everywhere(&network, ShardId::leaf(1, 0));
         let mut rng = ChaCha8Rng::seed_from_u64(42);
 
@@ -1976,11 +1941,7 @@ mod tests {
 
     #[test]
     fn test_peer_health_weighting_prefers_successful_peer() {
-        let network = sim_network(NetworkConfig {
-            validators_per_shard: 4,
-            num_shards: 1,
-            ..Default::default()
-        });
+        let network = sim_network(1, 4);
         let mut net = network;
         let mut rng = ChaCha8Rng::seed_from_u64(7);
 
@@ -2004,11 +1965,7 @@ mod tests {
 
     #[test]
     fn test_accept_requests_random_peer_selection() {
-        let mut network = sim_network(NetworkConfig {
-            validators_per_shard: 4,
-            num_shards: 1,
-            ..Default::default()
-        });
+        let mut network = sim_network(1, 4);
         host_shard_everywhere(&network, ShardId::leaf(1, 0));
         let mut rng = ChaCha8Rng::seed_from_u64(42);
 
@@ -2034,11 +1991,7 @@ mod tests {
 
     #[test]
     fn test_accept_requests_single_node_no_peers() {
-        let mut network = sim_network(NetworkConfig {
-            validators_per_shard: 1,
-            num_shards: 1,
-            ..Default::default()
-        });
+        let mut network = sim_network(1, 1);
         let mut rng = ChaCha8Rng::seed_from_u64(42);
 
         let adapter0 = network.create_adapter(0);
@@ -2057,12 +2010,14 @@ mod tests {
 
     #[test]
     fn test_accept_requests_response_latency() {
-        let mut network = sim_network(NetworkConfig {
-            validators_per_shard: 4,
-            num_shards: 1,
-            packet_loss_rate: 0.0,
-            ..Default::default()
-        });
+        let mut network = sim_network_cfg(
+            NetworkConfig {
+                packet_loss_rate: 0.0,
+                ..Default::default()
+            },
+            1,
+            4,
+        );
         host_shard_everywhere(&network, ShardId::leaf(1, 0));
         let mut rng = ChaCha8Rng::seed_from_u64(42);
 
@@ -2157,12 +2112,14 @@ mod tests {
 
     #[test]
     fn test_accept_gossip_shard_scoped() {
-        let mut network = sim_network(NetworkConfig {
-            validators_per_shard: 2,
-            num_shards: 2,
-            packet_loss_rate: 0.0,
-            ..Default::default()
-        });
+        let mut network = sim_network_cfg(
+            NetworkConfig {
+                packet_loss_rate: 0.0,
+                ..Default::default()
+            },
+            2,
+            2,
+        );
         let handlers = register_gossip_handlers(&network);
         let mut rng = ChaCha8Rng::seed_from_u64(42);
 
@@ -2181,12 +2138,14 @@ mod tests {
 
     #[test]
     fn test_accept_gossip_global() {
-        let mut network = sim_network(NetworkConfig {
-            validators_per_shard: 2,
-            num_shards: 2,
-            packet_loss_rate: 0.0,
-            ..Default::default()
-        });
+        let mut network = sim_network_cfg(
+            NetworkConfig {
+                packet_loss_rate: 0.0,
+                ..Default::default()
+            },
+            2,
+            2,
+        );
         let handlers = register_gossip_handlers(&network);
         let mut rng = ChaCha8Rng::seed_from_u64(42);
 
@@ -2204,12 +2163,14 @@ mod tests {
 
     #[test]
     fn test_accept_gossip_excludes_sender() {
-        let mut network = sim_network(NetworkConfig {
-            validators_per_shard: 4,
-            num_shards: 1,
-            packet_loss_rate: 0.0,
-            ..Default::default()
-        });
+        let mut network = sim_network_cfg(
+            NetworkConfig {
+                packet_loss_rate: 0.0,
+                ..Default::default()
+            },
+            1,
+            4,
+        );
         let handlers = register_gossip_handlers(&network);
         let mut rng = ChaCha8Rng::seed_from_u64(42);
 
@@ -2226,12 +2187,14 @@ mod tests {
 
     #[test]
     fn test_accept_gossip_partition_blocks() {
-        let mut network = sim_network(NetworkConfig {
-            validators_per_shard: 2,
-            num_shards: 2,
-            packet_loss_rate: 0.0,
-            ..Default::default()
-        });
+        let mut network = sim_network_cfg(
+            NetworkConfig {
+                packet_loss_rate: 0.0,
+                ..Default::default()
+            },
+            2,
+            2,
+        );
         let handlers = register_gossip_handlers(&network);
         let mut rng = ChaCha8Rng::seed_from_u64(42);
 
@@ -2252,12 +2215,14 @@ mod tests {
 
     #[test]
     fn test_accept_gossip_100_percent_loss() {
-        let mut network = sim_network(NetworkConfig {
-            validators_per_shard: 4,
-            num_shards: 1,
-            packet_loss_rate: 1.0,
-            ..Default::default()
-        });
+        let mut network = sim_network_cfg(
+            NetworkConfig {
+                packet_loss_rate: 1.0,
+                ..Default::default()
+            },
+            1,
+            4,
+        );
         let handlers = register_gossip_handlers(&network);
         let mut rng = ChaCha8Rng::seed_from_u64(42);
 
@@ -2275,13 +2240,15 @@ mod tests {
 
     #[test]
     fn test_accept_gossip_latency_varies() {
-        let mut network = sim_network(NetworkConfig {
-            validators_per_shard: 4,
-            num_shards: 1,
-            jitter_fraction: 0.5, // High jitter
-            packet_loss_rate: 0.0,
-            ..Default::default()
-        });
+        let mut network = sim_network_cfg(
+            NetworkConfig {
+                jitter_fraction: 0.5, // High jitter
+                packet_loss_rate: 0.0,
+                ..Default::default()
+            },
+            1,
+            4,
+        );
         let handlers = register_gossip_handlers(&network);
         let mut rng = ChaCha8Rng::seed_from_u64(42);
 
@@ -2306,12 +2273,14 @@ mod tests {
 
     #[test]
     fn test_accept_gossip_payload_decompressed() {
-        let mut network = sim_network(NetworkConfig {
-            validators_per_shard: 2,
-            num_shards: 1,
-            packet_loss_rate: 0.0,
-            ..Default::default()
-        });
+        let mut network = sim_network_cfg(
+            NetworkConfig {
+                packet_loss_rate: 0.0,
+                ..Default::default()
+            },
+            1,
+            2,
+        );
         let handlers = register_gossip_handlers(&network);
         let mut rng = ChaCha8Rng::seed_from_u64(42);
 
@@ -2328,11 +2297,7 @@ mod tests {
 
     #[test]
     fn test_accept_gossip_invalid_compressed_data() {
-        let mut network = sim_network(NetworkConfig {
-            validators_per_shard: 2,
-            num_shards: 1,
-            ..Default::default()
-        });
+        let mut network = sim_network(1, 2);
         let handlers = register_gossip_handlers(&network);
         let mut rng = ChaCha8Rng::seed_from_u64(42);
 
@@ -2355,12 +2320,15 @@ mod tests {
 
     #[test]
     fn test_accept_gossip_stats_accurate() {
-        let mut network = sim_network(NetworkConfig {
-            validators_per_shard: 2,
-            num_shards: 2, // nodes 0,1 in shard 0; nodes 2,3 in shard 1
-            packet_loss_rate: 0.0,
-            ..Default::default()
-        });
+        // nodes 0,1 in shard 0; nodes 2,3 in shard 1
+        let mut network = sim_network_cfg(
+            NetworkConfig {
+                packet_loss_rate: 0.0,
+                ..Default::default()
+            },
+            2,
+            2,
+        );
         let handlers = register_gossip_handlers(&network);
         let mut rng = ChaCha8Rng::seed_from_u64(42);
 
@@ -2382,12 +2350,14 @@ mod tests {
 
     #[test]
     fn test_next_gossip_delivery_time() {
-        let mut network = sim_network(NetworkConfig {
-            validators_per_shard: 2,
-            num_shards: 1,
-            packet_loss_rate: 0.0,
-            ..Default::default()
-        });
+        let mut network = sim_network_cfg(
+            NetworkConfig {
+                packet_loss_rate: 0.0,
+                ..Default::default()
+            },
+            1,
+            2,
+        );
         let _handlers = register_gossip_handlers(&network);
         let mut rng = ChaCha8Rng::seed_from_u64(42);
 
@@ -2410,11 +2380,7 @@ mod tests {
 
     #[test]
     fn test_create_adapter_shares_handler_slot() {
-        let mut network = sim_network(NetworkConfig {
-            validators_per_shard: 2,
-            num_shards: 1,
-            ..Default::default()
-        });
+        let mut network = sim_network(1, 2);
         host_shard_everywhere(&network, ShardId::leaf(1, 0));
         let mut rng = ChaCha8Rng::seed_from_u64(42);
 
@@ -2441,12 +2407,14 @@ mod tests {
         use hyperscale_types::network::gossip::TransactionGossip;
         use hyperscale_types::test_utils::{test_node, test_transaction_with_nodes};
 
-        let mut network = sim_network(NetworkConfig {
-            validators_per_shard: 2,
-            num_shards: 1,
-            packet_loss_rate: 0.0,
-            ..Default::default()
-        });
+        let mut network = sim_network_cfg(
+            NetworkConfig {
+                packet_loss_rate: 0.0,
+                ..Default::default()
+            },
+            1,
+            2,
+        );
         host_shard_everywhere(&network, ShardId::leaf(1, 0));
         let mut rng = ChaCha8Rng::seed_from_u64(42);
 
