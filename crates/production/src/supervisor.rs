@@ -1149,24 +1149,13 @@ impl ShardSupervisor {
             // Sync complete: tell the splitting shard's committee, where
             // the signal classifies as a ReshapeReady witness leaf and
             // folds into the split's readiness gate.
-            let signal = observer_ready_signal(
-                &beacon_network,
+            let identity = ObserverReadyIdentity {
+                beacon_network,
                 validator,
-                &signing_key,
-                anchor,
+                signing_key,
                 epoch_duration_ms,
-            );
-            let recipients: Vec<ValidatorId> = process
-                .topology()
-                .load()
-                .committee_for_shard(via)
-                .iter()
-                .copied()
-                .filter(|&v| v != validator)
-                .collect();
-            process
-                .network()
-                .notify(&recipients, &ReadySignalNotification::new(signal));
+            };
+            reassert_observer_ready(&process, &identity, via, anchor);
             // Send failure means the runner is shutting down; the duty
             // dies with it.
             let _ = events.send(SupervisorEvent::Observed(Ok(CompletedObservation {
@@ -1176,13 +1165,15 @@ impl ShardSupervisor {
             })));
 
             // Stay current: follow the parent's chain to its crossing,
-            // then adopt the followed store for the boundary handoff.
-            let done = prepare_observer_flip(&process, storage, via, child, anchor, root)
-                .await
-                .map_err(|error| {
-                    warn!(?via, ?child, error, "Observer boundary handoff failed");
-                    child
-                });
+            // re-asserting the ready signal each round, then adopt the
+            // followed store for the boundary handoff.
+            let done =
+                prepare_observer_flip(&process, &identity, storage, via, child, anchor, root)
+                    .await
+                    .map_err(|error| {
+                        warn!(?via, ?child, error, "Observer boundary handoff failed");
+                        child
+                    });
             let _ = events.send(SupervisorEvent::ObserverPrepared(done));
         });
         self.observers.insert(
@@ -1741,28 +1732,96 @@ impl ShardSupervisor {
     }
 }
 
+/// Cadence at which an observer re-asserts its ready signal while it waits
+/// for the split to execute — one round per second, matching the merge
+/// keeper. The signal's weighted-time window spans two epochs, so a
+/// sub-epoch cadence always keeps a live signal in front of the committee.
+const OBSERVER_READY_REASSERT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Identity an observer re-asserts its ready signal under, retained for the
+/// duty's lifetime so each round re-signs against the freshest anchor.
+struct ObserverReadyIdentity {
+    beacon_network: NetworkDefinition,
+    validator: ValidatorId,
+    signing_key: Arc<Bls12381G1PrivateKey>,
+    epoch_duration_ms: u64,
+}
+
+/// Broadcast an observer's ready signal to the splitting shard's committee,
+/// windowed from `anchor`. The signal classifies as a `ReshapeReady`
+/// witness leaf there and folds into the split's readiness gate. Re-asserted
+/// each round by the observer duty: a freshly drawn observer reaches the
+/// committee before its head reflects the cohort, so a single early signal is
+/// dropped — re-signing lands once the head catches up.
+fn reassert_observer_ready(
+    process: &ProdProcessIo,
+    identity: &ObserverReadyIdentity,
+    via: ShardId,
+    anchor: ShardAnchor,
+) {
+    let signal = observer_ready_signal(
+        &identity.beacon_network,
+        identity.validator,
+        &identity.signing_key,
+        anchor,
+        identity.epoch_duration_ms,
+    );
+    let recipients: Vec<ValidatorId> = process
+        .topology()
+        .load()
+        .committee_for_shard(via)
+        .iter()
+        .copied()
+        .filter(|&v| v != identity.validator)
+        .collect();
+    process
+        .network()
+        .notify(&recipients, &ReadySignalNotification::new(signal));
+}
+
 /// The boundary handoff's preparation, run at the tail of the observer
 /// duty task: follow the splitting parent to its crossing, then adopt
 /// the followed store at the derived genesis and verify it against the
 /// beacon-anchored root.
 async fn prepare_observer_flip(
     process: &ProdProcessIo,
+    identity: &ObserverReadyIdentity,
     storage: Arc<RocksDbShardStorage>,
     via: ShardId,
     child: ShardId,
     anchor: ShardAnchor,
     root: StateRoot,
 ) -> Result<Box<PreparedObserverFlip>, String> {
-    let (genesis, origin, _) = follow_observer_store(
-        process.network(),
-        process.topology(),
-        &storage,
-        via,
-        child,
-        anchor,
-        root,
-    )
-    .await?;
+    // Follow the parent to its crossing, re-asserting the ready signal each
+    // round meanwhile. A freshly drawn observer sits in the splitting shard's
+    // lookahead committee only a window after the draw, so a single early
+    // signal — which a cold follower emits the instant its child span
+    // finishes syncing — reaches the committee before its head reflects the
+    // cohort and is dropped on the floor. Re-signing against the freshest
+    // anchor lands a recognized `ReshapeReady` once the head catches up, well
+    // inside the readiness TTL (mirrors the merge keeper's re-assertion).
+    let (genesis, origin, _) = {
+        let follow = follow_observer_store(
+            process.network(),
+            process.topology(),
+            &storage,
+            via,
+            child,
+            anchor,
+            root,
+        );
+        tokio::pin!(follow);
+        loop {
+            tokio::select! {
+                followed = &mut follow => break followed?,
+                () = sleep(OBSERVER_READY_REASSERT_INTERVAL) => {
+                    if let Some(fresh) = process.topology().load().boundary(via) {
+                        reassert_observer_ready(process, identity, via, fresh);
+                    }
+                }
+            }
+        }
+    };
     spawn_blocking(move || {
         let adopted = storage
             .adopt_followed_child(origin, &genesis)
