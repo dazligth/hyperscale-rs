@@ -506,10 +506,10 @@ where
                 }
             }
             HostEvent::Process(input) => self.step_process_input(input),
-            HostEvent::Beacon(event) => {
+            HostEvent::Beacon(input) => {
                 // Drop beacon events on a host with no pooled vnodes.
                 if let Some(pool) = &mut self.pool {
-                    pool.dispatch_event(*event);
+                    pool.dispatch_event(input);
                 }
             }
         }

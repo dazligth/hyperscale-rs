@@ -4,14 +4,14 @@
 //! channel. It is a typed sum over the three drivers a
 //! [`NodeHost`](crate::host::NodeHost) routes to:
 //!
+//! - [`HostEvent::Beacon`] carries a [`PoolScopedInput`] routed to the
+//!   host's pool of shard-less followers.
+//! - [`HostEvent::Process`] carries a [`ProcessScopedInput`] with no
+//!   shard tag — inputs that fan out across every hosted shard.
 //! - [`HostEvent::Shard`] carries a [`ShardScopedInput`] tagged with
 //!   the hosted-shard id it routes to. Every shard-coherent input
 //!   (gossip, sync, fetch results, BLS-verified headers, protocol
 //!   events) lives here.
-//! - [`HostEvent::Process`] carries a [`ProcessScopedInput`] with no
-//!   shard tag — inputs that fan out across every hosted shard.
-//! - [`HostEvent::Beacon`] carries a beacon [`ProtocolEvent`] routed to
-//!   the host's pool of shard-less followers.
 //!
 //! The typed sum lets `step()` dispatch via exhaustive match without a
 //! runtime scope check.
@@ -484,6 +484,45 @@ impl ProcessScopedInput {
     }
 }
 
+/// Inputs routed to the host's shard-less beacon-follower pool
+/// ([`PoolLoop`](crate::pool_loop::PoolLoop)).
+///
+/// A follower folds the beacon and tracks topology but runs no shard
+/// consensus, so its input set is small: gossiped beacon blocks — and the
+/// self-driven verify/adopt continuations they spawn — arrive as
+/// [`Self::Protocol`].
+#[derive(Debug, Clone)]
+pub enum PoolScopedInput {
+    /// Pass-through to every pooled vnode's state machine. Boxed because
+    /// `ProtocolEvent` dwarfs every other variant and would inflate the
+    /// event queue otherwise.
+    Protocol(Box<ProtocolEvent>),
+}
+
+impl PoolScopedInput {
+    /// Priority for ordering events at the same simulation timestamp.
+    #[must_use]
+    pub fn priority(&self) -> EventPriority {
+        match self {
+            // Inbound beacon gossip is a network input; the verify/adopt
+            // continuations it spawns are internal consequences.
+            Self::Protocol(event) => match event.as_ref() {
+                ProtocolEvent::BeaconBlockReceived { .. } => EventPriority::Network,
+                _ => EventPriority::Internal,
+            },
+        }
+    }
+
+    /// Telemetry label. `Protocol` delegates to the inner
+    /// [`ProtocolEvent::type_name`].
+    #[must_use]
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Self::Protocol(event) => event.type_name(),
+        }
+    }
+}
+
 /// An input plus the driver the I/O loop's `step()` routes it to.
 ///
 /// The shard variant carries the hosted-shard tag inline; the process and
@@ -499,9 +538,9 @@ pub enum HostEvent {
     Process(ProcessScopedInput),
     /// Beacon-scoped — routed to the host's pool of shard-less
     /// followers (the [`PoolLoop`](crate::pool_loop::PoolLoop)). Carries
-    /// a beacon [`ProtocolEvent`] the pooled vnodes fold; shard hosts
-    /// receive beacon events through their per-shard channels instead.
-    Beacon(Box<ProtocolEvent>),
+    /// a [`PoolScopedInput`] the pool folds; shard hosts receive beacon
+    /// events through their per-shard channels instead.
+    Beacon(PoolScopedInput),
 }
 
 impl HostEvent {
@@ -523,10 +562,11 @@ impl HostEvent {
         Self::Shard(shard, ShardScopedInput::Protocol(Box::new(event)))
     }
 
-    /// Construct a beacon-scoped envelope for the host's pool.
+    /// Construct a beacon-scoped envelope carrying a protocol event for the
+    /// host's pool.
     #[must_use]
     pub fn beacon(event: ProtocolEvent) -> Self {
-        Self::Beacon(Box::new(event))
+        Self::Beacon(PoolScopedInput::Protocol(Box::new(event)))
     }
 
     /// Priority for ordering events at the same simulation timestamp.
@@ -535,12 +575,7 @@ impl HostEvent {
         match self {
             Self::Shard(_, input) => input.priority(),
             Self::Process(input) => input.priority(),
-            // Inbound beacon gossip is a network input; everything else a
-            // pooled follower sees is a self-driven continuation.
-            Self::Beacon(event) => match event.as_ref() {
-                ProtocolEvent::BeaconBlockReceived { .. } => EventPriority::Network,
-                _ => EventPriority::Internal,
-            },
+            Self::Beacon(input) => input.priority(),
         }
     }
 
@@ -550,7 +585,7 @@ impl HostEvent {
         match self {
             Self::Shard(_, input) => input.type_name(),
             Self::Process(input) => input.type_name(),
-            Self::Beacon(event) => event.type_name(),
+            Self::Beacon(input) => input.type_name(),
         }
     }
 }

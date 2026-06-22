@@ -1757,10 +1757,10 @@ fn run_pool_loop(mut pool: ProdPoolLoop, config: PoolLoopConfig) {
             }
             recv(beacon_rx) -> e => e.ok(),
         };
-        let Some(HostEvent::Beacon(event)) = event else {
+        let Some(HostEvent::Beacon(input)) = event else {
             continue;
         };
-        for change in pool.run_step(*event) {
+        for change in pool.run_step(input) {
             // Send failure means the runner is shutting down.
             let _ = participation_tx.send(change);
         }

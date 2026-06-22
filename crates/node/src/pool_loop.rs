@@ -27,6 +27,7 @@ use hyperscale_storage::ShardStorage;
 use hyperscale_types::{CertifiedBeaconBlockVerifyContext, LocalTimestamp};
 use tracing::warn;
 
+use crate::event::PoolScopedInput;
 use crate::process_io::ProcessIo;
 use crate::vnode::Vnode;
 
@@ -99,21 +100,28 @@ where
         self.actions_generated = 0;
     }
 
-    /// Drive one beacon event through every pooled vnode and return the
+    /// Drive one pool input through every pooled vnode and return the
     /// placement deltas they surfaced (the seat triggers the supervisor acts
     /// on). Clears per-step scratch first, mirroring
     /// [`ShardLoop::run_step`](crate::shard_loop::ShardLoop::run_step); used by
     /// the production pool thread, which owns the `PoolLoop` directly rather
     /// than driving it through [`NodeHost::step`](crate::host::NodeHost::step).
-    pub fn run_step(&mut self, event: ProtocolEvent) -> Vec<ParticipationChange> {
+    pub fn run_step(&mut self, input: PoolScopedInput) -> Vec<ParticipationChange> {
         self.clear_scratch();
-        self.dispatch_event(event);
+        self.dispatch_event(input);
         std::mem::take(&mut self.pending_reconfigurations)
+    }
+
+    /// Route a [`PoolScopedInput`] to the pooled vnodes.
+    pub(crate) fn dispatch_event(&mut self, input: PoolScopedInput) {
+        match input {
+            PoolScopedInput::Protocol(event) => self.dispatch_protocol(*event),
+        }
     }
 
     /// Fan a beacon [`ProtocolEvent`] across every pooled vnode, driving each
     /// one's follower cascade to quiescence.
-    pub(crate) fn dispatch_event(&mut self, event: ProtocolEvent) {
+    fn dispatch_protocol(&mut self, event: ProtocolEvent) {
         let count = self.vnodes.len();
         if count == 0 {
             return;

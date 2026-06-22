@@ -42,7 +42,8 @@ pub use status::{NodeStatusSnapshot, ShardStatus, VnodeStatus};
 
 use crate::batch_accumulator::BatchAccumulator;
 pub use crate::event::{
-    EventPriority, FetchFailureKind, HostEvent, ProcessScopedInput, ShardScopedInput,
+    EventPriority, FetchFailureKind, HostEvent, PoolScopedInput, ProcessScopedInput,
+    ShardScopedInput,
 };
 use crate::process_io::{BeaconProposalCache, ProcessIo};
 use crate::shard_io::ShardIo;
