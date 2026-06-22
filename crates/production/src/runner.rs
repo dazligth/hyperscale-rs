@@ -26,7 +26,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use arc_swap::ArcSwap;
 use crossbeam::channel::{Receiver, Sender, unbounded};
 use hex::encode as hex_encode;
-use hyperscale_beacon::genesis::build_genesis_beacon_state;
+use hyperscale_beacon::genesis::{GenesisChainInputs, build_genesis_chain};
 use hyperscale_core::{KeepDelta, ObserveDelta, ParticipationChange, ProtocolEvent, TimerId};
 use hyperscale_dispatch::{Dispatch, DispatchPool};
 use hyperscale_dispatch_pooled::{PooledDispatch, ThreadPoolConfig};
@@ -51,11 +51,9 @@ use hyperscale_shard::ShardConsensusConfig;
 use hyperscale_storage::{BeaconStorage, ShardChainReader};
 use hyperscale_storage_rocksdb::{RocksDbShardStorage, SharedStorage};
 use hyperscale_types::{
-    BeaconChainConfig, BeaconGenesisConfig, Block, BlockHeight, Bls12381G1PrivateKey,
-    CertifiedBeaconBlock, CertifiedBlock, ChainOrigin, GenesisPool, GenesisValidator,
-    InFlightCount, LocalTimestamp, MAX_TX_IN_FLIGHT, MIN_STAKE_FLOOR, NodeId, Randomness,
-    RoutableTransaction, ShardId, ShardTrie, Stake, StakePoolId, TopologySnapshot, ValidatorId,
-    ValidatorStatus, Verified, genesis_config_hash,
+    BeaconChainConfig, Block, BlockHeight, Bls12381G1PrivateKey, CertifiedBlock, ChainOrigin,
+    GenesisValidator, InFlightCount, LocalTimestamp, MAX_TX_IN_FLIGHT, NodeId, RoutableTransaction,
+    ShardId, ShardTrie, StakePoolId, TopologySnapshot, ValidatorId, ValidatorStatus, Verified,
 };
 use libp2p::identity::Keypair;
 use radix_common::types::ComponentAddress;
@@ -413,36 +411,29 @@ impl ProductionRunnerBuilder {
                     pubkey: v.public_key,
                 })
                 .collect();
-            let n = u128::from(initial_validators.len() as u64);
-            let initial_pools = vec![GenesisPool {
-                id: pool_id,
-                total_stake: Stake::from_attos(n * MIN_STAKE_FLOOR.attos()),
-            }];
+            // Production seats its whole configured validator set, capped at
+            // the committee size — there are no surplus pool extras to exclude.
             let beacon_committee_size = initial_validators
                 .len()
                 .min(chain_config.beacon_committee_size as usize);
-            let initial_beacon_committee: Vec<ValidatorId> = initial_validators
+            let beacon_committee: Vec<ValidatorId> = initial_validators
                 .iter()
                 .take(beacon_committee_size)
                 .map(|v| v.id)
                 .collect();
-            let initial_shard_committees: BTreeMap<ShardId, Vec<ValidatorId>> = shared_topology
+            let shard_committees: BTreeMap<ShardId, Vec<ValidatorId>> = shared_topology
                 .shard_trie()
                 .leaves()
                 .map(|s| (s, shared_topology.committee_for_shard(s).to_vec()))
                 .collect();
-            let config = BeaconGenesisConfig {
+            let chain = build_genesis_chain(GenesisChainInputs {
                 chain_config,
-                initial_validators,
-                initial_pools,
-                initial_beacon_committee,
-                initial_shard_committees,
-                initial_randomness: Randomness::new([0x42; 32]),
-            };
-            let state = Arc::new(build_genesis_beacon_state(&config));
-            let config_hash = genesis_config_hash(&config, &network);
-            let block = Arc::new(Verified::<CertifiedBeaconBlock>::genesis(config_hash));
-            (block, state, config_hash, network)
+                validators: initial_validators,
+                beacon_committee,
+                shard_committees,
+                network: &network,
+            });
+            (chain.block, chain.state, chain.config_hash, network)
         };
 
         // Warm-restart: resume the beacon coordinator from the latest

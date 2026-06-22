@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use crossbeam::channel::{Receiver, Sender, unbounded};
-use hyperscale_beacon::genesis::build_genesis_beacon_state;
+use hyperscale_beacon::genesis::{GenesisChainInputs, build_genesis_chain};
 use hyperscale_core::{ParticipationChange, ProtocolEvent, TimerId};
 use hyperscale_dispatch_sync::SyncDispatch;
 use hyperscale_engine::{GenesisConfig, RadixExecutor, TransactionValidation};
@@ -28,12 +28,10 @@ use hyperscale_shard::ShardConsensusConfig;
 use hyperscale_storage::{BeaconStorage, RecoveredState, ShardChainReader};
 use hyperscale_storage_memory::{SimBeaconStorage, SimShardStorage};
 use hyperscale_types::{
-    BeaconChainConfig, BeaconGenesisConfig, BlockHeight, Bls12381G1PrivateKey, Bls12381G1PublicKey,
-    CertifiedBeaconBlock, CertifiedBlock, ChainOrigin, GenesisConfigHash, GenesisPool,
-    GenesisValidator, LocalTimestamp, MIN_STAKE_FLOOR, NodeId, Randomness, ShardId, Stake,
-    StakePoolId, TopologySnapshot, TransactionStatus, TxHash, ValidatorId, ValidatorInfo,
-    ValidatorSet, Verified, bls_keypair_from_seed, genesis_config_hash, shard_prefix_path,
-    uniform_shard_for_node,
+    BeaconChainConfig, BlockHeight, Bls12381G1PrivateKey, Bls12381G1PublicKey, CertifiedBlock,
+    ChainOrigin, GenesisConfigHash, GenesisValidator, LocalTimestamp, NodeId, ShardId, StakePoolId,
+    TopologySnapshot, TransactionStatus, TxHash, ValidatorId, ValidatorInfo, ValidatorSet,
+    Verified, bls_keypair_from_seed, shard_prefix_path, uniform_shard_for_node,
 };
 use radix_common::math::Decimal;
 use radix_common::network::NetworkDefinition;
@@ -341,7 +339,6 @@ impl SimulationRunner {
         let (beacon_genesis_block, beacon_genesis_state, beacon_config_hash, beacon_network) = {
             let network = NetworkDefinition::simulator();
             let pool_id = StakePoolId::new(0);
-            let n = u128::from(registered_validators);
             let initial_validators: Vec<GenesisValidator> = (0..registered_validators)
                 .map(|i| GenesisValidator {
                     id: ValidatorId::new(u64::from(i)),
@@ -349,31 +346,25 @@ impl SimulationRunner {
                     pubkey: public_keys[i as usize],
                 })
                 .collect();
-            let initial_pools = vec![GenesisPool {
-                id: pool_id,
-                total_stake: Stake::from_attos(n * MIN_STAKE_FLOOR.attos()),
-            }];
             let chain_config = network_config.beacon_chain_config.unwrap_or_default();
+            // The sim's surplus pool extras are registered but excluded from
+            // the genesis beacon committee; cap at the committee validators.
             let beacon_committee_size =
                 u64::from(total_validators.min(chain_config.beacon_committee_size));
-            let initial_beacon_committee: Vec<ValidatorId> =
+            let beacon_committee: Vec<ValidatorId> =
                 (0..beacon_committee_size).map(ValidatorId::new).collect();
             let initial_shard_committees: BTreeMap<ShardId, Vec<ValidatorId>> = shard_committees
                 .iter()
                 .map(|(s, v)| (*s, v.clone()))
                 .collect();
-            let config = BeaconGenesisConfig {
+            let chain = build_genesis_chain(GenesisChainInputs {
                 chain_config,
-                initial_validators,
-                initial_pools,
-                initial_beacon_committee,
-                initial_shard_committees,
-                initial_randomness: Randomness::new([0x42; 32]),
-            };
-            let state = Arc::new(build_genesis_beacon_state(&config));
-            let config_hash = genesis_config_hash(&config, &network);
-            let block = Arc::new(Verified::<CertifiedBeaconBlock>::genesis(config_hash));
-            (block, state, config_hash, network)
+                validators: initial_validators,
+                beacon_committee,
+                shard_committees: initial_shard_committees,
+                network: &network,
+            });
+            (chain.block, chain.state, chain.config_hash, network)
         };
 
         // Build the host→validators layout based on the hosting mode.

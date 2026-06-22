@@ -13,12 +13,15 @@
 //! binary layer.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use hyperscale_types::{
-    BeaconGenesisConfig, BeaconState, BeaconWitnessLeafCount, BlockHash, BlockHeight, Epoch,
+    BeaconChainConfig, BeaconGenesisConfig, BeaconState, BeaconWitnessLeafCount, BlockHash,
+    BlockHeight, CertifiedBeaconBlock, Epoch, GenesisConfigHash, GenesisPool, GenesisValidator,
     MAX_BEACON_COMMITTEE, MAX_VOTE_VECTOR_LEN, MIN_BEACON_COMMITTEE_SIZE, MIN_STAKE_FLOOR,
-    NetworkParams, ShardBoundary, ShardCommittee, ShardId, Stake, StakePool, StakePoolId,
-    StateRoot, ValidatorId, ValidatorRecord, ValidatorStatus, WeightedTimestamp,
+    NetworkDefinition, NetworkParams, Randomness, ShardBoundary, ShardCommittee, ShardId, Stake,
+    StakePool, StakePoolId, StateRoot, ValidatorId, ValidatorRecord, ValidatorStatus, Verified,
+    WeightedTimestamp, genesis_config_hash,
 };
 
 // ─── builder ───────────────────────────────────────────────────────────────
@@ -168,6 +171,83 @@ pub fn build_genesis_beacon_state(config: &BeaconGenesisConfig) -> BeaconState {
     state.shard_consensus_members = state.ready_consensus_members(&state.shard_committees);
     state.witness_window_bases = state.live_witness_bases();
     state
+}
+
+// ─── runner-shared genesis chain ─────────────────────────────────────────────
+
+/// Caller-supplied inputs to [`build_genesis_chain`] — the parts that differ
+/// between the production and simulation runners when they stand up an
+/// otherwise identical genesis beacon chain.
+pub struct GenesisChainInputs<'a> {
+    /// Beacon chain sizing knobs (epoch duration, committee sizes, reshape
+    /// thresholds).
+    pub chain_config: BeaconChainConfig,
+    /// Every registered validator, all assigned to the single genesis pool.
+    pub validators: Vec<GenesisValidator>,
+    /// The initial beacon committee. Derived by the caller because the two
+    /// runners size it differently — the sim excludes its surplus pool
+    /// extras, while production seats its whole configured set.
+    pub beacon_committee: Vec<ValidatorId>,
+    /// Per-shard initial committees — supplied, not derived, because genesis
+    /// has no prior randomness to sample from.
+    pub shard_committees: BTreeMap<ShardId, Vec<ValidatorId>>,
+    /// Radix network identity bound into the genesis config hash.
+    pub network: &'a NetworkDefinition,
+}
+
+/// The derived genesis beacon chain both runners boot from: the committed
+/// genesis block, its folded state, and the config hash bound into both.
+pub struct GenesisChain {
+    /// Genesis [`CertifiedBeaconBlock`], verified for each per-vnode
+    /// `BeaconCoordinator` to resume from.
+    pub block: Arc<Verified<CertifiedBeaconBlock>>,
+    /// Folded genesis [`BeaconState`].
+    pub state: Arc<BeaconState>,
+    /// Genesis config hash, bound into beacon signatures alongside the
+    /// network.
+    pub config_hash: GenesisConfigHash,
+}
+
+/// Assemble the genesis beacon chain both runners boot from.
+///
+/// Every validator lands in one genesis stake pool at the stake floor; the
+/// config carries the caller's beacon and shard committees verbatim. The
+/// block, state, and hash are pure functions of the inputs, so a production
+/// host and a sim host built from the same inputs resume from identical
+/// genesis.
+#[must_use]
+pub fn build_genesis_chain(inputs: GenesisChainInputs<'_>) -> GenesisChain {
+    let GenesisChainInputs {
+        chain_config,
+        validators,
+        beacon_committee,
+        shard_committees,
+        network,
+    } = inputs;
+
+    // One genesis pool holds every validator at the stake floor.
+    let n = validators.len() as u128;
+    let initial_pools = vec![GenesisPool {
+        id: StakePoolId::new(0),
+        total_stake: Stake::from_attos(n * MIN_STAKE_FLOOR.attos()),
+    }];
+
+    let config = BeaconGenesisConfig {
+        chain_config,
+        initial_validators: validators,
+        initial_pools,
+        initial_beacon_committee: beacon_committee,
+        initial_shard_committees: shard_committees,
+        initial_randomness: Randomness::new([0x42; 32]),
+    };
+    let state = Arc::new(build_genesis_beacon_state(&config));
+    let config_hash = genesis_config_hash(&config, network);
+    let block = Arc::new(Verified::<CertifiedBeaconBlock>::genesis(config_hash));
+    GenesisChain {
+        block,
+        state,
+        config_hash,
+    }
 }
 
 /// Walk every invariant the builder relies on, panicking on the first
