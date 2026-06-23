@@ -29,9 +29,9 @@ use hyperscale_storage::{BeaconStorage, RecoveredState, ShardChainReader};
 use hyperscale_storage_memory::{SimBeaconStorage, SimShardStorage};
 use hyperscale_types::{
     BeaconChainConfig, BlockHeight, Bls12381G1PrivateKey, Bls12381G1PublicKey, CertifiedBlock,
-    ChainOrigin, GenesisConfigHash, GenesisValidator, LocalTimestamp, NodeId, ShardId, StakePoolId,
+    ChainOrigin, GenesisConfigHash, GenesisValidator, LocalTimestamp, ShardId, StakePoolId,
     TopologySnapshot, TransactionStatus, TxHash, ValidatorId, ValidatorInfo, ValidatorSet,
-    Verified, bls_keypair_from_seed, shard_prefix_path, uniform_shard_for_node,
+    Verified, bls_keypair_from_seed, shard_prefix_path,
 };
 use radix_common::math::Decimal;
 use radix_common::network::NetworkDefinition;
@@ -49,38 +49,23 @@ pub mod relocation;
 mod split;
 pub mod system_action;
 
-/// How simulated validators are bundled into hosts (`IoLoop` instances).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HostingMode {
-    /// Each host hosts `vnodes_per_host` consecutive validators from the same
-    /// shard. Host count = `num_shards * validators_per_shard /
-    /// vnodes_per_host`; `vnodes_per_host` must divide `validators_per_shard`.
-    SameShardBundled,
-    /// Each host hosts one validator from every shard. Host count equals
-    /// `validators_per_shard`; shard `s` owns ids `[s * VPS, (s+1) * VPS)` and
-    /// host `h` carries `{s * VPS + h : s in 0..num_shards}`. Exercises
-    /// cross-shard hosting end to end.
-    CrossShard,
-}
-
 /// Cluster and transport configuration for a simulation.
 ///
-/// The cluster fields (shards, validators, hosting) describe placement; the
-/// latency / jitter / loss fields configure the transport, which the runner
-/// hands over as a [`NetworkConfig`].
+/// Genesis is always a single ROOT shard: the network reaches a multi-shard
+/// topology by driving the real split lifecycle (`grow_to`), never by
+/// genesising into it. The cluster fields describe the genesis committee and
+/// host bundling; the latency / jitter / loss fields configure the transport,
+/// which the runner hands over as a [`NetworkConfig`].
 #[derive(Debug, Clone)]
 pub struct SimConfig {
-    /// Number of validators per shard.
+    /// Number of validators in the genesis (ROOT) committee.
     pub validators_per_shard: u32,
-    /// Number of shards.
-    pub num_shards: u32,
     /// Consecutive validators bundled into each host. Must divide
-    /// `validators_per_shard`; ignored under [`HostingMode::CrossShard`].
+    /// `validators_per_shard`.
     pub vnodes_per_host: u32,
-    /// How validators are bundled into hosts.
-    pub hosting_mode: HostingMode,
-    /// Validators registered in beacon genesis beyond the shard committees.
-    /// They land `Pooled` and run no host, giving the shuffle refill stock.
+    /// Validators registered in beacon genesis beyond the ROOT committee.
+    /// They land `Pooled` and run no host, giving the shuffle refill stock
+    /// and the cohorts each `grow_to` split draws.
     pub pool_extra_validators: u32,
     /// Give each pool extra its own shard-less follower host instead of
     /// leaving it host-less — the layout the shuffle's cross-shard relocation
@@ -104,9 +89,7 @@ impl Default for SimConfig {
     fn default() -> Self {
         Self {
             validators_per_shard: 4,
-            num_shards: 2,
             vnodes_per_host: 1,
-            hosting_mode: HostingMode::SameShardBundled,
             pool_extra_validators: 0,
             dedicated_pool_hosts: false,
             beacon_chain_config: None,
@@ -295,8 +278,8 @@ impl SimulationRunner {
         // Generate keys for all registered validators using deterministic
         // seeding. Pool extras are registered in beacon genesis (landing
         // `Pooled`, giving the shuffle refill stock) but run no host.
-        let total_validators = network_config.num_shards * network_config.validators_per_shard;
-        let registered_validators = total_validators + network_config.pool_extra_validators;
+        let committee_size = network_config.validators_per_shard;
+        let registered_validators = committee_size + network_config.pool_extra_validators;
         let keys: Vec<Bls12381G1PrivateKey> = (0..registered_validators)
             .map(|i| {
                 let mut seed_bytes = [0u8; 32];
@@ -321,24 +304,22 @@ impl SimulationRunner {
             .collect();
         let global_validator_set = ValidatorSet::new(global_validators);
 
-        // Build per-shard committee mappings
-        let mut shard_committees: HashMap<ShardId, Vec<ValidatorId>> = HashMap::new();
-        let shard_depth = network_config.num_shards.trailing_zeros();
-        for shard_id in 0..network_config.num_shards {
-            let shard = ShardId::leaf(shard_depth, u64::from(shard_id));
-            let shard_start = shard_id * network_config.validators_per_shard;
-            let shard_end = shard_start + network_config.validators_per_shard;
-            let committee: Vec<ValidatorId> = (shard_start..shard_end)
-                .map(|i| ValidatorId::new(u64::from(i)))
-                .collect();
-            shard_committees.insert(shard, committee);
-        }
+        // Genesis is a single ROOT shard: the first `committee_size`
+        // validators form its committee; the pool extras stay off-committee so
+        // they land `Pooled`, giving the shuffle and each `grow_to` split a
+        // cohort to draw.
+        let root_committee: Vec<ValidatorId> = (0..committee_size)
+            .map(|i| ValidatorId::new(u64::from(i)))
+            .collect();
+        let shard_committees: HashMap<ShardId, Vec<ValidatorId>> =
+            std::iter::once((ShardId::ROOT, root_committee)).collect();
 
         // Identity-agnostic snapshot — one allocation shared across every
-        // host and every vnode.
+        // host and every vnode. Only the ROOT committee is seated; pool extras
+        // are absent from every shard, so they project as `Pooled`.
         let shared_topology = Arc::new(TopologySnapshot::with_shard_committees(
             NetworkDefinition::simulator(),
-            u64::from(network_config.num_shards),
+            1,
             &global_validator_set,
             shard_committees.clone(),
         ));
@@ -361,7 +342,7 @@ impl SimulationRunner {
             // The sim's surplus pool extras are registered but excluded from
             // the genesis beacon committee; cap at the committee validators.
             let beacon_committee_size =
-                u64::from(total_validators.min(chain_config.beacon_committee_size));
+                u64::from(committee_size.min(chain_config.beacon_committee_size));
             let beacon_committee: Vec<ValidatorId> =
                 (0..beacon_committee_size).map(ValidatorId::new).collect();
             let initial_shard_committees: BTreeMap<ShardId, Vec<ValidatorId>> = shard_committees
@@ -502,10 +483,9 @@ impl SimulationRunner {
 
         info!(
             num_nodes = hosts.len(),
-            num_shards = network_config.num_shards,
             validators_per_shard = network_config.validators_per_shard,
             seed,
-            "Created simulation runner"
+            "Created single-shard (ROOT) simulation runner"
         );
 
         let signing_keys: Vec<Arc<Bls12381G1PrivateKey>> = keys
@@ -786,53 +766,19 @@ impl SimulationRunner {
 
     /// Initialize genesis with pre-funded accounts.
     ///
-    /// Each node only receives the accounts that belong to its shard, avoiding
-    /// the Radix Engine genesis limit (~8000 accounts per node). The `balances`
-    /// list may contain accounts from all shards — they are filtered per-node.
-    ///
-    /// # Panics
-    ///
-    /// Panics if a Radix `ComponentAddress` payload is shorter than 30 bytes
-    /// (unreachable: `ComponentAddress` is always 30 bytes).
+    /// Genesis is a single ROOT shard, so every funded account lands on ROOT;
+    /// a later `grow_to` partitions them across the children by prefix. The
+    /// account count is bounded by the Radix Engine genesis limit (~8000) —
+    /// callers past it fund the surplus at runtime instead.
     pub fn initialize_genesis_with_balances(&mut self, balances: &[(ComponentAddress, Decimal)]) {
-        let num_shards = u64::from(self.config.num_shards);
-        let hosts_per_shard = self.config.validators_per_shard / self.config.vnodes_per_host;
-
-        // Pre-group balances by shard so we don't re-filter for every node.
-        let mut balances_by_shard: HashMap<ShardId, Vec<_>> = HashMap::new();
-        for (address, balance) in balances {
-            let radix_node_id = address.into_node_id();
-            let det_node_id = NodeId(radix_node_id.0[..30].try_into().unwrap());
-            let shard = uniform_shard_for_node(&det_node_id, num_shards);
-            balances_by_shard
-                .entry(shard)
-                .or_default()
-                .push((*address, *balance));
-        }
-
-        // Each node receives only its own shard's balances. Build one
-        // GenesisConfig per shard up-front; the engine cache then memoizes
-        // the merged DatabaseUpdates per unique config across the process.
-        let configs_by_shard: HashMap<ShardId, GenesisConfig> = balances_by_shard
-            .into_iter()
-            .map(|(shard_id, shard_balances)| {
-                let config = GenesisConfig {
-                    xrd_balances: shard_balances,
-                    ..GenesisConfig::test_default()
-                };
-                (shard_id, config)
-            })
-            .collect();
-        let empty_config = GenesisConfig::test_default();
-
-        let shard_depth = self.config.num_shards.trailing_zeros();
-        for shard_idx in 0..self.config.num_shards {
-            let shard_id = ShardId::leaf(shard_depth, u64::from(shard_idx));
-            let config = configs_by_shard.get(&shard_id).unwrap_or(&empty_config);
-            self.install_engine_genesis(config, |node_idx| {
-                ShardId::leaf(shard_depth, node_idx as u64 / u64::from(hosts_per_shard)) == shard_id
-            });
-        }
+        // One GenesisConfig for the whole ROOT shard; the engine cache
+        // memoizes the merged DatabaseUpdates so installing it on each ROOT
+        // host is cheap.
+        let config = GenesisConfig {
+            xrd_balances: balances.to_vec(),
+            ..GenesisConfig::test_default()
+        };
+        self.install_engine_genesis(&config, |_| true);
 
         info!(
             num_nodes = self.hosts.len(),
@@ -867,78 +813,69 @@ impl SimulationRunner {
     /// Initialize state-machine genesis on all nodes and register inbound
     /// network handlers. Called after engine genesis on every node.
     ///
-    /// For each shard, locate every host that serves it (across both
-    /// same-shard and cross-shard hosting layouts), initialize that
-    /// shard's genesis block on those hosts, and schedule the
+    /// Genesis is a single ROOT shard: locate every host that serves ROOT,
+    /// initialize its genesis block on those hosts, and schedule the
     /// `BlockCommitted` event.
     fn finalize_genesis(&mut self) {
         use hyperscale_storage::SubstateStore;
         use hyperscale_types::Block;
 
-        let num_shards = self.config.num_shards;
-        let shard_depth = num_shards.trailing_zeros();
+        let shard = ShardId::ROOT;
 
-        for shard_id in 0..num_shards {
-            let shard = ShardId::leaf(shard_depth, u64::from(shard_id));
+        // Hosts that carry at least one vnode in ROOT.
+        let num_hosts = NodeIndex::try_from(self.hosts.len()).expect("host count fits NodeIndex");
+        let hosts_for_shard: Vec<NodeIndex> = (0..num_hosts)
+            .filter(|&h| self.hosts[h as usize].hosted_shards().any(|s| s == shard))
+            .collect();
 
-            // Hosts that carry at least one vnode in this shard.
-            let num_hosts =
-                NodeIndex::try_from(self.hosts.len()).expect("host count fits NodeIndex");
-            let hosts_for_shard: Vec<NodeIndex> = (0..num_hosts)
-                .filter(|&h| self.hosts[h as usize].hosted_shards().any(|s| s == shard))
-                .collect();
+        let first_host = *hosts_for_shard
+            .first()
+            .expect("the ROOT shard must have at least one host");
+        let first_node_storage = &self.hosts[first_host as usize].shard_io(shard).storage;
+        let genesis_jmt_root = first_node_storage.state_root();
 
-            let first_host = *hosts_for_shard
-                .first()
-                .expect("every shard must have at least one host");
-            let first_node_storage = &self.hosts[first_host as usize].shard_io(shard).storage;
-            let genesis_jmt_root = first_node_storage.state_root();
+        info!(
+            shard = ?shard,
+            genesis_jmt_root = ?genesis_jmt_root,
+            "JMT state after genesis bootstrap"
+        );
 
-            info!(
-                shard = shard_id,
-                genesis_jmt_root = ?genesis_jmt_root,
-                "JMT state after genesis bootstrap"
+        // Proposer = first validator in the ROOT committee.
+        let proposer = ValidatorId::new(0);
+        let genesis_block = Block::genesis(shard, proposer, genesis_jmt_root, ChainOrigin::ROOT);
+
+        for host_index in &hosts_for_shard {
+            let i = *host_index as usize;
+            self.hosts[i].initialize_shard_genesis(&genesis_block);
+            self.hosts[i].flush_all_batches();
+
+            // Drain outputs from genesis initialization (timer sets, etc.)
+            let output = self.hosts[i].drain_pending_output();
+            self.drain_node_io(*host_index);
+            self.process_step_output(*host_index, output);
+
+            // Sync state machine with actual JMT state after genesis bootstrap.
+            let genesis_certified = Arc::new(Verified::<CertifiedBlock>::genesis(
+                shard,
+                proposer,
+                genesis_jmt_root,
+                ChainOrigin::ROOT,
+            ));
+            let genesis_commit_event = HostEvent::protocol(
+                shard,
+                ProtocolEvent::BlockCommitted {
+                    certified: genesis_certified,
+                },
             );
-
-            // Proposer = first validator in the shard's committee
-            // (shard_id * validators_per_shard).
-            let proposer = ValidatorId::new(u64::from(shard_id * self.config.validators_per_shard));
-            let genesis_block =
-                Block::genesis(shard, proposer, genesis_jmt_root, ChainOrigin::ROOT);
-
-            for host_index in &hosts_for_shard {
-                let i = *host_index as usize;
-                self.hosts[i].initialize_shard_genesis(&genesis_block);
-                self.hosts[i].flush_all_batches();
-
-                // Drain outputs from genesis initialization (timer sets, etc.)
-                let output = self.hosts[i].drain_pending_output();
-                self.drain_node_io(*host_index);
-                self.process_step_output(*host_index, output);
-
-                // Sync state machine with actual JMT state after genesis bootstrap.
-                let genesis_certified = Arc::new(Verified::<CertifiedBlock>::genesis(
-                    shard,
-                    proposer,
-                    genesis_jmt_root,
-                    ChainOrigin::ROOT,
-                ));
-                let genesis_commit_event = HostEvent::protocol(
-                    shard,
-                    ProtocolEvent::BlockCommitted {
-                        certified: genesis_certified,
-                    },
-                );
-                self.schedule_event(*host_index, self.now, genesis_commit_event);
-            }
-
-            info!(
-                shard = shard_id,
-                genesis_hash = ?genesis_block.hash(),
-                hosts = hosts_for_shard.len(),
-                "Initialized genesis for shard"
-            );
+            self.schedule_event(*host_index, self.now, genesis_commit_event);
         }
+
+        info!(
+            shard = ?shard,
+            genesis_hash = ?genesis_block.hash(),
+            hosts = hosts_for_shard.len(),
+            "Initialized genesis for the ROOT shard"
+        );
 
         // Wire each node into the in-memory network now that genesis is settled.
         for host in &mut self.hosts {
@@ -1218,20 +1155,15 @@ fn network_layout(plans: &[HostPlan]) -> HostLayout {
 
 /// Compute the host→validators layout for a simulation network.
 ///
-/// Returns one [`HostPlan`] per host. The committee hosts carry seated
-/// `(validator_idx, shard)` vnodes per `config.hosting_mode`:
+/// Genesis is a single ROOT shard, so every seated vnode is on ROOT. Returns
+/// one [`HostPlan`] per host: the committee hosts are
+/// `validators_per_shard / vnodes_per_host`, host `h` carrying
+/// `vnodes_per_host` consecutive ROOT validators starting at
+/// `h * vnodes_per_host`.
 ///
-/// - [`HostingMode::SameShardBundled`]: hosts are
-///   `num_shards * validators_per_shard / vnodes_per_host`. Host `h`
-///   in shard `s` carries `vnodes_per_host` consecutive validators
-///   starting at `h * vnodes_per_host` within that shard.
-/// - [`HostingMode::CrossShard`]: hosts are `validators_per_shard`.
-///   Host `h` carries one validator from every shard — specifically
-///   `{s * validators_per_shard + h : s in 0..num_shards}`.
-///
-/// When [`NetworkConfig::dedicated_pool_hosts`] is set, one shard-less
-/// follower host per pool extra is appended past the committee hosts, at
-/// the validator-index slot the `validator_to_node` formula maps it to.
+/// When [`SimConfig::dedicated_pool_hosts`] is set, one shard-less follower
+/// host per pool extra is appended past the committee hosts, at the
+/// validator-index slot the `validator_to_node` formula maps it to.
 fn build_host_layout(config: &SimConfig) -> Vec<HostPlan> {
     let mut plans: Vec<HostPlan> = build_committee_host_layout(config)
         .into_iter()
@@ -1245,11 +1177,10 @@ fn build_host_layout(config: &SimConfig) -> Vec<HostPlan> {
         // follower. Pool-extra validator ids start past the committee
         // validators, and the `vnodes_per_host == 1` invariant the
         // dedicated layout requires puts each at its own node.
-        let total_validators = config.num_shards * config.validators_per_shard;
         for k in 0..config.pool_extra_validators {
             plans.push(HostPlan {
                 seated: Vec::new(),
-                followers: vec![total_validators + k],
+                followers: vec![config.validators_per_shard + k],
             });
         }
     }
@@ -1265,46 +1196,23 @@ struct HostPlan {
     followers: Vec<u32>,
 }
 
-/// The committee host layout — one entry per host that carries a shard at
-/// construction, per the hosting mode. Dedicated pool-extra hosts are
-/// appended separately by [`build_host_layout`].
+/// The committee host layout — one entry per host that carries a ROOT vnode
+/// at construction. Host `h` bundles `vnodes_per_host` consecutive ROOT
+/// validators starting at `h * vnodes_per_host`. Dedicated pool-extra hosts
+/// are appended separately by [`build_host_layout`].
 fn build_committee_host_layout(config: &SimConfig) -> Vec<Vec<(u32, ShardId)>> {
-    match config.hosting_mode {
-        HostingMode::SameShardBundled => {
-            assert_eq!(
-                config.validators_per_shard % config.vnodes_per_host,
-                0,
-                "vnodes_per_host must divide validators_per_shard"
-            );
-            let hosts_per_shard = config.validators_per_shard / config.vnodes_per_host;
-            let shard_depth = config.num_shards.trailing_zeros();
-            let mut layout = Vec::with_capacity((config.num_shards * hosts_per_shard) as usize);
-            for shard_id in 0..config.num_shards {
-                let shard = ShardId::leaf(shard_depth, u64::from(shard_id));
-                for h in 0..hosts_per_shard {
-                    let host_first_validator =
-                        shard_id * config.validators_per_shard + h * config.vnodes_per_host;
-                    let host_vnodes: Vec<(u32, ShardId)> = (0..config.vnodes_per_host)
-                        .map(|v| (host_first_validator + v, shard))
-                        .collect();
-                    layout.push(host_vnodes);
-                }
-            }
-            layout
-        }
-        HostingMode::CrossShard => {
-            let shard_depth = config.num_shards.trailing_zeros();
-            let mut layout = Vec::with_capacity(config.validators_per_shard as usize);
-            for h in 0..config.validators_per_shard {
-                let host_vnodes: Vec<(u32, ShardId)> = (0..config.num_shards)
-                    .map(|s| {
-                        let validator_idx = s * config.validators_per_shard + h;
-                        (validator_idx, ShardId::leaf(shard_depth, u64::from(s)))
-                    })
-                    .collect();
-                layout.push(host_vnodes);
-            }
-            layout
-        }
-    }
+    assert_eq!(
+        config.validators_per_shard % config.vnodes_per_host,
+        0,
+        "vnodes_per_host must divide validators_per_shard"
+    );
+    let host_count = config.validators_per_shard / config.vnodes_per_host;
+    (0..host_count)
+        .map(|h| {
+            let host_first_validator = h * config.vnodes_per_host;
+            (0..config.vnodes_per_host)
+                .map(|v| (host_first_validator + v, ShardId::ROOT))
+                .collect()
+        })
+        .collect()
 }

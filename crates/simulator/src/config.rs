@@ -2,8 +2,9 @@
 
 use std::time::Duration;
 
-use hyperscale_simulation::SimConfig;
+use hyperscale_simulation::{EPOCH_MS, SimConfig};
 use hyperscale_spammer::SelectionMode;
+use hyperscale_types::{BeaconChainConfig, ReshapeThresholds};
 use radix_common::math::Decimal;
 
 /// Configuration for a simulation run.
@@ -83,11 +84,34 @@ impl SimulatorConfig {
     }
 
     /// Convert to a `SimConfig` for the underlying simulation.
+    ///
+    /// Genesis is always a single ROOT shard. For a multi-shard target the
+    /// network grows there via the real split lifecycle ([`grow_to`]), which
+    /// needs the split trigger armed from genesis, one cohort of pooled extras
+    /// per split — `(num_shards - 1) * validators_per_shard` in total — and a
+    /// paced epoch so the beacon folds by epoch rather than stalling on
+    /// production-sized timeouts.
+    ///
+    /// [`grow_to`]: hyperscale_simulation::SimulationRunner::grow_to
     #[must_use]
     pub fn to_sim_config(&self) -> SimConfig {
+        let committee = self.validators_per_shard;
+        if self.num_shards <= 1 {
+            return SimConfig {
+                validators_per_shard: committee,
+                ..Default::default()
+            };
+        }
         SimConfig {
-            num_shards: self.num_shards,
-            validators_per_shard: self.validators_per_shard,
+            validators_per_shard: committee,
+            pool_extra_validators: (self.num_shards - 1) * committee,
+            beacon_chain_config: Some(BeaconChainConfig {
+                epoch_duration_ms: EPOCH_MS,
+                num_shards: 1,
+                shard_size: committee,
+                reshape_thresholds: ReshapeThresholds { split_bytes: 0 },
+                ..BeaconChainConfig::default()
+            }),
             ..Default::default()
         }
     }

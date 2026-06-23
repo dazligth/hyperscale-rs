@@ -18,8 +18,8 @@
 //! use hyperscale_simulator::{Simulator, SimulatorConfig, WorkloadConfig};
 //! use std::time::Duration;
 //!
-//! // Create a simulator with 2 shards, 3 validators each
-//! let config = SimulatorConfig::new(2, 3)
+//! // Genesis on one shard, grow to 2 shards, 4 validators each
+//! let config = SimulatorConfig::new(2, 4)
 //!     .with_accounts_per_shard(100)
 //!     .with_workload(WorkloadConfig::transfers_only());
 //!

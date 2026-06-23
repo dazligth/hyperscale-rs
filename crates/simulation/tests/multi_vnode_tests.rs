@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use hyperscale_simulation::{HostingMode, SimConfig, SimulationRunner};
+use hyperscale_simulation::{SimConfig, SimulationRunner};
 use hyperscale_types::{BlockHeight, ValidatorId};
 use tracing_test::traced_test;
 
@@ -19,10 +19,8 @@ use tracing_test::traced_test;
 #[test]
 fn test_v2_same_shard_hosting_makes_progress() {
     let config = SimConfig {
-        num_shards: 1,
         validators_per_shard: 4,
         vnodes_per_host: 2,
-        hosting_mode: HostingMode::SameShardBundled,
         jitter_fraction: 0.1,
         packet_loss_rate: 0.0,
         beacon_chain_config: None,

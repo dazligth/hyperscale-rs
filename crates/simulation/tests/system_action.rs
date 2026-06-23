@@ -28,7 +28,6 @@ const GENESIS_POOL: StakePoolId = StakePoolId::new(0);
 /// fires, so committee membership stays put for the test's duration.
 fn single_shard_config(validators: u32) -> SimConfig {
     SimConfig {
-        num_shards: 1,
         validators_per_shard: validators,
         jitter_fraction: 0.1,
         beacon_chain_config: Some(BeaconChainConfig {

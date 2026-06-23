@@ -8,7 +8,7 @@ mod event_queue;
 mod runner;
 
 pub use runner::relocation::JoinKind;
-pub use runner::{HostingMode, SimConfig, SimulationRunner};
+pub use runner::{SimConfig, SimulationRunner};
 
 /// Beacon epoch length the simulations run at.
 ///

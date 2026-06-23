@@ -91,7 +91,6 @@ const RESOLVE_BUDGET_EPOCHS: u64 = 12;
 /// arrives once the vote raises `split_bytes`.
 fn merge_config() -> SimConfig {
     SimConfig {
-        num_shards: 1,
         validators_per_shard: PER_SHARD,
         jitter_fraction: 0.1,
         beacon_chain_config: Some(BeaconChainConfig {

@@ -38,7 +38,6 @@ const OUTAGE_EPOCHS: u64 = 6;
 
 fn retention_config() -> SimConfig {
     SimConfig {
-        num_shards: 1,
         validators_per_shard: VALIDATORS,
         jitter_fraction: 0.1,
         beacon_chain_config: Some(BeaconChainConfig {

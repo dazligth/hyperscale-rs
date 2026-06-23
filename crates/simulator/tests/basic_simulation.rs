@@ -58,8 +58,9 @@ fn test_single_shard_simulation() {
 fn test_multi_shard_simulation() {
     let _ = fmt().with_env_filter("info").with_test_writer().try_init();
 
-    // Configure simulation: 2 shards, 3 validators each
-    let config = SimulatorConfig::new(2, 3)
+    // Grow to 2 shards with 4 validators each — the BFT floor, since
+    // single-shard genesis seats one ROOT committee.
+    let config = SimulatorConfig::new(2, 4)
         .with_accounts_per_shard(20)
         .with_seed(12345)
         .with_workload(

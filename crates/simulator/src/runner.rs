@@ -18,8 +18,8 @@ use hyperscale_spammer::{
     WorkloadGenerator,
 };
 use hyperscale_types::{
-    RoutableTransaction, ShardId, TransactionDecision, TransactionStatus, TxHash,
-    WeightedTimestamp, uniform_shard_for_node,
+    MIN_BEACON_COMMITTEE_SIZE, RoutableTransaction, ShardId, TransactionDecision,
+    TransactionStatus, TxHash, WeightedTimestamp, uniform_shard_for_node,
 };
 use radix_common::math::Decimal;
 use radix_common::network::NetworkDefinition;
@@ -71,6 +71,17 @@ impl Simulator {
     /// Returns [`SimulatorError::AccountPool`] if the requested account pool
     /// can't be allocated (e.g. zero-shard or zero-account configuration).
     pub fn new(config: SimulatorConfig) -> Result<Self, SimulatorError> {
+        if !matches!(config.num_shards, 1 | 2 | 4) {
+            return Err(SimulatorError::UnsupportedShardCount(config.num_shards));
+        }
+        // Genesis seats one ROOT committee of `validators_per_shard` hosted
+        // validators; the beacon committee is drawn from them, so it must clear
+        // the BFT floor. Pool extras run no host and cannot fill the gap.
+        if (config.validators_per_shard as usize) < MIN_BEACON_COMMITTEE_SIZE {
+            return Err(SimulatorError::CommitteeBelowBftFloor(
+                config.validators_per_shard,
+            ));
+        }
         let network_config = config.to_sim_config();
         let runner = SimulationRunner::new(&network_config, config.seed);
 
@@ -144,8 +155,22 @@ impl Simulator {
         }
     }
 
+    /// Grow from the single ROOT genesis to the configured target topology via
+    /// the real split lifecycle. A no-op for a single-shard target.
+    fn grow_to_target(&mut self) {
+        if self.config.num_shards > 1 {
+            info!(
+                num_shards = self.config.num_shards,
+                "Growing from ROOT to target topology"
+            );
+            self.runner.grow_to(self.config.num_shards);
+        }
+    }
+
     /// Fast path: all accounts fit in genesis.
     fn initialize_genesis_only(&mut self, balance: Decimal) {
+        // Genesis funds every account on ROOT; the grow then partitions them
+        // across the children by prefix.
         let balances: Vec<_> = self
             .accounts
             .shards()
@@ -160,6 +185,7 @@ impl Simulator {
 
         self.runner.initialize_genesis_with_balances(&balances);
         self.run_warmup();
+        self.grow_to_target();
         info!("Genesis initialized with funded accounts");
     }
 
@@ -205,6 +231,10 @@ impl Simulator {
 
         self.runner.initialize_genesis_with_balances(&balances);
         self.run_warmup();
+
+        // Grow to the target topology before runtime funding so the surplus
+        // funding transactions route across the grown shards.
+        self.grow_to_target();
 
         // Phase 2: Fund remaining accounts via transactions.
         let txs_by_shard = funding_workload.generate_funding_transactions(&self.accounts, &plan);
@@ -451,18 +481,22 @@ impl Simulator {
         )
     }
 
-    /// Get a node index for submitting to a shard (for status checks).
-    fn get_node_for_shard(&self, shard: ShardId) -> u32 {
-        // The shard's flat index in a uniform partition is its trie path.
-        u32::try_from(shard.path()).unwrap_or(u32::MAX) * self.config.validators_per_shard
+    /// A host that currently serves `shard`, for status reads. The grow
+    /// shuffle scatters committee members across hosts, so this queries the
+    /// live topology rather than assuming a contiguous layout. Falls back to
+    /// host 0 only before genesis seats any shard.
+    fn get_node_for_shard(&self, shard: ShardId) -> NodeIndex {
+        (0..self.runner.num_hosts())
+            .find(|&node| self.runner.hosts_shard(node, shard).is_some())
+            .unwrap_or(0)
     }
 
-    /// Get all node indices in a shard.
+    /// Every host that currently serves `shard`. Submitting to all of them
+    /// ensures the proposer holds the tx before its proposal timer fires.
     fn nodes_for_shard(&self, shard: ShardId) -> Vec<NodeIndex> {
-        let start =
-            u32::try_from(shard.path()).unwrap_or(u32::MAX) * self.config.validators_per_shard;
-        let end = start + self.config.validators_per_shard;
-        (start..end).collect()
+        (0..self.runner.num_hosts())
+            .filter(|&node| self.runner.hosts_shard(node, shard).is_some())
+            .collect()
     }
 
     /// Log progress during simulation.
@@ -501,15 +535,16 @@ impl Simulator {
         );
     }
 
-    /// Aggregate lock contention stats from all shards.
+    /// Aggregate lock contention stats across the live leaf shards.
     ///
-    /// Sums stats from the first validator of each shard (they all see the same mempool).
+    /// Sums stats from one vnode per leaf (they all see the same mempool).
     fn aggregate_lock_contention(&self) -> LockContentionStats {
         let mut total = LockContentionStats::default();
 
+        let depth = self.config.num_shards.trailing_zeros();
         for shard_idx in 0..self.config.num_shards {
-            let node_idx = shard_idx * self.config.validators_per_shard;
-            if let Some(node) = self.runner.node(node_idx) {
+            let shard = ShardId::leaf(depth, u64::from(shard_idx));
+            if let Some(node) = self.runner.shard_vnodes(shard).first() {
                 let stats = node.mempool_coordinator().lock_contention_stats();
                 total.locked_nodes += stats.locked_nodes;
                 total.pending_count += stats.pending_count;
@@ -543,11 +578,8 @@ impl Simulator {
     /// and shard, with potential cycle detection.
     #[must_use]
     pub fn analyze_livelocks(&self) -> LivelockReport {
-        let analyzer = LivelockAnalyzer::from_runner(
-            &self.runner,
-            u64::from(self.config.num_shards),
-            self.config.validators_per_shard,
-        );
+        let analyzer =
+            LivelockAnalyzer::from_runner(&self.runner, u64::from(self.config.num_shards));
         analyzer.analyze()
     }
 
@@ -581,6 +613,17 @@ pub enum SimulatorError {
     /// The account pool could not be constructed.
     #[error("Account pool error: {0}")]
     AccountPool(#[from] AccountPoolError),
+    /// The requested shard count is not a grow target the simulator supports.
+    /// Genesis is single-shard and grows by splitting, which the harness caps
+    /// at four shards (the host-less pool ceiling), so the target must be 1, 2
+    /// or 4.
+    #[error("unsupported num_shards {0}: must be 1, 2, or 4 (genesis grows by splitting)")]
+    UnsupportedShardCount(u32),
+    /// `validators_per_shard` is below the BFT floor. Single-shard genesis
+    /// seats one ROOT committee of that many hosted validators, and the beacon
+    /// committee drawn from them must clear [`MIN_BEACON_COMMITTEE_SIZE`].
+    #[error("validators_per_shard {0} is below the BFT floor of {MIN_BEACON_COMMITTEE_SIZE}")]
+    CommitteeBelowBftFloor(u32),
 }
 
 #[cfg(test)]

@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use hyperscale_core::ProtocolEvent;
 use hyperscale_node::shard::HostEvent;
-use hyperscale_simulation::{HostingMode, SimConfig, SimulationRunner};
+use hyperscale_simulation::{SimConfig, SimulationRunner};
 use hyperscale_types::{
     BlockHeight, LocalTimestamp, NetworkDefinition, Round, ShardId, TransactionStatus,
 };
@@ -18,7 +18,6 @@ use tracing_test::traced_test;
 /// Create a basic network configuration for testing.
 fn test_network_config() -> SimConfig {
     SimConfig {
-        num_shards: 1,
         validators_per_shard: 4,
         jitter_fraction: 0.1,
         ..Default::default()
@@ -1774,12 +1773,10 @@ fn test_consensus_during_partition() {
 #[test]
 fn test_packet_loss_application() {
     let config = SimConfig {
-        num_shards: 1,
         validators_per_shard: 4,
         jitter_fraction: 0.1,
         packet_loss_rate: 0.10, // 10% packet loss
         vnodes_per_host: 1,
-        hosting_mode: HostingMode::SameShardBundled,
         beacon_chain_config: None,
         pool_extra_validators: 0,
         ..Default::default()
@@ -1839,12 +1836,10 @@ fn test_packet_loss_application() {
 #[test]
 fn test_packet_loss_determinism() {
     let config = SimConfig {
-        num_shards: 1,
         validators_per_shard: 4,
         jitter_fraction: 0.1,
         packet_loss_rate: 0.2, // 20% packet loss for more variation
         vnodes_per_host: 1,
-        hosting_mode: HostingMode::SameShardBundled,
         beacon_chain_config: None,
         pool_extra_validators: 0,
         ..Default::default()

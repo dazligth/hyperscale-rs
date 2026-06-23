@@ -57,7 +57,6 @@ pub const POOL_EXTRAS: u32 = 1;
 #[must_use]
 pub fn rotation_config() -> SimConfig {
     SimConfig {
-        num_shards: 1,
         validators_per_shard: PER_SHARD,
         jitter_fraction: 0.1,
         beacon_chain_config: Some(BeaconChainConfig {
@@ -93,7 +92,6 @@ pub const GROW_PER_SHARD: u32 = 4;
 #[must_use]
 pub fn cross_shard_grow_config() -> SimConfig {
     SimConfig {
-        num_shards: 1,
         validators_per_shard: GROW_PER_SHARD,
         jitter_fraction: 0.1,
         beacon_chain_config: Some(BeaconChainConfig {

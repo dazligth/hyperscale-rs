@@ -44,7 +44,6 @@ fn with_test_recorder<R>(f: impl FnOnce(&MemoryRecorder) -> R) -> R {
 
 fn single_shard_config() -> SimConfig {
     SimConfig {
-        num_shards: 1,
         validators_per_shard: 4,
         jitter_fraction: 0.1,
         ..Default::default()
@@ -57,7 +56,6 @@ fn single_shard_config() -> SimConfig {
 /// launches single-shard and fans out under load.
 fn cross_shard_grow_config() -> SimConfig {
     SimConfig {
-        num_shards: 1,
         validators_per_shard: 4,
         jitter_fraction: 0.1,
         beacon_chain_config: Some(BeaconChainConfig {

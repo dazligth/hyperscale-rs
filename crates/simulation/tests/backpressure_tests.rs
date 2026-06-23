@@ -36,7 +36,6 @@ use radix_transactions::builder::ManifestBuilder;
 /// mempool and provision mechanics, so one shard is sufficient.
 fn backpressure_config() -> SimConfig {
     SimConfig {
-        num_shards: 1,
         validators_per_shard: 8,
         jitter_fraction: 0.1,
         beacon_chain_config: Some(BeaconChainConfig {

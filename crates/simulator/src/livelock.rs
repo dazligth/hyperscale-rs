@@ -177,23 +177,19 @@ pub struct LivelockAnalyzer {
 impl LivelockAnalyzer {
     /// Create a new analyzer from the simulation runner.
     ///
-    /// Collects incomplete transactions from all nodes in all shards.
-    pub fn from_runner(
-        runner: &SimulationRunner,
-        num_shards: u64,
-        validators_per_shard: u32,
-    ) -> Self {
+    /// Collects incomplete transactions from one vnode per live leaf shard
+    /// (all validators on a shard see the same mempool). The grow shuffle
+    /// scatters committee members across hosts, so leaves are resolved through
+    /// the live topology rather than a contiguous host layout.
+    pub fn from_runner(runner: &SimulationRunner, num_shards: u64) -> Self {
         let mut stuck_transactions = Vec::new();
         let mut seen_hashes = HashSet::new();
 
-        // Collect from first validator of each shard (all validators see same mempool)
         let depth = num_shards.trailing_zeros();
         for shard_idx in 0..num_shards {
             let shard = ShardId::leaf(depth, shard_idx);
-            let first_node_idx =
-                u32::try_from(shard_idx).unwrap_or(u32::MAX) * validators_per_shard;
 
-            if let Some(node) = runner.node(first_node_idx) {
+            if let Some(node) = runner.shard_vnodes(shard).first() {
                 let incomplete = node.mempool_coordinator().incomplete_transactions();
 
                 for (hash, status, tx) in incomplete {

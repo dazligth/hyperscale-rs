@@ -65,7 +65,6 @@ const PARENT_RUN_BUDGET_EPOCHS: u64 = 6;
 /// shards (`leaf(1,0)`, `leaf(1,1)`) through the real split lifecycle.
 fn merge_config() -> SimConfig {
     SimConfig {
-        num_shards: 1,
         validators_per_shard: PER_SHARD,
         jitter_fraction: 0.1,
         beacon_chain_config: Some(BeaconChainConfig {

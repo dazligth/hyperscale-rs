@@ -16,7 +16,6 @@ const PER_SHARD: u32 = 4;
 /// genesis and one cohort of pooled extras per split.
 fn grow_config(target_shards: u32) -> SimConfig {
     SimConfig {
-        num_shards: 1,
         validators_per_shard: PER_SHARD,
         jitter_fraction: 0.1,
         beacon_chain_config: Some(BeaconChainConfig {

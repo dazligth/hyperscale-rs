@@ -36,7 +36,6 @@ use common::{
 /// Create a basic single-shard network configuration.
 fn single_shard_config() -> SimConfig {
     SimConfig {
-        num_shards: 1,
         validators_per_shard: 4,
         jitter_fraction: 0.1,
         ..Default::default()
