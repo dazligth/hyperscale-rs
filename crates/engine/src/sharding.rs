@@ -192,18 +192,21 @@ pub fn resolve_owned_nodes_from_updates(merged: &DatabaseUpdates) -> HashMap<Nod
 /// produces disjoint contributions.
 ///
 /// Returns `Err(conflicts)` if the same vault is claimed by accounts on
-/// both shards. The Radix Engine is not shard-aware yet: every shard's
-/// genesis runs the same VM initialization with the same RNG-derived
-/// IDs, so two genesis accounts (one per shard) can end up holding
-/// `Own(_)` references to the same internal vault. Even with a
-/// deterministic ownership tiebreaker the VM would still see divergent
-/// substates for the colliding vault (each shard's
-/// [`crate::provisioned_snapshot::ProvisionedSnapshot`] overlays the
-/// other shard's provision on top of its own local state with
-/// "provisions win" precedence), so the global receipt root would split
-/// across the two committees. Callers must abort the transaction on
-/// `Err` — a deterministic outcome both shards can produce locally —
-/// rather than attempting to execute it.
+/// both shards. Each vault is owned by exactly one account, so healthy
+/// execution never reaches this: genesis runs the engine's id allocation
+/// once on ROOT (no per-shard duplicate that hands one vault to two
+/// accounts), and runtime vault `NodeId`s are unique and never re-parent.
+/// The path left open is a remote shard's provisions claiming a vault the
+/// local shard owns — a bogus `owned_nodes` the interim trust model can't
+/// reject at intake, since `provision_tx_roots` attests only the source tx
+/// hash, not the ownership itself. The guard stays as a deterministic
+/// safety net: each shard's
+/// [`crate::provisioned_snapshot::ProvisionedSnapshot`] overlays the other
+/// shard's provision on top of its own local state with "provisions win"
+/// precedence, so a contested vault would give the two committees divergent
+/// substates and split the global receipt root. Aborting on `Err` — an
+/// outcome both shards derive locally and identically — keeps them in
+/// agreement rather than executing a divergent VM view.
 ///
 /// Deterministic across same-shard validators: identical declared set +
 /// identical local state + identical BFT-attested provisions ⇒ identical
@@ -256,8 +259,9 @@ pub fn build_cross_shard_ownership<S: SubstateDatabase>(
                     ?remote_owner,
                     ?local_owner,
                     "Cross-shard ownership conflict — aborting transaction. \
-                     Vault claimed by accounts on both shards (pre-sharding-aware \
-                     Radix Engine genesis can produce colliding internal vault NodeIds)."
+                     A vault is claimed by accounts on both shards; healthy state \
+                     holds one owner per vault, so a remote provision is claiming a \
+                     vault the local shard owns. Aborting deterministically."
                 );
                 conflicts.push(vault);
             }
@@ -968,11 +972,14 @@ mod tests {
 
     #[test]
     fn cross_shard_ownership_conflict_returns_err() {
-        // Genesis vault-NodeId collision: the same internal vault is claimed
-        // by accounts on both shards. Both shards see the conflict from
-        // opposite perspectives (local-walk on one side, provision on the
-        // other), so each independently returns Err — the caller fast-aborts
-        // the transaction, producing a deterministic outcome across shards.
+        // A vault contested across shards: the same internal vault is claimed
+        // by accounts on both shards. Healthy state holds one owner per vault
+        // (single-shard genesis removed the colliding-genesis case), so this
+        // stands in for a remote provision claiming a vault the local shard
+        // owns. Both shards see the conflict from opposite perspectives
+        // (local-walk on one side, provision on the other), so each
+        // independently returns Err — the caller fast-aborts the transaction,
+        // producing a deterministic outcome across shards.
         let a = account_id(1);
         let b = pick_other_shard_seed(a, 2);
         let shared_vault = fungible_vault_id(99);
@@ -990,7 +997,7 @@ mod tests {
             shard_a,
             &ShardTrie::uniform_from_count(2),
         )
-        .expect_err("collision should produce Err");
+        .expect_err("contested vault should produce Err");
 
         // Run on shard(b): local owner is b, provisions claim a.
         let shard_b = uniform_shard_for_node(&b, 2);
@@ -1005,7 +1012,7 @@ mod tests {
             shard_b,
             &ShardTrie::uniform_from_count(2),
         )
-        .expect_err("collision should produce Err");
+        .expect_err("contested vault should produce Err");
 
         assert_eq!(err_a, vec![shared_vault]);
         assert_eq!(err_b, vec![shared_vault]);
