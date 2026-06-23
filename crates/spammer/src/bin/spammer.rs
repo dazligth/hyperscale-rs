@@ -9,7 +9,7 @@ use humantime::Duration as HumantimeDuration;
 use hyperscale_spammer::accounts::{AccountPool, SelectionMode};
 use hyperscale_spammer::client::RpcClient;
 use hyperscale_spammer::config::SpammerConfig;
-use hyperscale_spammer::genesis::{generate_genesis_toml, generate_genesis_toml_for_shard};
+use hyperscale_spammer::genesis::generate_genesis_toml;
 use hyperscale_spammer::runner::Spammer;
 use hyperscale_spammer::workloads::TransferWorkload;
 use hyperscale_types::ShardId;
@@ -34,13 +34,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Generate genesis configuration with funded accounts
+    /// Generate genesis configuration with funded accounts.
     ///
-    /// By default, generates balances for ALL accounts across all shards.
-    /// Use --shard to generate balances only for accounts on a specific shard,
-    /// which is required when running with large numbers of accounts per shard.
+    /// Genesis is single-shard: every account is funded on the ROOT shard and
+    /// the network partitions them by prefix as it grows. `num_shards` only
+    /// spreads the generated accounts across the prefixes they will route to
+    /// post-grow.
     Genesis {
-        /// Number of shards
+        /// Number of shards the generated accounts spread across post-grow
         #[arg(long, default_value = "2")]
         num_shards: u64,
 
@@ -51,11 +52,6 @@ enum Commands {
         /// Initial balance per account
         #[arg(long, default_value = "1000000")]
         balance: u64,
-
-        /// Generate balances only for accounts on this specific shard.
-        /// If not specified, generates balances for all accounts across all shards.
-        #[arg(long)]
-        shard: Option<u64>,
     },
 
     /// Run transaction spammer against network endpoints
@@ -221,19 +217,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             num_shards,
             accounts_per_shard,
             balance,
-            shard,
         } => {
             // Don't initialize tracing for genesis - output goes to stdout
-            let toml = if let Some(shard_id) = shard {
-                generate_genesis_toml_for_shard(
-                    num_shards,
-                    accounts_per_shard,
-                    Decimal::from(balance),
-                    shard_id,
-                )?
-            } else {
-                generate_genesis_toml(num_shards, accounts_per_shard, Decimal::from(balance))?
-            };
+            let toml =
+                generate_genesis_toml(num_shards, accounts_per_shard, Decimal::from(balance))?;
             print!("{toml}");
         }
 
