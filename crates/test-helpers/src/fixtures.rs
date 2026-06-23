@@ -1,12 +1,10 @@
-//! Test fixtures for production e2e tests.
+//! Deterministic cluster test fixtures shared across the production runner,
+//! libp2p transport, and scenario test suites.
 //!
-//! Provides deterministic test setup including key generation and topology construction.
-
-// Shared fixture surface consumed piecemeal across several production e2e
-// test binaries (the bind, runner, multi-vnode, and reshape suites); each
-// compiles its own copy and exercises a different subset, so unused helpers
-// in any one binary aren't dead code.
-#![allow(dead_code)]
+//! Generates seeded BLS (consensus) and Ed25519 (libp2p) keypairs plus a
+//! topology snapshot from one seed, so every consumer derives byte-identical
+//! identities. Gated behind the `fixtures` feature, which pulls the libp2p and
+//! network dependencies the Ed25519 identities and validator key map need.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
@@ -16,9 +14,9 @@ use hyperscale_types::{
     Bls12381G1PrivateKey, Bls12381G1PublicKey, NetworkDefinition, ShardId, TopologySnapshot,
     ValidatorId, ValidatorInfo, ValidatorSet, bls_keypair_from_seed,
 };
+use libp2p::PeerId;
 use libp2p::identity::Keypair;
 use libp2p::identity::ed25519::{Keypair as Ed25519Keypair, SecretKey};
-use libp2p::{Multiaddr, PeerId};
 
 /// Generate `num_validators` deterministic BLS (consensus) and Ed25519
 /// (libp2p) keypairs from `seed`, on independent derivation paths.
@@ -88,11 +86,13 @@ impl TestFixtures {
     ///
     /// Derives both BLS and Ed25519 keys from seed for consistency.
     /// All validators are placed in a single shard.
+    #[must_use]
     pub fn new(seed: u64, num_validators: u32) -> Self {
         Self::with_shards(seed, num_validators, 1)
     }
 
     /// Create test fixtures with multiple shards (no pool surplus).
+    #[must_use]
     pub fn with_shards(seed: u64, validators_per_shard: u32, num_shards: u64) -> Self {
         Self::with_shards_and_surplus(seed, validators_per_shard, num_shards, 0)
     }
@@ -102,6 +102,11 @@ impl TestFixtures {
     /// seated in no committee. Validator ids `[0, seated)` fill the shard
     /// committees (`validators_per_shard` consecutive ids per shard); ids
     /// `[seated, seated + pool_surplus)` are the surplus a reshape draws on.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `num_shards` exceeds `u32::MAX`.
+    #[must_use]
     pub fn with_shards_and_surplus(
         seed: u64,
         validators_per_shard: u32,
@@ -168,6 +173,11 @@ impl TestFixtures {
     /// the partition a uniform `with_shards` cannot express — so a reshape
     /// scenario runs on fewer shards (and so fewer pinned consensus threads)
     /// than the uniform leaf count would force.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `committees` is empty or a validator id exceeds `u32::MAX`.
+    #[must_use]
     pub fn with_explicit_shards(seed: u64, committees: Vec<(ShardId, Vec<ValidatorId>)>) -> Self {
         let num_validators = committees
             .iter()
@@ -214,11 +224,13 @@ impl TestFixtures {
     }
 
     /// Get the identity-agnostic topology snapshot shared across every vnode.
+    #[must_use]
     pub fn topology(&self) -> Arc<TopologySnapshot> {
         Arc::clone(&self.topology)
     }
 
     /// Extract a validator key map for network adapter construction.
+    #[must_use]
     pub fn validator_key_map(&self) -> Arc<ValidatorKeyMap> {
         Arc::new(
             self.topology
@@ -231,22 +243,34 @@ impl TestFixtures {
     }
 
     /// Get the BLS signing key for a validator.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index` is out of range.
+    #[must_use]
     pub fn signing_key(&self, index: u32) -> Arc<Bls12381G1PrivateKey> {
         let key_bytes = self.bls_keys[index as usize].to_bytes();
         Arc::new(Bls12381G1PrivateKey::from_bytes(&key_bytes).expect("valid key bytes"))
     }
 
     /// Get the Ed25519 keypair for a validator.
+    #[must_use]
     pub fn ed25519_keypair(&self, index: u32) -> Keypair {
         self.ed25519_keys[index as usize].clone()
     }
 
     /// Get the libp2p peer ID for a validator.
+    #[must_use]
     pub fn peer_id(&self, index: u32) -> PeerId {
         PeerId::from(self.ed25519_keys[index as usize].public())
     }
 
     /// Get validators in a shard.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the shard path exceeds `u32::MAX`.
+    #[must_use]
     pub fn validators_in_shard(&self, shard: ShardId) -> Vec<u32> {
         let start = u32::try_from(shard.path()).expect("shard fits in u32 for tests")
             * self.validators_per_shard;
@@ -255,20 +279,9 @@ impl TestFixtures {
     }
 
     /// Alias of [`Self::signing_key`] reserved for bind-test call sites.
+    #[must_use]
     pub fn bind_signing_key(&self, index: u32) -> Arc<Bls12381G1PrivateKey> {
         self.signing_key(index)
-    }
-
-    /// Create a listen address using port 0 (OS-assigned).
-    pub fn listen_addr() -> Multiaddr {
-        "/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()
-    }
-
-    /// Create a listen address with a specific port.
-    pub fn listen_addr_with_port(port: u16) -> Multiaddr {
-        format!("/ip4/127.0.0.1/udp/{port}/quic-v1")
-            .parse()
-            .unwrap()
     }
 }
 

@@ -16,6 +16,9 @@
 //! assert!(verify_bls12381_v1(message, committee.public_key(0), &signature));
 //! ```
 
+#[cfg(feature = "fixtures")]
+pub mod fixtures;
+
 use std::collections::BTreeSet;
 use std::sync::Arc;
 

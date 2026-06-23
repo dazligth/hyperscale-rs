@@ -9,20 +9,19 @@
 //! wait-for-condition assertions.
 
 mod cluster;
-mod fixtures;
 
 use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
 use cluster::{Cluster, ClusterSpec, HostSpec};
-use fixtures::TestFixtures;
 use hyperscale_engine::GenesisConfig;
 use hyperscale_network_libp2p::Libp2pConfig;
 use hyperscale_production::{LocalValidator, ProductionRunner};
 use hyperscale_shard::ShardConsensusConfig;
 use hyperscale_storage::{BeaconChainReader, BeaconStorage};
 use hyperscale_storage_rocksdb::RocksDbBeaconStorage;
+use hyperscale_test_helpers::fixtures::TestFixtures;
 use hyperscale_types::test_utils::test_validity_range;
 use hyperscale_types::{
     BeaconChainConfig, BlockHeight, Ed25519PrivateKey, NodeId, ReshapeThresholds,

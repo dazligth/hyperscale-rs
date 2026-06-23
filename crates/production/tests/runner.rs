@@ -5,18 +5,17 @@
 //! state leakage; runs on a multi-threaded runtime to match the production
 //! host's runtime shape.
 
-mod fixtures;
 mod support;
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use fixtures::TestFixtures;
 use hyperscale_network_libp2p::Libp2pConfig;
 use hyperscale_production::{LocalValidator, ProductionRunner, ShardCommand, VnodeConfig};
 use hyperscale_shard::ShardConsensusConfig;
 use hyperscale_storage::BeaconStorage;
 use hyperscale_storage_rocksdb::RocksDbBeaconStorage;
+use hyperscale_test_helpers::fixtures::TestFixtures;
 use hyperscale_types::{ShardId, ValidatorId};
 use serial_test::serial;
 use support::{CONNECTION_TIMEOUT, temp_storage_dir, temp_storage_factory};

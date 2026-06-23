@@ -5,16 +5,15 @@
 //! port conflicts; runs on a multi-threaded runtime to match the production
 //! host's runtime shape.
 
-mod fixtures;
 mod support;
 
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use fixtures::TestFixtures;
 use hyperscale_network::HandlerRegistry;
 use hyperscale_network_libp2p::{Libp2pAdapter, Libp2pConfig};
+use hyperscale_test_helpers::fixtures::TestFixtures;
 use hyperscale_types::{NetworkDefinition, ShardId, ValidatorId, generate_bls_keypair};
 use serial_test::serial;
 use support::CONNECTION_TIMEOUT;

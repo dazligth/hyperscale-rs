@@ -9,13 +9,12 @@
 //! `reshape_e2e.rs` build on this baseline.
 
 mod cluster;
-mod fixtures;
 
 use std::time::Duration;
 
 use cluster::{Cluster, ClusterSpec, HostSpec};
-use fixtures::TestFixtures;
 use hyperscale_production::LocalValidator;
+use hyperscale_test_helpers::fixtures::TestFixtures;
 use hyperscale_types::{BeaconChainConfig, ReshapeThresholds, ShardId, ValidatorId};
 use serial_test::serial;
 use tracing_subscriber::fmt;
