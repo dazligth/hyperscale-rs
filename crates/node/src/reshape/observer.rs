@@ -15,7 +15,7 @@
 //! and prefix-rooted hashing makes the resulting store root the parent
 //! tree's subtree node at that prefix by construction.
 //!
-//! Sans-io like [`ShardBootstrap`](super::ShardBootstrap): drivers own
+//! Sans-io like [`ShardBootstrap`](crate::bootstrap::ShardBootstrap): drivers own
 //! transport, peer selection, and the import write, and pump it through
 //! the same [`BootstrapRequest`] surface (the witness-history variant
 //! never appears — the pending child's accumulator starts empty).
@@ -29,8 +29,8 @@ use hyperscale_types::{
     shard_prefix_path,
 };
 
-use super::snap_sync::SnapSync;
-use super::{BootstrapOutcome, BootstrapRequest, SPLIT_BITS, STATE_CHUNK_LIMIT};
+use crate::bootstrap::snap_sync::SnapSync;
+use crate::bootstrap::{BootstrapOutcome, BootstrapRequest, SPLIT_BITS, STATE_CHUNK_LIMIT};
 
 /// The self-signed ready signal an observer broadcasts to the
 /// splitting shard's committee on completing its child-span bootstrap.

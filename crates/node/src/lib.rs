@@ -38,6 +38,7 @@ mod fetch;
 pub mod host;
 pub mod pool_loop;
 pub mod process;
+pub mod reshape;
 pub mod shard;
 mod state;
 mod sync;

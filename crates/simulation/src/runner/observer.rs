@@ -12,10 +12,10 @@
 
 use hyperscale_engine::GenesisConfig;
 use hyperscale_network::Network;
-use hyperscale_node::bootstrap::observer::{
+use hyperscale_node::bootstrap::{BootstrapRequest, replicate_engine_bootstrap};
+use hyperscale_node::reshape::observer::{
     ObserverBootstrap, ObserverTail, TailOutcome, observer_ready_signal,
 };
-use hyperscale_node::bootstrap::{BootstrapRequest, replicate_engine_bootstrap};
 use hyperscale_node::{serve_block_request, serve_state_range_request};
 use hyperscale_storage::BoundaryStore;
 use hyperscale_storage_memory::SimShardStorage;

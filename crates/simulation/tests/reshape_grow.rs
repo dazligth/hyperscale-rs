@@ -12,7 +12,7 @@
 //! holds exactly the imported subtree, co-observers of a half agree byte for
 //! byte, and the two imported roots recompose to the parent's terminal root —
 //! are not re-asserted here: they are unit-tested directly on the sans-io
-//! sequencer in `hyperscale_node::bootstrap::observer`
+//! sequencer in `hyperscale_node::reshape::observer`
 //! (`observer_bootstraps_adopt_the_child_subtrees`,
 //! `child_spans_partition_the_parent_population`), which both harnesses drive.
 

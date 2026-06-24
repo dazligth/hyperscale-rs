@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use hyperscale_core::ProtocolEvent;
 use hyperscale_network_memory::NodeIndex;
-use hyperscale_node::bootstrap::split_flip::split_genesis_from_terminal;
+use hyperscale_node::reshape::split_flip::split_genesis_from_terminal;
 use hyperscale_node::shard::HostEvent;
 use hyperscale_storage::{RecoveredState, ShardChainReader};
 use hyperscale_storage_memory::SimShardStorage;

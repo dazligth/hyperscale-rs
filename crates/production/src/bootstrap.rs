@@ -16,9 +16,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use hyperscale_network::{Network, RequestError, ResponseVerdict};
-use hyperscale_node::bootstrap::observer::{ObserverBootstrap, ObserverTail, TailOutcome};
-use hyperscale_node::bootstrap::split_flip::split_genesis_from_terminal;
 use hyperscale_node::bootstrap::{BootstrapOutcome, BootstrapRequest, ShardBootstrap};
+use hyperscale_node::reshape::observer::{ObserverBootstrap, ObserverTail, TailOutcome};
+use hyperscale_node::reshape::split_flip::split_genesis_from_terminal;
 use hyperscale_node::{SharedTopologySnapshot, serve_state_range_request};
 use hyperscale_storage::{ImportLeaf, RecoveredState, ShardStorage};
 use hyperscale_types::network::request::GetBlockRequest;

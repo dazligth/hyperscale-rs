@@ -19,10 +19,7 @@
 //! production runner pumps it with async requests; the simulation steps
 //! it deterministically — both run this exact sequencing.
 
-pub mod merge_flip;
-pub mod observer;
 pub mod snap_sync;
-pub mod split_flip;
 pub mod state_range_serve;
 pub mod witness_history;
 pub mod witness_history_serve;
@@ -102,10 +99,10 @@ impl EngineBootstrap {
 }
 
 /// State sub-range fan-out: `2^4 = 16` concurrent range fetches.
-const SPLIT_BITS: u8 = 4;
+pub(crate) const SPLIT_BITS: u8 = 4;
 
 #[allow(clippy::cast_possible_truncation)] // compile-time cap, far below u32::MAX
-const STATE_CHUNK_LIMIT: u32 = MAX_LEAVES_PER_STATE_RANGE as u32;
+pub(crate) const STATE_CHUNK_LIMIT: u32 = MAX_LEAVES_PER_STATE_RANGE as u32;
 
 #[allow(clippy::cast_possible_truncation)] // compile-time cap, far below u32::MAX
 const WITNESS_PAGE_LIMIT: u32 = MAX_HASHES_PER_WITNESS_HISTORY as u32;

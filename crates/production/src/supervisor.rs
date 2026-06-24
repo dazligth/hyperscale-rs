@@ -26,12 +26,12 @@ use hyperscale_mempool::MempoolConfig;
 use hyperscale_network::Network;
 use hyperscale_network_libp2p::Libp2pNetwork;
 use hyperscale_node::bootstrap::EngineBootstrap;
-use hyperscale_node::bootstrap::merge_flip::merge_genesis_from_terminals;
-use hyperscale_node::bootstrap::observer::observer_ready_signal;
-use hyperscale_node::bootstrap::split_flip::split_genesis_from_terminal;
 use hyperscale_node::host::{attach_shard, detach_shard};
 use hyperscale_node::pool_loop::PoolLoop;
 use hyperscale_node::process::ProcessIo;
+use hyperscale_node::reshape::merge_flip::merge_genesis_from_terminals;
+use hyperscale_node::reshape::observer::observer_ready_signal;
+use hyperscale_node::reshape::split_flip::split_genesis_from_terminal;
 use hyperscale_node::shard::HostEvent;
 use hyperscale_node::{
     NodeConfig, SeatFollower, SeatVnodeGroup, TimerOp, VnodeInit, seat_follower, seat_vnode_group,

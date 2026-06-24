@@ -12,7 +12,7 @@
 //! The merge's **mid-lifecycle** properties are not re-asserted here: the
 //! compose keystone — the parent anchor is `hash_internal` of the two child
 //! terminal roots — is unit-tested on the sans-io sequencer in
-//! `hyperscale_node::bootstrap::merge_flip` (`derivation_reconstructs_the_beacon_anchor`),
+//! `hyperscale_node::reshape::merge_flip` (`derivation_reconstructs_the_beacon_anchor`),
 //! and the gate safety — a merge that pairs but whose keepers never ready must
 //! not collapse the trie — in `hyperscale_beacon`
 //! (`merge_executes_only_when_keepers_reach_quorum`).
