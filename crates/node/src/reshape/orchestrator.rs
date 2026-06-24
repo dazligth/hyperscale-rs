@@ -339,6 +339,16 @@ impl ReshapeOrchestrator {
         }
     }
 
+    /// Whether an in-flight duty owns seating `shard` — a merging parent a
+    /// keeper reforms, or a splitting child an observer syncs. The adapter
+    /// suppresses the placement-delta join for such a shard so the
+    /// orchestrator seats it from the duty's prepared store, rather than the
+    /// join racing a redundant fresh snap-sync against it.
+    #[must_use]
+    pub fn is_seating(&self, shard: ShardId) -> bool {
+        self.keepers.contains_key(&shard) || self.observers.contains_key(&shard)
+    }
+
     /// Advance every duty one step: apply the io results in `events`, discover
     /// new duties from `view`, and return the io the adapter should perform.
     pub fn step(&mut self, view: &ReshapeView, events: Vec<ReshapeEvent>) -> Vec<ReshapeRequest> {
@@ -595,10 +605,14 @@ impl ReshapeOrchestrator {
                 }
             }
             ObserverPhase::Following(tail) => {
-                // Once the children seed, the parent terminated: stop following
-                // and re-asserting, and derive genesis from its crossing.
-                if view.children_seeded(duty.parent)
-                    && let Some(anchor) = view.boundary(child)
+                // Once this child's boundary seeds, the parent terminated.
+                // Keep following its committed blocks until the tail catches
+                // up through the terminal crossing, then derive genesis from
+                // it — adopting before the followed store reaches the terminal
+                // would reproduce the wrong child-subtree root.
+                let child_anchor = view.boundary(child);
+                if let Some(anchor) = child_anchor
+                    && tail.next_height() >= anchor.height
                 {
                     duty.phase = ObserverPhase::FetchingTerminal {
                         anchor,
@@ -606,6 +620,8 @@ impl ReshapeOrchestrator {
                     };
                     return;
                 }
+                // Re-assert ready to the splitting parent's committee until the
+                // split executes; harmless once the parent dissolves.
                 if let Some(anchor) = view.boundary(duty.parent) {
                     out.push(ReshapeRequest::BroadcastReady {
                         validator: duty.validator,
@@ -613,11 +629,20 @@ impl ReshapeOrchestrator {
                         recipients: recipients_for(view, duty.parent, duty.validator),
                     });
                 }
+                // The parent committee serves its blocks while it lives; once
+                // this child's anchor projects the parent has dissolved, so the
+                // child committee's parent halves serve the parent's crossing
+                // blocks from their retained chain.
+                let from = if child_anchor.is_some() {
+                    child
+                } else {
+                    duty.parent
+                };
                 if let Some(request) = tail.next_request() {
                     out.push(ReshapeRequest::Fetch {
                         duty: child,
-                        from: duty.parent,
-                        peers: view.committee(duty.parent).to_vec(),
+                        from,
+                        peers: view.committee(from).to_vec(),
                         kind: FetchKind::Block { request },
                     });
                 }

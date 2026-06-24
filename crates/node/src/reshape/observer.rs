@@ -268,6 +268,12 @@ pub struct ObserverTail {
     in_flight: bool,
     /// Accepted block waiting for the driver to apply and answer.
     pending: Option<PendingFollow>,
+    /// Set while a taken application is out for the driver to apply,
+    /// cleared on [`Self::on_applied`]. Guards [`Self::take_apply`] against
+    /// re-emitting the same application when the driver re-polls before the
+    /// apply answers — the production pump ticks on a timer, so a `step`
+    /// can land between the take and its answer.
+    apply_in_flight: bool,
 }
 
 struct PendingFollow {
@@ -290,6 +296,7 @@ impl ObserverTail {
             root: imported_root,
             in_flight: false,
             pending: None,
+            apply_in_flight: false,
         }
     }
 
@@ -358,7 +365,11 @@ impl ObserverTail {
     /// `Some` once per accepted block; the driver answers with the
     /// resulting root via [`Self::on_applied`].
     pub fn take_apply(&mut self) -> Option<(BlockHeight, Vec<StoredReceipt>)> {
+        if self.apply_in_flight {
+            return None;
+        }
         let pending = self.pending.as_mut()?;
+        self.apply_in_flight = true;
         Some((pending.height, std::mem::take(&mut pending.receipts)))
     }
 
@@ -376,6 +387,7 @@ impl ObserverTail {
     ///
     /// Panics unless an application was taken via [`Self::take_apply`].
     pub fn on_applied(&mut self, root: StateRoot) -> Result<(), String> {
+        self.apply_in_flight = false;
         let pending = self
             .pending
             .take()

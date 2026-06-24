@@ -27,7 +27,7 @@ use arc_swap::ArcSwap;
 use crossbeam::channel::{Receiver, Sender, unbounded};
 use hex::encode as hex_encode;
 use hyperscale_beacon::genesis::{GenesisChainInputs, build_genesis_chain};
-use hyperscale_core::{KeepDelta, ObserveDelta, ParticipationChange, ProtocolEvent, TimerId};
+use hyperscale_core::{ParticipationChange, ProtocolEvent, TimerId};
 use hyperscale_dispatch::{Dispatch, DispatchPool};
 use hyperscale_dispatch_pooled::{PooledDispatch, ThreadPoolConfig};
 use hyperscale_engine::{GenesisConfig, NetworkDefinition, RadixExecutor, TransactionValidation};
@@ -1005,6 +1005,11 @@ impl ProductionRunner {
         // ── 4. Metrics + maintenance + reconfiguration + shutdown loop.
         let mut metrics_tick = interval(Duration::from_secs(1));
         metrics_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        // Paces the reshape orchestrator: every tick re-polls the committed
+        // view and re-asserts in-window ready signals (the orchestrator emits
+        // a fresh signal each step, so this cadence is the re-assert cadence).
+        let mut reshape_tick = interval(Duration::from_secs(1));
+        reshape_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut last_gc = Instant::now();
         let gc_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut shutdown_rx = self.shutdown_rx.take().expect("shutdown_rx already taken");
@@ -1051,6 +1056,9 @@ impl ProductionRunner {
                         self.schedule_jmt_gc(&gc_in_flight);
                     }
                 }
+                _ = reshape_tick.tick() => {
+                    supervisor.reshape_step(Vec::new());
+                }
             }
         }
 
@@ -1077,40 +1085,14 @@ impl ProductionRunner {
     /// drains gracefully: the shard keeps serving until the validator's
     /// window observably closes plus the DA retention grace, so its
     /// replacement can snap-sync from it during the overlap.
-    /// Dispatch a merge-keeper delta to the supervisor: begin a keeper
-    /// duty (deriving the keeper's own child as the non-sibling child of
-    /// the merging parent) or abandon one. A keeper carries no join/leave
-    /// — it stays on its child until the merge executes — so this is its
-    /// only signal until the placement delta.
-    fn dispatch_keep(&self, supervisor: &mut ShardSupervisor, change: &ParticipationChange) {
-        match change.keep {
-            Some(KeepDelta::Begin { parent, sibling }) => {
-                if let Some(signing_key) = self.vnode_keys.get(&change.validator) {
-                    let (left, right) = parent.children();
-                    let own_child = if sibling == left { right } else { left };
-                    supervisor.handle(ShardCommand::Keep {
-                        parent,
-                        own_child,
-                        validator: change.validator,
-                        signing_key: Arc::clone(signing_key),
-                    });
-                } else {
-                    warn!(
-                        validator = change.validator.inner(),
-                        "Keeper seat for a validator without a local signing key; ignored"
-                    );
-                }
-            }
-            Some(KeepDelta::Abandon { parent }) => {
-                supervisor.handle(ShardCommand::Unkeep {
-                    parent,
-                    validator: change.validator,
-                });
-            }
-            None => {}
-        }
-    }
-
+    ///
+    /// The observer and keeper deltas (`observe`/`keep`) drive nothing
+    /// here — the reshape orchestrator self-determines those duties from
+    /// the committed topology projection — so this only wakes the
+    /// orchestrator to re-poll, and dispatches the join/leave the placement
+    /// surfaces. The orchestrator owns observer and keeper seating, so the
+    /// supervisor suppresses an observer split join and a merge-execution
+    /// join (see [`ShardSupervisor::handle`]).
     fn apply_participation_change(
         &self,
         supervisor: &mut ShardSupervisor,
@@ -1125,28 +1107,10 @@ impl ProductionRunner {
             effective_epoch = change.effective_epoch.inner(),
             "Beacon placement change detected"
         );
-        self.dispatch_keep(supervisor, change);
-        match change.observe {
-            Some(ObserveDelta::Begin { via, child }) => {
-                if let Some(signing_key) = self.vnode_keys.get(&change.validator) {
-                    supervisor.handle(ShardCommand::Observe {
-                        via,
-                        child,
-                        validator: change.validator,
-                        signing_key: Arc::clone(signing_key),
-                    });
-                } else {
-                    warn!(
-                        validator = change.validator.inner(),
-                        "Observer seat for a validator without a local signing key; ignored"
-                    );
-                }
-            }
-            Some(ObserveDelta::Abandon { child, .. }) => {
-                supervisor.handle(ShardCommand::Unobserve { child });
-            }
-            None => {}
-        }
+        // Wake the orchestrator to re-poll the committed view: a placement
+        // change often accompanies the cohort/keeper draws and boundary
+        // seedings its duties gate on.
+        supervisor.reshape_step(Vec::new());
         if let Some(shard) = change.leave {
             let topology = self.topology_snapshot.clone();
             let reconfigure = self.reconfigure_tx.clone();
