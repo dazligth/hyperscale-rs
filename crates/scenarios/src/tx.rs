@@ -57,6 +57,73 @@ const STRADDLER_BULK: usize = 20;
 /// splitter that has already terminated.
 pub const STRADDLER_COUNT: usize = 8;
 
+/// The surviving shard of the depth-2 merge-straddler topology — `leaf(2, 0)`.
+///
+/// The heaviest engine-bootstrap quarter, bulk-funded over `merge_bytes` so its
+/// sibling pair never merges. Straddler payers live here; their cross-shard
+/// waves name the terminating merge-left child.
+pub const MERGE_STRADDLER_SURVIVOR: ShardId = ShardId::leaf(2, 0);
+
+/// The merge-left child — `leaf(2, 2)`.
+///
+/// Light enough to fall under `merge_bytes` and collapse into `leaf(1, 1)` with
+/// its sibling. Straddler recipients live here, so the survivor's wave names the
+/// shard that terminates at the merge.
+pub const MERGE_STRADDLER_LEFT: ShardId = ShardId::leaf(2, 2);
+
+/// The merge-right child — `leaf(2, 3)`, the lightest quarter, which merges with
+/// [`MERGE_STRADDLER_LEFT`] into their parent `leaf(1, 1)`.
+pub const MERGE_STRADDLER_RIGHT: ShardId = ShardId::leaf(2, 3);
+
+/// Bulk accounts funded into the lighter surviving quarter `leaf(2, 1)`.
+///
+/// The engine bootstrap leaves `leaf(2, 1)` (~89k) below `merge_bytes`, so
+/// without this it would emit an unpairable merge against its heavy sibling
+/// `leaf(2, 0)` (~522k) and churn the schedule. Lifting it to ~403k keeps the
+/// whole surviving pair above the threshold while the lighter merging pair stays
+/// under it. The `u8`-seeded [`account_in_n`] tops out at 255 keys; this draws
+/// from the wide `u64` seed space of [`bulk_fund_into`].
+const MERGE_SURVIVOR_BULK: usize = 500;
+
+/// Merge-straddler pairs submitted across the merge.
+///
+/// Each payer in the survivor `leaf(2, 0)`, each recipient in the merging
+/// `leaf(2, 2)`. Submitted in two waves — the first settles before the
+/// merge-left terminal, the second straddles it.
+pub const MERGE_STRADDLER_COUNT: usize = 4;
+
+/// Seed of the merge-straddler vote payer.
+///
+/// The simulation adaptor reaches the four-shard topology by growing the root
+/// (the harness genesis is always single-shard) and then voting `split_bytes` up
+/// so only the light pair merges. That vote is a fee-paying system action; this
+/// account is funded at genesis so the adaptor's pre-grow vote can lock its fee.
+/// On production the genesis seats four shards directly, so the account is just
+/// an unused funded balance.
+const MERGE_VOTE_PAYER_SEED: u8 = 200;
+
+/// The merge-straddler vote payer's signing key — funded by
+/// [`merge_straddler_setup`] for the simulation adaptor's pre-grow vote.
+#[must_use]
+pub fn merge_vote_payer() -> Ed25519PrivateKey {
+    signer_from_seed(MERGE_VOTE_PAYER_SEED)
+}
+
+/// The genesis funding and straddler transfers for the merge-straddler scenario.
+///
+/// Mirrors [`SplitStraddlerSetup`] but on a four-shard genesis: the surviving
+/// quarter pair (`leaf(2, 0)`/`leaf(2, 1)`) is bulk-funded over `merge_bytes`,
+/// the merging pair (`leaf(2, 2)`/`leaf(2, 3)`) is left under it, and the
+/// straddlers run from the survivor into the merging left child.
+pub struct MergeStraddlerSetup {
+    /// Genesis XRD balances: survivor-pair bulk plus straddler payers in the
+    /// survivor, straddler recipients in the merging left child.
+    pub balances: Vec<(ComponentAddress, Decimal)>,
+    /// Straddler transfers: `(payer key, payer account in the survivor,
+    /// recipient in the merging left child)`.
+    pub straddlers: Vec<(Ed25519PrivateKey, ComponentAddress, ComponentAddress)>,
+}
+
 /// The genesis funding and straddler transfers for the split-straddler scenario.
 ///
 /// One definition both adaptors and the scenario body derive from, so the funded
@@ -73,6 +140,16 @@ pub struct SplitStraddlerSetup {
 /// A deterministic seeded account routing to `shard` under the two-shard uniform
 /// trie the grow produces, skipping seeds already `taken`.
 fn account_in(shard: ShardId, taken: &mut Vec<u8>) -> (Ed25519PrivateKey, ComponentAddress) {
+    account_in_n(shard, 2, taken)
+}
+
+/// A deterministic seeded account routing to `shard` under the `num_shards`-wide
+/// uniform trie, skipping seeds already `taken`.
+fn account_in_n(
+    shard: ShardId,
+    num_shards: u64,
+    taken: &mut Vec<u8>,
+) -> (Ed25519PrivateKey, ComponentAddress) {
     for seed in 1u8..=u8::MAX {
         if taken.contains(&seed) {
             continue;
@@ -84,12 +161,42 @@ fn account_in(shard: ShardId, taken: &mut Vec<u8>) -> (Ed25519PrivateKey, Compon
                 .try_into()
                 .expect("account address carries a 30-byte node id"),
         );
-        if uniform_shard_for_node(&node, 2) == shard {
+        if uniform_shard_for_node(&node, num_shards) == shard {
             taken.push(seed);
             return (key, address);
         }
     }
     panic!("no account seed routes to {shard:?}");
+}
+
+/// Push `count` funded accounts routing to `shard` under a `num_shards`-wide
+/// trie onto `balances`, drawing from the wide `u64` seed space so a single
+/// shard's prefix can be funded far past the `u8`-seeded [`account_in_n`] ceiling
+/// — needed to lift a light quarter above `merge_bytes` so it stays a live leaf.
+fn bulk_fund_into(
+    shard: ShardId,
+    num_shards: u64,
+    count: usize,
+    balances: &mut Vec<(ComponentAddress, Decimal)>,
+) {
+    let mut found = 0;
+    let mut seed: u64 = 1;
+    while found < count {
+        let mut bytes = [0u8; 32];
+        bytes[..8].copy_from_slice(&seed.to_le_bytes());
+        let key = ed25519_keypair_from_seed(&bytes);
+        let address = ComponentAddress::preallocated_account_from_public_key(&key.public_key());
+        let node = NodeId(
+            address.into_node_id().0[..30]
+                .try_into()
+                .expect("account address carries a 30-byte node id"),
+        );
+        if uniform_shard_for_node(&node, num_shards) == shard {
+            balances.push((address, Decimal::from(10_000)));
+            found += 1;
+        }
+        seed += 1;
+    }
 }
 
 /// Build the split-straddler genesis funding and straddler transfers.
@@ -114,6 +221,47 @@ pub fn split_straddler_setup() -> SplitStraddlerSetup {
         straddlers.push((payer_key, payer, recipient));
     }
     SplitStraddlerSetup {
+        balances,
+        straddlers,
+    }
+}
+
+/// Build the merge-straddler genesis funding and straddler transfers.
+///
+/// On a four-shard genesis the surviving quarters (`leaf(2, 0)`/`leaf(2, 1)`)
+/// are bulk-funded over the derived `merge_bytes` so neither auto-merges, while
+/// the lighter merging pair (`leaf(2, 2)`/`leaf(2, 3)`) stays under it and
+/// collapses into `leaf(1, 1)`. Straddler payers sit in the survivor
+/// `leaf(2, 0)` and recipients in the merging `leaf(2, 2)`, so each cross-shard
+/// wave names the shard that terminates at the merge.
+#[must_use]
+pub fn merge_straddler_setup() -> MergeStraddlerSetup {
+    let num_shards = 4;
+    let mut taken = Vec::new();
+    let mut balances = vec![(
+        account_from_seed(MERGE_VOTE_PAYER_SEED),
+        Decimal::from(100_000),
+    )];
+
+    // Lift the naturally light survivor quarter `leaf(2, 1)` above `merge_bytes`:
+    // its heavy sibling `leaf(2, 0)` already clears it, but `leaf(2, 1)` would
+    // otherwise emit an unpairable merge and churn the schedule.
+    bulk_fund_into(
+        ShardId::leaf(2, 1),
+        num_shards,
+        MERGE_SURVIVOR_BULK,
+        &mut balances,
+    );
+
+    let mut straddlers = Vec::new();
+    for _ in 0..MERGE_STRADDLER_COUNT {
+        let (payer_key, payer) = account_in_n(MERGE_STRADDLER_SURVIVOR, num_shards, &mut taken);
+        let (_, recipient) = account_in_n(MERGE_STRADDLER_LEFT, num_shards, &mut taken);
+        balances.push((payer, Decimal::from(10_000)));
+        balances.push((recipient, Decimal::from(10_000)));
+        straddlers.push((payer_key, payer, recipient));
+    }
+    MergeStraddlerSetup {
         balances,
         straddlers,
     }

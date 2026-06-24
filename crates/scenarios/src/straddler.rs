@@ -19,10 +19,13 @@ use radix_common::types::ComponentAddress;
 use crate::query::{beacon_epoch, split_admitted};
 use crate::reshape::split_lifecycle;
 use crate::tx::{
-    STRADDLER_SPLITTER, STRADDLER_SURVIVOR, build_reshape_threshold_vote_tx, build_transfer_tx,
+    MERGE_STRADDLER_LEFT, MERGE_STRADDLER_RIGHT, MERGE_STRADDLER_SURVIVOR, STRADDLER_SPLITTER,
+    STRADDLER_SURVIVOR, build_reshape_threshold_vote_tx, build_transfer_tx, merge_straddler_setup,
     split_straddler_setup, validity_around,
 };
-use crate::wait::{await_serves, await_split_admitted, await_tx_terminal};
+use crate::wait::{
+    await_merge_keeper_count, await_serves, await_split_admitted, await_tx_terminal,
+};
 use crate::{Cluster, epochs};
 
 /// Epochs of lead before the threshold vote activates.
@@ -134,6 +137,154 @@ pub fn split_straddler_atomic(c: &mut impl Cluster) {
     }
 
     assert_fence_held(c, splitter, terminal_b, &probes);
+}
+
+/// Verify a merge straddler settles atomically across the reshape boundary.
+///
+/// On a four-shard genesis the lighter `leaf(2, 2)`/`leaf(2, 3)` pair falls
+/// under the derived merge threshold and collapses into `leaf(1, 1)`, while the
+/// bulk-funded survivors `leaf(2, 0)`/`leaf(2, 1)` stay above it and keep the
+/// left half alive — no vote and no grow, the merge fires from the genesis byte
+/// skew alone. Cross-shard transfers run from the survivor `leaf(2, 0)` into the
+/// merging `leaf(2, 2)`, so each wave names a shard that terminates at the merge.
+/// The first wave settles before `leaf(2, 2)`'s terminal block; the second
+/// straddles it, in flight when it terminates. After the merge the survivor must
+/// reach a terminal verdict on every straddler, consistent with what `leaf(2, 2)`
+/// settled by its terminal block — never one-sided, never contradicting a
+/// settlement, never hanging. Exercises the merge-child terminal's settled-waves
+/// attestation, the path a split child's terminal cannot cover. Requires the
+/// [`merge_straddler_setup`] genesis funding on a four-shard config.
+///
+/// # Panics
+///
+/// Panics if the merge misses its budget, the merged parent never seats, or the
+/// settled-waves fence is breached (a one-sided application, a mismatch, or a
+/// hung straddler).
+pub fn merge_straddler_atomic(c: &mut impl Cluster) {
+    let survivor = MERGE_STRADDLER_SURVIVOR;
+    let merge_left = MERGE_STRADDLER_LEFT;
+    let merge_right = MERGE_STRADDLER_RIGHT;
+    let merge_parent = merge_left.parent().expect("a depth-2 leaf has a parent");
+    let setup = merge_straddler_setup();
+    let network = NetworkDefinition::simulator();
+
+    // The four-shard genesis seats all four quarters; let it execute and serve.
+    assert!(
+        await_serves(c, survivor, epochs(4))
+            && await_serves(c, merge_left, epochs(4))
+            && await_serves(c, merge_right, epochs(4))
+            && await_serves(c, ShardId::leaf(2, 1), epochs(4)),
+        "the four-shard genesis must seat every quarter",
+    );
+
+    let mut probes: Vec<TxHash> = Vec::new();
+    let half = setup.straddlers.len() / 2;
+
+    // Settling waves: submitted while `leaf(2, 2)` still commits real blocks, so
+    // their cross-shard 2PC can finalize at or below its terminal block and land
+    // in the attested settled set. Submitted before the keeper pairing arms the
+    // gate, then awaited to finalize on `leaf(2, 2)` so settlement can't lose the
+    // race to the cut — a settler only needs to finalize before the terminal.
+    let settling: Vec<TxHash> = setup
+        .straddlers
+        .iter()
+        .take(half)
+        .enumerate()
+        .map(|(i, (key, from, to))| {
+            let nonce = 100 + u32::try_from(i).unwrap_or(0);
+            submit_straddler(c, &network, key, *from, *to, nonce)
+        })
+        .collect();
+    probes.extend_from_slice(&settling);
+    assert!(
+        c.run_until(epochs(12), |c| settling
+            .iter()
+            .all(|hash| chain_settled(c, merge_left, *hash))),
+        "the settling waves must finalize on the merging child before its terminal",
+    );
+
+    // The light merging pair asserts the merge from its genesis byte skew; the
+    // beacon pairs it and draws a keeper quorum (2f+1 of the four-validator
+    // reformed committee). The heavy survivor pair never pairs.
+    assert!(
+        await_merge_keeper_count(c, merge_parent, 3, epochs(24)),
+        "the light merging pair must pair a keeper quorum within budget",
+    );
+
+    // Straddling waves: submitted once the merge has paired and `leaf(2, 2)` is
+    // coasting to its terminal — the survivor still provisions to it, but its
+    // coast blocks settle nothing, leaving them in flight when it terminates.
+    for (i, (key, from, to)) in setup.straddlers.iter().skip(half).enumerate() {
+        let nonce = 200 + u32::try_from(i).unwrap_or(0);
+        probes.push(submit_straddler(c, &network, key, *from, *to, nonce));
+    }
+
+    // Drive the merge to fire: the keepers' ready signals collapse the children
+    // into `leaf(1, 1)`, seating it in the lookahead. Gate on the reformed parent
+    // appearing in the lookahead — not merely on the pending record clearing — so
+    // a pairing that lapses and re-pairs under the seeded schedule isn't read as
+    // the gate.
+    assert!(
+        c.run_until(epochs(16), |c| merge_executed(c, merge_parent)),
+        "the merge must gate within budget",
+    );
+
+    // The merge executes: the reformed parent seats and commits past genesis.
+    assert!(
+        await_serves(c, merge_parent, epochs(28)),
+        "the merged parent must be served within budget",
+    );
+
+    // The merged parent's composed boundary records its seeded genesis height,
+    // folded from both children's terminals after the gate seats the placeholder
+    // at `GENESIS`. Wait for the composed height (a real genesis above `GENESIS`,
+    // so its predecessor — the merging child's terminal — exists).
+    assert!(
+        c.run_until(epochs(12), |c| merged_genesis_height(c, merge_parent)
+            .and_then(BlockHeight::prev)
+            .is_some()),
+        "the merged parent's composed boundary must fold within budget",
+    );
+
+    // The merging child's terminal block sits one below the merged genesis.
+    let terminal_b = merged_genesis_height(c, merge_parent)
+        .and_then(BlockHeight::prev)
+        .expect("the merged seeded genesis pins the merging child's terminal block");
+
+    // Every straddler must reach a terminal verdict on the survivor.
+    for hash in &probes {
+        let status = await_tx_terminal(c, *hash, epochs(12));
+        assert!(
+            matches!(status, Some(TransactionStatus::Completed(_))),
+            "a straddler hung on the settled-waves fence; status = {status:?}",
+        );
+    }
+
+    assert_fence_held(c, merge_left, terminal_b, &probes);
+}
+
+/// Whether the merge into `parent` has executed: the reformed parent is seated
+/// in the lookahead committee set and no longer pending.
+fn merge_executed<C: Cluster>(c: &C, parent: ShardId) -> bool {
+    c.beacon_state().is_some_and(|state| {
+        !state.pending_reshapes.contains_key(&parent)
+            && state.next_shard_committees.contains_key(&parent)
+    })
+}
+
+/// The merged parent's seeded genesis height, from its composed boundary.
+fn merged_genesis_height<C: Cluster>(c: &C, parent: ShardId) -> Option<BlockHeight> {
+    c.beacon_state()
+        .and_then(|state| state.boundaries.get(&parent).map(|b| b.height))
+}
+
+/// Whether `hash` finalized a non-abort decision on `shard`'s committed chain —
+/// the source side of a cross-shard wave settling before a reshape terminal.
+fn chain_settled<C: Cluster>(c: &C, shard: ShardId, hash: TxHash) -> bool {
+    matches!(
+        c.chain_fate(shard, hash).1,
+        Some((_, decision)) if decision != TransactionDecision::Aborted
+    )
 }
 
 /// Build a straddler transfer (survivor payer → splitter recipient) bracketing

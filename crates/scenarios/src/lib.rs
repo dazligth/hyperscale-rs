@@ -32,5 +32,5 @@ pub use config::ScenarioConfig;
 pub use liveness::liveness_baseline;
 pub use multi_vnode::multi_vnode_progress;
 pub use reshape::{merge_lifecycle, split_lifecycle};
-pub use straddler::split_straddler_atomic;
+pub use straddler::{merge_straddler_atomic, split_straddler_atomic};
 pub use transactions::{cross_shard_tx, livelock_resolves_promptly, single_shard_tx};

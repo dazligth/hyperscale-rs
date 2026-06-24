@@ -38,12 +38,14 @@ use hyperscale_node::reshape::view::ReshapeView;
 use hyperscale_node::shard::HostEvent;
 use hyperscale_node::{
     NodeConfig, SeatFollower, SeatVnodeGroup, TimerOp, VnodeInit, seat_follower, seat_vnode_group,
+    serve_state_range_request,
 };
 use hyperscale_provisions::ProvisionConfig;
 use hyperscale_shard::ShardConsensusConfig;
 use hyperscale_storage::{BoundaryStore, ImportLeaf, RecoveredState, ShardChainReader};
 use hyperscale_storage_rocksdb::{RocksDbShardStorage, SharedStorage};
 use hyperscale_types::network::notification::ReadySignalNotification;
+use hyperscale_types::network::request::GetStateRangeRequest;
 use hyperscale_types::{
     Block, BlockHeight, Bls12381G1PrivateKey, ChainOrigin, GenesisConfigHash, NetworkDefinition,
     ShardAnchor, ShardId, SplitAdoption, StateRoot, StoredReceipt, ValidatorId,
@@ -944,35 +946,47 @@ impl ShardSupervisor {
         let events = self.events_tx.clone();
         match kind {
             FetchKind::StateRange { sub_range, request } => {
-                let on_fail = request.clone();
-                self.process.network().request(
-                    from,
-                    None,
-                    request,
-                    None,
-                    Box::new(move |result| {
-                        let io = result.map_or_else(
-                            |_| ReshapeIo::FetchFailed {
-                                duty,
-                                from,
-                                kind: FetchKind::StateRange {
-                                    sub_range,
-                                    request: on_fail,
-                                },
+                // A merge keeper co-hosts the terminating halves it collects, so
+                // serve their ranges from the local store: a half's committee
+                // dissolves at the merge boundary, and a network fetch would just
+                // hammer the drained shard's torn-down request protocol.
+                let local = self
+                    .storages
+                    .lock()
+                    .expect("storages lock")
+                    .get(&from)
+                    .cloned();
+                let Some(storage) = local else {
+                    Self::network_state_range(
+                        self.process.network(),
+                        &events,
+                        duty,
+                        from,
+                        sub_range,
+                        request,
+                    );
+                    return;
+                };
+                let network = Arc::clone(self.process.network());
+                self.tokio_handle.spawn_blocking(move || {
+                    let response = serve_state_range_request(&storage, &request);
+                    if response.chunk.is_some() {
+                        let _ = events.send(SupervisorEvent::Reshape(ReshapeIo::Fetched {
+                            duty,
+                            from,
+                            kind: FetchedKind::StateRange {
+                                sub_range,
+                                response: Box::new(response),
                             },
-                            |response| ReshapeIo::Fetched {
-                                duty,
-                                from,
-                                kind: FetchedKind::StateRange {
-                                    sub_range,
-                                    response: Box::new(response),
-                                },
-                            },
+                        }));
+                    } else {
+                        // The local store no longer pins the boundary; fall back
+                        // to the shard's committee.
+                        Self::network_state_range(
+                            &network, &events, duty, from, sub_range, request,
                         );
-                        let _ = events.send(SupervisorEvent::Reshape(io));
-                        ResponseVerdict::Accept
-                    }),
-                );
+                    }
+                });
             }
             FetchKind::Block { request } => {
                 let on_fail = request.clone();
@@ -1002,6 +1016,48 @@ impl ShardSupervisor {
                 );
             }
         }
+    }
+
+    /// Request one reshape state range from `from`'s committee, answering with a
+    /// [`ReshapeIo`]. The fallback when a duty's source isn't co-hosted locally.
+    fn network_state_range(
+        network: &Arc<Libp2pNetwork>,
+        events: &mpsc::UnboundedSender<SupervisorEvent>,
+        duty: ShardId,
+        from: ShardId,
+        sub_range: usize,
+        request: GetStateRangeRequest,
+    ) {
+        let on_fail = request.clone();
+        let events = events.clone();
+        network.request(
+            from,
+            None,
+            request,
+            None,
+            Box::new(move |result| {
+                let io = result.map_or_else(
+                    |_| ReshapeIo::FetchFailed {
+                        duty,
+                        from,
+                        kind: FetchKind::StateRange {
+                            sub_range,
+                            request: on_fail,
+                        },
+                    },
+                    |response| ReshapeIo::Fetched {
+                        duty,
+                        from,
+                        kind: FetchedKind::StateRange {
+                            sub_range,
+                            response: Box::new(response),
+                        },
+                    },
+                );
+                let _ = events.send(SupervisorEvent::Reshape(io));
+                ResponseVerdict::Accept
+            }),
+        );
     }
 
     /// Write a reshape duty's boundary leaves into its store off the loop,

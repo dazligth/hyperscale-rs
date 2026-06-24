@@ -7,10 +7,11 @@ mod support;
 
 use std::time::Duration;
 
-use hyperscale_scenarios::tx::split_straddler_setup;
+use hyperscale_scenarios::tx::{merge_straddler_setup, split_straddler_setup};
 use hyperscale_scenarios::{
     ScenarioConfig, cross_shard_tx, livelock_resolves_promptly, liveness_baseline, merge_lifecycle,
-    multi_vnode_progress, single_shard_tx, split_lifecycle, split_straddler_atomic,
+    merge_straddler_atomic, multi_vnode_progress, single_shard_tx, split_lifecycle,
+    split_straddler_atomic,
 };
 use support::sim_cluster::SimCluster;
 
@@ -97,6 +98,33 @@ fn split_straddler_atomic_sim() {
     let setup = split_straddler_setup();
     let mut cluster = SimCluster::with_balances(&straddler_config(), 11, &setup.balances);
     split_straddler_atomic(&mut cluster);
+}
+
+/// Four-shard topology whose `split_bytes` derives a `merge_bytes` bracketing
+/// the genesis byte skew: the survivor pair (`leaf(2,0)`/`leaf(2,1)`, the latter
+/// bulk-funded) sits above it, the light merging pair (`leaf(2,2)`/`leaf(2,3)`)
+/// below it, so only the merging pair auto-merges into `leaf(1,1)`. Three cohorts
+/// of pool surplus staff the two split generations the simulation grows through
+/// to reach the partition production seats at genesis; the merge keepers then
+/// come from the merging children's own committees.
+const fn merge_straddler_config() -> ScenarioConfig {
+    ScenarioConfig {
+        validators_per_shard: 4,
+        vnodes_per_host: 1,
+        pool_surplus: 12,
+        num_shards: 4,
+        split_bytes: 2_880_000,
+        latency: Duration::from_millis(150),
+        dedicated_hosts: false,
+    }
+}
+
+#[test]
+fn merge_straddler_atomic_sim() {
+    let setup = merge_straddler_setup();
+    let mut cluster =
+        SimCluster::with_grown_balances(&merge_straddler_config(), 11, &setup.balances);
+    merge_straddler_atomic(&mut cluster);
 }
 
 /// Multi-vnode config: two vnodes per host (same-shard multi-vnode hosting), the

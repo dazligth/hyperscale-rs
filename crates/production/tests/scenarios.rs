@@ -12,10 +12,11 @@ mod prod_cluster;
 
 use std::time::Duration;
 
-use hyperscale_scenarios::tx::split_straddler_setup;
+use hyperscale_scenarios::tx::{merge_straddler_setup, split_straddler_setup};
 use hyperscale_scenarios::{
     ScenarioConfig, cross_shard_tx, livelock_resolves_promptly, liveness_baseline, merge_lifecycle,
-    multi_vnode_progress, single_shard_tx, split_lifecycle, split_straddler_atomic,
+    merge_straddler_atomic, multi_vnode_progress, single_shard_tx, split_lifecycle,
+    split_straddler_atomic,
 };
 use prod_cluster::ProdCluster;
 use serial_test::serial;
@@ -164,6 +165,40 @@ fn split_straddler_atomic_prod() {
     let mut cluster =
         ProdCluster::start_with_balances(&straddler_config(), 11, EPOCH_MS, setup.balances);
     split_straddler_atomic(&mut cluster);
+    cluster.shutdown();
+}
+
+/// Four-shard genesis whose `split_bytes` derives a `merge_bytes` bracketing the
+/// genesis byte skew: the survivor pair (`leaf(2,0)`/`leaf(2,1)`, the latter
+/// bulk-funded) over it, the light merging pair (`leaf(2,2)`/`leaf(2,3)`) under
+/// it, so only the merging pair auto-merges into `leaf(1,1)`. One validator per
+/// host (each reshape seat its own store), three cohorts of pool surplus to keep
+/// sizing parity with the simulation's grow, a paced inter-host latency so the
+/// loadless committees track wall-clock through the merge.
+const fn merge_straddler_config() -> ScenarioConfig {
+    ScenarioConfig {
+        validators_per_shard: 4,
+        vnodes_per_host: 1,
+        pool_surplus: 12,
+        num_shards: 4,
+        split_bytes: 2_880_000,
+        latency: Duration::from_millis(60),
+        dedicated_hosts: true,
+    }
+}
+
+#[test]
+#[serial]
+#[cfg_attr(
+    not(feature = "ci"),
+    ignore = "real-QUIC production scenario; run with --features ci or -- --ignored"
+)]
+fn merge_straddler_atomic_prod() {
+    let _ = fmt().with_test_writer().try_init();
+    let setup = merge_straddler_setup();
+    let mut cluster =
+        ProdCluster::start_with_balances(&merge_straddler_config(), 11, EPOCH_MS, setup.balances);
+    merge_straddler_atomic(&mut cluster);
     cluster.shutdown();
 }
 
