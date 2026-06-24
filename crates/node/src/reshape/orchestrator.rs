@@ -15,8 +15,8 @@
 //! each step (the adapter's step cadence paces it — production's 1s sleep,
 //! simulation's per-slice pump).
 //!
-//! This module covers the **split observer** duty. The merge keeper duty and the
-//! supervisor wiring land in later phases.
+//! This module covers the **split observer** and **merge keeper** duties. The
+//! supervisor wiring lands in a later phase.
 
 use std::collections::HashMap;
 
@@ -24,10 +24,12 @@ use hyperscale_storage::ImportLeaf;
 use hyperscale_types::network::request::{GetBlockRequest, GetStateRangeRequest};
 use hyperscale_types::network::response::{GetBlockResponse, GetStateRangeResponse};
 use hyperscale_types::{
-    Block, BlockHeight, ChainOrigin, ShardAnchor, ShardId, StateRoot, StoredReceipt, ValidatorId,
+    Block, BlockHeader, BlockHeight, ChainOrigin, QuorumCertificate, ShardAnchor, ShardId,
+    StateRoot, StoredReceipt, ValidatorId,
 };
 
-use crate::bootstrap::BootstrapRequest;
+use crate::bootstrap::{BootstrapRequest, ShardBootstrap};
+use crate::reshape::merge_flip::merge_genesis_from_terminals;
 use crate::reshape::observer::{ObserverBootstrap, ObserverTail};
 use crate::reshape::split_flip::split_genesis_from_terminal;
 use crate::reshape::view::ReshapeView;
@@ -161,6 +163,8 @@ pub enum ReshapeEvent {
     Fetched {
         /// The duty the fetch belonged to.
         duty: ShardId,
+        /// The shard the fetch addressed (which keeper half it answers).
+        from: ShardId,
         /// The response.
         kind: FetchedKind,
     },
@@ -168,6 +172,8 @@ pub enum ReshapeEvent {
     FetchFailed {
         /// The duty the fetch belonged to.
         duty: ShardId,
+        /// The shard the fetch addressed.
+        from: ShardId,
         /// What failed.
         kind: FetchKind,
     },
@@ -232,22 +238,104 @@ struct ObserverDuty {
     store_opened: bool,
 }
 
+/// One keeper seat this host runs in a pending merge.
+struct KeeperMember {
+    validator: ValidatorId,
+    own_child: ShardId,
+}
+
+/// One child half's progress in a keeper's merged-store build: its snap-synced
+/// leaves and its certified terminal.
+struct KeeperHalf {
+    child: ShardId,
+    bootstrap: Box<ShardBootstrap>,
+    leaves: Option<Vec<ImportLeaf>>,
+    terminal: Option<(BlockHeader, QuorumCertificate)>,
+    terminal_requested: bool,
+}
+
+impl KeeperHalf {
+    fn new(child: ShardId, anchor: ShardAnchor) -> Self {
+        Self {
+            child,
+            bootstrap: Box::new(ShardBootstrap::new(child, anchor)),
+            leaves: None,
+            terminal: None,
+            terminal_requested: false,
+        }
+    }
+}
+
+/// One keeper's progress through its merge duty, keyed by the parent it reforms.
+enum KeeperPhase {
+    /// Re-asserting ready until the parent composes.
+    ReassertingReady,
+    /// The parent composed; collecting both halves and terminals, deriving the
+    /// merged genesis, and importing the union.
+    Building {
+        parent_anchor: ShardAnchor,
+        left: Box<KeeperHalf>,
+        right: Box<KeeperHalf>,
+        derived: Option<(ChainOrigin, Box<Block>)>,
+        import_requested: bool,
+    },
+    /// Union imported; awaiting the next advance to emit the adopt.
+    Adopting {
+        origin: ChainOrigin,
+        genesis: Box<Block>,
+    },
+    /// Adopt emitted; awaiting the verified adopted root.
+    AwaitingAdopt,
+    /// Genesis adopted; awaiting the placement that seats the keepers.
+    Prepared,
+}
+
+/// One merge keeper duty, keyed by the parent it reforms.
+struct KeeperDuty {
+    members: Vec<KeeperMember>,
+    phase: KeeperPhase,
+    open_requested: bool,
+    store_opened: bool,
+}
+
+/// The keeper half `from` addresses, when it is one of the duty's children.
+fn half_for<'a>(
+    left: &'a mut KeeperHalf,
+    right: &'a mut KeeperHalf,
+    from: ShardId,
+) -> Option<&'a mut KeeperHalf> {
+    if from == left.child {
+        Some(left)
+    } else if from == right.child {
+        Some(right)
+    } else {
+        None
+    }
+}
+
 /// The per-host reshape orchestrator. See the module docs.
 #[derive(Default)]
 pub struct ReshapeOrchestrator {
     /// This host's validator ids — the seats it may hold.
     me: Vec<ValidatorId>,
+    /// The beacon epoch length, used to anchor a merge's cut.
+    epoch_duration_ms: u64,
     /// In-flight observer duties, keyed by child.
     observers: HashMap<ShardId, ObserverDuty>,
+    /// In-flight keeper duties, keyed by the parent each reforms.
+    keepers: HashMap<ShardId, KeeperDuty>,
 }
 
 impl ReshapeOrchestrator {
-    /// A fresh orchestrator for a host running `me`.
+    /// A fresh orchestrator for a host running `me`, with the beacon
+    /// `epoch_duration_ms` a merge's cut anchors to.
     #[must_use]
-    pub fn new(me: Vec<ValidatorId>) -> Self {
+    pub fn new(me: Vec<ValidatorId>, epoch_duration_ms: u64) -> Self {
         Self {
             me,
+            epoch_duration_ms,
             observers: HashMap::new(),
+            keepers: HashMap::new(),
         }
     }
 
@@ -258,11 +346,16 @@ impl ReshapeOrchestrator {
             self.apply_event(view, event);
         }
         self.discover_observer_duties(view);
+        self.discover_keeper_duties(view);
 
         let mut requests = Vec::new();
         let children: Vec<ShardId> = self.observers.keys().copied().collect();
         for child in children {
             self.advance_observer(child, view, &mut requests);
+        }
+        let parents: Vec<ShardId> = self.keepers.keys().copied().collect();
+        for parent in parents {
+            self.advance_keeper(parent, view, &mut requests);
         }
         requests
     }
@@ -273,30 +366,21 @@ impl ReshapeOrchestrator {
             ReshapeEvent::Opened { shard } => {
                 if let Some(duty) = self.observers.get_mut(&shard) {
                     duty.store_opened = true;
+                } else if let Some(duty) = self.keepers.get_mut(&shard) {
+                    duty.store_opened = true;
                 }
             }
-            ReshapeEvent::Fetched { duty, kind } => self.apply_fetched(duty, kind),
-            ReshapeEvent::FetchFailed { duty, kind } => {
-                let Some(duty) = self.observers.get_mut(&duty) else {
-                    return;
-                };
-                match (&mut duty.phase, kind) {
-                    (
-                        ObserverPhase::Syncing(bootstrap),
-                        FetchKind::StateRange { sub_range, .. },
-                    ) => bootstrap.on_state_range_failure(sub_range),
-                    (ObserverPhase::Following(tail), FetchKind::Block { .. }) => tail.on_failure(),
-                    (ObserverPhase::FetchingTerminal { requested, .. }, _) => *requested = false,
-                    _ => {}
+            ReshapeEvent::Fetched { duty, from, kind } => {
+                if self.observers.contains_key(&duty) {
+                    self.apply_observer_fetched(duty, kind);
+                } else if self.keepers.contains_key(&duty) {
+                    self.apply_keeper_fetched(duty, from, kind);
                 }
             }
-            ReshapeEvent::Imported { shard, root } => {
-                if let Some(duty) = self.observers.get_mut(&shard)
-                    && let ObserverPhase::Syncing(bootstrap) = &mut duty.phase
-                {
-                    bootstrap.on_imported(root);
-                }
+            ReshapeEvent::FetchFailed { duty, from, kind } => {
+                self.apply_fetch_failed(duty, from, kind);
             }
+            ReshapeEvent::Imported { shard, root } => self.apply_imported(shard, root),
             ReshapeEvent::Applied { shard, root } => {
                 if let Some(duty) = self.observers.get_mut(&shard)
                     && let ObserverPhase::Following(tail) = &mut duty.phase
@@ -312,14 +396,87 @@ impl ReshapeOrchestrator {
                     && matches!(duty.phase, ObserverPhase::AwaitingAdopt)
                 {
                     duty.phase = ObserverPhase::Prepared;
+                } else if let Some(duty) = self.keepers.get_mut(&shard)
+                    && matches!(duty.phase, KeeperPhase::AwaitingAdopt)
+                {
+                    duty.phase = KeeperPhase::Prepared;
                 }
+            }
+        }
+    }
+
+    /// Re-arm a failed fetch on the observer or keeper half awaiting it.
+    fn apply_fetch_failed(&mut self, duty: ShardId, from: ShardId, kind: FetchKind) {
+        if let Some(observer) = self.observers.get_mut(&duty) {
+            match (&mut observer.phase, kind) {
+                (ObserverPhase::Syncing(bootstrap), FetchKind::StateRange { sub_range, .. }) => {
+                    bootstrap.on_state_range_failure(sub_range);
+                }
+                (ObserverPhase::Following(tail), FetchKind::Block { .. }) => tail.on_failure(),
+                (ObserverPhase::FetchingTerminal { requested, .. }, _) => *requested = false,
+                _ => {}
+            }
+        } else if let Some(keeper) = self.keepers.get_mut(&duty)
+            && let KeeperPhase::Building { left, right, .. } = &mut keeper.phase
+            && let Some(half) = half_for(left, right, from)
+        {
+            match kind {
+                FetchKind::StateRange { sub_range, .. } => {
+                    half.bootstrap.on_state_range_failure(sub_range);
+                }
+                FetchKind::Block { .. } => half.terminal_requested = false,
+            }
+        }
+    }
+
+    /// Route an import root to the observer or keeper awaiting it.
+    fn apply_imported(&mut self, shard: ShardId, root: StateRoot) {
+        if let Some(observer) = self.observers.get_mut(&shard) {
+            if let ObserverPhase::Syncing(bootstrap) = &mut observer.phase {
+                bootstrap.on_imported(root);
+            }
+        } else if let Some(keeper) = self.keepers.get_mut(&shard) {
+            // The merged union imported; emit the adopt next.
+            let derived = match &mut keeper.phase {
+                KeeperPhase::Building { derived, .. } => derived.take(),
+                _ => None,
+            };
+            if let Some((origin, genesis)) = derived {
+                keeper.phase = KeeperPhase::Adopting { origin, genesis };
+            }
+        }
+    }
+
+    /// Route a keeper half's fetch response, recording its terminal once served.
+    fn apply_keeper_fetched(&mut self, parent: ShardId, from: ShardId, kind: FetchedKind) {
+        let Some(keeper) = self.keepers.get_mut(&parent) else {
+            return;
+        };
+        let KeeperPhase::Building { left, right, .. } = &mut keeper.phase else {
+            return;
+        };
+        let Some(half) = half_for(left, right, from) else {
+            return;
+        };
+        match kind {
+            FetchedKind::StateRange {
+                sub_range,
+                response,
+            } => {
+                let _ = half.bootstrap.on_state_range(sub_range, &response);
+            }
+            FetchedKind::Block { response } => {
+                if let Some(elided) = &response.certified {
+                    half.terminal = Some((elided.header().clone(), elided.qc().clone()));
+                }
+                half.terminal_requested = false;
             }
         }
     }
 
     /// Route a fetch response to its sequencer, deriving genesis once the
     /// terminal arrives.
-    fn apply_fetched(&mut self, duty: ShardId, kind: FetchedKind) {
+    fn apply_observer_fetched(&mut self, duty: ShardId, kind: FetchedKind) {
         let Some(duty) = self.observers.get_mut(&duty) else {
             return;
         };
@@ -507,6 +664,140 @@ impl ReshapeOrchestrator {
             }
         }
     }
+
+    /// Open a keeper duty for every cohort seat this host holds, accumulating
+    /// the members it runs for each merging parent.
+    fn discover_keeper_duties(&mut self, view: &ReshapeView) {
+        for (&child, cohort) in view.keeper_cohorts() {
+            for (&validator, &parent) in cohort {
+                if !self.me.contains(&validator) {
+                    continue;
+                }
+                let duty = self.keepers.entry(parent).or_insert_with(|| KeeperDuty {
+                    members: Vec::new(),
+                    phase: KeeperPhase::ReassertingReady,
+                    open_requested: false,
+                    store_opened: false,
+                });
+                if !duty
+                    .members
+                    .iter()
+                    .any(|m| m.validator == validator && m.own_child == child)
+                {
+                    duty.members.push(KeeperMember {
+                        validator,
+                        own_child: child,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Advance one keeper duty, emitting its current io.
+    #[allow(clippy::too_many_lines)] // single dispatch over KeeperPhase
+    fn advance_keeper(
+        &mut self,
+        parent: ShardId,
+        view: &ReshapeView,
+        out: &mut Vec<ReshapeRequest>,
+    ) {
+        let epoch_duration_ms = self.epoch_duration_ms;
+        let Some(duty) = self.keepers.get_mut(&parent) else {
+            return;
+        };
+        match &mut duty.phase {
+            KeeperPhase::ReassertingReady => {
+                let (left, right) = parent.children();
+                if view.parent_composed(parent)
+                    && let Some(parent_anchor) = view.boundary(parent)
+                    && let Some(left_anchor) = view.boundary(left)
+                    && let Some(right_anchor) = view.boundary(right)
+                {
+                    duty.phase = KeeperPhase::Building {
+                        parent_anchor,
+                        left: Box::new(KeeperHalf::new(left, left_anchor)),
+                        right: Box::new(KeeperHalf::new(right, right_anchor)),
+                        derived: None,
+                        import_requested: false,
+                    };
+                    return;
+                }
+                for member in &duty.members {
+                    if let Some(anchor) = view.boundary(member.own_child) {
+                        out.push(ReshapeRequest::BroadcastReady {
+                            validator: member.validator,
+                            anchor,
+                            recipients: recipients_for(view, member.own_child, member.validator),
+                        });
+                    }
+                }
+            }
+            KeeperPhase::Building {
+                parent_anchor,
+                left,
+                right,
+                derived,
+                import_requested,
+            } => {
+                if !duty.open_requested {
+                    out.push(ReshapeRequest::OpenStore { shard: parent });
+                    duty.open_requested = true;
+                }
+                advance_keeper_half(left, parent, view, out);
+                advance_keeper_half(right, parent, view, out);
+                if derived.is_none()
+                    && let (Some((left_h, left_qc)), Some((right_h, right_qc))) =
+                        (&left.terminal, &right.terminal)
+                    && let Ok((genesis, origin)) = merge_genesis_from_terminals(
+                        parent,
+                        (left_h, left_qc),
+                        (right_h, right_qc),
+                        epoch_duration_ms,
+                        parent_anchor,
+                    )
+                {
+                    *derived = Some((origin, Box::new(genesis)));
+                }
+                if !*import_requested
+                    && duty.store_opened
+                    && let (Some(left_leaves), Some(right_leaves)) = (&left.leaves, &right.leaves)
+                    && let Some((origin, _)) = derived.as_ref()
+                {
+                    let mut union = left_leaves.clone();
+                    union.extend(right_leaves.iter().cloned());
+                    out.push(ReshapeRequest::ImportBoundary {
+                        shard: parent,
+                        height: origin.genesis_height,
+                        leaves: union,
+                    });
+                    *import_requested = true;
+                }
+            }
+            KeeperPhase::Adopting { .. } => {
+                if let KeeperPhase::Adopting { origin, genesis } =
+                    std::mem::replace(&mut duty.phase, KeeperPhase::AwaitingAdopt)
+                {
+                    out.push(ReshapeRequest::Adopt {
+                        shard: parent,
+                        kind: AdoptKind::Merge,
+                        origin,
+                        genesis,
+                    });
+                }
+            }
+            KeeperPhase::AwaitingAdopt => {}
+            KeeperPhase::Prepared => {
+                if duty
+                    .members
+                    .iter()
+                    .any(|m| view.committee(parent).contains(&m.validator))
+                {
+                    out.push(ReshapeRequest::Seat { shard: parent });
+                    self.keepers.remove(&parent);
+                }
+            }
+        }
+    }
 }
 
 /// A ready signal's recipients — `shard`'s committee minus the signer.
@@ -516,6 +807,48 @@ fn recipients_for(view: &ReshapeView, shard: ShardId, validator: ValidatorId) ->
         .copied()
         .filter(|&v| v != validator)
         .collect()
+}
+
+/// Advance one keeper half: forward its snap-sync state ranges and take the
+/// leaves once assembled, and fetch its certified terminal once.
+fn advance_keeper_half(
+    half: &mut KeeperHalf,
+    duty: ShardId,
+    view: &ReshapeView,
+    out: &mut Vec<ReshapeRequest>,
+) {
+    if half.leaves.is_none() {
+        for request in half.bootstrap.next_requests() {
+            // The half collect only assembles state, so only state ranges appear.
+            let BootstrapRequest::StateRange(sub_range, request) = request else {
+                continue;
+            };
+            out.push(ReshapeRequest::Fetch {
+                duty,
+                from: half.child,
+                peers: view.committee(half.child).to_vec(),
+                kind: FetchKind::StateRange { sub_range, request },
+            });
+        }
+        if let Some((_, leaves)) = half.bootstrap.take_import() {
+            half.leaves = Some(leaves);
+        }
+    }
+    if half.terminal.is_none()
+        && !half.terminal_requested
+        && let Some(anchor) = view.boundary(half.child)
+    {
+        let terminal = anchor.height.prev().unwrap_or(anchor.height);
+        out.push(ReshapeRequest::Fetch {
+            duty,
+            from: half.child,
+            peers: view.committee(half.child).to_vec(),
+            kind: FetchKind::Block {
+                request: GetBlockRequest::new(terminal, terminal),
+            },
+        });
+        half.terminal_requested = true;
+    }
 }
 
 #[cfg(test)]
@@ -528,7 +861,10 @@ mod tests {
         generate_bls_keypair,
     };
 
-    use super::{FetchKind, ObserverDuty, ObserverPhase, ReshapeOrchestrator, ReshapeRequest};
+    use super::{
+        FetchKind, KeeperDuty, KeeperMember, KeeperPhase, ObserverDuty, ObserverPhase,
+        ReshapeOrchestrator, ReshapeRequest,
+    };
     use crate::reshape::observer::{ObserverBootstrap, ObserverTail};
     use crate::reshape::view::ReshapeView;
 
@@ -554,11 +890,29 @@ mod tests {
         cohort: &[(ShardId, u64, ShardId)],
         seeded: &[ShardId],
     ) -> TopologySnapshot {
+        build(committees, cohort, &[], seeded)
+    }
+
+    /// Project a snapshot with keeper cohort seats `(child, validator, parent)`.
+    fn snapshot_keepers(
+        committees: &[(ShardId, &[u64])],
+        keepers: &[(ShardId, u64, ShardId)],
+        seeded: &[ShardId],
+    ) -> TopologySnapshot {
+        build(committees, &[], keepers, seeded)
+    }
+
+    fn build(
+        committees: &[(ShardId, &[u64])],
+        observers: &[(ShardId, u64, ShardId)],
+        keepers: &[(ShardId, u64, ShardId)],
+        seeded: &[ShardId],
+    ) -> TopologySnapshot {
         let mut ids: BTreeSet<u64> = BTreeSet::new();
         for (_, members) in committees {
             ids.extend(members.iter().copied());
         }
-        for (_, v, _) in cohort {
+        for (_, v, _) in observers.iter().chain(keepers) {
             ids.insert(*v);
         }
         let validators: Vec<ValidatorInfo> = ids
@@ -572,9 +926,19 @@ mod tests {
             .iter()
             .map(|(s, members)| (*s, members.iter().map(|&m| vid(m)).collect()))
             .collect();
-        let mut cohorts: HashMap<ShardId, BTreeMap<ValidatorId, ShardId>> = HashMap::new();
-        for (parent, v, child) in cohort {
-            cohorts.entry(*parent).or_default().insert(vid(*v), *child);
+        let mut observer_cohorts: HashMap<ShardId, BTreeMap<ValidatorId, ShardId>> = HashMap::new();
+        for (parent, v, child) in observers {
+            observer_cohorts
+                .entry(*parent)
+                .or_default()
+                .insert(vid(*v), *child);
+        }
+        let mut keeper_cohorts: HashMap<ShardId, BTreeMap<ValidatorId, ShardId>> = HashMap::new();
+        for (child, v, parent) in keepers {
+            keeper_cohorts
+                .entry(*child)
+                .or_default()
+                .insert(vid(*v), *parent);
         }
         TopologySnapshot::from_explicit_committees(
             NetworkDefinition::simulator(),
@@ -583,8 +947,8 @@ mod tests {
             committee_map,
             seeded.iter().map(|&s| (s, anchor())).collect(),
             HashMap::new(),
-            cohorts,
-            HashMap::new(),
+            observer_cohorts,
+            keeper_cohorts,
             BTreeSet::new(),
         )
     }
@@ -610,7 +974,7 @@ mod tests {
         let parent = ShardId::ROOT;
         let (child, _) = parent.children();
         let snap = snapshot(&[], &[(parent, 5, child)], &[]);
-        let mut orch = ReshapeOrchestrator::new(vec![vid(5)]);
+        let mut orch = ReshapeOrchestrator::new(vec![vid(5)], 30_000);
 
         let requests = orch.step(&ReshapeView::new(&snap), Vec::new());
 
@@ -625,7 +989,7 @@ mod tests {
         let parent = ShardId::ROOT;
         let (child, _) = parent.children();
         let snap = snapshot(&[], &[(parent, 9, child)], &[]);
-        let mut orch = ReshapeOrchestrator::new(vec![vid(5)]);
+        let mut orch = ReshapeOrchestrator::new(vec![vid(5)], 30_000);
 
         assert!(orch.step(&ReshapeView::new(&snap), Vec::new()).is_empty());
     }
@@ -635,7 +999,7 @@ mod tests {
         let parent = ShardId::ROOT;
         let (child, _) = parent.children();
         let snap = snapshot(&[(parent, &[1, 2, 3, 4])], &[], &[parent]);
-        let mut orch = ReshapeOrchestrator::new(vec![vid(5)]);
+        let mut orch = ReshapeOrchestrator::new(vec![vid(5)], 30_000);
         orch.observers.insert(
             child,
             observer_duty(
@@ -662,7 +1026,7 @@ mod tests {
         let parent = ShardId::ROOT;
         let (child, _) = parent.children();
         let snap = snapshot(&[(parent, &[1, 2, 3, 5])], &[], &[parent]);
-        let mut orch = ReshapeOrchestrator::new(vec![vid(5)]);
+        let mut orch = ReshapeOrchestrator::new(vec![vid(5)], 30_000);
         orch.observers.insert(
             child,
             observer_duty(
@@ -697,7 +1061,7 @@ mod tests {
         // the child committee.
         let snap = snapshot(&[(child, &[1, 2])], &[], &[parent, child, sibling]);
         let view = ReshapeView::new(&snap);
-        let mut orch = ReshapeOrchestrator::new(vec![vid(5)]);
+        let mut orch = ReshapeOrchestrator::new(vec![vid(5)], 30_000);
         orch.observers.insert(
             child,
             observer_duty(
@@ -733,7 +1097,7 @@ mod tests {
         let (child, _) = parent.children();
         // The observer is now seated on the child committee.
         let snap = snapshot(&[(child, &[1, 5])], &[], &[]);
-        let mut orch = ReshapeOrchestrator::new(vec![vid(5)]);
+        let mut orch = ReshapeOrchestrator::new(vec![vid(5)], 30_000);
         orch.observers.insert(
             child,
             observer_duty(parent, child, 5, ObserverPhase::Prepared),
@@ -753,12 +1117,101 @@ mod tests {
         let (child, _) = parent.children();
         // Child committee does not yet include the observer.
         let snap = snapshot(&[(child, &[1, 2])], &[], &[]);
-        let mut orch = ReshapeOrchestrator::new(vec![vid(5)]);
+        let mut orch = ReshapeOrchestrator::new(vec![vid(5)], 30_000);
         orch.observers.insert(
             child,
             observer_duty(parent, child, 5, ObserverPhase::Prepared),
         );
 
         assert!(orch.step(&ReshapeView::new(&snap), Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn detects_a_keeper_seat_and_reasserts_ready() {
+        let parent = ShardId::ROOT;
+        let (own_child, _) = parent.children();
+        // The keeper runs `own_child` and reforms `parent`; the parent has not
+        // composed yet, so it re-asserts ready to the own-child committee.
+        let snap = snapshot_keepers(
+            &[(own_child, &[1, 2, 3, 5])],
+            &[(own_child, 5, parent)],
+            &[own_child],
+        );
+        let mut orch = ReshapeOrchestrator::new(vec![vid(5)], 30_000);
+
+        let requests = orch.step(&ReshapeView::new(&snap), Vec::new());
+
+        assert!(
+            requests.iter().any(|r| matches!(
+                r,
+                ReshapeRequest::BroadcastReady { validator, recipients, .. }
+                    if *validator == vid(5) && !recipients.contains(&vid(5)) && recipients.len() == 3
+            )),
+            "a keeper must re-assert ready to its own-child committee minus self; got {requests:?}",
+        );
+    }
+
+    #[test]
+    fn the_keeper_gate_opens_the_parent_store_and_collects_both_halves() {
+        let parent = ShardId::ROOT;
+        let (left, right) = parent.children();
+        // Parent composed and both children's terminal anchors present → the
+        // gate fires.
+        let snap = snapshot_keepers(
+            &[(left, &[1, 2]), (right, &[3, 4])],
+            &[(left, 5, parent)],
+            &[parent, left, right],
+        );
+        let view = ReshapeView::new(&snap);
+        let mut orch = ReshapeOrchestrator::new(vec![vid(5)], 30_000);
+
+        // First step fires the gate (ReassertingReady → Building); the second
+        // opens the parent store and collects both halves.
+        let _ = orch.step(&view, Vec::new());
+        let requests = orch.step(&view, Vec::new());
+
+        assert!(
+            requests
+                .iter()
+                .any(|r| matches!(r, ReshapeRequest::OpenStore { shard } if *shard == parent)),
+            "the keeper gate must open the parent store; got {requests:?}",
+        );
+        for half in [left, right] {
+            assert!(
+                requests.iter().any(|r| matches!(
+                    r,
+                    ReshapeRequest::Fetch { from, kind: FetchKind::StateRange { .. }, .. } if *from == half
+                )),
+                "the keeper must snap-sync the {half:?} half; got {requests:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_prepared_keeper_seats_when_placed_on_the_parent() {
+        let parent = ShardId::ROOT;
+        let (own_child, _) = parent.children();
+        // The keeper is now seated on the reformed parent committee.
+        let snap = snapshot_keepers(&[(parent, &[1, 5])], &[], &[]);
+        let mut orch = ReshapeOrchestrator::new(vec![vid(5)], 30_000);
+        orch.keepers.insert(
+            parent,
+            KeeperDuty {
+                members: vec![KeeperMember {
+                    validator: vid(5),
+                    own_child,
+                }],
+                phase: KeeperPhase::Prepared,
+                open_requested: true,
+                store_opened: true,
+            },
+        );
+
+        let requests = orch.step(&ReshapeView::new(&snap), Vec::new());
+
+        assert!(
+            matches!(requests.as_slice(), [ReshapeRequest::Seat { shard }] if *shard == parent),
+            "a prepared keeper must seat once placed on the parent; got {requests:?}",
+        );
     }
 }

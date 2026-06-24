@@ -61,6 +61,14 @@ impl<'a> ReshapeView<'a> {
         self.topology.reshape_observer_cohorts()
     }
 
+    /// The pending-merge keeper cohorts, keyed by the child each keeper runs —
+    /// each maps a keeper to the parent it reforms. The orchestrator scans these
+    /// for its host's keeper seats.
+    #[must_use]
+    pub const fn keeper_cohorts(&self) -> &HashMap<ShardId, BTreeMap<ValidatorId, ShardId>> {
+        self.topology.reshape_keeper_cohorts()
+    }
+
     /// Whether `shard` has seeded a beacon-attested boundary anchor. The
     /// projection drops zeroed genesis placeholders, so a projected anchor
     /// means the shard's boundary crossing committed.
