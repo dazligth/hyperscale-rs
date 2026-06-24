@@ -434,6 +434,26 @@ impl TopologySnapshot {
         self.reshape_keepers.contains_key(&shard)
     }
 
+    /// The pending-split observer cohorts, keyed by splitting parent — each
+    /// maps a cohort member to the child it syncs. The reshape orchestrator
+    /// reads this to discover the observer duties its host holds.
+    #[must_use]
+    pub const fn reshape_observer_cohorts(
+        &self,
+    ) -> &HashMap<ShardId, BTreeMap<ValidatorId, ShardId>> {
+        &self.reshape_observers
+    }
+
+    /// The pending-merge keeper cohorts, keyed by the child each keeper runs —
+    /// each maps a keeper to that child. The reshape orchestrator reads this to
+    /// discover the keeper duties its host holds.
+    #[must_use]
+    pub const fn reshape_keeper_cohorts(
+        &self,
+    ) -> &HashMap<ShardId, BTreeMap<ValidatorId, ShardId>> {
+        &self.reshape_keepers
+    }
+
     /// Get the ordered committee members for a shard — full membership,
     /// the networking view.
     ///

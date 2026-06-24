@@ -11,7 +11,9 @@
 //!
 //! [`BeaconState::derive_topology_snapshot`]: hyperscale_types::BeaconState::derive_topology_snapshot
 
-use hyperscale_types::{ShardId, TopologySnapshot};
+use std::collections::{BTreeMap, HashMap};
+
+use hyperscale_types::{ShardAnchor, ShardId, TopologySnapshot, ValidatorId};
 
 /// Reshape gate predicates over one host's [`TopologySnapshot`] — the
 /// identity-agnostic projection of the committed `BeaconState`.
@@ -24,6 +26,39 @@ impl<'a> ReshapeView<'a> {
     #[must_use]
     pub const fn new(topology: &'a TopologySnapshot) -> Self {
         Self { topology }
+    }
+
+    /// The shard's beacon-attested boundary anchor, or `None` until it seeds.
+    #[must_use]
+    pub fn boundary(&self, shard: ShardId) -> Option<ShardAnchor> {
+        self.topology.boundary(shard)
+    }
+
+    /// The shard's full committee — the ready-signal broadcast recipients.
+    #[must_use]
+    pub fn committee(&self, shard: ShardId) -> &[ValidatorId] {
+        self.topology.committee_for_shard(shard)
+    }
+
+    /// The split child `validator` syncs as an observer of `parent`'s pending
+    /// split, or `None` when it holds no observer seat there.
+    #[must_use]
+    pub fn observer_child(&self, parent: ShardId, validator: ValidatorId) -> Option<ShardId> {
+        self.topology.reshape_observer_child(parent, validator)
+    }
+
+    /// The parent `validator` reforms as a keeper of `child` in a pending
+    /// merge, or `None` when it holds no keeper seat there.
+    #[must_use]
+    pub fn keeper_parent(&self, child: ShardId, validator: ValidatorId) -> Option<ShardId> {
+        self.topology.reshape_keeper_parent(child, validator)
+    }
+
+    /// The pending-split observer cohorts, keyed by splitting parent — the
+    /// orchestrator scans these for its host's observer seats.
+    #[must_use]
+    pub const fn observer_cohorts(&self) -> &HashMap<ShardId, BTreeMap<ValidatorId, ShardId>> {
+        self.topology.reshape_observer_cohorts()
     }
 
     /// Whether `shard` has seeded a beacon-attested boundary anchor. The
