@@ -113,9 +113,9 @@ fn observer_ready_signal_commits_as_reshape_ready_leaf() {
         HashMap::from([(ShardId::ROOT, consensus)]),
         HashMap::new(),
         HashMap::new(),
-        HashMap::from([(ShardId::ROOT, BTreeMap::from([(observer, left)]))]),
-        HashMap::new(),
-        HashMap::new(),
+        BTreeMap::from([(ShardId::ROOT, BTreeMap::from([(observer, left)]))]),
+        BTreeMap::new(),
+        BTreeMap::new(),
         BTreeSet::from([ShardId::ROOT]),
     );
     sim.topology = TopologySchedule::single(Arc::new(snapshot));

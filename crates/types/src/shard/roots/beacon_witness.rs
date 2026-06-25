@@ -354,7 +354,7 @@ impl Verify<&BeaconWitnessRootContext<'_>> for BeaconWitnessRoot {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeSet, HashMap};
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
 
     use super::*;
     use crate::{
@@ -367,7 +367,7 @@ mod tests {
     fn snapshot_with_observers(
         shard: ShardId,
         base: u64,
-        observers: std::collections::BTreeMap<ValidatorId, ShardId>,
+        observers: BTreeMap<ValidatorId, ShardId>,
     ) -> TopologySnapshot {
         let validators = vec![ValidatorInfo {
             validator_id: ValidatorId::new(0),
@@ -381,16 +381,16 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
             HashMap::from([(shard, BeaconWitnessLeafCount::new(base))]),
-            HashMap::from([(shard, observers)]),
-            HashMap::new(),
-            HashMap::new(),
+            BTreeMap::from([(shard, observers)]),
+            BTreeMap::new(),
+            BTreeMap::new(),
             BTreeSet::from([shard]),
         )
     }
 
     /// [`snapshot_with_observers`] with no cohort.
     fn snapshot_with_base(shard: ShardId, base: u64) -> TopologySnapshot {
-        snapshot_with_observers(shard, base, std::collections::BTreeMap::new())
+        snapshot_with_observers(shard, base, BTreeMap::new())
     }
 
     /// A single-shard snapshot carrying `keepers` as `shard`'s pending
@@ -398,7 +398,7 @@ mod tests {
     fn snapshot_with_keepers(
         shard: ShardId,
         base: u64,
-        keepers: std::collections::BTreeMap<ValidatorId, ShardId>,
+        keepers: BTreeMap<ValidatorId, ShardId>,
     ) -> TopologySnapshot {
         let validators = vec![ValidatorInfo {
             validator_id: ValidatorId::new(0),
@@ -412,9 +412,9 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
             HashMap::from([(shard, BeaconWitnessLeafCount::new(base))]),
-            HashMap::new(),
-            HashMap::from([(shard, keepers)]),
-            HashMap::new(),
+            BTreeMap::new(),
+            BTreeMap::from([(shard, keepers)]),
+            BTreeMap::new(),
             BTreeSet::from([shard]),
         )
     }

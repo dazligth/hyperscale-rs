@@ -1598,7 +1598,7 @@ fn host_assigned(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeSet, HashMap, HashSet};
+    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
     use hyperscale_types::{
         NetworkDefinition, RoutingCommittees, ShardId, TopologySnapshot, ValidatorId,
@@ -1627,9 +1627,9 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),
-            HashMap::new(),
-            HashMap::new(),
-            HashMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
             BTreeSet::new(),
         )
     }

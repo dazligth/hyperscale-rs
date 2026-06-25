@@ -283,12 +283,12 @@ mod tests {
             HashMap::from([(ShardId::ROOT, members)]),
             HashMap::new(),
             HashMap::new(),
-            HashMap::from([(
+            BTreeMap::from([(
                 ShardId::ROOT,
                 BTreeMap::from([(ValidatorId::new(observer), left)]),
             )]),
-            HashMap::new(),
-            HashMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
             BTreeSet::from([ShardId::ROOT]),
         )
     }

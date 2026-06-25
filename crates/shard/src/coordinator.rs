@@ -7409,7 +7409,7 @@ mod tests {
     /// full member but outside the consensus subset — placed, not yet
     /// ready.
     fn not_ready_member_topology() -> TopologySchedule {
-        use std::collections::HashMap;
+        use std::collections::{BTreeMap, HashMap};
 
         let validators: Vec<ValidatorInfo> = (0..4)
             .map(|i| ValidatorInfo {
@@ -7430,9 +7430,9 @@ mod tests {
             consensus,
             HashMap::new(),
             HashMap::new(),
-            HashMap::new(),
-            HashMap::new(),
-            HashMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
             BTreeSet::new(),
         );
         TopologySchedule::single(Arc::new(snapshot))
@@ -7445,7 +7445,7 @@ mod tests {
     /// case stays silent: `test_sync_complete_exits_sync_mode`.)
     #[test]
     fn sync_complete_emits_ready_signal_when_not_in_consensus_subset() {
-        use std::collections::HashMap;
+        use std::collections::{BTreeMap, HashMap};
 
         let (mut state, _) = make_test_state();
         let validators: Vec<ValidatorInfo> = (0..4)
@@ -7468,9 +7468,9 @@ mod tests {
             consensus,
             HashMap::new(),
             HashMap::new(),
-            HashMap::new(),
-            HashMap::new(),
-            HashMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
             BTreeSet::new(),
         );
         let topology = TopologySchedule::single(Arc::new(snapshot));

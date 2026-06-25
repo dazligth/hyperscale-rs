@@ -549,9 +549,9 @@ mod tests {
                 HashMap::new(),
                 HashMap::new(),
                 HashMap::new(),
-                HashMap::new(),
-                HashMap::new(),
-                HashMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
                 pending.iter().copied().collect(),
             ))
         };
@@ -596,9 +596,9 @@ mod tests {
                 HashMap::new(),
                 HashMap::new(),
                 HashMap::new(),
-                HashMap::new(),
-                HashMap::new(),
-                HashMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
                 pending.iter().copied().collect(),
             ))
         };
@@ -632,9 +632,9 @@ mod tests {
                 HashMap::new(),
                 HashMap::new(),
                 HashMap::new(),
-                HashMap::new(),
-                HashMap::new(),
-                HashMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
                 BTreeSet::new(),
             ))
         };
@@ -728,7 +728,7 @@ mod tests {
                          split_pending: &[ShardId],
                          merge_keeper_children: &[ShardId]|
          -> Arc<TopologySnapshot> {
-            let reshape_keepers: HashMap<ShardId, BTreeMap<ValidatorId, ShardId>> =
+            let reshape_keepers: BTreeMap<ShardId, BTreeMap<ValidatorId, ShardId>> =
                 merge_keeper_children
                     .iter()
                     .map(|child| {
@@ -745,9 +745,9 @@ mod tests {
                 HashMap::new(),
                 HashMap::new(),
                 HashMap::new(),
-                HashMap::new(),
+                BTreeMap::new(),
                 reshape_keepers,
-                HashMap::new(),
+                BTreeMap::new(),
                 split_pending.iter().copied().collect(),
             ))
         };

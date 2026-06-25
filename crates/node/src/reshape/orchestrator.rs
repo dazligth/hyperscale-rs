@@ -19,7 +19,7 @@
 //! parent half**, and the **merge keeper** — each discovered from its own cohort
 //! projection and sequenced to the shared adopt and seat tail.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use hyperscale_storage::ImportLeaf;
 use hyperscale_types::network::request::{GetBlockRequest, GetStateRangeRequest};
@@ -387,24 +387,24 @@ pub struct ReshapeOrchestrator {
     /// The beacon epoch length, used to anchor a merge's cut.
     epoch_duration_ms: u64,
     /// In-flight observer duties, keyed by child.
-    observers: HashMap<ShardId, ObserverDuty>,
+    observers: BTreeMap<ShardId, ObserverDuty>,
     /// In-flight keeper duties, keyed by the parent each reforms.
-    keepers: HashMap<ShardId, KeeperDuty>,
+    keepers: BTreeMap<ShardId, KeeperDuty>,
     /// In-flight parent-half duties, keyed by the child each seats.
-    parent_halves: HashMap<ShardId, ParentHalfDuty>,
+    parent_halves: BTreeMap<ShardId, ParentHalfDuty>,
 }
 
 impl ReshapeOrchestrator {
     /// A fresh orchestrator for a host running `me`, with the beacon
     /// `epoch_duration_ms` a merge's cut anchors to.
     #[must_use]
-    pub fn new(me: Vec<ValidatorId>, epoch_duration_ms: u64) -> Self {
+    pub const fn new(me: Vec<ValidatorId>, epoch_duration_ms: u64) -> Self {
         Self {
             me,
             epoch_duration_ms,
-            observers: HashMap::new(),
-            keepers: HashMap::new(),
-            parent_halves: HashMap::new(),
+            observers: BTreeMap::new(),
+            keepers: BTreeMap::new(),
+            parent_halves: BTreeMap::new(),
         }
     }
 
@@ -1205,22 +1205,23 @@ mod tests {
             .iter()
             .map(|(s, members)| (*s, members.iter().map(|&m| vid(m)).collect()))
             .collect();
-        let mut observer_cohorts: HashMap<ShardId, BTreeMap<ValidatorId, ShardId>> = HashMap::new();
+        let mut observer_cohorts: BTreeMap<ShardId, BTreeMap<ValidatorId, ShardId>> =
+            BTreeMap::new();
         for (parent, v, child) in observers {
             observer_cohorts
                 .entry(*parent)
                 .or_default()
                 .insert(vid(*v), *child);
         }
-        let mut keeper_cohorts: HashMap<ShardId, BTreeMap<ValidatorId, ShardId>> = HashMap::new();
+        let mut keeper_cohorts: BTreeMap<ShardId, BTreeMap<ValidatorId, ShardId>> = BTreeMap::new();
         for (child, v, parent) in keepers {
             keeper_cohorts
                 .entry(*child)
                 .or_default()
                 .insert(vid(*v), *parent);
         }
-        let mut parent_half_cohorts: HashMap<ShardId, BTreeMap<ValidatorId, ShardId>> =
-            HashMap::new();
+        let mut parent_half_cohorts: BTreeMap<ShardId, BTreeMap<ValidatorId, ShardId>> =
+            BTreeMap::new();
         for (child, v, parent) in parent_halves {
             parent_half_cohorts
                 .entry(*child)

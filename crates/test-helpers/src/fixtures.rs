@@ -6,7 +6,7 @@
 //! identities. Gated behind the `fixtures` feature, which pulls the libp2p and
 //! network dependencies the Ed25519 identities and validator key map need.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use hyperscale_network::ValidatorKeyMap;
@@ -207,9 +207,9 @@ impl TestFixtures {
             committee_map,
             HashMap::new(),
             HashMap::new(),
-            HashMap::new(),
-            HashMap::new(),
-            HashMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
             BTreeSet::new(),
         ));
 

@@ -11,7 +11,7 @@
 //!
 //! [`BeaconState::derive_topology_snapshot`]: hyperscale_types::BeaconState::derive_topology_snapshot
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use hyperscale_types::{ShardAnchor, ShardId, TopologySnapshot, ValidatorId};
 
@@ -57,7 +57,7 @@ impl<'a> ReshapeView<'a> {
     /// The pending-split observer cohorts, keyed by splitting parent — the
     /// orchestrator scans these for its host's observer seats.
     #[must_use]
-    pub const fn observer_cohorts(&self) -> &HashMap<ShardId, BTreeMap<ValidatorId, ShardId>> {
+    pub const fn observer_cohorts(&self) -> &BTreeMap<ShardId, BTreeMap<ValidatorId, ShardId>> {
         self.topology.reshape_observer_cohorts()
     }
 
@@ -65,7 +65,7 @@ impl<'a> ReshapeView<'a> {
     /// each maps a keeper to the parent it reforms. The orchestrator scans these
     /// for its host's keeper seats.
     #[must_use]
-    pub const fn keeper_cohorts(&self) -> &HashMap<ShardId, BTreeMap<ValidatorId, ShardId>> {
+    pub const fn keeper_cohorts(&self) -> &BTreeMap<ShardId, BTreeMap<ValidatorId, ShardId>> {
         self.topology.reshape_keeper_cohorts()
     }
 
@@ -73,7 +73,7 @@ impl<'a> ReshapeView<'a> {
     /// seats on — each maps a member to the parent it re-roots its local store
     /// from. The orchestrator scans these for its host's parent-half seats.
     #[must_use]
-    pub const fn parent_half_cohorts(&self) -> &HashMap<ShardId, BTreeMap<ValidatorId, ShardId>> {
+    pub const fn parent_half_cohorts(&self) -> &BTreeMap<ShardId, BTreeMap<ValidatorId, ShardId>> {
         self.topology.reshape_parent_half_cohorts()
     }
 
@@ -109,7 +109,7 @@ impl<'a> ReshapeView<'a> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeSet, HashMap};
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
 
     use hyperscale_types::{
         BlockHash, BlockHeight, Hash, NetworkDefinition, ShardAnchor, ShardId, StateRoot,
@@ -140,9 +140,9 @@ mod tests {
             HashMap::new(),
             seeded.iter().map(|&s| (s, seeded_anchor())).collect(),
             HashMap::new(),
-            HashMap::new(),
-            HashMap::new(),
-            HashMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
             BTreeSet::new(),
         )
     }
@@ -177,9 +177,9 @@ mod tests {
             std::iter::once((parent, vec![validator])).collect(),
             std::iter::once((parent, seeded_anchor())).collect(),
             HashMap::new(),
-            HashMap::new(),
-            HashMap::new(),
-            HashMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
             BTreeSet::new(),
         );
         assert!(ReshapeView::new(&composed).merge_composed(parent));

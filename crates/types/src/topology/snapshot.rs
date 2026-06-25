@@ -117,14 +117,14 @@ pub struct TopologySnapshot {
     /// the splitting shard's committee in the networking view but never
     /// its consensus subset; their ready signals classify as
     /// `ReshapeReady` witness leaves.
-    reshape_observers: HashMap<ShardId, BTreeMap<ValidatorId, ShardId>>,
+    reshape_observers: BTreeMap<ShardId, BTreeMap<ValidatorId, ShardId>>,
     /// Per-child keeper sets of pending merges — each merging child's
     /// drawn keepers and the parent each one reforms, projected from
     /// `BeaconState.pending_reshapes`. Keepers stay ordinary `OnShard`
     /// members of their child (the networking and consensus view both
     /// see them), but their ready signals classify as `ReshapeReady`
     /// witness leaves: they signal that the sibling half has synced.
-    reshape_keepers: HashMap<ShardId, BTreeMap<ValidatorId, ShardId>>,
+    reshape_keepers: BTreeMap<ShardId, BTreeMap<ValidatorId, ShardId>>,
     /// Per-child parent-half sets of executed splits — each freshly split
     /// child mapped to the members that landed on it from the parent
     /// committee and the parent each one re-roots its local store from,
@@ -132,7 +132,7 @@ pub struct TopologySnapshot {
     /// split's execution until the child commits past its genesis, so the
     /// reshape orchestrator can discover and seat the parent halves from the
     /// committed view rather than a one-shot placement delta.
-    reshape_parent_halves: HashMap<ShardId, BTreeMap<ValidatorId, ShardId>>,
+    reshape_parent_halves: BTreeMap<ShardId, BTreeMap<ValidatorId, ShardId>>,
     /// Shards with an admitted, not-yet-executed split as of this
     /// window's committee freeze. Frozen with the same discipline as
     /// `witness_bases`, so both writes of a window's schedule entry
@@ -179,9 +179,9 @@ impl TopologySnapshot {
             shard_committees,
             boundaries: HashMap::new(),
             witness_bases: HashMap::new(),
-            reshape_observers: HashMap::new(),
-            reshape_keepers: HashMap::new(),
-            reshape_parent_halves: HashMap::new(),
+            reshape_observers: BTreeMap::new(),
+            reshape_keepers: BTreeMap::new(),
+            reshape_parent_halves: BTreeMap::new(),
             split_pending: BTreeSet::new(),
             validator_pubkeys,
             global_validator_set: Arc::new(validator_set),
@@ -220,9 +220,9 @@ impl TopologySnapshot {
             shard_committees,
             boundaries: HashMap::new(),
             witness_bases: HashMap::new(),
-            reshape_observers: HashMap::new(),
-            reshape_keepers: HashMap::new(),
-            reshape_parent_halves: HashMap::new(),
+            reshape_observers: BTreeMap::new(),
+            reshape_keepers: BTreeMap::new(),
+            reshape_parent_halves: BTreeMap::new(),
             split_pending: BTreeSet::new(),
             validator_pubkeys,
             global_validator_set: Arc::new(validator_set),
@@ -270,9 +270,9 @@ impl TopologySnapshot {
             shard_committees: committees,
             boundaries: HashMap::new(),
             witness_bases: HashMap::new(),
-            reshape_observers: HashMap::new(),
-            reshape_keepers: HashMap::new(),
-            reshape_parent_halves: HashMap::new(),
+            reshape_observers: BTreeMap::new(),
+            reshape_keepers: BTreeMap::new(),
+            reshape_parent_halves: BTreeMap::new(),
             split_pending: BTreeSet::new(),
             validator_pubkeys,
             global_validator_set: Arc::new(global_validator_set.clone()),
@@ -314,9 +314,9 @@ impl TopologySnapshot {
         mut consensus_members: HashMap<ShardId, Vec<ValidatorId>>,
         boundaries: HashMap<ShardId, ShardAnchor>,
         witness_bases: HashMap<ShardId, BeaconWitnessLeafCount>,
-        mut reshape_observers: HashMap<ShardId, BTreeMap<ValidatorId, ShardId>>,
-        mut reshape_keepers: HashMap<ShardId, BTreeMap<ValidatorId, ShardId>>,
-        mut reshape_parent_halves: HashMap<ShardId, BTreeMap<ValidatorId, ShardId>>,
+        mut reshape_observers: BTreeMap<ShardId, BTreeMap<ValidatorId, ShardId>>,
+        mut reshape_keepers: BTreeMap<ShardId, BTreeMap<ValidatorId, ShardId>>,
+        mut reshape_parent_halves: BTreeMap<ShardId, BTreeMap<ValidatorId, ShardId>>,
         split_pending: BTreeSet<ShardId>,
     ) -> Self {
         let validator_pubkeys = build_validator_pubkeys(global_validator_set);
@@ -454,7 +454,7 @@ impl TopologySnapshot {
     #[must_use]
     pub const fn reshape_observer_cohorts(
         &self,
-    ) -> &HashMap<ShardId, BTreeMap<ValidatorId, ShardId>> {
+    ) -> &BTreeMap<ShardId, BTreeMap<ValidatorId, ShardId>> {
         &self.reshape_observers
     }
 
@@ -464,7 +464,7 @@ impl TopologySnapshot {
     #[must_use]
     pub const fn reshape_keeper_cohorts(
         &self,
-    ) -> &HashMap<ShardId, BTreeMap<ValidatorId, ShardId>> {
+    ) -> &BTreeMap<ShardId, BTreeMap<ValidatorId, ShardId>> {
         &self.reshape_keepers
     }
 
@@ -489,7 +489,7 @@ impl TopologySnapshot {
     #[must_use]
     pub const fn reshape_parent_half_cohorts(
         &self,
-    ) -> &HashMap<ShardId, BTreeMap<ValidatorId, ShardId>> {
+    ) -> &BTreeMap<ShardId, BTreeMap<ValidatorId, ShardId>> {
         &self.reshape_parent_halves
     }
 
@@ -746,14 +746,14 @@ mod tests {
             HashMap::from([(shard, members)]),
             HashMap::new(),
             HashMap::new(),
-            HashMap::from([
+            BTreeMap::from([
                 (shard, BTreeMap::from([(observer, left)])),
                 // Empty cohorts prune away — an absent shard and a shard
                 // with no cohort answer identically.
                 (ShardId::leaf(1, 1), BTreeMap::new()),
             ]),
-            HashMap::new(),
-            HashMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
             BTreeSet::from([shard]),
         );
 
@@ -923,9 +923,9 @@ mod tests {
             committees,
             boundaries,
             witness_bases,
-            HashMap::new(),
-            HashMap::new(),
-            HashMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
             BTreeSet::new(),
         );
 
@@ -966,9 +966,9 @@ mod tests {
             consensus,
             HashMap::new(),
             HashMap::new(),
-            HashMap::new(),
-            HashMap::new(),
-            HashMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
             BTreeSet::new(),
         );
 
@@ -1016,9 +1016,9 @@ mod tests {
             consensus,
             HashMap::new(),
             HashMap::new(),
-            HashMap::new(),
-            HashMap::new(),
-            HashMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
             BTreeSet::new(),
         );
     }

@@ -1083,13 +1083,6 @@ impl BeaconState {
         // run — are passed in already frozen (active) or live (lookahead),
         // so a window's `ReshapeReady` leaf classification is byte-identical
         // across both writes of its schedule entry.
-        let reshape_observers: HashMap<ShardId, BTreeMap<ValidatorId, ShardId>> =
-            reshape_observers.into_iter().collect();
-        let reshape_keepers: HashMap<ShardId, BTreeMap<ValidatorId, ShardId>> =
-            reshape_keepers.into_iter().collect();
-        let reshape_parent_halves: HashMap<ShardId, BTreeMap<ValidatorId, ShardId>> =
-            reshape_parent_halves.into_iter().collect();
-
         TopologySnapshot::from_explicit_committees(
             network,
             &validator_set,
