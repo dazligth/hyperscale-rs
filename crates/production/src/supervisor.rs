@@ -48,7 +48,8 @@ use hyperscale_types::network::notification::ReadySignalNotification;
 use hyperscale_types::network::request::GetStateRangeRequest;
 use hyperscale_types::{
     Block, BlockHeight, Bls12381G1PrivateKey, ChainOrigin, GenesisConfigHash, NetworkDefinition,
-    ShardAnchor, ShardId, SplitAdoption, StateRoot, StoredReceipt, ValidatorId,
+    RoutingCommittees, ShardAnchor, ShardId, SplitAdoption, StateRoot, StoredReceipt,
+    TopologySnapshot, ValidatorId,
 };
 use tokio::runtime::Handle as TokioHandle;
 use tokio::sync::mpsc;
@@ -1403,10 +1404,18 @@ impl ShardSupervisor {
             );
             return;
         }
-        let entry = self
-            .shards
-            .remove(&shard)
-            .expect("entry fetched above still present");
+        self.tear_down(shard);
+    }
+
+    /// Tear a hosted shard's thread down and unwire it off the loop:
+    /// signal shutdown, drop the entry, and join the thread off-loop,
+    /// finishing the unwire in [`Self::on_torn_down`]. Shared by the
+    /// explicit per-vnode [`Self::leave`] at zero count and the
+    /// reshape-tick routable-expiry reconcile.
+    fn tear_down(&mut self, shard: ShardId) {
+        let Some(entry) = self.shards.remove(&shard) else {
+            return;
+        };
         let _ = entry.shutdown_tx.send(());
         // The thread join waits out an in-flight shard step; run it off
         // the loop and finish the unwire in `on_torn_down`.
@@ -1423,6 +1432,38 @@ impl ShardSupervisor {
                 validator_ids: entry.validator_ids,
             });
         });
+    }
+
+    /// Reconcile hosted shards against the committed routing window: tear
+    /// down a shard once no local validator holds a consensus role in it
+    /// (absent from the active committee) and none sits in its routing
+    /// committee (no serve obligation — the shard aged out of the routable
+    /// window, or the validator rotated off a still-live shard).
+    ///
+    /// The active-committee guard keeps a shard up through its current
+    /// window even after a lookahead delta moved the validator on in
+    /// routing; the routing guard keeps a dissolved shard served for as
+    /// long as a fetch can still resolve this host among its peers, so a
+    /// merge keeper that does not co-host a merging child can still
+    /// snap-sync it. Run on the reshape tick, binding serving and routing
+    /// to one committed lifetime in place of a fixed drain grace.
+    pub(crate) fn reconcile_teardown(&mut self) {
+        let topology = self.process.topology().load();
+        let routing = self.process.network().routing_committees();
+        let host_ids: HashSet<ValidatorId> = self.vnode_keys.keys().copied().collect();
+        let expired: Vec<ShardId> = self
+            .shards
+            .keys()
+            .copied()
+            .filter(|&shard| shard_retired(shard, &topology, &routing, &host_ids))
+            .collect();
+        for shard in expired {
+            info!(
+                shard = ?shard,
+                "Shard aged out of the routable window; tearing down"
+            );
+            self.tear_down(shard);
+        }
     }
 
     /// Finish a teardown whose thread joined: unwire the process maps,
@@ -1632,3 +1673,148 @@ fn adopt_from_parent(
 /// than this is wedged and the join should fail (a later placement
 /// delta retries).
 const PARENT_TERMINAL_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Whether a hosted shard has aged out of this host's serving duty: no
+/// local validator holds a consensus role in it (absent from the active
+/// committee) and none sits in its routing committee (no serve
+/// obligation).
+///
+/// The active-committee guard keeps a shard up through its current window
+/// even after a lookahead delta has moved the validator on in the routing
+/// view; the routing guard keeps a dissolved shard served for as long as
+/// a fetch can still resolve this host among its peers. Both false means
+/// the shard is still wanted — it retires only when neither holds, so
+/// serving and routing share the one committed lifetime.
+fn shard_retired(
+    shard: ShardId,
+    topology: &TopologySnapshot,
+    routing: &RoutingCommittees,
+    host_ids: &HashSet<ValidatorId>,
+) -> bool {
+    let in_active = topology
+        .committee_for_shard(shard)
+        .iter()
+        .any(|v| host_ids.contains(v));
+    let in_routing = routing
+        .get(&shard)
+        .is_some_and(|committee| committee.iter().any(|v| host_ids.contains(v)));
+    !in_active && !in_routing
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeSet, HashMap, HashSet};
+
+    use hyperscale_types::{
+        NetworkDefinition, RoutingCommittees, ShardId, TopologySnapshot, ValidatorId,
+        ValidatorInfo, ValidatorSet, generate_bls_keypair,
+    };
+
+    use super::shard_retired;
+
+    const HOST: ValidatorId = ValidatorId::new(1);
+
+    /// A head snapshot carrying `committees` as each shard's active
+    /// membership — a complete sibling set so the trie is well-formed.
+    fn head(committees: HashMap<ShardId, Vec<ValidatorId>>) -> TopologySnapshot {
+        let ids: BTreeSet<ValidatorId> = committees.values().flatten().copied().collect();
+        let validators: Vec<ValidatorInfo> = ids
+            .iter()
+            .map(|&validator_id| ValidatorInfo {
+                validator_id,
+                public_key: generate_bls_keypair().public_key(),
+            })
+            .collect();
+        TopologySnapshot::from_explicit_committees(
+            NetworkDefinition::simulator(),
+            &ValidatorSet::new(validators),
+            committees,
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            BTreeSet::new(),
+        )
+    }
+
+    fn routing(entries: &[(ShardId, Vec<ValidatorId>)]) -> RoutingCommittees {
+        entries.iter().cloned().collect()
+    }
+
+    /// A live shard the host rotated off — gone from both its active and
+    /// its routing committee — retires.
+    #[test]
+    fn retires_a_shard_absent_from_active_and_routing() {
+        let shard = ShardId::leaf(1, 0);
+        let sibling = ShardId::leaf(1, 1);
+        let others = vec![ValidatorId::new(2), ValidatorId::new(3)];
+        let topology = head(HashMap::from([
+            (shard, others.clone()),
+            (sibling, vec![ValidatorId::new(4)]),
+        ]));
+        let routing = routing(&[(shard, others)]);
+        assert!(shard_retired(
+            shard,
+            &topology,
+            &routing,
+            &HashSet::from([HOST])
+        ));
+    }
+
+    /// A merge child gone from the head but retained in routing with the
+    /// host among its terminal committee stays served — the keeper-fetch
+    /// case the fix exists for.
+    #[test]
+    fn keeps_a_dissolved_shard_the_host_still_routes() {
+        let child = ShardId::leaf(2, 2);
+        let topology = head(HashMap::from([
+            (ShardId::leaf(1, 0), vec![ValidatorId::new(2)]),
+            (ShardId::leaf(1, 1), vec![HOST]),
+        ]));
+        let routing = routing(&[(child, vec![HOST, ValidatorId::new(2)])]);
+        assert!(!shard_retired(
+            child,
+            &topology,
+            &routing,
+            &HashSet::from([HOST])
+        ));
+    }
+
+    /// The host still sits in the active committee — kept even after the
+    /// routing lookahead has moved it on, so the current window is served
+    /// to its end.
+    #[test]
+    fn keeps_a_shard_with_an_active_consensus_role() {
+        let shard = ShardId::leaf(1, 0);
+        let topology = head(HashMap::from([
+            (shard, vec![HOST, ValidatorId::new(2)]),
+            (ShardId::leaf(1, 1), vec![ValidatorId::new(4)]),
+        ]));
+        // The lookahead already moved the host off in routing.
+        let routing = routing(&[(shard, vec![ValidatorId::new(2), ValidatorId::new(3)])]);
+        assert!(!shard_retired(
+            shard,
+            &topology,
+            &routing,
+            &HashSet::from([HOST])
+        ));
+    }
+
+    /// A dissolved shard aged out of routing entirely retires.
+    #[test]
+    fn retires_a_shard_evicted_from_routing() {
+        let child = ShardId::leaf(2, 2);
+        let topology = head(HashMap::from([
+            (ShardId::leaf(1, 0), vec![ValidatorId::new(2)]),
+            (ShardId::leaf(1, 1), vec![HOST]),
+        ]));
+        let routing = RoutingCommittees::new();
+        assert!(shard_retired(
+            child,
+            &topology,
+            &routing,
+            &HashSet::from([HOST])
+        ));
+    }
+}

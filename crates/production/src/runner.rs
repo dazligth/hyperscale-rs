@@ -60,11 +60,10 @@ use radix_common::types::ComponentAddress;
 use thiserror::Error;
 use tokio::runtime::Handle as TokioHandle;
 use tokio::sync::{mpsc, oneshot};
-use tokio::task::{JoinHandle, spawn};
+use tokio::task::JoinHandle;
 use tokio::time::{MissedTickBehavior, interval, sleep};
 use tracing::{debug, info, warn};
 
-use crate::drain::{DRAIN_GRACE, DRAIN_POLL_INTERVAL, drain_after_window_close};
 use crate::rpc::state::{RpcPublishers, VnodeMempoolSnapshot};
 use crate::rpc::{
     MempoolSnapshot, NodeStatusState, TxSubmissionSender, VnodeMempoolStats, VnodeStatusEntry,
@@ -1057,6 +1056,7 @@ impl ProductionRunner {
                     }
                 }
                 _ = reshape_tick.tick() => {
+                    supervisor.reconcile_teardown();
                     supervisor.reshape_step(Vec::new());
                 }
             }
@@ -1082,14 +1082,17 @@ impl ProductionRunner {
     /// commands for the moved vnode. A join starts the shard's
     /// bootstrap immediately — the delta arrives a full epoch before
     /// the window opens, and the vnode votes only once ready. A leave
-    /// drains gracefully: the shard keeps serving until the validator's
-    /// window observably closes plus the DA retention grace, so its
-    /// replacement can snap-sync from it during the overlap.
+    /// needs no command here: the reshape tick's
+    /// [`ShardSupervisor::reconcile_teardown`] tears a shard down once it
+    /// leaves both this host's active committee and its routing committee,
+    /// so serving outlasts a departing window for exactly as long as the
+    /// shard stays routable — covering a replacement's snap-sync and a
+    /// merge keeper's cross-child fetch from one committed lifetime.
     ///
     /// The observer and keeper deltas (`observe`/`keep`) drive nothing
     /// here — the reshape orchestrator self-determines those duties from
     /// the committed topology projection — so this only wakes the
-    /// orchestrator to re-poll, and dispatches the join/leave the placement
+    /// orchestrator to re-poll and dispatches the join the placement
     /// surfaces. The orchestrator owns observer and keeper seating, so the
     /// supervisor suppresses an observer split join and a merge-execution
     /// join (see [`ShardSupervisor::handle`]).
@@ -1109,38 +1112,10 @@ impl ProductionRunner {
         );
         // Wake the orchestrator to re-poll the committed view: a placement
         // change often accompanies the cohort/keeper draws and boundary
-        // seedings its duties gate on.
+        // seedings its duties gate on. A `leave` needs no action here — the
+        // reshape tick's `reconcile_teardown` retires the shard once it
+        // ages out of this host's active and routing committees.
         supervisor.reshape_step(Vec::new());
-        if let Some(shard) = change.leave {
-            let topology = self.topology_snapshot.clone();
-            let reconfigure = self.reconfigure_tx.clone();
-            let validator = change.validator;
-            spawn(async move {
-                if drain_after_window_close(
-                    &topology,
-                    validator,
-                    shard,
-                    DRAIN_GRACE,
-                    DRAIN_POLL_INTERVAL,
-                )
-                .await
-                {
-                    info!(
-                        ?shard,
-                        validator = validator.inner(),
-                        "Drain complete; leaving shard"
-                    );
-                    // Send failure means the runner is shutting down.
-                    let _ = reconfigure.send(ShardCommand::Leave { shard }).await;
-                } else {
-                    info!(
-                        ?shard,
-                        validator = validator.inner(),
-                        "Drain cancelled; validator re-entered the committee"
-                    );
-                }
-            });
-        }
         let Some(shard) = change.join else {
             return;
         };

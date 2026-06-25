@@ -175,6 +175,16 @@ impl Libp2pNetwork {
             }
         });
     }
+
+    /// The committed terminal-clamped routing committees the request path
+    /// resolves peers from — the per-shard serving set the production
+    /// supervisor reconciles shard teardown against, so a shard stays
+    /// served exactly while it stays routable. Mirrors the value pushed
+    /// by [`Network::update_routing_committees`].
+    #[must_use]
+    pub fn routing_committees(&self) -> Arc<RoutingCommittees> {
+        self.routing_committees.load_full()
+    }
 }
 
 impl Network for Libp2pNetwork {
