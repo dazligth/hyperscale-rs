@@ -43,7 +43,9 @@ const fn sibling_config() -> ScenarioConfig {
         num_shards: 1,
         split_bytes: 800_000,
         latency: std::time::Duration::from_millis(150),
-        dedicated_hosts: false,
+        // One host per pool observer so each split committee spreads one
+        // validator per host (see `scenarios::straddler_config`).
+        dedicated_hosts: true,
     }
 }
 

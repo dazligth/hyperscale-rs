@@ -29,6 +29,7 @@ use hyperscale_node::bootstrap::EngineBootstrap;
 use hyperscale_node::host::{attach_shard, detach_shard};
 use hyperscale_node::pool_loop::PoolLoop;
 use hyperscale_node::process::ProcessIo;
+use hyperscale_node::reshape::adopt::verified_recovered_state;
 use hyperscale_node::reshape::observer::observer_ready_signal;
 use hyperscale_node::reshape::orchestrator::{
     AdoptKind, FetchKind, FetchedKind, ReshapeEvent, ReshapeOrchestrator, ReshapeRequest,
@@ -878,9 +879,7 @@ impl ShardSupervisor {
     fn dispatch_reshape(&mut self, request: ReshapeRequest) {
         match request {
             ReshapeRequest::OpenStore { shard } => self.reshape_open_store(shard),
-            ReshapeRequest::Fetch {
-                duty, from, kind, ..
-            } => self.reshape_fetch(duty, from, kind),
+            ReshapeRequest::Fetch { duty, from, kind } => self.reshape_fetch(duty, from, kind),
             ReshapeRequest::ImportBoundary {
                 shard,
                 height,
@@ -941,8 +940,7 @@ impl ShardSupervisor {
     /// Issue one reshape fetch against `from`'s committee, answering with
     /// [`ReshapeIo::Fetched`] on success or [`ReshapeIo::FetchFailed`] on a
     /// transport error. `from` resolves to its committee through the live
-    /// topology; the orchestrator's explicit `peers` are the simulation's
-    /// routing hint and are unused here.
+    /// topology.
     fn reshape_fetch(&self, duty: ShardId, from: ShardId, kind: FetchKind) {
         let events = self.events_tx.clone();
         match kind {
@@ -1184,19 +1182,10 @@ impl ShardSupervisor {
                         anchor_root.ok_or("merge parent anchor no longer projects")?,
                     ),
                 };
-                if adopted != expected {
-                    return Err(format!(
-                        "adopted root {adopted:?} does not match the anchor {expected:?}"
-                    ));
-                }
                 let substate_bytes = storage
                     .substate_bytes_at_version(origin.genesis_height.inner())
                     .unwrap_or(0);
-                Ok(RecoveredState {
-                    substate_bytes,
-                    chain_origin: origin,
-                    ..RecoveredState::default()
-                })
+                verified_recovered_state(adopted, expected, origin, substate_bytes)
             })();
             match outcome {
                 Ok(recovered) => {
@@ -1650,20 +1639,10 @@ fn adopt_from_parent(
     let adopted = storage
         .adopt_split_child(origin, &genesis)
         .map_err(|e| format!("child adoption: {e}"))?;
-    if adopted != anchor.state_root {
-        return Err(format!(
-            "adopted subtree root {adopted:?} does not match the beacon anchor {:?}",
-            anchor.state_root,
-        ));
-    }
     let substate_bytes = storage
         .substate_bytes_at_version(origin.genesis_height.inner())
         .unwrap_or(0);
-    let recovered = RecoveredState {
-        substate_bytes,
-        chain_origin: origin,
-        ..RecoveredState::default()
-    };
+    let recovered = verified_recovered_state(adopted, anchor.state_root, origin, substate_bytes)?;
     Ok((storage, genesis, recovered))
 }
 

@@ -72,15 +72,14 @@ pub enum ReshapeRequest {
         /// The duty's store shard.
         shard: ShardId,
     },
-    /// Fetch from `peers` serving `from`, on behalf of `duty`. Answered by
-    /// [`ReshapeEvent::Fetched`] (or [`ReshapeEvent::FetchFailed`]).
+    /// Fetch from `from`'s committee, on behalf of `duty`. Answered by
+    /// [`ReshapeEvent::Fetched`] (or [`ReshapeEvent::FetchFailed`]). The
+    /// adapter resolves `from` to its serving peers itself.
     Fetch {
         /// The duty this fetch belongs to (an observer's child).
         duty: ShardId,
         /// The shard whose committee serves the request.
         from: ShardId,
-        /// The peers to ask.
-        peers: Vec<ValidatorId>,
         /// What to fetch.
         kind: FetchKind,
     },
@@ -105,7 +104,7 @@ pub enum ReshapeRequest {
         receipts: Vec<StoredReceipt>,
     },
     /// Sign a ready signal for `validator` anchored at `anchor` and notify
-    /// `recipients`. No response.
+    /// `recipients` — the target committee minus the signer. No response.
     BroadcastReady {
         /// The seat holder signing the signal.
         validator: ValidatorId,
@@ -228,11 +227,14 @@ enum ObserverPhase {
     Prepared,
 }
 
-/// One split observer duty, keyed by the child it syncs.
+/// One split observer duty, keyed by the child it syncs. A host may hold more
+/// than one cohort seat for the same child (multiple co-hosted validators drawn
+/// into it); they share the one child-span sync and store, each re-asserting its
+/// own ready signal and seating under the one placement.
 struct ObserverDuty {
     parent: ShardId,
     child: ShardId,
-    validator: ValidatorId,
+    validators: Vec<ValidatorId>,
     phase: ObserverPhase,
     open_requested: bool,
     store_opened: bool,
@@ -353,7 +355,7 @@ impl ReshapeOrchestrator {
     /// new duties from `view`, and return the io the adapter should perform.
     pub fn step(&mut self, view: &ReshapeView, events: Vec<ReshapeEvent>) -> Vec<ReshapeRequest> {
         for event in events {
-            self.apply_event(view, event);
+            self.apply_event(event);
         }
         self.discover_observer_duties(view);
         self.discover_keeper_duties(view);
@@ -371,7 +373,7 @@ impl ReshapeOrchestrator {
     }
 
     /// Route one io result to the duty and sequencer awaiting it.
-    fn apply_event(&mut self, _view: &ReshapeView, event: ReshapeEvent) {
+    fn apply_event(&mut self, event: ReshapeEvent) {
         match event {
             ReshapeEvent::Opened { shard } => {
                 if let Some(duty) = self.observers.get_mut(&shard) {
@@ -533,18 +535,19 @@ impl ReshapeOrchestrator {
     fn discover_observer_duties(&mut self, view: &ReshapeView) {
         for (&parent, cohort) in view.observer_cohorts() {
             for (&validator, &child) in cohort {
-                if self.me.contains(&validator) && !self.observers.contains_key(&child) {
-                    self.observers.insert(
-                        child,
-                        ObserverDuty {
-                            parent,
-                            child,
-                            validator,
-                            phase: ObserverPhase::Opening,
-                            open_requested: false,
-                            store_opened: false,
-                        },
-                    );
+                if !self.me.contains(&validator) {
+                    continue;
+                }
+                let duty = self.observers.entry(child).or_insert_with(|| ObserverDuty {
+                    parent,
+                    child,
+                    validators: Vec::new(),
+                    phase: ObserverPhase::Opening,
+                    open_requested: false,
+                    store_opened: false,
+                });
+                if !duty.validators.contains(&validator) {
+                    duty.validators.push(validator);
                 }
             }
         }
@@ -587,7 +590,6 @@ impl ReshapeOrchestrator {
                     out.push(ReshapeRequest::Fetch {
                         duty: child,
                         from: duty.parent,
-                        peers: view.committee(duty.parent).to_vec(),
                         kind: FetchKind::StateRange { sub_range, request },
                     });
                 }
@@ -621,13 +623,16 @@ impl ReshapeOrchestrator {
                     return;
                 }
                 // Re-assert ready to the splitting parent's committee until the
-                // split executes; harmless once the parent dissolves.
+                // split executes; harmless once the parent dissolves. Every
+                // co-hosted seat for this child re-asserts its own signal.
                 if let Some(anchor) = view.boundary(duty.parent) {
-                    out.push(ReshapeRequest::BroadcastReady {
-                        validator: duty.validator,
-                        anchor,
-                        recipients: recipients_for(view, duty.parent, duty.validator),
-                    });
+                    for &validator in &duty.validators {
+                        out.push(ReshapeRequest::BroadcastReady {
+                            validator,
+                            anchor,
+                            recipients: recipients_for(view, duty.parent, validator),
+                        });
+                    }
                 }
                 // The parent committee serves its blocks while it lives; once
                 // this child's anchor projects the parent has dissolved, so the
@@ -642,7 +647,6 @@ impl ReshapeOrchestrator {
                     out.push(ReshapeRequest::Fetch {
                         duty: child,
                         from,
-                        peers: view.committee(from).to_vec(),
                         kind: FetchKind::Block { request },
                     });
                 }
@@ -660,7 +664,6 @@ impl ReshapeOrchestrator {
                     out.push(ReshapeRequest::Fetch {
                         duty: child,
                         from: child,
-                        peers: view.committee(child).to_vec(),
                         kind: FetchKind::Block {
                             request: GetBlockRequest::new(terminal, terminal),
                         },
@@ -682,7 +685,11 @@ impl ReshapeOrchestrator {
             }
             ObserverPhase::AwaitingAdopt => {}
             ObserverPhase::Prepared => {
-                if view.committee(child).contains(&duty.validator) {
+                if duty
+                    .validators
+                    .iter()
+                    .any(|validator| view.committee(child).contains(validator))
+                {
                     out.push(ReshapeRequest::Seat { shard: child });
                     self.observers.remove(&child);
                 }
@@ -733,7 +740,13 @@ impl ReshapeOrchestrator {
         match &mut duty.phase {
             KeeperPhase::ReassertingReady => {
                 let (left, right) = parent.children();
-                if view.parent_composed(parent)
+                // Build only once the merge has executed — the beacon seated a
+                // live committee on the reformed parent and composed its anchor.
+                // A bare `boundary(parent)` would also match the parent's own
+                // pre-merge terminal record (a grow-then-merge reforms a shard
+                // that split earlier), firing the build against the wrong
+                // anchor and quitting the ready re-assert before the gate fires.
+                if view.merge_composed(parent)
                     && let Some(parent_anchor) = view.boundary(parent)
                     && let Some(left_anchor) = view.boundary(left)
                     && let Some(right_anchor) = view.boundary(right)
@@ -851,7 +864,6 @@ fn advance_keeper_half(
             out.push(ReshapeRequest::Fetch {
                 duty,
                 from: half.child,
-                peers: view.committee(half.child).to_vec(),
                 kind: FetchKind::StateRange { sub_range, request },
             });
         }
@@ -870,7 +882,6 @@ fn advance_keeper_half(
         out.push(ReshapeRequest::Fetch {
             duty,
             from: half.child,
-            peers: view.committee(half.child).to_vec(),
             kind: FetchKind::Block {
                 request: GetBlockRequest::new(terminal, terminal),
             },
@@ -990,7 +1001,7 @@ mod tests {
         ObserverDuty {
             parent,
             child,
-            validator: vid(validator),
+            validators: vec![vid(validator)],
             phase,
             open_requested: true,
             store_opened: true,
@@ -1183,10 +1194,10 @@ mod tests {
     fn the_keeper_gate_opens_the_parent_store_and_collects_both_halves() {
         let parent = ShardId::ROOT;
         let (left, right) = parent.children();
-        // Parent composed and both children's terminal anchors present → the
-        // gate fires.
+        // The merge reformed the parent — a live parent committee plus both
+        // children's terminal anchors → the gate fires.
         let snap = snapshot_keepers(
-            &[(left, &[1, 2]), (right, &[3, 4])],
+            &[(parent, &[5, 6]), (left, &[1, 2]), (right, &[3, 4])],
             &[(left, 5, parent)],
             &[parent, left, right],
         );

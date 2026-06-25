@@ -18,6 +18,7 @@ use hyperscale_network_memory::{
     BandwidthReport, HostLayout, NetworkConfig, NetworkTrafficAnalyzer, NodeIndex,
     SimNetworkAdapter, SimulatedNetwork,
 };
+use hyperscale_node::reshape::orchestrator::{ReshapeEvent, ReshapeOrchestrator};
 use hyperscale_node::shard::{HostEvent, StepOutput};
 use hyperscale_node::{
     NodeConfig, NodeHost, NodeStateMachine, SeatFollower, SeatVnodeGroup, TimerOp, VnodeInit,
@@ -42,12 +43,11 @@ use tracing::{debug, info, trace};
 
 use crate::event_queue::EventKey;
 
-pub mod grow;
-pub mod merge;
-pub mod observer;
 pub mod relocation;
-mod split;
+pub mod reshape;
 pub mod system_action;
+
+use reshape::ReshapeStore;
 
 /// Cluster and transport configuration for a simulation.
 ///
@@ -193,15 +193,35 @@ pub struct SimulationRunner {
     /// merge keeper's flip can recompute the cut the children crossed.
     epoch_duration_ms: u64,
 
-    /// Cluster + transport config, retained so reshape paths can read the
-    /// host layout the transport no longer carries.
-    config: SimConfig,
-
     /// Per-host flag: whether a beacon-sync retry tick is already queued for
     /// the host's follower pool. Keeps the harness from scheduling duplicate
     /// ticks while a catch-up sync runs; production's pool thread self-ticks
     /// off its `select!` timeout instead.
     pool_tick_pending: Vec<bool>,
+
+    /// One reshape orchestrator per host, each `me`-scoped to that host's home
+    /// validators. Pumped once per slice by [`Self::pump_reshape`] — the
+    /// deterministic counterpart of the production supervisor's per-host
+    /// reshape pump.
+    reshape: Vec<ReshapeOrchestrator>,
+
+    /// In-flight reshape stores the orchestrators opened, imported, and adopted
+    /// into, keyed by `(host, duty shard)`, held until the seat installs each.
+    reshape_stores: HashMap<(NodeIndex, ShardId), ReshapeStore>,
+
+    /// Per-host reshape fetches whose target block had not committed yet,
+    /// carried to the next slice as `FetchFailed` events so the sequencer
+    /// re-arms and re-requests — the in-memory stand-in for production's
+    /// fetch callback firing on a later tick.
+    reshape_pending: Vec<Vec<ReshapeEvent>>,
+
+    /// Fixed home host per registered validator, by id. A validator's keys live
+    /// on one host for the run, so the host whose orchestrator runs its reshape
+    /// duties and seats it is stable — the simulation's stand-in for
+    /// production's per-host key bundle. Committee validators home to their
+    /// genesis host; pool extras home to their dedicated host, or round-robin
+    /// across the committee hosts when co-hosted.
+    validator_home: Vec<NodeIndex>,
 }
 
 /// Statistics collected during simulation.
@@ -497,6 +517,40 @@ impl SimulationRunner {
             })
             .collect();
 
+        // Fixed home host per registered validator: committee validators home
+        // to their genesis host, pool extras to their dedicated host or — when
+        // co-hosted — round-robin across the committee hosts. The orchestrator
+        // on a validator's home host runs its reshape duties and seats it there.
+        let committee_hosts = committee_size / network_config.vnodes_per_host;
+        let validator_home: Vec<NodeIndex> = (0..registered_validators)
+            .map(|v| {
+                if v < committee_size {
+                    v / network_config.vnodes_per_host
+                } else {
+                    let k = v - committee_size;
+                    if network_config.dedicated_pool_hosts {
+                        committee_hosts + k
+                    } else {
+                        k % committee_hosts
+                    }
+                }
+            })
+            .collect();
+        let epoch_duration_ms = network_config
+            .beacon_chain_config
+            .unwrap_or_default()
+            .epoch_duration_ms;
+        let reshape: Vec<ReshapeOrchestrator> = (0..num_hosts)
+            .map(|host| {
+                let host = NodeIndex::try_from(host).expect("host index fits NodeIndex");
+                let me: Vec<ValidatorId> = (0..registered_validators)
+                    .filter(|&v| validator_home[v as usize] == host)
+                    .map(|v| ValidatorId::new(u64::from(v)))
+                    .collect();
+                ReshapeOrchestrator::new(me, epoch_duration_ms)
+            })
+            .collect();
+
         Self {
             hosts,
             event_rxs,
@@ -515,12 +569,12 @@ impl SimulationRunner {
             genesis_executed: vec![false; num_hosts],
             traffic_analyzer: None,
             last_gossip_dedup_prune: Duration::ZERO,
-            epoch_duration_ms: network_config
-                .beacon_chain_config
-                .unwrap_or_default()
-                .epoch_duration_ms,
-            config: network_config.clone(),
+            epoch_duration_ms,
             pool_tick_pending: vec![false; num_hosts],
+            reshape,
+            reshape_stores: HashMap::new(),
+            reshape_pending: vec![Vec::new(); num_hosts],
+            validator_home,
         }
     }
 

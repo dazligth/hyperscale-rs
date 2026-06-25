@@ -15,6 +15,7 @@
 //! the store writes. The production supervisor pumps them with async requests;
 //! the simulation steps them deterministically — both run this exact sequencing.
 
+pub mod adopt;
 pub mod merge_flip;
 pub mod observer;
 pub mod orchestrator;

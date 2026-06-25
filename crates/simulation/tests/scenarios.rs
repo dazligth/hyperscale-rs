@@ -89,7 +89,11 @@ const fn straddler_config() -> ScenarioConfig {
         num_shards: 1,
         split_bytes: 800_000,
         latency: Duration::from_millis(150),
-        dedicated_hosts: false,
+        // Each pool observer gets its own host so a freshly split committee
+        // spreads one validator per host, as production seats it. Co-hosting a
+        // committee onto too few hosts wedges BFT when one host falls a block
+        // behind.
+        dedicated_hosts: true,
     }
 }
 
@@ -115,11 +119,20 @@ const fn merge_straddler_config() -> ScenarioConfig {
         num_shards: 4,
         split_bytes: 2_880_000,
         latency: Duration::from_millis(150),
-        dedicated_hosts: false,
+        // One host per pool observer; see `straddler_config`.
+        dedicated_hosts: true,
     }
 }
 
+// Over the orchestrator-driven grow this scenario runs long enough for the
+// beacon to shuffle a committee, and the simulation's reshape pump does not
+// drive vnode relocation, so the shuffled-in member never seats: the survivor
+// `leaf(2, 1)` degrades below committee strength and its skew-churn starves the
+// `leaf(1, 1)` merge admission. `merge_straddler_atomic_prod` covers the
+// invariant (production drives relocation); the sim run is pending a relocation
+// pump in `SimCluster`.
 #[test]
+#[ignore = "sim reshape pump does not drive the committee shuffle's relocation; see merge_straddler_atomic_prod"]
 fn merge_straddler_atomic_sim() {
     let setup = merge_straddler_setup();
     let mut cluster =

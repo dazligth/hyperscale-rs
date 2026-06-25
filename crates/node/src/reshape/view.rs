@@ -85,11 +85,17 @@ impl<'a> ReshapeView<'a> {
         self.seeded(left) && self.seeded(right)
     }
 
-    /// Whether `parent`'s merge-composed anchor has seeded — the gate a
-    /// merge's keepers flip on.
+    /// Whether `parent`'s merge has executed — the beacon seated a live
+    /// committee on the reformed parent and composed its anchor. The gate a
+    /// merge's keepers build and flip on.
+    ///
+    /// A bare seeded check is ambiguous for a grow-then-merge: the parent's own
+    /// pre-merge terminal boundary record can still project while the merge
+    /// pends, so the keeper must wait for a *live* committee — present only once
+    /// the merge actually reforms the parent.
     #[must_use]
-    pub fn parent_composed(&self, parent: ShardId) -> bool {
-        self.seeded(parent)
+    pub fn merge_composed(&self, parent: ShardId) -> bool {
+        self.seeded(parent) && !self.committee(parent).is_empty()
     }
 }
 
@@ -99,7 +105,8 @@ mod tests {
 
     use hyperscale_types::{
         BlockHash, BlockHeight, Hash, NetworkDefinition, ShardAnchor, ShardId, StateRoot,
-        TopologySnapshot, ValidatorSet, WeightedTimestamp,
+        TopologySnapshot, ValidatorId, ValidatorInfo, ValidatorSet, WeightedTimestamp,
+        generate_bls_keypair,
     };
 
     use super::ReshapeView;
@@ -142,9 +149,29 @@ mod tests {
     }
 
     #[test]
-    fn parent_composed_tracks_the_parent_anchor() {
+    fn merge_composed_requires_a_live_committee() {
         let parent = ShardId::ROOT;
-        assert!(!ReshapeView::new(&snapshot_with_seeded(&[])).parent_composed(parent));
-        assert!(ReshapeView::new(&snapshot_with_seeded(&[parent])).parent_composed(parent));
+        // Seeded but no live committee — the parent's pre-merge terminal record,
+        // not a reformed parent.
+        assert!(!ReshapeView::new(&snapshot_with_seeded(&[])).merge_composed(parent));
+        assert!(!ReshapeView::new(&snapshot_with_seeded(&[parent])).merge_composed(parent));
+        // Seeded with a live committee — the merge reformed it.
+        let validator = ValidatorId::new(1);
+        let validators = ValidatorSet::new(vec![ValidatorInfo {
+            validator_id: validator,
+            public_key: generate_bls_keypair().public_key(),
+        }]);
+        let composed = TopologySnapshot::from_explicit_committees(
+            NetworkDefinition::simulator(),
+            &validators,
+            std::iter::once((parent, vec![validator])).collect(),
+            std::iter::once((parent, vec![validator])).collect(),
+            std::iter::once((parent, seeded_anchor())).collect(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            BTreeSet::new(),
+        );
+        assert!(ReshapeView::new(&composed).merge_composed(parent));
     }
 }

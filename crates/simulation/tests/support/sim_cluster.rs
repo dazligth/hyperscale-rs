@@ -2,9 +2,9 @@
 //!
 //! Wraps a [`SimulationRunner`] driven on its logical clock. Each [`Cluster`]
 //! method maps onto an existing runner sampler; [`Cluster::run_until`] advances
-//! the clock in one-second slices, checking the predicate between slices, up to
-//! the budget. There is no reshape pump yet — that arrives with the
-//! `ReshapeDriver`.
+//! the clock in one-second slices, pumping every host's reshape orchestrator
+//! before each slice and checking the predicate between slices, up to the
+//! budget.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -18,12 +18,10 @@ use hyperscale_simulation::{EPOCH_MS, SimConfig, SimulationRunner};
 use hyperscale_storage::{ShardChainReader, SubstateStore};
 use hyperscale_types::{
     BeaconChainConfig, BeaconState, BlockHeight, Epoch, ReshapeThresholds, RoutableTransaction,
-    ShardId, StateRoot, TransactionDecision, TransactionStatus, TxHash,
+    ShardId, StateRoot, TransactionDecision, TransactionStatus, TxHash, ValidatorId,
 };
 use radix_common::math::Decimal;
 use radix_common::types::ComponentAddress;
-
-use super::reshape_driver::ReshapeDriver;
 
 /// The clock slice `run_until` advances per poll, matching the runner's own
 /// internal predicate loop.
@@ -32,7 +30,6 @@ const SLICE: Duration = Duration::from_secs(1);
 /// The simulation adaptor: a [`Cluster`] over a [`SimulationRunner`].
 pub struct SimCluster {
     runner: SimulationRunner,
-    driver: ReshapeDriver,
 }
 
 impl SimCluster {
@@ -77,10 +74,7 @@ impl SimCluster {
         let mut runner = SimulationRunner::new(&sim_config, seed);
         runner.initialize_genesis_with_balances(balances);
 
-        Self {
-            runner,
-            driver: ReshapeDriver::default(),
-        }
+        Self { runner }
     }
 
     /// Build a cluster pre-grown to `config.num_shards` with `config.split_bytes`
@@ -162,6 +156,28 @@ impl SimCluster {
         Duration::from_millis(EPOCH_MS) * budget.0
     }
 
+    /// Hosts whose `shard` vnode sits in the shard's current committee — the
+    /// live copy. After a grow-then-merge the reformed shard's terminated
+    /// pre-merge chain lingers under the same id on its old hosts; those carry
+    /// no current committee seat, so this filters them out.
+    fn live_committee_hosts(&self, shard: ShardId) -> Vec<NodeIndex> {
+        let Some(topology) = self.runner.host_topology(0) else {
+            return Vec::new();
+        };
+        let committee: BTreeSet<ValidatorId> = topology
+            .committee_for_shard(shard)
+            .iter()
+            .copied()
+            .collect();
+        (0..self.runner.num_hosts())
+            .filter(|&node| {
+                self.runner
+                    .vnode_state_in(node, shard)
+                    .is_some_and(|vnode| committee.contains(&vnode.validator_id()))
+            })
+            .collect()
+    }
+
     /// A host serving any shard `tx` touches, for submission routing. Single
     /// shard tests resolve to the one serving host; cross-shard source
     /// selection is refined when cross-shard scenarios land.
@@ -205,7 +221,7 @@ impl Cluster for SimCluster {
         }
         let deadline = self.runner.now() + Self::span(budget);
         while self.runner.now() < deadline {
-            self.driver.pump(&mut self.runner);
+            self.runner.pump_reshape();
             let next = (self.runner.now() + SLICE).min(deadline);
             self.runner.run_until(next);
             if cond(self) {
@@ -227,13 +243,17 @@ impl Cluster for SimCluster {
     }
 
     fn committed_state_root(&self, shard: ShardId) -> Option<StateRoot> {
-        (0..self.runner.num_hosts())
+        // Read the live committee's copy: a grow-then-merge leaves the reformed
+        // shard's pre-merge chain hosted under the same id, and only the
+        // reformed copy carries the beacon-composed root the scenarios assert.
+        self.live_committee_hosts(shard)
+            .into_iter()
             .find_map(|node| self.runner.hosts_shard(node, shard))
             .map(SubstateStore::state_root)
     }
 
     fn serves_shard(&self, shard: ShardId) -> bool {
-        (0..self.runner.num_hosts()).any(|node| self.runner.hosted_shards_of(node).contains(&shard))
+        !self.live_committee_hosts(shard).is_empty()
     }
 
     fn beacon_state(&self) -> Option<Arc<BeaconState>> {
