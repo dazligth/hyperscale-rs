@@ -1348,4 +1348,132 @@ mod tests {
         // The pending placeholder never projects as a snap-sync anchor.
         assert!(lookahead.boundary(parent).is_none());
     }
+
+    /// `routing_committees()` resolves a dissolved merging child to the
+    /// frozen committee that ran it to its terminal crossing — its own
+    /// serving members — never the keeper mix nor the reunified parent.
+    ///
+    /// This is the property a merge keeper relies on to snap-sync the
+    /// sibling child it does not co-host: the committee routing resolves
+    /// must be the one still subscribed and serving that child through the
+    /// drain. Drives the real merge fold and reads back through the same
+    /// schedule path production routes on.
+    #[test]
+    fn routing_committees_resolves_a_merging_child_to_its_own_terminal_committee() {
+        use std::sync::Arc;
+
+        use hyperscale_types::TopologySchedule;
+
+        let parent = ShardId::leaf(1, 0);
+        let (left, right) = parent.children();
+        let sibling = ShardId::leaf(1, 1);
+        let mut state = merge_grow_state(0);
+        // Staff the sibling so both tries are prefix-complete.
+        let mut sibling_members = Vec::new();
+        for i in 100..104u64 {
+            let id = ValidatorId::new(i);
+            sibling_members.push(id);
+            state.validators.insert(
+                id,
+                validator_record(
+                    i,
+                    0,
+                    ValidatorStatus::OnShard {
+                        shard: sibling,
+                        ready: true,
+                        placed_at_epoch: Epoch::GENESIS,
+                    },
+                ),
+            );
+        }
+        state.shard_committees.insert(
+            sibling,
+            ShardCommittee {
+                members: sibling_members.clone(),
+            },
+        );
+        state.next_shard_committees.insert(
+            sibling,
+            ShardCommittee {
+                members: sibling_members,
+            },
+        );
+
+        // The frozen active committees that keep serving each child through
+        // its terminal crossing — the set a keeper's fetch must reach. The
+        // merge mutates `next_shard_committees` only, so these stay put.
+        let serving = |state: &BeaconState, shard| -> BTreeSet<ValidatorId> {
+            state.shard_committees[&shard]
+                .members
+                .iter()
+                .copied()
+                .collect()
+        };
+        let left_serving = serving(&state, left);
+        let right_serving = serving(&state, right);
+
+        // Drive the merge to execution.
+        let merge = ShardWitnessPayload::ScheduleMerge { parent };
+        apply_shard_payload(&mut state, left, &merge);
+        apply_shard_payload(&mut state, right, &merge);
+        for (id, seat) in keepers_of(&state, parent) {
+            apply_shard_payload(
+                &mut state,
+                seat.child,
+                &ShardWitnessPayload::ReshapeReady { validator: id },
+            );
+        }
+        execute_ready_merges(&mut state);
+        assert!(state.pending_reshapes.is_empty());
+
+        // The keeper committee seated on the reunified parent — a 2+2 mix
+        // of both children's validators, so it is neither child's serving
+        // set: the wrong answer a keeper fetch would route to.
+        let keepers: BTreeSet<ValidatorId> = state.next_shard_committees[&parent]
+            .members
+            .iter()
+            .copied()
+            .collect();
+
+        // The schedule the beacon holds at the merge-execution commit: the
+        // in-flight window still carries the children; the lookahead carries
+        // the reunified parent.
+        let active = Arc::new(state.derive_topology_snapshot(net()));
+        let lookahead = Arc::new(state.derive_next_topology_snapshot(net()));
+        let mut schedule = TopologySchedule::new(1000, Epoch::new(5), active);
+        schedule.insert(Epoch::new(6), lookahead);
+        let routing = schedule.routing_committees();
+
+        let route = |shard| -> BTreeSet<ValidatorId> {
+            routing.get(&shard).into_iter().flatten().copied().collect()
+        };
+        // Each dissolved child routes to its own frozen serving committee.
+        assert_eq!(
+            route(left),
+            left_serving,
+            "the left child must route to its own serving committee",
+        );
+        assert_eq!(
+            route(right),
+            right_serving,
+            "the right child must route to its own serving committee",
+        );
+        // And never to the keeper mix — the failure the prod merge hit.
+        assert_ne!(
+            route(left),
+            keepers,
+            "the left child must not route to the keeper committee",
+        );
+        assert_ne!(
+            route(right),
+            keepers,
+            "the right child must not route to the keeper committee",
+        );
+        // The reunified parent routes to its keeper committee.
+        assert_eq!(
+            route(parent),
+            keepers,
+            "the reunified parent must route to its keeper committee",
+        );
+    }
 }
