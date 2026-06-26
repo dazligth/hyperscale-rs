@@ -13,7 +13,7 @@ use hyperscale_network::{Network, RequestError, ResponseVerdict};
 use hyperscale_storage::ShardStorage;
 use hyperscale_types::network::request::beacon::GetBeaconBlockRequest;
 use hyperscale_types::network::response::beacon::GetBeaconBlockResponse;
-use hyperscale_types::{CertifiedBeaconBlock, Epoch, Verifiable};
+use hyperscale_types::{CertifiedBeaconBlock, Epoch, LocalTimestamp, Verifiable};
 
 use crate::beacon::{self, BeaconBlockSync, BeaconSyncSink};
 use crate::event::{FetchFailureKind, classify_fetch_error};
@@ -74,6 +74,10 @@ where
 
     fn beacon_tip(&self) -> Option<Epoch> {
         self.process.beacon_storage.latest_committed_epoch()
+    }
+
+    fn now(&self) -> LocalTimestamp {
+        self.now
     }
 }
 

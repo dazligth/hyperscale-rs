@@ -13,12 +13,12 @@ mod block_sync;
 mod gossip;
 
 use std::sync::Arc;
-use std::time::Instant;
 
 pub use block::{BlockSync, BlockSyncConfig, BlockSyncInput, BlockSyncOutput, BlockSyncStateKind};
 pub use block_serve::serve_block_request;
 use hyperscale_types::{
-    Bls12381G1PublicKey, Bls12381G2Signature, CertifiedBlockHeader, ValidatorId, Verifiable,
+    Bls12381G1PublicKey, Bls12381G2Signature, CertifiedBlockHeader, LocalTimestamp, ValidatorId,
+    Verifiable,
 };
 
 use crate::batch_accumulator::BatchAccumulator;
@@ -77,7 +77,7 @@ impl ConsensusState {
 
     /// Drive the block-sync FSM's periodic tick. Returns the outputs the
     /// I/O loop should dispatch (block fetches, deliveries, sync-complete).
-    pub fn block_tick(&mut self, now: Instant) -> Vec<BlockSyncOutput> {
+    pub fn block_tick(&mut self, now: LocalTimestamp) -> Vec<BlockSyncOutput> {
         self.block_sync.handle(BlockSyncInput::Tick { now })
     }
 }

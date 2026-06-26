@@ -296,7 +296,7 @@ where
                 from: height,
                 count: 1,
                 delivered_heights: vec![height],
-                now: std::time::Instant::now(),
+                now: self.now,
             });
         self.process_block_sync_outputs(outputs);
     }
@@ -313,7 +313,7 @@ where
                 from: height,
                 count: 1,
                 kind,
-                now: std::time::Instant::now(),
+                now: self.now,
             });
         self.process_block_sync_outputs(outputs);
     }

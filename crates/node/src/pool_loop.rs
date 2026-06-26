@@ -322,4 +322,8 @@ where
     fn beacon_tip(&self) -> Option<Epoch> {
         self.process.beacon_storage.latest_committed_epoch()
     }
+
+    fn now(&self) -> LocalTimestamp {
+        self.now
+    }
 }

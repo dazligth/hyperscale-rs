@@ -126,7 +126,7 @@ where
                     from: from_height,
                     count: count.inner(),
                     delivered_heights,
-                    now: std::time::Instant::now(),
+                    now: self.now,
                 });
         self.process_remote_header_sync_outputs(outputs);
     }
@@ -148,7 +148,7 @@ where
                     from: from_height,
                     count: count.inner(),
                     kind,
-                    now: std::time::Instant::now(),
+                    now: self.now,
                 });
         self.process_remote_header_sync_outputs(outputs);
     }

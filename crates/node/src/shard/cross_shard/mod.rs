@@ -21,15 +21,13 @@ mod settled_set;
 mod settled_set_sync;
 mod settled_waves_serve;
 
-use std::time::Instant;
-
 pub use exec_cert_serve::serve_execution_certs_request;
 pub use fetch::{
     ExecCertBinding, ExecCertFetch, FinalizedWaveBinding, FinalizedWaveFetch,
     LocalProvisionBinding, LocalProvisionFetch, ProvisionBinding, ProvisionFetch,
 };
 pub use finalized_wave_serve::serve_finalized_waves_request;
-use hyperscale_types::{BlockHeight, ShardId};
+use hyperscale_types::{BlockHeight, LocalTimestamp, ShardId};
 pub use local_provision_serve::serve_local_provisions_request;
 pub use provision_serve::serve_provision_request;
 use remote_header::{RemoteHeaderSync, RemoteHeaderSyncInput, RemoteHeaderSyncOutput};
@@ -107,7 +105,7 @@ impl CrossShardState {
     /// Drive the remote-header-sync FSM's periodic tick. Returns range
     /// fetches and any newly-emitted `SyncComplete` for shards that just
     /// caught up.
-    pub fn remote_header_tick(&mut self, now: Instant) -> Vec<RemoteHeaderSyncOutput> {
+    pub fn remote_header_tick(&mut self, now: LocalTimestamp) -> Vec<RemoteHeaderSyncOutput> {
         self.remote_header_sync
             .handle(RemoteHeaderSyncInput::Tick { now })
     }

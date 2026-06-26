@@ -19,7 +19,7 @@
 
 use std::sync::Arc;
 
-use hyperscale_types::{CertifiedBeaconBlock, Epoch, Verifiable};
+use hyperscale_types::{CertifiedBeaconBlock, Epoch, LocalTimestamp, Verifiable};
 
 use crate::event::FetchFailureKind;
 use crate::sync::{Sync, SyncBinding, SyncConfig, SyncInput, SyncOutput};
@@ -85,6 +85,11 @@ pub trait BeaconSyncSink {
 
     /// Local beacon tip, for the restart seed (identical logic both sides).
     fn beacon_tip(&self) -> Option<Epoch>;
+
+    /// This driver's current consensus clock — the deterministic time the
+    /// FSM anchors its `pending_admission` and retry-backoff deadlines on,
+    /// matching every other `self.now` site (set via `set_time`).
+    fn now(&self) -> LocalTimestamp;
 }
 
 /// Begin (or extend) a catch-up sync toward `target`.
@@ -135,6 +140,7 @@ pub fn on_response<K: BeaconSyncSink>(
         return;
     };
     sink.deliver_block(block);
+    let now = sink.now();
     let outputs = sink
         .beacon_fsm()
         .handle(BeaconBlockSyncInput::FetchSucceeded {
@@ -142,19 +148,20 @@ pub fn on_response<K: BeaconSyncSink>(
             from: epoch,
             count: 1,
             delivered_heights: vec![epoch],
-            now: std::time::Instant::now(),
+            now,
         });
     drive_outputs(sink, outputs);
 }
 
 /// Re-queue an epoch via `FetchFailed`, applying the FSM's deferral.
 pub fn on_fetch_failed<K: BeaconSyncSink>(sink: &mut K, epoch: Epoch, kind: FetchFailureKind) {
+    let now = sink.now();
     let outputs = sink.beacon_fsm().handle(BeaconBlockSyncInput::FetchFailed {
         scope: (),
         from: epoch,
         count: 1,
         kind,
-        now: std::time::Instant::now(),
+        now,
     });
     drive_outputs(sink, outputs);
 }
@@ -173,9 +180,8 @@ pub fn on_admitted<K: BeaconSyncSink>(sink: &mut K, epoch: Epoch) {
 /// Drive the periodic tick, re-dispatching any deferred fetch whose backoff
 /// has expired.
 pub fn on_tick<K: BeaconSyncSink>(sink: &mut K) {
-    let outputs = sink.beacon_fsm().handle(BeaconBlockSyncInput::Tick {
-        now: std::time::Instant::now(),
-    });
+    let now = sink.now();
+    let outputs = sink.beacon_fsm().handle(BeaconBlockSyncInput::Tick { now });
     drive_outputs(sink, outputs);
 }
 
@@ -202,8 +208,6 @@ fn drive_outputs<K: BeaconSyncSink>(sink: &K, outputs: Vec<BeaconBlockSyncOutput
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
-
     use super::*;
 
     fn h(n: u64) -> Epoch {
@@ -226,7 +230,7 @@ mod tests {
             from: h(epoch),
             count: 1,
             delivered_heights: vec![h(epoch)],
-            now: Instant::now(),
+            now: LocalTimestamp::from_millis(0),
         });
     }
 

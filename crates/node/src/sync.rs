@@ -40,9 +40,9 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 use std::fmt::Debug;
 use std::hash::Hash;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use hyperscale_types::{BlockHeight, Epoch};
+use hyperscale_types::{BlockHeight, Epoch, LocalTimestamp};
 use serde::Serialize;
 use tracing::{info, trace};
 
@@ -67,15 +67,15 @@ const PENDING_ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Debug, Default)]
 struct DeferralBackoff {
     rounds: u32,
-    next_retry_at: Option<Instant>,
+    next_retry_at: Option<LocalTimestamp>,
 }
 
 impl DeferralBackoff {
-    fn is_ready(&self, now: Instant) -> bool {
+    fn is_ready(&self, now: LocalTimestamp) -> bool {
         self.next_retry_at.is_none_or(|deadline| now >= deadline)
     }
 
-    fn advance_round(&mut self, now: Instant) {
+    fn advance_round(&mut self, now: LocalTimestamp) {
         self.rounds = self.rounds.saturating_add(1);
         let exp = i32::try_from(self.rounds.saturating_sub(1)).unwrap_or(i32::MAX);
         #[allow(
@@ -85,7 +85,7 @@ impl DeferralBackoff {
         )] // float→u64 truncation is intentional; result is clamped below
         let backoff_ms = ((DEFERRAL_BASE_MS as f64) * DEFERRAL_MULTIPLIER.powi(exp)) as u64;
         let backoff_ms = backoff_ms.min(DEFERRAL_MAX_MS);
-        self.next_retry_at = Some(now + Duration::from_millis(backoff_ms));
+        self.next_retry_at = Some(now.plus(Duration::from_millis(backoff_ms)));
     }
 }
 
@@ -239,7 +239,7 @@ struct ScopeState<K: SyncKey> {
     /// `queue_window` would re-queue every just-delivered range and
     /// `emit_fetches` would dispatch a duplicate fetch for the bytes
     /// we just received.
-    pending_admission: HashMap<K, Instant>,
+    pending_admission: HashMap<K, LocalTimestamp>,
     /// Number of in-flight fetch ranges for this scope. Bounded by
     /// `max_concurrent_per_scope`.
     in_flight_ranges: usize,
@@ -315,7 +315,7 @@ pub enum SyncInput<B: SyncBinding> {
         from: B::Key,
         count: u64,
         delivered_heights: Vec<B::Key>,
-        now: Instant,
+        now: LocalTimestamp,
     },
     /// The fetch round-trip failed. Heights are re-queued; whether they
     /// pay an exponential-backoff penalty depends on `kind`.
@@ -324,14 +324,14 @@ pub enum SyncInput<B: SyncBinding> {
         from: B::Key,
         count: u64,
         kind: FetchFailureKind,
-        now: Instant,
+        now: LocalTimestamp,
     },
     /// The consumer admitted a height for `scope` (e.g. via QC verification).
     /// Advances per-scope `committed`; may emit `Complete`.
     Admitted { scope: B::Scope, height: B::Key },
     /// Periodic tick: promotes deferred heights past their backoff and
     /// emits any newly-ready fetches.
-    Tick { now: Instant },
+    Tick { now: LocalTimestamp },
 }
 
 /// Outputs from the generic sync state machine.
@@ -491,7 +491,7 @@ impl<B: SyncBinding> Sync<B> {
         from: B::Key,
         count: u64,
         delivered_heights: &[B::Key],
-        now: Instant,
+        now: LocalTimestamp,
     ) -> Vec<SyncOutput<B>> {
         let Some(state) = self.scopes.get_mut(scope) else {
             return Vec::new();
@@ -499,7 +499,7 @@ impl<B: SyncBinding> Sync<B> {
         state.in_flight_ranges = state.in_flight_ranges.saturating_sub(1);
 
         let delivered: HashSet<B::Key> = delivered_heights.iter().copied().collect();
-        let pending_deadline = now + PENDING_ADMISSION_TIMEOUT;
+        let pending_deadline = now.plus(PENDING_ADMISSION_TIMEOUT);
 
         // For prefix-responder bindings, a short response signals the
         // responder's tip: heights past `from + delivered.len() - 1` do
@@ -585,7 +585,7 @@ impl<B: SyncBinding> Sync<B> {
         from: B::Key,
         count: u64,
         kind: FetchFailureKind,
-        now: Instant,
+        now: LocalTimestamp,
     ) -> Vec<SyncOutput<B>> {
         let Some(state) = self.scopes.get_mut(scope) else {
             return vec![];
@@ -677,7 +677,7 @@ impl<B: SyncBinding> Sync<B> {
         outputs
     }
 
-    fn handle_tick(&mut self, now: Instant) -> Vec<SyncOutput<B>> {
+    fn handle_tick(&mut self, now: LocalTimestamp) -> Vec<SyncOutput<B>> {
         for state in self.scopes.values_mut() {
             // Re-queue pending-admission heights whose deadline elapsed.
             // The PENDING_ADMISSION_TIMEOUT wait already absorbs the
@@ -940,7 +940,7 @@ mod tests {
             scope: (),
             target: BlockHeight::new(1),
         });
-        let now = Instant::now();
+        let now = LocalTimestamp::from_millis(0);
         let _ = s.handle(SyncInput::FetchFailed {
             scope: (),
             from: BlockHeight::new(1),
@@ -952,7 +952,7 @@ mod tests {
 
         // Tick before backoff: failed height stays parked.
         let outputs = s.handle(SyncInput::Tick {
-            now: now + Duration::from_millis(500),
+            now: now.plus(Duration::from_millis(500)),
         });
         assert!(!outputs.iter().any(|o| matches!(
             o,
@@ -961,7 +961,7 @@ mod tests {
 
         // Tick past first-round backoff: re-emerges.
         let outputs = s.handle(SyncInput::Tick {
-            now: now + Duration::from_secs(2),
+            now: now.plus(Duration::from_secs(2)),
         });
         assert!(outputs.iter().any(|o| matches!(
             o,
@@ -984,7 +984,7 @@ mod tests {
             scope: (),
             target: BlockHeight::new(1),
         });
-        let now = Instant::now();
+        let now = LocalTimestamp::from_millis(0);
         let outputs = s.handle(SyncInput::FetchFailed {
             scope: (),
             from: BlockHeight::new(1),
@@ -1014,7 +1014,7 @@ mod tests {
             scope: 1,
             target: BlockHeight::new(20),
         });
-        let now = Instant::now();
+        let now = LocalTimestamp::from_millis(0);
         // Asked for 1..=8, responder only had 1..=5.
         let delivered = (1..=5).map(BlockHeight::new).collect::<Vec<_>>();
         let _ = s.handle(SyncInput::FetchSucceeded {
@@ -1081,7 +1081,7 @@ mod tests {
         // exceeds it (e.g. we asked for 1..=5 and got [1,2,3,4,5,6]
         // because the responder serves a slightly larger window). Test
         // by feeding a delivery whose max exceeds current target.
-        let now = Instant::now();
+        let now = LocalTimestamp::from_millis(0);
         let _ = s.handle(SyncInput::FetchSucceeded {
             scope: 1,
             from: BlockHeight::new(1),
@@ -1111,7 +1111,7 @@ mod tests {
             from: BlockHeight::new(1),
             count: 5,
             delivered_heights: vec![BlockHeight::new(100)],
-            now: Instant::now(),
+            now: LocalTimestamp::from_millis(0),
         });
         let st = s.scopes.get(&1).unwrap();
         assert_eq!(
@@ -1132,7 +1132,7 @@ mod tests {
             scope: 1,
             target: BlockHeight::new(8),
         });
-        let now = Instant::now();
+        let now = LocalTimestamp::from_millis(0);
         // Asked for heights 1..=8; responder has only committed 1..=3.
         let _ = s.handle(SyncInput::FetchSucceeded {
             scope: 1,
@@ -1174,7 +1174,7 @@ mod tests {
             from: BlockHeight::new(1),
             count: 8,
             delivered_heights: vec![],
-            now: Instant::now(),
+            now: LocalTimestamp::from_millis(0),
         });
         let st = s.scopes.get(&1).unwrap();
         assert_eq!(st.target, st.committed);
@@ -1230,7 +1230,7 @@ mod tests {
             from: BlockHeight::new(1),
             count: 8,
             delivered_heights: (1..=3).map(BlockHeight::new).collect(),
-            now: Instant::now(),
+            now: LocalTimestamp::from_millis(0),
         });
         let st = s.scopes.get(&1).unwrap();
         assert_eq!(st.target, BlockHeight::new(8), "target unchanged");
@@ -1259,7 +1259,7 @@ mod tests {
             from: BlockHeight::new(1),
             count: 8,
             delivered_heights: vec![BlockHeight::new(1), BlockHeight::new(3)],
-            now: Instant::now(),
+            now: LocalTimestamp::from_millis(0),
         });
         let st = s.scopes.get(&1).unwrap();
         assert_eq!(st.target, BlockHeight::new(8), "target unchanged on gap");
@@ -1283,7 +1283,7 @@ mod tests {
             from: BlockHeight::new(1),
             count: 8,
             delivered_heights: (1..=3).map(BlockHeight::new).collect(),
-            now: Instant::now(),
+            now: LocalTimestamp::from_millis(0),
         });
         let outputs_1 = s.handle(SyncInput::Admitted {
             scope: 1,
@@ -1401,7 +1401,7 @@ mod tests {
             scope: 1,
             target: BlockHeight::new(20),
         });
-        let now = Instant::now();
+        let now = LocalTimestamp::from_millis(0);
         let outputs = s.handle(SyncInput::FetchSucceeded {
             scope: 1,
             from: BlockHeight::new(1),
@@ -1442,7 +1442,7 @@ mod tests {
             target: BlockHeight::new(8),
         });
         // Drain the initial fetches so we observe Tick's emission below.
-        let now = Instant::now();
+        let now = LocalTimestamp::from_millis(0);
         let _ = s.handle(SyncInput::FetchSucceeded {
             scope: 1,
             from: BlockHeight::new(1),
@@ -1452,7 +1452,7 @@ mod tests {
         });
         // Tick before timeout: still pending, no re-fetch.
         let outputs = s.handle(SyncInput::Tick {
-            now: now + Duration::from_secs(1),
+            now: now.plus(Duration::from_secs(1)),
         });
         assert!(
             outputs.is_empty(),
@@ -1463,7 +1463,7 @@ mod tests {
         // Tick past PENDING_ADMISSION_TIMEOUT (5s): heights re-queue and
         // emit_fetches dispatches a new range immediately.
         let outputs = s.handle(SyncInput::Tick {
-            now: now + Duration::from_secs(6),
+            now: now.plus(Duration::from_secs(6)),
         });
         assert!(
             !s.has_deferred(),
@@ -1500,7 +1500,7 @@ mod tests {
             from: BlockHeight::new(1),
             count: 1,
             kind: FetchFailureKind::Transport,
-            now: Instant::now(),
+            now: LocalTimestamp::from_millis(0),
         });
         assert!(
             outputs.iter().any(
@@ -1521,7 +1521,7 @@ mod tests {
             scope: 1,
             target: BlockHeight::new(8),
         });
-        let now = Instant::now();
+        let now = LocalTimestamp::from_millis(0);
         let _ = s.handle(SyncInput::FetchSucceeded {
             scope: 1,
             from: BlockHeight::new(1),
@@ -1583,7 +1583,7 @@ mod tests {
             from: BlockHeight::new(1),
             count: 1,
             delivered_heights: vec![BlockHeight::new(1)],
-            now: Instant::now(),
+            now: LocalTimestamp::from_millis(0),
         });
     }
 }
