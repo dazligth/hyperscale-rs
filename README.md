@@ -218,7 +218,7 @@ Windows `MAX_PATH` (~260). Cargo fetches via git but checks out with **libgit2**
 which fails unless long paths are enabled system-wide. Shorter `CARGO_HOME` does
 not help — the in-repo suffix alone is ~268 characters.
 
-**Enable Windows long paths (recommended):**
+**Enable Windows long paths:**
 
 1. Open **PowerShell** as Administrator.
 2. Run:
@@ -230,10 +230,6 @@ not help — the in-repo suffix alone is ~268 characters.
    ```bash
    git config --global core.longpaths true
    ```
-
-**Fallback — WSL (no admin):** run `cargo fetch`, `cargo clippy`, and `cargo test`
-from a Linux environment (e.g. Ubuntu in WSL) with the repository checked out
-under `/mnt/<drive>/...`.
 
 ### Windows: "Can't find clang.dll" or "libclang.dll"
 
