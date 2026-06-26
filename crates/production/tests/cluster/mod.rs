@@ -35,8 +35,8 @@ use hyperscale_shard::ShardConsensusConfig;
 use hyperscale_storage::{BeaconChainReader, BeaconStorage, ShardChainReader, SubstateStore};
 use hyperscale_storage_rocksdb::{RocksDbBeaconStorage, RocksDbShardStorage};
 use hyperscale_types::{
-    BeaconChainConfig, BeaconState, BlockHeight, Epoch, PendingReshape, RoutableTransaction,
-    ShardId, StateRoot, TopologySnapshot, TransactionDecision, TransactionStatus, TxHash,
+    BeaconChainConfig, BeaconState, BlockHeight, Epoch, GenesisTopology, PendingReshape,
+    RoutableTransaction, ShardId, StateRoot, TransactionDecision, TransactionStatus, TxHash,
     shard_prefix_path,
 };
 use libp2p::Multiaddr;
@@ -114,8 +114,8 @@ impl HostSpec {
 
 /// Inputs for [`Cluster::start`].
 pub struct ClusterSpec {
-    /// Identity-agnostic snapshot shared across every host and vnode.
-    pub topology: Arc<TopologySnapshot>,
+    /// Genesis validator placement each host projects its topology from.
+    pub genesis: GenesisTopology,
     /// Per-host seating; host 0 is the bootstrap peer for the rest.
     pub hosts: Vec<HostSpec>,
     /// Beacon sizing knobs — small `epoch_duration_ms` for real-time
@@ -174,7 +174,7 @@ impl Cluster {
     /// are spawned.
     pub async fn start(spec: ClusterSpec) -> Self {
         let ClusterSpec {
-            topology,
+            genesis,
             hosts,
             beacon_chain_config,
             genesis_config,
@@ -200,7 +200,7 @@ impl Cluster {
             let bootstrap_peers: Vec<Multiaddr> = bootstrap_addr.iter().cloned().collect();
             let built_host = build_host(BuildHostArgs {
                 temp_dir: &temp_dir,
-                topology: &topology,
+                genesis: &genesis,
                 validators: host.validators,
                 beacon_chain_config: chain_config,
                 genesis_config: genesis_config.clone(),
@@ -623,7 +623,7 @@ struct BuiltHost {
 
 struct BuildHostArgs<'a> {
     temp_dir: &'a TempDir,
-    topology: &'a Arc<TopologySnapshot>,
+    genesis: &'a GenesisTopology,
     validators: Vec<LocalValidator>,
     beacon_chain_config: BeaconChainConfig,
     genesis_config: Option<GenesisConfig>,
@@ -640,7 +640,7 @@ fn build_host(args: BuildHostArgs<'_>) -> BuiltHost {
         RocksDbBeaconStorage::open(args.temp_dir.path().join("beacon_db")).expect("open beacon db"),
     );
     let rpc_status = Arc::new(ArcSwap::new(Arc::new(NodeStatusState {
-        num_shards: args.topology.num_shards(),
+        num_shards: args.genesis.num_shards(),
         ..Default::default()
     })));
 
@@ -658,7 +658,7 @@ fn build_host(args: BuildHostArgs<'_>) -> BuiltHost {
     let beacon_reader: Arc<dyn BeaconStorage> = beacon_storage.clone();
     let mut builder = ProductionRunner::builder(
         args.validators,
-        Arc::clone(args.topology),
+        args.genesis.clone(),
         ShardConsensusConfig::default(),
         beacon_reader,
         network_config,

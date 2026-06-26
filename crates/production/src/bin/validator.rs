@@ -71,7 +71,7 @@ use hyperscale_storage_rocksdb::{
     RocksDbShardStorage,
 };
 use hyperscale_types::{
-    Bls12381G1PrivateKey, Bls12381G1PublicKey, ShardId, TopologySnapshot, ValidatorId,
+    Bls12381G1PrivateKey, Bls12381G1PublicKey, GenesisTopology, ShardId, ValidatorId,
     ValidatorInfo, ValidatorSet, bls_keypair_from_seed, generate_bls_keypair, shard_prefix_path,
 };
 use igd_next::aio::tokio::search_gateway;
@@ -636,23 +636,24 @@ fn load_or_generate_keypair(key_path: Option<&PathBuf>) -> Result<Bls12381G1Priv
     }
 }
 
-/// Build the identity-agnostic topology snapshot once for the host.
+/// Build the genesis validator placement the runner projects the host's
+/// topology snapshot from.
 ///
 /// `local_keypairs` carries every hosted vnode's (`validator_id`, private key)
 /// in `config.vnodes` order. For each genesis validator whose id matches a
 /// hosted vnode, the public key is taken from the local keypair rather than
-/// parsed from the genesis hex — keeping the snapshot's view consistent with
-/// what this process actually signs with.
+/// parsed from the genesis hex — keeping the placement consistent with what
+/// this process actually signs with.
 ///
 /// Genesis is always a single ROOT shard: the network launches at one shard
 /// and grows by splitting, so there is no operator-facing genesis-distribution
 /// knob. The network reaches its target topology by driving the real split
 /// lifecycle.
-fn build_topology(
+fn build_genesis_topology(
     network: NetworkDefinition,
     genesis: &GenesisConfig,
     local_keypairs: &[(ValidatorId, Arc<Bls12381G1PrivateKey>)],
-) -> Result<Arc<TopologySnapshot>> {
+) -> Result<GenesisTopology> {
     let lookup_local = |id: ValidatorId| -> Option<&Arc<Bls12381G1PrivateKey>> {
         local_keypairs
             .iter()
@@ -699,12 +700,18 @@ fn build_topology(
 
     let validator_set = ValidatorSet::new(validators);
 
-    Ok(Arc::new(TopologySnapshot::single_shard(
+    // Genesis seats every configured validator in the single ROOT committee.
+    let seated: Vec<ValidatorId> = validator_set
+        .validators
+        .iter()
+        .map(|v| v.validator_id)
+        .collect();
+
+    Ok(GenesisTopology::single_shard(
         network,
-        ShardId::ROOT,
-        1,
         validator_set,
-    )))
+        seated,
+    ))
 }
 
 /// Build engine genesis configuration from TOML config.
@@ -1165,10 +1172,10 @@ async fn async_main(cli: Cli, config: ValidatorConfig) -> Result<()> {
         hosted_keypairs.push((ValidatorId::new(entry.validator_id), Arc::new(keypair)));
     }
 
-    // Build the host's single identity-agnostic topology snapshot. Genesis is
-    // always a single ROOT shard; the network grows to its target topology by
-    // splitting under load.
-    let topology = build_topology(
+    // Build the host's genesis validator placement. Genesis is always a single
+    // ROOT shard; the network grows to its target topology by splitting under
+    // load. The runner projects the host's topology snapshot from this.
+    let genesis_topology = build_genesis_topology(
         config.node.network.clone(),
         &config.genesis,
         &hosted_keypairs,
@@ -1199,7 +1206,7 @@ async fn async_main(cli: Cli, config: ValidatorConfig) -> Result<()> {
     // event channel the RPC server submits transactions through.
     let mut runner_builder = ProductionRunner::builder(
         validators,
-        topology,
+        genesis_topology,
         shard_config,
         beacon_storage,
         network_config,

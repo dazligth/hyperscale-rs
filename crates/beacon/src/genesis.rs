@@ -17,11 +17,11 @@ use std::sync::Arc;
 
 use hyperscale_types::{
     BeaconChainConfig, BeaconGenesisConfig, BeaconState, BeaconWitnessLeafCount, BlockHash,
-    BlockHeight, CertifiedBeaconBlock, Epoch, GenesisConfigHash, GenesisPool, GenesisValidator,
-    MAX_BEACON_COMMITTEE, MAX_VOTE_VECTOR_LEN, MIN_BEACON_COMMITTEE_SIZE, MIN_STAKE_FLOOR,
-    NetworkDefinition, NetworkParams, Randomness, ShardBoundary, ShardCommittee, ShardId, Stake,
-    StakePool, StakePoolId, StateRoot, ValidatorId, ValidatorRecord, ValidatorStatus, Verified,
-    WeightedTimestamp, genesis_config_hash,
+    BlockHeight, CertifiedBeaconBlock, Epoch, GenesisConfigHash, GenesisPool, GenesisTopology,
+    GenesisValidator, MAX_BEACON_COMMITTEE, MAX_VOTE_VECTOR_LEN, MIN_BEACON_COMMITTEE_SIZE,
+    MIN_STAKE_FLOOR, NetworkDefinition, NetworkParams, Randomness, ShardBoundary, ShardCommittee,
+    ShardId, Stake, StakePool, StakePoolId, StateRoot, TopologySnapshot, ValidatorId,
+    ValidatorRecord, ValidatorStatus, Verified, WeightedTimestamp, genesis_config_hash,
 };
 
 // ─── builder ───────────────────────────────────────────────────────────────
@@ -249,6 +249,64 @@ pub fn build_genesis_chain(inputs: GenesisChainInputs<'_>) -> GenesisChain {
         state,
         config_hash,
     }
+}
+
+/// The genesis a runner boots from: the committed beacon chain plus the
+/// topology projected from its folded state.
+pub struct GenesisBoot {
+    /// The committed genesis beacon chain — block, folded state, config hash.
+    pub chain: GenesisChain,
+    /// Topology projected from `chain.state`, identical in shape to the
+    /// snapshot the runtime `ArcSwap` update derives on every epoch commit.
+    pub topology: TopologySnapshot,
+}
+
+/// Build the genesis beacon chain from `placement` and project its topology
+/// from the folded genesis state — the `inputs → BeaconState →
+/// derive_topology_snapshot` direction the runtime follows.
+///
+/// The seated validators — those appearing in some shard committee — ordered
+/// by id form the beacon committee, capped at
+/// [`BeaconChainConfig::beacon_committee_size`]. Every registered validator,
+/// seated or pooled, joins the single genesis stake pool, so the projected
+/// global set carries the pooled surplus a later reshape draws its child
+/// cohort from.
+#[must_use]
+pub fn build_genesis(placement: &GenesisTopology, chain_config: BeaconChainConfig) -> GenesisBoot {
+    let pool_id = StakePoolId::new(0);
+    let validators: Vec<GenesisValidator> = placement
+        .global_validator_set
+        .validators
+        .iter()
+        .map(|v| GenesisValidator {
+            id: v.validator_id,
+            pool: pool_id,
+            pubkey: v.public_key,
+        })
+        .collect();
+
+    let seated: BTreeSet<ValidatorId> = placement
+        .shard_committees
+        .values()
+        .flatten()
+        .copied()
+        .collect();
+    let committee_len = seated
+        .len()
+        .min(chain_config.beacon_committee_size as usize);
+    let beacon_committee: Vec<ValidatorId> = seated.into_iter().take(committee_len).collect();
+
+    let chain = build_genesis_chain(GenesisChainInputs {
+        chain_config,
+        validators,
+        beacon_committee,
+        shard_committees: placement.shard_committees.clone(),
+        network: &placement.network,
+    });
+    let topology = chain
+        .state
+        .derive_topology_snapshot(placement.network.clone());
+    GenesisBoot { chain, topology }
 }
 
 /// Walk every invariant the builder relies on, panicking on the first

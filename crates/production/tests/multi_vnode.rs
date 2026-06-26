@@ -67,7 +67,7 @@ async fn test_v2_same_shard_production_runner_binds_all_vnodes() {
         Arc::new(RocksDbBeaconStorage::open(temp_dir0.path().join("beacon_db")).unwrap());
     let mut runner0 = ProductionRunner::builder(
         host0_vnodes,
-        fixtures.topology(),
+        fixtures.genesis_topology(),
         ShardConsensusConfig::default(),
         beacon_storage0,
         network_config0,
@@ -100,7 +100,7 @@ async fn test_v2_same_shard_production_runner_binds_all_vnodes() {
         Arc::new(RocksDbBeaconStorage::open(temp_dir1.path().join("beacon_db")).unwrap());
     let mut runner1 = ProductionRunner::builder(
         host1_vnodes,
-        fixtures.topology(),
+        fixtures.genesis_topology(),
         ShardConsensusConfig::default(),
         beacon_storage1,
         network_config1,
@@ -195,7 +195,7 @@ async fn test_v2_different_shard_production_runner_binds_all_vnodes() {
         Arc::new(RocksDbBeaconStorage::open(temp_dir0.path().join("beacon_db")).unwrap());
     let mut runner0 = ProductionRunner::builder(
         host0_vnodes,
-        fixtures.topology(),
+        fixtures.genesis_topology(),
         ShardConsensusConfig::default(),
         beacon_storage0,
         network_config0,
@@ -228,7 +228,7 @@ async fn test_v2_different_shard_production_runner_binds_all_vnodes() {
         Arc::new(RocksDbBeaconStorage::open(temp_dir1.path().join("beacon_db")).unwrap());
     let mut runner1 = ProductionRunner::builder(
         host1_vnodes,
-        fixtures.topology(),
+        fixtures.genesis_topology(),
         ShardConsensusConfig::default(),
         beacon_storage1,
         network_config1,

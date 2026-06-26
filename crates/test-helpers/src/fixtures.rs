@@ -6,12 +6,12 @@
 //! identities. Gated behind the `fixtures` feature, which pulls the libp2p and
 //! network dependencies the Ed25519 identities and validator key map need.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use hyperscale_network::ValidatorKeyMap;
 use hyperscale_types::{
-    Bls12381G1PrivateKey, Bls12381G1PublicKey, NetworkDefinition, ShardId, TopologySnapshot,
+    Bls12381G1PrivateKey, Bls12381G1PublicKey, GenesisTopology, NetworkDefinition, ShardId,
     ValidatorId, ValidatorInfo, ValidatorSet, bls_keypair_from_seed,
 };
 use libp2p::PeerId;
@@ -61,8 +61,9 @@ pub struct TestFixtures {
     /// Ed25519 keypairs for libp2p (one per validator).
     pub ed25519_keys: Vec<Keypair>,
 
-    /// Identity-agnostic topology snapshot shared across every validator.
-    topology: Arc<TopologySnapshot>,
+    /// Genesis validator placement a runner projects its initial topology
+    /// snapshot from.
+    genesis: GenesisTopology,
 
     /// Number of validators.
     pub num_validators: u32,
@@ -134,7 +135,7 @@ impl TestFixtures {
         let global_validator_set = ValidatorSet::new(global_validators);
 
         // Build per-shard committee mappings
-        let mut shard_committees: HashMap<ShardId, Vec<ValidatorId>> = HashMap::new();
+        let mut shard_committees: BTreeMap<ShardId, Vec<ValidatorId>> = BTreeMap::new();
         let shard_depth = num_shards.trailing_zeros();
         for shard_id in 0..num_shards {
             let shard = ShardId::leaf(shard_depth, shard_id);
@@ -147,17 +148,16 @@ impl TestFixtures {
             shard_committees.insert(shard, committee);
         }
 
-        let topology = Arc::new(TopologySnapshot::with_shard_committees(
-            NetworkDefinition::simulator(),
-            num_shards,
-            &global_validator_set,
+        let genesis = GenesisTopology {
+            network: NetworkDefinition::simulator(),
+            global_validator_set,
             shard_committees,
-        ));
+        };
 
         Self {
             bls_keys,
             ed25519_keys,
-            topology,
+            genesis,
             num_validators,
             num_shards,
             validators_per_shard,
@@ -199,24 +199,18 @@ impl TestFixtures {
             .collect();
         let global_validator_set = ValidatorSet::new(global_validators);
 
-        let committee_map: HashMap<ShardId, Vec<ValidatorId>> = committees.into_iter().collect();
-        let topology = Arc::new(TopologySnapshot::from_explicit_committees(
-            NetworkDefinition::simulator(),
-            &global_validator_set,
-            committee_map.clone(),
-            committee_map,
-            HashMap::new(),
-            HashMap::new(),
-            BTreeMap::new(),
-            BTreeMap::new(),
-            BTreeMap::new(),
-            BTreeSet::new(),
-        ));
+        let shard_committees: BTreeMap<ShardId, Vec<ValidatorId>> =
+            committees.into_iter().collect();
+        let genesis = GenesisTopology {
+            network: NetworkDefinition::simulator(),
+            global_validator_set,
+            shard_committees,
+        };
 
         Self {
             bls_keys,
             ed25519_keys,
-            topology,
+            genesis,
             num_validators,
             num_shards: 0,
             validators_per_shard: 0,
@@ -224,18 +218,19 @@ impl TestFixtures {
         }
     }
 
-    /// Get the identity-agnostic topology snapshot shared across every vnode.
+    /// Get the genesis validator placement a runner projects its initial
+    /// topology snapshot from.
     #[must_use]
-    pub fn topology(&self) -> Arc<TopologySnapshot> {
-        Arc::clone(&self.topology)
+    pub fn genesis_topology(&self) -> GenesisTopology {
+        self.genesis.clone()
     }
 
     /// Extract a validator key map for network adapter construction.
     #[must_use]
     pub fn validator_key_map(&self) -> Arc<ValidatorKeyMap> {
         Arc::new(
-            self.topology
-                .global_validator_set()
+            self.genesis
+                .global_validator_set
                 .validators
                 .iter()
                 .map(|v| (v.validator_id, v.public_key))
@@ -340,13 +335,9 @@ mod tests {
     fn test_topology_lookup() {
         let fixtures = TestFixtures::new(42, 4);
 
-        let topology = fixtures.topology();
-        assert!(
-            topology
-                .committee_for_shard(ShardId::ROOT)
-                .contains(&ValidatorId::new(0))
-        );
-        assert_eq!(topology.num_shards(), 1);
+        let genesis = fixtures.genesis_topology();
+        assert!(genesis.shard_committees[&ShardId::ROOT].contains(&ValidatorId::new(0)));
+        assert_eq!(genesis.num_shards(), 1);
     }
 
     #[test]
@@ -358,17 +349,17 @@ mod tests {
         assert_eq!(fixtures.pool_surplus, 2);
         assert_eq!(fixtures.bls_keys.len(), 6);
 
-        let topology = fixtures.topology();
-        let committee = topology.committee_for_shard(ShardId::ROOT);
+        let genesis = fixtures.genesis_topology();
+        let committee = &genesis.shard_committees[&ShardId::ROOT];
         assert_eq!(
             committee.len(),
             4,
             "only the seated validators form the committee"
         );
         // Surplus ids 4 and 5 are in the global set but not the committee.
-        let global = topology.global_validator_set();
         assert!(
-            global
+            genesis
+                .global_validator_set
                 .validators
                 .iter()
                 .any(|v| v.validator_id == ValidatorId::new(5)),

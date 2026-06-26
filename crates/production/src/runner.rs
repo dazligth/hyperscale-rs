@@ -26,7 +26,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use arc_swap::ArcSwap;
 use crossbeam::channel::{Receiver, Sender, unbounded};
 use hex::encode as hex_encode;
-use hyperscale_beacon::genesis::{GenesisChainInputs, build_genesis_chain};
+use hyperscale_beacon::genesis::{GenesisBoot, build_genesis};
 use hyperscale_core::{ParticipationChange, ProtocolEvent, TimerId};
 use hyperscale_dispatch::{Dispatch, DispatchPool};
 use hyperscale_dispatch_pooled::{PooledDispatch, ThreadPoolConfig};
@@ -52,8 +52,8 @@ use hyperscale_storage::{BeaconStorage, ShardChainReader};
 use hyperscale_storage_rocksdb::{RocksDbShardStorage, SharedStorage};
 use hyperscale_types::{
     BeaconChainConfig, Block, BlockHeight, Bls12381G1PrivateKey, CertifiedBlock, ChainOrigin,
-    GenesisValidator, InFlightCount, LocalTimestamp, MAX_TX_IN_FLIGHT, NodeId, RoutableTransaction,
-    ShardId, ShardTrie, StakePoolId, TopologySnapshot, ValidatorId, ValidatorStatus, Verified,
+    GenesisTopology, InFlightCount, LocalTimestamp, MAX_TX_IN_FLIGHT, NodeId, RoutableTransaction,
+    ShardId, ShardTrie, ValidatorId, ValidatorStatus, Verified,
 };
 use libp2p::identity::Keypair;
 use radix_common::types::ComponentAddress;
@@ -180,8 +180,9 @@ pub struct LocalValidator {
 ///   Shard participation is not supplied; the runner derives each
 ///   validator's seat (or pool membership) from the committed beacon state
 ///   and opens any seated shard's storage via `storage_factory`.
-/// - `topology` - Identity-agnostic [`TopologySnapshot`] shared across every
-///   hosted vnode and seeded into the `ProcessIo`'s `ArcSwap`.
+/// - `genesis_topology` - The validator placement the genesis beacon chain is
+///   built from; the initial [`TopologySnapshot`] is projected from that
+///   genesis state and seeded into the `ProcessIo`'s `ArcSwap`.
 /// - `shard_config` - Consensus configuration parameters
 /// - `network` - libp2p configuration for peer-to-peer communication
 /// - `storage_factory` - Opens a shard's storage (at startup for a derived
@@ -192,7 +193,7 @@ pub struct LocalValidator {
 /// - `channel_capacity` - Event channel capacity (defaults to 10,000)
 pub struct ProductionRunnerBuilder {
     validators: Vec<LocalValidator>,
-    topology: Arc<TopologySnapshot>,
+    genesis_topology: GenesisTopology,
     shard_config: ShardConsensusConfig,
     beacon_storage: Arc<dyn BeaconStorage>,
     network_config: Libp2pConfig,
@@ -229,7 +230,7 @@ impl ProductionRunnerBuilder {
     #[allow(clippy::too_many_arguments)] // storage + identity threading
     pub fn new(
         validators: Vec<LocalValidator>,
-        topology: Arc<TopologySnapshot>,
+        genesis_topology: GenesisTopology,
         shard_config: ShardConsensusConfig,
         beacon_storage: Arc<dyn BeaconStorage>,
         network_config: Libp2pConfig,
@@ -242,7 +243,7 @@ impl ProductionRunnerBuilder {
         );
         Self {
             validators,
-            topology,
+            genesis_topology,
             shard_config,
             beacon_storage,
             network_config,
@@ -357,7 +358,7 @@ impl ProductionRunnerBuilder {
             .iter()
             .map(|v| (v.validator_id, Arc::clone(&v.signing_key)))
             .collect();
-        let shared_topology = self.topology;
+        let genesis_topology = self.genesis_topology;
         let shard_config = self.shard_config;
         let network_config = self.network_config;
         let chain_config = self.beacon_chain_config.unwrap_or_default();
@@ -371,6 +372,21 @@ impl ProductionRunnerBuilder {
 
         let ed25519_keypair = generate_random_keypair();
 
+        // Genesis: build the beacon chain from the validator placement, then
+        // project the topology from its folded state — the same
+        // `BeaconState → derive_topology_snapshot` direction the runtime
+        // ArcSwap update follows, so the topology is derived rather than
+        // supplied alongside a beacon state it has to be kept consistent with.
+        let beacon_network = genesis_topology.network.clone();
+        let GenesisBoot {
+            chain: genesis_chain,
+            topology: projected_topology,
+        } = build_genesis(&genesis_topology, chain_config);
+        let beacon_genesis_block = genesis_chain.block;
+        let beacon_genesis_state = genesis_chain.state;
+        let beacon_config_hash = genesis_chain.config_hash;
+
+        let shared_topology = Arc::new(projected_topology);
         let topology: SharedTopologySnapshot =
             Arc::new(ArcSwap::from(Arc::clone(&shared_topology)));
 
@@ -390,50 +406,6 @@ impl ProductionRunnerBuilder {
             .iter()
             .map(|v| (v.validator_id, Arc::clone(&v.signing_key)))
             .collect();
-
-        // Beacon genesis: one config + derived (block, state) reused
-        // across every per-vnode `BeaconCoordinator`. All validators
-        // land in a single pool; the first
-        // `chain_config.beacon_committee_size` form the beacon
-        // committee. Shard committees mirror the topology snapshot's
-        // view so the beacon-state placement agrees with tx-routing.
-        let (beacon_genesis_block, beacon_genesis_state, beacon_config_hash, beacon_network) = {
-            let network = NetworkDefinition::simulator();
-            let pool_id = StakePoolId::new(0);
-            let validators_set = shared_topology.global_validator_set();
-            let initial_validators: Vec<GenesisValidator> = validators_set
-                .validators
-                .iter()
-                .map(|v| GenesisValidator {
-                    id: v.validator_id,
-                    pool: pool_id,
-                    pubkey: v.public_key,
-                })
-                .collect();
-            // Production seats its whole configured validator set, capped at
-            // the committee size — there are no surplus pool extras to exclude.
-            let beacon_committee_size = initial_validators
-                .len()
-                .min(chain_config.beacon_committee_size as usize);
-            let beacon_committee: Vec<ValidatorId> = initial_validators
-                .iter()
-                .take(beacon_committee_size)
-                .map(|v| v.id)
-                .collect();
-            let shard_committees: BTreeMap<ShardId, Vec<ValidatorId>> = shared_topology
-                .shard_trie()
-                .leaves()
-                .map(|s| (s, shared_topology.committee_for_shard(s).to_vec()))
-                .collect();
-            let chain = build_genesis_chain(GenesisChainInputs {
-                chain_config,
-                validators: initial_validators,
-                beacon_committee,
-                shard_committees,
-                network: &network,
-            });
-            (chain.block, chain.state, chain.config_hash, network)
-        };
 
         // Warm-restart: resume the beacon coordinator from the latest
         // committed (block, state) in storage. On an empty store, commit the
@@ -741,7 +713,7 @@ impl ProductionRunner {
     #[allow(clippy::too_many_arguments)] // storage handles threaded explicitly
     pub fn builder(
         validators: Vec<LocalValidator>,
-        topology: Arc<TopologySnapshot>,
+        genesis_topology: GenesisTopology,
         shard_config: ShardConsensusConfig,
         beacon_storage: Arc<dyn BeaconStorage>,
         network_config: Libp2pConfig,
@@ -750,7 +722,7 @@ impl ProductionRunner {
     ) -> ProductionRunnerBuilder {
         ProductionRunnerBuilder::new(
             validators,
-            topology,
+            genesis_topology,
             shard_config,
             beacon_storage,
             network_config,

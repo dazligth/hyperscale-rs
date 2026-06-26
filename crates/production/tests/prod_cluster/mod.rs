@@ -116,7 +116,7 @@ impl ProdCluster {
             .map(|chunk| HostSpec::new(chunk.to_vec()))
             .collect();
         ClusterSpec {
-            topology: fixtures.topology(),
+            genesis: fixtures.genesis_topology(),
             hosts,
             beacon_chain_config: BeaconChainConfig {
                 epoch_duration_ms: epoch_ms,

@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use crossbeam::channel::{Receiver, Sender, unbounded};
-use hyperscale_beacon::genesis::{GenesisChainInputs, build_genesis_chain};
+use hyperscale_beacon::genesis::{GenesisBoot, build_genesis};
 use hyperscale_core::{ParticipationChange, ProtocolEvent, TimerId};
 use hyperscale_dispatch_sync::SyncDispatch;
 use hyperscale_engine::{GenesisConfig, RadixExecutor, TransactionValidation};
@@ -30,9 +30,9 @@ use hyperscale_storage::{BeaconStorage, RecoveredState, ShardChainReader};
 use hyperscale_storage_memory::{SimBeaconStorage, SimShardStorage};
 use hyperscale_types::{
     BeaconChainConfig, BlockHeight, Bls12381G1PrivateKey, Bls12381G1PublicKey, CertifiedBlock,
-    ChainOrigin, GenesisConfigHash, GenesisValidator, LocalTimestamp, ShardId, StakePoolId,
-    TopologySnapshot, TransactionStatus, TxHash, ValidatorId, ValidatorInfo, ValidatorSet,
-    Verified, bls_keypair_from_seed, shard_prefix_path,
+    ChainOrigin, GenesisConfigHash, GenesisTopology, LocalTimestamp, ShardId, TopologySnapshot,
+    TransactionStatus, TxHash, ValidatorId, ValidatorInfo, ValidatorSet, Verified,
+    bls_keypair_from_seed, shard_prefix_path,
 };
 use radix_common::math::Decimal;
 use radix_common::network::NetworkDefinition;
@@ -331,53 +331,28 @@ impl SimulationRunner {
         let root_committee: Vec<ValidatorId> = (0..committee_size)
             .map(|i| ValidatorId::new(u64::from(i)))
             .collect();
-        let shard_committees: HashMap<ShardId, Vec<ValidatorId>> =
-            std::iter::once((ShardId::ROOT, root_committee)).collect();
-
-        // Identity-agnostic snapshot — one allocation shared across every
-        // host and every vnode. Only the ROOT committee is seated; pool extras
-        // are absent from every shard, so they project as `Pooled`.
-        let shared_topology = Arc::new(TopologySnapshot::with_shard_committees(
+        let genesis_topology = GenesisTopology::single_shard(
             NetworkDefinition::simulator(),
-            1,
-            &global_validator_set,
-            shard_committees.clone(),
-        ));
+            global_validator_set,
+            root_committee,
+        );
+        let chain_config = network_config.beacon_chain_config.unwrap_or_default();
 
-        // Beacon genesis: one config + derived (block, state) reused
-        // across every host's per-vnode `BeaconCoordinator`. All
-        // validators land in a single pool; the first
-        // `chain_config.beacon_committee_size` form the beacon committee.
-        let (beacon_genesis_block, beacon_genesis_state, beacon_config_hash, beacon_network) = {
-            let network = NetworkDefinition::simulator();
-            let pool_id = StakePoolId::new(0);
-            let initial_validators: Vec<GenesisValidator> = (0..registered_validators)
-                .map(|i| GenesisValidator {
-                    id: ValidatorId::new(u64::from(i)),
-                    pool: pool_id,
-                    pubkey: public_keys[i as usize],
-                })
-                .collect();
-            let chain_config = network_config.beacon_chain_config.unwrap_or_default();
-            // The sim's surplus pool extras are registered but excluded from
-            // the genesis beacon committee; cap at the committee validators.
-            let beacon_committee_size =
-                u64::from(committee_size.min(chain_config.beacon_committee_size));
-            let beacon_committee: Vec<ValidatorId> =
-                (0..beacon_committee_size).map(ValidatorId::new).collect();
-            let initial_shard_committees: BTreeMap<ShardId, Vec<ValidatorId>> = shard_committees
-                .iter()
-                .map(|(s, v)| (*s, v.clone()))
-                .collect();
-            let chain = build_genesis_chain(GenesisChainInputs {
-                chain_config,
-                validators: initial_validators,
-                beacon_committee,
-                shard_committees: initial_shard_committees,
-                network: &network,
-            });
-            (chain.block, chain.state, chain.config_hash, network)
-        };
+        // Build the genesis beacon chain once, reused across every host's
+        // per-vnode `BeaconCoordinator`, and project the shared topology from
+        // its folded state — one allocation shared across every host and
+        // vnode. Pool extras are absent from every committee, so they project
+        // as `Pooled`; the seated ROOT validators, capped at the beacon
+        // committee size, form the genesis beacon committee.
+        let beacon_network = genesis_topology.network.clone();
+        let GenesisBoot {
+            chain: genesis_chain,
+            topology: projected_topology,
+        } = build_genesis(&genesis_topology, chain_config);
+        let beacon_genesis_block = genesis_chain.block;
+        let beacon_genesis_state = genesis_chain.state;
+        let beacon_config_hash = genesis_chain.config_hash;
+        let shared_topology = Arc::new(projected_topology);
 
         // Build the host→validators layout based on the hosting mode.
         // Each host carries a list of (validator_idx, shard) tuples.

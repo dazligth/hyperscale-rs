@@ -2,6 +2,8 @@
 //!
 //! - [`awaiting`]: [`AwaitingTopologyBuffer`] parking artifacts whose committee
 //!   epoch the beacon hasn't reached.
+//! - [`genesis`]: [`genesis::GenesisTopology`], the validator placement a
+//!   runner projects its initial snapshot from.
 //! - [`schedule`]: per-epoch [`TopologySchedule`] resolving committees by
 //!   weighted timestamp.
 //! - [`settled_set`]: the split-boundary settled-set predicate shared by
@@ -12,6 +14,7 @@
 //! - [`validator`]: [`ValidatorInfo`] / [`ValidatorSet`].
 
 pub mod awaiting;
+pub mod genesis;
 pub mod schedule;
 pub mod settled_set;
 pub mod shard_prefix;
