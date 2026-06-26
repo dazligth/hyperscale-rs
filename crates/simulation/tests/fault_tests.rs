@@ -517,17 +517,11 @@ fn cross_shard_exec_cert_fetch_fallback_when_broadcast_dropped() {
 /// Compound fault: drop *both* `provisions.broadcast` and
 /// `execution.cert.batch` simultaneously. Both fetch protocols must
 /// engage independently — they're gated on different timeouts and
-/// different fetch instances; this proves they compose without
-/// deadlock when both primary cross-shard channels fail at once.
-///
-/// Ignored: with the network layer modeling realistic retry/backoff latency,
-/// recovering *both* cross-shard channels by fetch races `WAVE_TIMEOUT`, and on
-/// some seeds the wave deterministically times out and aborts the tx before
-/// both arrive. That is a legitimate outcome of the recovery budget exceeding
-/// the wave deadline, not a fallback-path defect — re-enabling it needs the
-/// recovery-vs-`WAVE_TIMEOUT` budget reconciled (faster fetch recovery or a
-/// longer wave deadline), not a test tweak.
-#[ignore = "compound-fault recovery races WAVE_TIMEOUT under realistic fetch latency; needs a timeout-budget fix"]
+/// different fetch instances — and the combined recovery (remote-header
+/// sync, then the provision and exec-cert fetches) must complete within
+/// `WAVE_TIMEOUT` so the wave finalizes rather than aborting. Proves the
+/// two channels compose without deadlock when both primary cross-shard
+/// channels fail at once.
 #[test]
 fn cross_shard_compound_provisions_and_exec_cert_fetch_fallback() {
     run_cross_shard_fault_scenario(
