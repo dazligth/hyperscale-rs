@@ -518,8 +518,13 @@ impl SimulationRunner {
         }
     }
 
-    /// Whether the topology holds at least `target` leaves and each commits
-    /// past its child genesis on some host.
+    /// Whether the topology holds at least `target` leaves and each is fully
+    /// formed: every committee member seated and committing past its child
+    /// genesis. Waiting for the whole committee — not just a quorum on some
+    /// host — keeps a post-grow workload from racing a straggler that seats
+    /// after the transaction lands and so never carries it to a terminal
+    /// outcome; the pump only advances duties while `grow_to` drives it, so a
+    /// member left unseated at return never catches up.
     fn grown_to(&self, target: u64) -> bool {
         let Some(topology) = self.host_topology(0) else {
             return false;
@@ -527,10 +532,19 @@ impl SimulationRunner {
         let leaves: Vec<ShardId> = topology.shard_trie().leaves().collect();
         leaves.len() as u64 >= target
             && leaves.iter().all(|&leaf| {
-                (0..self.num_hosts()).any(|node| {
+                let past_genesis = (0..self.num_hosts()).any(|node| {
                     self.hosts_shard(node, leaf)
                         .is_some_and(|storage| storage.committed_height() > BlockHeight::GENESIS)
-                })
+                });
+                let seated: Vec<ValidatorId> = self
+                    .shard_vnodes(leaf)
+                    .iter()
+                    .map(|vnode| vnode.validator_id())
+                    .collect();
+                let committee = topology.committee_for_shard(leaf);
+                past_genesis
+                    && !committee.is_empty()
+                    && committee.iter().all(|member| seated.contains(member))
             })
     }
 }
