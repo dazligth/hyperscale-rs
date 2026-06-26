@@ -12,13 +12,13 @@ use std::time::Duration;
 
 use hyperscale_network_memory::NodeIndex;
 use hyperscale_node::shard::{HostEvent, ProcessScopedInput};
-use hyperscale_scenarios::tx::{merge_vote_payer, straddler_genesis_balances};
-use hyperscale_scenarios::{Budget, Cluster, ScenarioConfig};
+use hyperscale_scenarios::tx::straddler_genesis_balances;
+use hyperscale_scenarios::{Budget, Cluster, ScenarioConfig, grow_to};
 use hyperscale_simulation::{EPOCH_MS, SimConfig, SimulationRunner};
 use hyperscale_storage::{ShardChainReader, SubstateStore};
 use hyperscale_types::{
-    BeaconChainConfig, BeaconState, BlockHeight, Epoch, ReshapeThresholds, RoutableTransaction,
-    ShardId, StateRoot, TransactionDecision, TransactionStatus, TxHash, ValidatorId,
+    BeaconChainConfig, BeaconState, BlockHeight, ReshapeThresholds, RoutableTransaction, ShardId,
+    StateRoot, TransactionDecision, TransactionStatus, TxHash, ValidatorId,
 };
 use radix_common::math::Decimal;
 use radix_common::types::ComponentAddress;
@@ -77,23 +77,16 @@ impl SimCluster {
         Self { runner }
     }
 
-    /// Build a cluster pre-grown to `config.num_shards` with `config.split_bytes`
-    /// as the live reshape threshold — the simulation's stand-in for a multi-shard
-    /// genesis the production harness seats directly.
-    ///
-    /// The simulation harness always genesis as a single root shard, so a
-    /// scenario that needs a deeper partition reaches it through the real split
-    /// lifecycle. This grows the root to `config.num_shards` under an armed
-    /// `split_bytes = 0`, then votes the threshold up to `config.split_bytes` so
-    /// the grown topology stabilizes and any leaf the scenario wants to merge
-    /// falls under the derived merge threshold. The returned cluster sits at the
-    /// same depth-2, threshold-active starting point production reaches at
-    /// genesis, so the scenario body is identical on both harnesses.
+    /// Build a cluster grown to `config.num_shards` with `config.split_bytes` as
+    /// the live reshape threshold. Genesis is always a single ROOT shard, so a
+    /// scenario that needs a deeper partition reaches it the only way the network
+    /// does — by splitting into it, here via [`grow_to`]. Production grows to the
+    /// same starting point the same way, so the scenario body is identical on
+    /// both harnesses.
     ///
     /// # Panics
     ///
-    /// Panics if the grow misses its budget (see [`SimulationRunner::grow_to`])
-    /// or the threshold vote does not activate within budget.
+    /// Panics if the grow or the threshold activation misses its budget.
     #[allow(dead_code)] // only the merge-straddler binary pre-grows; others fund a flat genesis
     #[must_use]
     pub fn with_grown_balances(
@@ -101,44 +94,17 @@ impl SimCluster {
         seed: u64,
         balances: &[(ComponentAddress, Decimal)],
     ) -> Self {
-        // Epochs of lead before the threshold vote activates, and the budget for
-        // its activation to fold — enough for the vote to commit and tally.
-        const VOTE_LEAD: u64 = 4;
-        const ACTIVATION_BUDGET: u32 = 12;
-
         let grow_config = ScenarioConfig {
             num_shards: 1,
             split_bytes: 0,
             ..*config
         };
         let mut cluster = Self::with_balances(&grow_config, seed, balances);
-
-        // Grow the root to the target partition through the real split
-        // lifecycle, then vote the threshold up so the grown leaves stabilize.
-        cluster
-            .runner
-            .grow_to(u32::try_from(config.num_shards).unwrap_or(u32::MAX));
-        let current = cluster
-            .beacon_state()
-            .map(|state| state.current_epoch)
-            .expect("the grow committed a beacon epoch");
-        let activate_at = Epoch::new(current.inner() + VOTE_LEAD);
-        cluster.runner.vote_reshape_thresholds(
-            &merge_vote_payer(),
-            1,
+        grow_to(
+            &mut cluster,
+            u32::try_from(config.num_shards).unwrap_or(u32::MAX),
             config.split_bytes,
-            activate_at,
         );
-        let deadline = cluster.runner.now() + Self::span(Budget(ACTIVATION_BUDGET));
-        while cluster.runner.now() < deadline
-            && cluster.beacon_state().is_none_or(|state| {
-                state.params.reshape_thresholds.split_bytes != config.split_bytes
-            })
-        {
-            let next = cluster.runner.now() + SLICE;
-            cluster.runner.run_until(next);
-        }
-
         cluster
     }
 

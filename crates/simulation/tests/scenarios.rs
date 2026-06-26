@@ -108,9 +108,8 @@ fn split_straddler_atomic_sim() {
 /// the genesis byte skew: the survivor pair (`leaf(2,0)`/`leaf(2,1)`, the latter
 /// bulk-funded) sits above it, the light merging pair (`leaf(2,2)`/`leaf(2,3)`)
 /// below it, so only the merging pair auto-merges into `leaf(1,1)`. Three cohorts
-/// of pool surplus staff the two split generations the simulation grows through
-/// to reach the partition production seats at genesis; the merge keepers then
-/// come from the merging children's own committees.
+/// of pool surplus staff the two split generations the grow walks through; the
+/// merge keepers then come from the merging children's own committees.
 const fn merge_straddler_config() -> ScenarioConfig {
     ScenarioConfig {
         validators_per_shard: 4,

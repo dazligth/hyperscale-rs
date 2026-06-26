@@ -30,7 +30,7 @@ use hyperscale_storage::{BeaconStorage, RecoveredState, ShardChainReader};
 use hyperscale_storage_memory::{SimBeaconStorage, SimShardStorage};
 use hyperscale_types::{
     BeaconChainConfig, BlockHeight, Bls12381G1PrivateKey, Bls12381G1PublicKey, CertifiedBlock,
-    ChainOrigin, GenesisConfigHash, GenesisTopology, LocalTimestamp, ShardId, TopologySnapshot,
+    ChainOrigin, GenesisConfigHash, GenesisValidators, LocalTimestamp, ShardId, TopologySnapshot,
     TransactionStatus, TxHash, ValidatorId, ValidatorInfo, ValidatorSet, Verified,
     bls_keypair_from_seed, shard_prefix_path,
 };
@@ -331,7 +331,7 @@ impl SimulationRunner {
         let root_committee: Vec<ValidatorId> = (0..committee_size)
             .map(|i| ValidatorId::new(u64::from(i)))
             .collect();
-        let genesis_topology = GenesisTopology::single_shard(
+        let genesis_validators = GenesisValidators::new(
             NetworkDefinition::simulator(),
             global_validator_set,
             root_committee,
@@ -344,11 +344,11 @@ impl SimulationRunner {
         // vnode. Pool extras are absent from every committee, so they project
         // as `Pooled`; the seated ROOT validators, capped at the beacon
         // committee size, form the genesis beacon committee.
-        let beacon_network = genesis_topology.network.clone();
+        let beacon_network = genesis_validators.network.clone();
         let GenesisBoot {
             chain: genesis_chain,
             topology: projected_topology,
-        } = build_genesis(&genesis_topology, chain_config);
+        } = build_genesis(&genesis_validators, chain_config);
         let beacon_genesis_block = genesis_chain.block;
         let beacon_genesis_state = genesis_chain.state;
         let beacon_config_hash = genesis_chain.config_hash;

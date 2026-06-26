@@ -6,13 +6,12 @@
 //! identities. Gated behind the `fixtures` feature, which pulls the libp2p and
 //! network dependencies the Ed25519 identities and validator key map need.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use hyperscale_network::ValidatorKeyMap;
 use hyperscale_types::{
-    Bls12381G1PrivateKey, Bls12381G1PublicKey, GenesisTopology, NetworkDefinition, ShardId,
-    ValidatorId, ValidatorInfo, ValidatorSet, bls_keypair_from_seed,
+    Bls12381G1PrivateKey, Bls12381G1PublicKey, GenesisValidators, NetworkDefinition, ValidatorId,
+    ValidatorInfo, ValidatorSet, bls_keypair_from_seed,
 };
 use libp2p::PeerId;
 use libp2p::identity::Keypair;
@@ -61,62 +60,31 @@ pub struct TestFixtures {
     /// Ed25519 keypairs for libp2p (one per validator).
     pub ed25519_keys: Vec<Keypair>,
 
-    /// Genesis validator placement a runner projects its initial topology
-    /// snapshot from.
-    genesis: GenesisTopology,
+    /// The genesis validators a runner projects its initial topology snapshot
+    /// from.
+    genesis: GenesisValidators,
 
-    /// Number of validators.
+    /// Number of validators (ROOT committee plus pooled surplus).
     pub num_validators: u32,
-
-    /// Number of shards.
-    pub num_shards: u64,
-
-    /// Validators per shard.
-    pub validators_per_shard: u32,
-
-    /// Validators registered in the global set (and beacon genesis pool)
-    /// beyond the seated committees — the production analog of the sim's
-    /// `pool_extra_validators`. A split's child cohort is drawn from this
-    /// surplus, so the reshape suite needs it; it is zero for the
-    /// committee-only fixtures.
-    pub pool_surplus: u32,
 }
 
 impl TestFixtures {
-    /// Create deterministic test fixtures from a seed.
-    ///
-    /// Derives both BLS and Ed25519 keys from seed for consistency.
-    /// All validators are placed in a single shard.
+    /// Deterministic fixtures seating every validator in the single genesis
+    /// ROOT committee. Derives both BLS and Ed25519 keys from `seed`.
     #[must_use]
     pub fn new(seed: u64, num_validators: u32) -> Self {
-        Self::with_shards(seed, num_validators, 1)
+        Self::with_surplus(seed, num_validators, 0)
     }
 
-    /// Create test fixtures with multiple shards (no pool surplus).
+    /// Deterministic fixtures seating `committee_size` validators in the genesis
+    /// ROOT committee, plus `surplus` validators registered in the global set
+    /// (and the beacon genesis pool) but seated nowhere — the production analog
+    /// of the sim's `pool_extra_validators`, the pool a reshape draws a child
+    /// cohort from. Validator ids `[0, committee_size)` seat the root; ids
+    /// `[committee_size, committee_size + surplus)` are the surplus.
     #[must_use]
-    pub fn with_shards(seed: u64, validators_per_shard: u32, num_shards: u64) -> Self {
-        Self::with_shards_and_surplus(seed, validators_per_shard, num_shards, 0)
-    }
-
-    /// Create test fixtures with multiple shards plus `pool_surplus`
-    /// validators registered in the global set and beacon genesis pool but
-    /// seated in no committee. Validator ids `[0, seated)` fill the shard
-    /// committees (`validators_per_shard` consecutive ids per shard); ids
-    /// `[seated, seated + pool_surplus)` are the surplus a reshape draws on.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `num_shards` exceeds `u32::MAX`.
-    #[must_use]
-    pub fn with_shards_and_surplus(
-        seed: u64,
-        validators_per_shard: u32,
-        num_shards: u64,
-        pool_surplus: u32,
-    ) -> Self {
-        let seated = validators_per_shard
-            * u32::try_from(num_shards).expect("num_shards fits in u32 for tests");
-        let num_validators = seated + pool_surplus;
+    pub fn with_surplus(seed: u64, committee_size: u32, surplus: u32) -> Self {
+        let num_validators = committee_size + surplus;
 
         let (bls_keys, ed25519_keys) = derive_keypairs(seed, num_validators);
 
@@ -125,103 +93,32 @@ impl TestFixtures {
             .map(Bls12381G1PrivateKey::public_key)
             .collect();
 
-        // Build global validator set
-        let global_validators: Vec<ValidatorInfo> = (0..num_validators)
+        let validators: Vec<ValidatorInfo> = (0..num_validators)
             .map(|i| ValidatorInfo {
                 validator_id: ValidatorId::new(u64::from(i)),
                 public_key: public_keys[i as usize],
             })
             .collect();
-        let global_validator_set = ValidatorSet::new(global_validators);
+        let validator_set = ValidatorSet::new(validators);
 
-        // Build per-shard committee mappings
-        let mut shard_committees: BTreeMap<ShardId, Vec<ValidatorId>> = BTreeMap::new();
-        let shard_depth = num_shards.trailing_zeros();
-        for shard_id in 0..num_shards {
-            let shard = ShardId::leaf(shard_depth, shard_id);
-            let shard_start = u32::try_from(shard_id).expect("shard_id fits in u32 for tests")
-                * validators_per_shard;
-            let shard_end = shard_start + validators_per_shard;
-            let committee: Vec<ValidatorId> = (shard_start..shard_end)
-                .map(|i| ValidatorId::new(u64::from(i)))
-                .collect();
-            shard_committees.insert(shard, committee);
-        }
-
-        let genesis = GenesisTopology {
-            network: NetworkDefinition::simulator(),
-            global_validator_set,
-            shard_committees,
-        };
+        let committee: Vec<ValidatorId> = (0..committee_size)
+            .map(|i| ValidatorId::new(u64::from(i)))
+            .collect();
+        let genesis =
+            GenesisValidators::new(NetworkDefinition::simulator(), validator_set, committee);
 
         Self {
             bls_keys,
             ed25519_keys,
             genesis,
             num_validators,
-            num_shards,
-            validators_per_shard,
-            pool_surplus,
         }
     }
 
-    /// Create fixtures over an arbitrary, possibly non-uniform shard
-    /// partition: the live shards are exactly the keys of `committees`, each
-    /// mapped to its committee. Validator ids index the generated keypairs,
-    /// so the highest id across all committees sets the validator count. Used
-    /// to seat a survivor at one trie depth and a merging pair at another —
-    /// the partition a uniform `with_shards` cannot express — so a reshape
-    /// scenario runs on fewer shards (and so fewer pinned consensus threads)
-    /// than the uniform leaf count would force.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `committees` is empty or a validator id exceeds `u32::MAX`.
+    /// Get the genesis validators a runner projects its initial topology
+    /// snapshot from.
     #[must_use]
-    pub fn with_explicit_shards(seed: u64, committees: Vec<(ShardId, Vec<ValidatorId>)>) -> Self {
-        let num_validators = committees
-            .iter()
-            .flat_map(|(_, ids)| ids)
-            .map(|id| u32::try_from(id.inner()).expect("validator id fits in u32") + 1)
-            .max()
-            .expect("at least one committee member");
-
-        let (bls_keys, ed25519_keys) = derive_keypairs(seed, num_validators);
-        let public_keys: Vec<Bls12381G1PublicKey> = bls_keys
-            .iter()
-            .map(Bls12381G1PrivateKey::public_key)
-            .collect();
-        let global_validators: Vec<ValidatorInfo> = (0..num_validators)
-            .map(|i| ValidatorInfo {
-                validator_id: ValidatorId::new(u64::from(i)),
-                public_key: public_keys[i as usize],
-            })
-            .collect();
-        let global_validator_set = ValidatorSet::new(global_validators);
-
-        let shard_committees: BTreeMap<ShardId, Vec<ValidatorId>> =
-            committees.into_iter().collect();
-        let genesis = GenesisTopology {
-            network: NetworkDefinition::simulator(),
-            global_validator_set,
-            shard_committees,
-        };
-
-        Self {
-            bls_keys,
-            ed25519_keys,
-            genesis,
-            num_validators,
-            num_shards: 0,
-            validators_per_shard: 0,
-            pool_surplus: 0,
-        }
-    }
-
-    /// Get the genesis validator placement a runner projects its initial
-    /// topology snapshot from.
-    #[must_use]
-    pub fn genesis_topology(&self) -> GenesisTopology {
+    pub fn genesis_validators(&self) -> GenesisValidators {
         self.genesis.clone()
     }
 
@@ -230,7 +127,7 @@ impl TestFixtures {
     pub fn validator_key_map(&self) -> Arc<ValidatorKeyMap> {
         Arc::new(
             self.genesis
-                .global_validator_set
+                .validators
                 .validators
                 .iter()
                 .map(|v| (v.validator_id, v.public_key))
@@ -261,19 +158,6 @@ impl TestFixtures {
         PeerId::from(self.ed25519_keys[index as usize].public())
     }
 
-    /// Get validators in a shard.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the shard path exceeds `u32::MAX`.
-    #[must_use]
-    pub fn validators_in_shard(&self, shard: ShardId) -> Vec<u32> {
-        let start = u32::try_from(shard.path()).expect("shard fits in u32 for tests")
-            * self.validators_per_shard;
-        let end = start + self.validators_per_shard;
-        (start..end).collect()
-    }
-
     /// Alias of [`Self::signing_key`] reserved for bind-test call sites.
     #[must_use]
     pub fn bind_signing_key(&self, index: u32) -> Arc<Bls12381G1PrivateKey> {
@@ -290,8 +174,6 @@ mod tests {
         let fixtures = TestFixtures::new(42, 4);
 
         assert_eq!(fixtures.num_validators, 4);
-        assert_eq!(fixtures.num_shards, 1);
-        assert_eq!(fixtures.validators_per_shard, 4);
         assert_eq!(fixtures.bls_keys.len(), 4);
         assert_eq!(fixtures.ed25519_keys.len(), 4);
     }
@@ -316,59 +198,41 @@ mod tests {
     }
 
     #[test]
-    fn test_fixtures_multi_shard() {
-        let fixtures = TestFixtures::with_shards(42, 3, 2);
-
-        assert_eq!(fixtures.num_validators, 6);
-        assert_eq!(fixtures.num_shards, 2);
-        assert_eq!(fixtures.validators_per_shard, 3);
-
-        // Check shard assignments
-        let shard0_validators = fixtures.validators_in_shard(ShardId::leaf(1, 0));
-        assert_eq!(shard0_validators, vec![0, 1, 2]);
-
-        let shard1_validators = fixtures.validators_in_shard(ShardId::leaf(1, 1));
-        assert_eq!(shard1_validators, vec![3, 4, 5]);
-    }
-
-    #[test]
-    fn test_topology_lookup() {
+    fn test_genesis_seats_every_validator() {
         let fixtures = TestFixtures::new(42, 4);
 
-        let genesis = fixtures.genesis_topology();
-        assert!(genesis.shard_committees[&ShardId::ROOT].contains(&ValidatorId::new(0)));
-        assert_eq!(genesis.num_shards(), 1);
+        let genesis = fixtures.genesis_validators();
+        assert_eq!(genesis.committee.len(), 4);
+        assert!(genesis.committee.contains(&ValidatorId::new(0)));
     }
 
     #[test]
     fn test_fixtures_pool_surplus() {
-        // 4 seated in one shard, 2 surplus registered but in no committee.
-        let fixtures = TestFixtures::with_shards_and_surplus(42, 4, 1, 2);
+        // 4 seated in the root committee, 2 surplus registered but seated nowhere.
+        let fixtures = TestFixtures::with_surplus(42, 4, 2);
 
         assert_eq!(fixtures.num_validators, 6);
-        assert_eq!(fixtures.pool_surplus, 2);
         assert_eq!(fixtures.bls_keys.len(), 6);
 
-        let genesis = fixtures.genesis_topology();
-        let committee = &genesis.shard_committees[&ShardId::ROOT];
+        let genesis = fixtures.genesis_validators();
         assert_eq!(
-            committee.len(),
+            genesis.committee.len(),
             4,
             "only the seated validators form the committee"
         );
         // Surplus ids 4 and 5 are in the global set but not the committee.
         assert!(
             genesis
-                .global_validator_set
+                .validators
                 .validators
                 .iter()
                 .any(|v| v.validator_id == ValidatorId::new(5)),
             "surplus validator is registered globally"
         );
         assert!(
-            !committee.contains(&ValidatorId::new(4)),
+            !genesis.committee.contains(&ValidatorId::new(4)),
             "surplus validator is seated in no committee"
         );
-        assert!(!committee.contains(&ValidatorId::new(5)));
+        assert!(!genesis.committee.contains(&ValidatorId::new(5)));
     }
 }

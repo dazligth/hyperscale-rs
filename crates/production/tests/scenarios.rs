@@ -168,13 +168,13 @@ fn split_straddler_atomic_prod() {
     cluster.shutdown();
 }
 
-/// Four-shard genesis whose `split_bytes` derives a `merge_bytes` bracketing the
-/// genesis byte skew: the survivor pair (`leaf(2,0)`/`leaf(2,1)`, the latter
+/// Four-shard topology whose `split_bytes` derives a `merge_bytes` bracketing
+/// the genesis byte skew: the survivor pair (`leaf(2,0)`/`leaf(2,1)`, the latter
 /// bulk-funded) over it, the light merging pair (`leaf(2,2)`/`leaf(2,3)`) under
 /// it, so only the merging pair auto-merges into `leaf(1,1)`. One validator per
-/// host (each reshape seat its own store), three cohorts of pool surplus to keep
-/// sizing parity with the simulation's grow, a paced inter-host latency so the
-/// loadless committees track wall-clock through the merge.
+/// host (each reshape seat its own store), three cohorts of pool surplus to
+/// staff the two split generations the grow walks through, a paced inter-host
+/// latency so the loadless committees track wall-clock through the merge.
 const fn merge_straddler_config() -> ScenarioConfig {
     ScenarioConfig {
         validators_per_shard: 4,
@@ -197,7 +197,7 @@ fn merge_straddler_atomic_prod() {
     let _ = fmt().with_test_writer().try_init();
     let setup = merge_straddler_setup();
     let mut cluster =
-        ProdCluster::start_with_balances(&merge_straddler_config(), 11, EPOCH_MS, setup.balances);
+        ProdCluster::with_grown_balances(&merge_straddler_config(), 11, EPOCH_MS, setup.balances);
     merge_straddler_atomic(&mut cluster);
     cluster.shutdown();
 }

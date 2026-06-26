@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use hyperscale_engine::GenesisConfig;
 use hyperscale_production::LocalValidator;
 use hyperscale_scenarios::tx::straddler_genesis_balances;
-use hyperscale_scenarios::{Budget, Cluster, ScenarioConfig};
+use hyperscale_scenarios::{Budget, Cluster, ScenarioConfig, grow_to};
 use hyperscale_test_helpers::fixtures::TestFixtures;
 use hyperscale_types::{
     BeaconChainConfig, BeaconState, BlockHeight, ReshapeThresholds, RoutableTransaction, ShardId,
@@ -75,31 +75,54 @@ impl ProdCluster {
         }
     }
 
+    /// Build a cluster grown to `config.num_shards` with `config.split_bytes` as
+    /// the live reshape threshold. Genesis is always a single ROOT shard, so a
+    /// scenario that needs a deeper partition reaches it the only way the network
+    /// does — by splitting into it, here via [`grow_to`]. The mirror of
+    /// `SimCluster::with_grown_balances`, so a scenario starts identically on both
+    /// harnesses.
+    #[must_use]
+    pub fn with_grown_balances(
+        config: &ScenarioConfig,
+        seed: u64,
+        epoch_ms: u64,
+        balances: Vec<(ComponentAddress, Decimal)>,
+    ) -> Self {
+        let grow_config = ScenarioConfig {
+            num_shards: 1,
+            split_bytes: 0,
+            ..*config
+        };
+        let mut cluster = Self::start_with_balances(&grow_config, seed, epoch_ms, balances);
+        grow_to(
+            &mut cluster,
+            u32::try_from(config.num_shards).unwrap_or(u32::MAX),
+            config.split_bytes,
+        );
+        cluster
+    }
+
     /// Drive the cluster to a clean shutdown, joining every host's runner task.
     pub fn shutdown(self) {
         let Self { runtime, inner, .. } = self;
         runtime.block_on(inner.shutdown());
     }
 
-    /// Translate the portable config into a production `ClusterSpec`: a genesis
-    /// committee of `validators_per_shard * num_shards` plus `pool_surplus`
-    /// followers (the reshape cohort), grouped one per host when
-    /// `dedicated_hosts` (the reshape flip needs each seat on its own store) or
-    /// `vnodes_per_host` per host otherwise.
+    /// Translate the portable config into a production `ClusterSpec`. Genesis is
+    /// always a single ROOT shard (a deeper partition is reached by growing): the
+    /// committee is `validators_per_shard` validators plus `pool_surplus`
+    /// followers (the reshape cohort), grouped one per host when `dedicated_hosts`
+    /// (the reshape flip needs each seat on its own store) or `vnodes_per_host`
+    /// per host otherwise.
     fn spec(
         config: &ScenarioConfig,
         seed: u64,
         epoch_ms: u64,
         balances: Vec<(ComponentAddress, Decimal)>,
     ) -> ClusterSpec {
-        let fixtures = TestFixtures::with_shards_and_surplus(
-            seed,
-            config.validators_per_shard,
-            config.num_shards,
-            config.pool_surplus,
-        );
-        let total = config.validators_per_shard * u32::try_from(config.num_shards).unwrap_or(1)
-            + config.pool_surplus;
+        let fixtures =
+            TestFixtures::with_surplus(seed, config.validators_per_shard, config.pool_surplus);
+        let total = config.validators_per_shard + config.pool_surplus;
         let validators: Vec<LocalValidator> = (0..total)
             .map(|i| LocalValidator {
                 validator_id: ValidatorId::new(u64::from(i)),
@@ -116,7 +139,7 @@ impl ProdCluster {
             .map(|chunk| HostSpec::new(chunk.to_vec()))
             .collect();
         ClusterSpec {
-            genesis: fixtures.genesis_topology(),
+            genesis: fixtures.genesis_validators(),
             hosts,
             beacon_chain_config: BeaconChainConfig {
                 epoch_duration_ms: epoch_ms,

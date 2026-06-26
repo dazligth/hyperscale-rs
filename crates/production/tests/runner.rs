@@ -47,7 +47,7 @@ async fn test_production_runner_with_network() {
             validator_id: ValidatorId::new(0),
             signing_key: fixtures.signing_key(0),
         }],
-        fixtures.genesis_topology(),
+        fixtures.genesis_validators(),
         ShardConsensusConfig::default(),
         beacon_storage,
         network_config,
@@ -105,7 +105,7 @@ async fn test_graceful_shutdown() {
             validator_id: ValidatorId::new(0),
             signing_key: fixtures.signing_key(0),
         }],
-        fixtures.genesis_topology(),
+        fixtures.genesis_validators(),
         ShardConsensusConfig::default(),
         beacon_storage,
         network_config,
@@ -139,19 +139,17 @@ async fn test_graceful_shutdown() {
     info!("Graceful shutdown test completed");
 }
 
-/// Runtime shard membership through the supervisor: a runner hosting
-/// shard 0 joins shard 1 mid-run — storage opened via the factory,
-/// pinned thread spawned, network subscriptions live — then leaves it
-/// — thread joined, subscriptions torn down — and finally shuts down
-/// cleanly with only shard 0 running.
+/// Runtime shard teardown through the supervisor: a runner seated on the root
+/// shard leaves it mid-run — the departing vnode's pinned thread is joined and
+/// its network subscriptions torn down — then shuts down cleanly hosting no
+/// shard. The startup/join half is covered by
+/// [`pooled_validator_boots_as_follower_only_host`].
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
-async fn test_runtime_shard_join_and_leave() {
+async fn test_runtime_shard_leave_tears_down() {
     let _ = fmt().with_test_writer().try_init();
 
-    let fixtures = TestFixtures::with_shards(43, 1, 2);
-    let shard_a = ShardId::leaf(1, 0);
-    let shard_b = ShardId::leaf(1, 1);
+    let fixtures = TestFixtures::new(43, 1);
 
     let temp_dir = TempDir::new().unwrap();
     let network_config = Libp2pConfig {
@@ -162,14 +160,12 @@ async fn test_runtime_shard_join_and_leave() {
     let beacon_storage: Arc<dyn BeaconStorage> =
         Arc::new(RocksDbBeaconStorage::open(temp_dir.path().join("beacon_db")).unwrap());
 
-    let vnode_a = fixtures.validators_in_shard(shard_a)[0];
-    let vnode_b = fixtures.validators_in_shard(shard_b)[0];
     let mut runner = ProductionRunner::builder(
         vec![LocalValidator {
-            validator_id: ValidatorId::new(u64::from(vnode_a)),
-            signing_key: fixtures.signing_key(vnode_a),
+            validator_id: ValidatorId::new(0),
+            signing_key: fixtures.signing_key(0),
         }],
-        fixtures.genesis_topology(),
+        fixtures.genesis_validators(),
         ShardConsensusConfig::default(),
         beacon_storage,
         network_config,
@@ -186,49 +182,33 @@ async fn test_runtime_shard_join_and_leave() {
         .expect("Should have shutdown handle");
     let handle = spawn(runner.run());
     sleep(Duration::from_millis(200)).await;
-    assert!(adapter.local_shards().contains(&shard_a));
-    assert!(!adapter.local_shards().contains(&shard_b));
+    assert!(adapter.local_shards().contains(&ShardId::ROOT));
 
-    // Join shard B at runtime.
+    // Leave the root shard: the single vnode departing tears the shard down.
     reconfigure
-        .send(ShardCommand::Join {
-            shard: shard_b,
-            vnodes: vec![VnodeConfig {
-                validator_id: ValidatorId::new(u64::from(vnode_b)),
-                local_shard: shard_b,
-                signing_key: fixtures.signing_key(vnode_b),
-            }],
+        .send(ShardCommand::Leave {
+            shard: ShardId::ROOT,
         })
         .await
         .expect("supervisor accepts commands");
     timeout(CONNECTION_TIMEOUT, async {
-        while !adapter.local_shards().contains(&shard_b) {
-            sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .expect("joined shard becomes hosted on the adapter");
-
-    // Leave shard B: the single vnode departing tears the shard down.
-    reconfigure
-        .send(ShardCommand::Leave { shard: shard_b })
-        .await
-        .expect("supervisor accepts commands");
-    timeout(CONNECTION_TIMEOUT, async {
-        while adapter.local_shards().contains(&shard_b) {
+        while adapter.local_shards().contains(&ShardId::ROOT) {
             sleep(Duration::from_millis(50)).await;
         }
     })
     .await
     .expect("left shard is removed from the adapter");
-    assert!(adapter.local_shards().contains(&shard_a));
+    assert!(
+        adapter.local_shards().is_empty(),
+        "the host hosts no shard after leaving the root"
+    );
 
     drop(shutdown);
     let result = timeout(Duration::from_secs(5), handle).await;
-    assert!(result.is_ok(), "Runner should exit after join/leave cycle");
+    assert!(result.is_ok(), "Runner should exit after the leave");
     assert!(result.unwrap().is_ok(), "Runner should return Ok");
 
-    info!("Runtime shard join/leave test completed");
+    info!("Runtime shard leave/teardown test completed");
 }
 
 /// A validator the beacon genesis leaves `Pooled` — registered in the global
@@ -244,7 +224,7 @@ async fn pooled_validator_boots_as_follower_only_host() {
 
     // One seated validator (id 0 on ROOT) plus one pool surplus (id 1) that
     // the genesis committee never seats.
-    let fixtures = TestFixtures::with_shards_and_surplus(44, 1, 1, 1);
+    let fixtures = TestFixtures::with_surplus(44, 1, 1);
     let surplus = ValidatorId::new(1);
 
     let temp_dir = TempDir::new().unwrap();
@@ -261,7 +241,7 @@ async fn pooled_validator_boots_as_follower_only_host() {
             validator_id: surplus,
             signing_key: fixtures.signing_key(1),
         }],
-        fixtures.genesis_topology(),
+        fixtures.genesis_validators(),
         ShardConsensusConfig::default(),
         beacon_storage,
         network_config,

@@ -111,10 +111,12 @@ pub fn merge_vote_payer() -> Ed25519PrivateKey {
 
 /// The genesis funding and straddler transfers for the merge-straddler scenario.
 ///
-/// Mirrors [`SplitStraddlerSetup`] but on a four-shard genesis: the surviving
+/// Mirrors [`SplitStraddlerSetup`] but for a four-shard topology: the surviving
 /// quarter pair (`leaf(2, 0)`/`leaf(2, 1)`) is bulk-funded over `merge_bytes`,
 /// the merging pair (`leaf(2, 2)`/`leaf(2, 3)`) is left under it, and the
-/// straddlers run from the survivor into the merging left child.
+/// straddlers run from the survivor into the merging left child. The funding is
+/// installed at the single-shard genesis and partitions across the quarters as
+/// the cluster grows.
 pub struct MergeStraddlerSetup {
     /// Genesis XRD balances: survivor-pair bulk plus straddler payers in the
     /// survivor, straddler recipients in the merging left child.
@@ -228,9 +230,9 @@ pub fn split_straddler_setup() -> SplitStraddlerSetup {
 
 /// Build the merge-straddler genesis funding and straddler transfers.
 ///
-/// On a four-shard genesis the surviving quarters (`leaf(2, 0)`/`leaf(2, 1)`)
-/// are bulk-funded over the derived `merge_bytes` so neither auto-merges, while
-/// the lighter merging pair (`leaf(2, 2)`/`leaf(2, 3)`) stays under it and
+/// Across the four-shard topology the surviving quarters (`leaf(2, 0)`/`leaf(2,
+/// 1)`) are bulk-funded over the derived `merge_bytes` so neither auto-merges,
+/// while the lighter merging pair (`leaf(2, 2)`/`leaf(2, 3)`) stays under it and
 /// collapses into `leaf(1, 1)`. Straddler payers sit in the survivor
 /// `leaf(2, 0)` and recipients in the merging `leaf(2, 2)`, so each cross-shard
 /// wave names the shard that terminates at the merge.

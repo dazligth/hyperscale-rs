@@ -1,56 +1,43 @@
-//! Genesis validator placement a runner projects its initial
-//! [`TopologySnapshot`](super::snapshot::TopologySnapshot) from.
+//! The validators a runner projects its initial
+//! [`TopologySnapshot`](super::snapshot::TopologySnapshot) from at genesis.
 
-use std::collections::BTreeMap;
+use crate::{NetworkDefinition, ValidatorId, ValidatorSet};
 
-use crate::{NetworkDefinition, ShardId, ValidatorId, ValidatorSet};
-
-/// The genesis validator placement: the Radix network, the global validator
-/// set (every registered validator, seated or pooled), and the per-shard
-/// seated committees.
+/// The validators that exist at genesis: the Radix network, the full registered
+/// set (every validator, seated or pooled), and the genesis ROOT committee.
 ///
-/// A runner builds the genesis `BeaconState` from this and projects the
-/// `TopologySnapshot` from that state, so genesis follows the same
-/// `BeaconState → TopologySnapshot` direction the runtime `ArcSwap` update does.
-/// The topology is always derived, never supplied alongside a beacon state it
-/// has to be kept in agreement with.
+/// Genesis is always a single ROOT shard — the network launches at one shard and
+/// reaches a multi-shard partition only by splitting — so there is nothing to
+/// configure here beyond who exists and who seats the root. A runner builds the
+/// genesis `BeaconState` from this and projects the `TopologySnapshot` from that
+/// state, the same `BeaconState → TopologySnapshot` direction the runtime
+/// `ArcSwap` update follows; the topology is always derived, never supplied
+/// alongside a beacon state it has to be kept in agreement with.
 #[derive(Clone, Debug)]
-pub struct GenesisTopology {
+pub struct GenesisValidators {
     /// Radix network bound into the projected topology (the consensus-signature
     /// domain) and the genesis beacon config hash.
     pub network: NetworkDefinition,
-    /// Every registered validator at genesis — seated committee members and
-    /// the pooled surplus a later reshape draws its child cohort from.
-    pub global_validator_set: ValidatorSet,
-    /// Each genesis shard's seated committee. The keys are the genesis shard
-    /// partition.
-    pub shard_committees: BTreeMap<ShardId, Vec<ValidatorId>>,
+    /// Every registered validator at genesis — the ROOT committee plus the
+    /// pooled surplus a later reshape draws its child cohort from.
+    pub validators: ValidatorSet,
+    /// The genesis ROOT committee. Any registered validator absent from it
+    /// starts `Pooled`; pass every validator id to seat the whole set.
+    pub committee: Vec<ValidatorId>,
 }
 
-impl GenesisTopology {
-    /// Genesis with a single ROOT shard — the shape every real beacon genesis
-    /// takes. The network launches at one shard and reaches a multi-shard
-    /// partition only by splitting, so production never configures more than
-    /// the ROOT committee here.
-    ///
-    /// `seated` is the ROOT committee; any registered validator absent from it
-    /// starts `Pooled`. Pass every validator id to seat the whole set.
+impl GenesisValidators {
+    /// Genesis validators with `committee` seating the single ROOT shard.
     #[must_use]
-    pub fn single_shard(
+    pub const fn new(
         network: NetworkDefinition,
-        global_validator_set: ValidatorSet,
-        seated: Vec<ValidatorId>,
+        validators: ValidatorSet,
+        committee: Vec<ValidatorId>,
     ) -> Self {
         Self {
             network,
-            global_validator_set,
-            shard_committees: std::iter::once((ShardId::ROOT, seated)).collect(),
+            validators,
+            committee,
         }
-    }
-
-    /// Number of seated shards at genesis.
-    #[must_use]
-    pub fn num_shards(&self) -> u64 {
-        self.shard_committees.len() as u64
     }
 }

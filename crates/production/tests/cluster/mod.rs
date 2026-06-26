@@ -35,7 +35,7 @@ use hyperscale_shard::ShardConsensusConfig;
 use hyperscale_storage::{BeaconChainReader, BeaconStorage, ShardChainReader, SubstateStore};
 use hyperscale_storage_rocksdb::{RocksDbBeaconStorage, RocksDbShardStorage};
 use hyperscale_types::{
-    BeaconChainConfig, BeaconState, BlockHeight, Epoch, GenesisTopology, PendingReshape,
+    BeaconChainConfig, BeaconState, BlockHeight, Epoch, GenesisValidators, PendingReshape,
     RoutableTransaction, ShardId, StateRoot, TransactionDecision, TransactionStatus, TxHash,
     shard_prefix_path,
 };
@@ -114,8 +114,8 @@ impl HostSpec {
 
 /// Inputs for [`Cluster::start`].
 pub struct ClusterSpec {
-    /// Genesis validator placement each host projects its topology from.
-    pub genesis: GenesisTopology,
+    /// The genesis validators each host projects its topology from.
+    pub genesis: GenesisValidators,
     /// Per-host seating; host 0 is the bootstrap peer for the rest.
     pub hosts: Vec<HostSpec>,
     /// Beacon sizing knobs — small `epoch_duration_ms` for real-time
@@ -623,7 +623,7 @@ struct BuiltHost {
 
 struct BuildHostArgs<'a> {
     temp_dir: &'a TempDir,
-    genesis: &'a GenesisTopology,
+    genesis: &'a GenesisValidators,
     validators: Vec<LocalValidator>,
     beacon_chain_config: BeaconChainConfig,
     genesis_config: Option<GenesisConfig>,
@@ -640,7 +640,9 @@ fn build_host(args: BuildHostArgs<'_>) -> BuiltHost {
         RocksDbBeaconStorage::open(args.temp_dir.path().join("beacon_db")).expect("open beacon db"),
     );
     let rpc_status = Arc::new(ArcSwap::new(Arc::new(NodeStatusState {
-        num_shards: args.genesis.num_shards(),
+        // Genesis is always a single ROOT shard; the runner republishes the live
+        // count from the committed beacon state on its first status tick.
+        num_shards: 1,
         ..Default::default()
     })));
 

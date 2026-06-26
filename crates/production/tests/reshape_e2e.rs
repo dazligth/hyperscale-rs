@@ -63,7 +63,7 @@ async fn beacon_chain_config_reaches_genesis() {
     let beacon_reader: Arc<dyn BeaconStorage> = beacon_storage.clone();
     let runner = ProductionRunner::builder(
         vec![validator(&fixtures, 0)],
-        fixtures.genesis_topology(),
+        fixtures.genesis_validators(),
         ShardConsensusConfig::default(),
         beacon_reader,
         network_config,

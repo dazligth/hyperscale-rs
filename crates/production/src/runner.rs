@@ -52,8 +52,8 @@ use hyperscale_storage::{BeaconStorage, ShardChainReader};
 use hyperscale_storage_rocksdb::{RocksDbShardStorage, SharedStorage};
 use hyperscale_types::{
     BeaconChainConfig, Block, BlockHeight, Bls12381G1PrivateKey, CertifiedBlock, ChainOrigin,
-    GenesisTopology, InFlightCount, LocalTimestamp, MAX_TX_IN_FLIGHT, NodeId, RoutableTransaction,
-    ShardId, ShardTrie, ValidatorId, ValidatorStatus, Verified,
+    GenesisValidators, InFlightCount, LocalTimestamp, MAX_TX_IN_FLIGHT, NodeId,
+    RoutableTransaction, ShardId, ShardTrie, ValidatorId, ValidatorStatus, Verified,
 };
 use libp2p::identity::Keypair;
 use radix_common::types::ComponentAddress;
@@ -180,7 +180,7 @@ pub struct LocalValidator {
 ///   Shard participation is not supplied; the runner derives each
 ///   validator's seat (or pool membership) from the committed beacon state
 ///   and opens any seated shard's storage via `storage_factory`.
-/// - `genesis_topology` - The validator placement the genesis beacon chain is
+/// - `genesis_validators` - The validator placement the genesis beacon chain is
 ///   built from; the initial [`TopologySnapshot`] is projected from that
 ///   genesis state and seeded into the `ProcessIo`'s `ArcSwap`.
 /// - `shard_config` - Consensus configuration parameters
@@ -193,7 +193,7 @@ pub struct LocalValidator {
 /// - `channel_capacity` - Event channel capacity (defaults to 10,000)
 pub struct ProductionRunnerBuilder {
     validators: Vec<LocalValidator>,
-    genesis_topology: GenesisTopology,
+    genesis_validators: GenesisValidators,
     shard_config: ShardConsensusConfig,
     beacon_storage: Arc<dyn BeaconStorage>,
     network_config: Libp2pConfig,
@@ -230,7 +230,7 @@ impl ProductionRunnerBuilder {
     #[allow(clippy::too_many_arguments)] // storage + identity threading
     pub fn new(
         validators: Vec<LocalValidator>,
-        genesis_topology: GenesisTopology,
+        genesis_validators: GenesisValidators,
         shard_config: ShardConsensusConfig,
         beacon_storage: Arc<dyn BeaconStorage>,
         network_config: Libp2pConfig,
@@ -243,7 +243,7 @@ impl ProductionRunnerBuilder {
         );
         Self {
             validators,
-            genesis_topology,
+            genesis_validators,
             shard_config,
             beacon_storage,
             network_config,
@@ -358,7 +358,7 @@ impl ProductionRunnerBuilder {
             .iter()
             .map(|v| (v.validator_id, Arc::clone(&v.signing_key)))
             .collect();
-        let genesis_topology = self.genesis_topology;
+        let genesis_validators = self.genesis_validators;
         let shard_config = self.shard_config;
         let network_config = self.network_config;
         let chain_config = self.beacon_chain_config.unwrap_or_default();
@@ -377,11 +377,11 @@ impl ProductionRunnerBuilder {
         // `BeaconState → derive_topology_snapshot` direction the runtime
         // ArcSwap update follows, so the topology is derived rather than
         // supplied alongside a beacon state it has to be kept consistent with.
-        let beacon_network = genesis_topology.network.clone();
+        let beacon_network = genesis_validators.network.clone();
         let GenesisBoot {
             chain: genesis_chain,
             topology: projected_topology,
-        } = build_genesis(&genesis_topology, chain_config);
+        } = build_genesis(&genesis_validators, chain_config);
         let beacon_genesis_block = genesis_chain.block;
         let beacon_genesis_state = genesis_chain.state;
         let beacon_config_hash = genesis_chain.config_hash;
@@ -713,7 +713,7 @@ impl ProductionRunner {
     #[allow(clippy::too_many_arguments)] // storage handles threaded explicitly
     pub fn builder(
         validators: Vec<LocalValidator>,
-        genesis_topology: GenesisTopology,
+        genesis_validators: GenesisValidators,
         shard_config: ShardConsensusConfig,
         beacon_storage: Arc<dyn BeaconStorage>,
         network_config: Libp2pConfig,
@@ -722,7 +722,7 @@ impl ProductionRunner {
     ) -> ProductionRunnerBuilder {
         ProductionRunnerBuilder::new(
             validators,
-            genesis_topology,
+            genesis_validators,
             shard_config,
             beacon_storage,
             network_config,

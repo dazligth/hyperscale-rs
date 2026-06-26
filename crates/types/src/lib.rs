@@ -171,7 +171,7 @@ pub use time::timeouts::{
 };
 pub use time::timestamp::{LocalTimestamp, ProposerTimestamp, WeightedTimestamp};
 pub use topology::awaiting::AwaitingTopologyBuffer;
-pub use topology::genesis::GenesisTopology;
+pub use topology::genesis::GenesisValidators;
 pub use topology::schedule::{
     QuiesceCut, RoutingCommittees, ScheduleLookup, SplitAtBoundary, TopologySchedule,
 };

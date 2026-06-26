@@ -141,19 +141,20 @@ pub fn split_straddler_atomic(c: &mut impl Cluster) {
 
 /// Verify a merge straddler settles atomically across the reshape boundary.
 ///
-/// On a four-shard genesis the lighter `leaf(2, 2)`/`leaf(2, 3)` pair falls
-/// under the derived merge threshold and collapses into `leaf(1, 1)`, while the
-/// bulk-funded survivors `leaf(2, 0)`/`leaf(2, 1)` stay above it and keep the
-/// left half alive — no vote and no grow, the merge fires from the genesis byte
-/// skew alone. Cross-shard transfers run from the survivor `leaf(2, 0)` into the
-/// merging `leaf(2, 2)`, so each wave names a shard that terminates at the merge.
-/// The first wave settles before `leaf(2, 2)`'s terminal block; the second
-/// straddles it, in flight when it terminates. After the merge the survivor must
-/// reach a terminal verdict on every straddler, consistent with what `leaf(2, 2)`
-/// settled by its terminal block — never one-sided, never contradicting a
-/// settlement, never hanging. Exercises the merge-child terminal's settled-waves
-/// attestation, the path a split child's terminal cannot cover. Requires the
-/// [`merge_straddler_setup`] genesis funding on a four-shard config.
+/// The cluster grows into four shards (the caller's `with_grown_balances`), then
+/// the lighter `leaf(2, 2)`/`leaf(2, 3)` pair — funded below the derived merge
+/// threshold — collapses into `leaf(1, 1)`, while the bulk-funded survivors
+/// `leaf(2, 0)`/`leaf(2, 1)` stay above it and keep the left half alive: once the
+/// topology is grown, the merge fires from the byte skew alone. Cross-shard
+/// transfers run from the survivor `leaf(2, 0)` into the merging `leaf(2, 2)`, so
+/// each wave names a shard that terminates at the merge. The first wave settles
+/// before `leaf(2, 2)`'s terminal block; the second straddles it, in flight when
+/// it terminates. After the merge the survivor must reach a terminal verdict on
+/// every straddler, consistent with what `leaf(2, 2)` settled by its terminal
+/// block — never one-sided, never contradicting a settlement, never hanging.
+/// Exercises the merge-child terminal's settled-waves attestation, the path a
+/// split child's terminal cannot cover. Requires the [`merge_straddler_setup`]
+/// funding on a config grown to four shards.
 ///
 /// # Panics
 ///
@@ -168,13 +169,14 @@ pub fn merge_straddler_atomic(c: &mut impl Cluster) {
     let setup = merge_straddler_setup();
     let network = NetworkDefinition::simulator();
 
-    // The four-shard genesis seats all four quarters; let it execute and serve.
+    // The cluster reaches this body grown to four shards; confirm every quarter
+    // is seated and serving before driving the merge.
     assert!(
         await_serves(c, survivor, epochs(4))
             && await_serves(c, merge_left, epochs(4))
             && await_serves(c, merge_right, epochs(4))
             && await_serves(c, ShardId::leaf(2, 1), epochs(4)),
-        "the four-shard genesis must seat every quarter",
+        "the grown four-shard topology must seat every quarter",
     );
 
     let mut probes: Vec<TxHash> = Vec::new();
