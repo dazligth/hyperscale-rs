@@ -1,0 +1,88 @@
+//! Inbound request-serving caches.
+//!
+//! [`SharedCaches`] groups the in-memory caches that back peer-facing
+//! request handlers (transaction, finalized-wave, execution-cert,
+//! provision) plus the cross-thread transaction-status view used by
+//! external RPC consumers. Each field is `Arc`-shared, so the same
+//! handles flow into the network handler closures (registered once at
+//! genesis) and into RPC state.
+//!
+//! The caches are independent of the consensus state machine; the `io_loop`
+//! mutates them in response to outbound events
+//! (`Continuation(FinalizedWavesAdmitted)`, validated transactions, terminal
+//! status), and handlers read them on remote-peer requests.
+
+use std::sync::Arc;
+
+use hyperscale_execution::{ExecCertStore, FinalizedWaveStore};
+use hyperscale_mempool::TxStore;
+use hyperscale_provisions::{ProvisionStore, VerifiedHeaderBuffer};
+use hyperscale_types::{FinalizedWave, Verifiable, WaveId};
+use quick_cache::sync::Cache as QuickCache;
+
+/// Default certificate cache capacity.
+pub(super) const DEFAULT_CERT_CACHE_SIZE: usize = 10_000;
+
+/// Inbound request-serving caches.
+pub struct SharedCaches {
+    /// Shared transaction body store. Populated by mempool admission;
+    /// pruned alongside tombstones when validity windows expire. Queried
+    /// by the inbound transaction request handler before falling through
+    /// to storage. Owned jointly with [`hyperscale_mempool::MempoolCoordinator`]
+    /// — both hold `Arc<TxStore>` pointing at the same map, so the network
+    /// worker can read bodies without contending on a mempool lock.
+    pub tx_store: Arc<TxStore>,
+    /// Finalized waves, keyed by `WaveId`. Populated by `io_loop`'s
+    /// `Continuation(FinalizedWavesAdmitted)` interception; queried by the
+    /// inbound finalized-wave handler.
+    pub finalized_wave: Arc<QuickCache<WaveId, Arc<Verifiable<FinalizedWave>>>>,
+    /// Outbound + local provision store, owned by the
+    /// [`ProvisionCoordinator`]. Cloned here so handlers (block, block-topup,
+    /// local-provision, cross-shard provision) can read it without going
+    /// through the state machine.
+    ///
+    /// [`ProvisionCoordinator`]: hyperscale_provisions::ProvisionCoordinator
+    pub provision_store: Arc<ProvisionStore>,
+    /// Verified source-shard headers, owned by the
+    /// [`ProvisionCoordinator`]. The `local_provision.request` handler
+    /// reads this to bundle each returned provision with its matching
+    /// source header — the receiver can then admit both without buffering
+    /// for a header that's still in flight.
+    ///
+    /// [`ProvisionCoordinator`]: hyperscale_provisions::ProvisionCoordinator
+    pub verified_headers: Arc<VerifiedHeaderBuffer>,
+    /// Aggregated local-shard execution certificates awaiting block commit,
+    /// owned by the [`ExecutionCoordinator`]. Cloned here so the inbound EC
+    /// fetch handler can serve cross-shard fallback requests without taking
+    /// a coordinator lock; on cache miss the handler falls through to
+    /// storage.
+    ///
+    /// [`ExecutionCoordinator`]: hyperscale_execution::ExecutionCoordinator
+    pub exec_cert_store: Arc<ExecCertStore>,
+    /// Per-shard finalized-wave store, shared with every same-shard
+    /// `ExecutionCoordinator`.
+    pub finalized_wave_store: Arc<FinalizedWaveStore>,
+}
+
+impl SharedCaches {
+    /// Construct caches at `io_loop` startup. The `ProvisionStore`,
+    /// `TxStore`, `ExecCertStore`, and `FinalizedWaveStore` are owned
+    /// by their respective state machines; clones are passed in so the
+    /// same `Arc`s flow into network handler closures and sync helpers.
+    pub fn new(
+        provision_store: Arc<ProvisionStore>,
+        verified_headers: Arc<VerifiedHeaderBuffer>,
+        tx_store: Arc<TxStore>,
+        exec_cert_store: Arc<ExecCertStore>,
+        finalized_wave_store: Arc<FinalizedWaveStore>,
+    ) -> Self {
+        Self {
+            tx_store,
+            finalized_wave: Arc::new(QuickCache::new(DEFAULT_CERT_CACHE_SIZE)),
+            provision_store,
+            verified_headers,
+            exec_cert_store,
+            finalized_wave_store,
+        }
+    }
+}

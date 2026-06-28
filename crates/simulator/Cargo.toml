@@ -1,0 +1,39 @@
+[package]
+name = "hyperscale-simulator"
+version.workspace = true
+edition.workspace = true
+description = "Long-running workload simulator"
+
+[dependencies]
+hyperscale-core.workspace = true
+hyperscale-mempool.workspace = true
+hyperscale-network-memory.workspace = true
+hyperscale-node.workspace = true
+hyperscale-simulation.workspace = true
+hyperscale-spammer.workspace = true
+hyperscale-types.workspace = true
+
+# Radix dependencies for transaction building
+radix-common.workspace = true
+
+# Metrics
+hdrhistogram.workspace = true
+
+thiserror.workspace = true
+tracing.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+
+clap.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[[bin]]
+name = "hyperscale-sim"
+path = "src/bin/main.rs"
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+tracing-test.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,111 @@
+//! Host bring-up: genesis bootstrap and inbound handler registration.
+//!
+//! These methods run at well-defined points in the host's life, not
+//! on every event. The run-loop methods live in [`super`].
+//!
+//! - [`NodeHost::initialize_shard_genesis`] feeds the supplied genesis
+//!   block into every vnode of its shard and drains the resulting
+//!   actions via the common [`NodeHost::drain_actions`] path.
+//! - [`NodeHost::install_engine_genesis`] commits the genesis substates +
+//!   computes the genesis state root. Only runs on a fresh node.
+//! - [`NodeHost::register_inbound_handlers`] wires the request / gossip /
+//!   notification handler closures into the network adapter. Required
+//!   before the host starts processing events; reached by both genesis
+//!   and resume paths.
+
+use hyperscale_dispatch::Dispatch;
+use hyperscale_engine::sharding::{
+    filter_genesis_updates_for_shard, resolve_owned_nodes_from_updates,
+};
+use hyperscale_engine::{GenesisConfig, prepared_genesis};
+use hyperscale_network::Network;
+use hyperscale_storage::{GenesisCommit, ShardStorage};
+use hyperscale_types::{Block, NodeId, ShardId, StateRoot};
+
+use crate::host::NodeHost;
+
+impl<S, N, D> NodeHost<S, N, D>
+where
+    S: ShardStorage,
+    N: Network,
+    D: Dispatch,
+{
+    /// Initialize every vnode in `genesis_block`'s shard with the
+    /// supplied genesis block, dispatching the resulting actions
+    /// per-vnode. Vnodes in other hosted shards are untouched —
+    /// cross-shard hosts call this once per shard with that shard's
+    /// genesis block.
+    pub fn initialize_shard_genesis(&mut self, genesis_block: &Block) {
+        let shard = genesis_block.header().shard_id();
+        let count = self.vnodes_len(shard);
+        let now = self.shard_loop_mut(shard).now;
+        for vnode_idx in 0..count {
+            let actions = self
+                .vnode_state_mut(shard, vnode_idx)
+                .initialize_genesis(now, genesis_block);
+            self.shard_loop_mut(shard).drain_actions(vnode_idx, actions);
+        }
+        self.shard_loop_mut(shard)
+            .seed_genesis_substate_frontier(genesis_block);
+    }
+
+    /// Install engine genesis on `shard`'s storage.
+    ///
+    /// Builds (or reuses) the cached merged [`hyperscale_storage::DatabaseUpdates`]
+    /// for `(network, config)`, commits substates, and computes the JMT root
+    /// at version 0. Returns the genesis state root.
+    ///
+    /// Independent of network-handler registration — runners call
+    /// [`Self::register_inbound_handlers`] once their genesis-or-resume
+    /// decision is settled.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the JMT is already initialized (genesis must run on a fresh
+    /// store) or if a shard address can't be decoded to a `NodeId`.
+    pub fn install_engine_genesis(&mut self, shard: ShardId, config: &GenesisConfig) -> StateRoot
+    where
+        S: GenesisCommit,
+    {
+        // A per-shard store holds only its own shard's accounts: prefix-rooting
+        // (each store roots its JMT at the shard's prefix) requires it, since a
+        // foreign-prefix key would be mis-bucketed beneath this shard's root.
+        // Drop xrd balances whose address routes to another shard.
+        let topology = self.process.topology_snapshot.load();
+        let mut config = config.clone();
+        config.xrd_balances.retain(|(address, _)| {
+            let radix_node_id = address.into_node_id();
+            let det_node_id = NodeId(
+                radix_node_id.0[..30]
+                    .try_into()
+                    .expect("NodeId is 30 bytes"),
+            );
+            topology.shard_for_node_id(&det_node_id) == shard
+        });
+        let merged = prepared_genesis(self.process.dispatch_handles.executor.network(), &config);
+        // Genesis writes the full initial state in one batch, so every owned
+        // node's `Own(_)` ref is present in `merged` — resolve ownership from
+        // it directly to owner-prefix vaults under their accounts.
+        let owner_map = resolve_owned_nodes_from_updates(&merged);
+        // The full bootstrap is replicated to every shard's substate store for
+        // read availability, but the prefix-rooted JMT must hold only this
+        // shard's subtree, so the committed state root is the global tree's
+        // node at the shard prefix.
+        let jmt_updates =
+            filter_genesis_updates_for_shard(&merged, &owner_map, shard, topology.shard_trie());
+        self.shard_io(shard)
+            .storage
+            .install_genesis(&merged, &jmt_updates, &owner_map)
+    }
+
+    /// Register inbound network handlers (requests, gossip, notifications).
+    ///
+    /// Must be called once per node before the `NodeHost` starts processing
+    /// events. Both genesis and resume paths reach this — registration is
+    /// not coupled to whether genesis ran.
+    pub fn register_inbound_handlers(&mut self) {
+        self.register_request_handler();
+        self.register_gossip_handlers();
+        self.register_notification_handlers();
+    }
+}

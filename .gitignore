@@ -1,0 +1,66 @@
+# Rust
+.cargo/config.local.toml
+/target/
+/deterministic/target/
+/deterministic/Cargo.lock
+Cargo.lock
+**/*.rs.bk
+*.pdb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+/target/
+/simulation-failures/
+/reference/
+
+# Benchmarks
+/target/criterion/
+profile.json.gz
+
+# Temporary files
+*.tmp
+*.temp
+
+# Logs
+*.log
+
+# RocksDB
+*.sst
+*.log
+MANIFEST-*
+CURRENT
+IDENTITY
+LOCK
+OPTIONS-*
+LOG*
+
+# Validator data
+data/
+keys/
+cluster-data/
+.hyperscale-nonces.json
+bootstrap-data/
+distributed-cluster-data/
+docker-cluster-data/
+
+# Modelling
+tla/
+
+# Docker compose and monitoring (dynamically generated)
+scripts/monitoring/prometheus.yml
+scripts/docker-compose.generated.yml
+
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.auto.tfvars
+.terraform.lock.hcl

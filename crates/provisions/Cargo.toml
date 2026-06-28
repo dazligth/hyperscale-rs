@@ -1,0 +1,26 @@
+[package]
+name = "hyperscale-provisions"
+version.workspace = true
+edition.workspace = true
+description = "Centralized provision coordination for cross-shard transactions"
+
+[dependencies]
+hyperscale-core.workspace = true
+hyperscale-engine.workspace = true
+hyperscale-jmt.workspace = true
+hyperscale-metrics.workspace = true
+hyperscale-network.workspace = true
+hyperscale-storage.workspace = true
+hyperscale-types.workspace = true
+
+papaya.workspace = true
+serde.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+hyperscale-test-helpers.workspace = true
+hyperscale-types = { workspace = true, features = ["test-utils"] }
+proptest.workspace = true
+
+[lints]
+workspace = true

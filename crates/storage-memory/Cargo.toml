@@ -1,0 +1,18 @@
+[package]
+name = "hyperscale-storage-memory"
+version.workspace = true
+edition.workspace = true
+description = "In-memory storage implementation for simulation"
+
+[dependencies]
+hyperscale-storage.workspace = true
+hyperscale-types.workspace = true
+hyperscale-jmt.workspace = true
+
+[dev-dependencies]
+hyperscale-storage = { workspace = true, features = ["test-utils"] }
+hyperscale-types = { workspace = true, features = ["test-utils"] }
+indexmap.workspace = true
+
+[lints]
+workspace = true

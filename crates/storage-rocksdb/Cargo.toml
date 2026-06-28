@@ -1,0 +1,25 @@
+[package]
+name = "hyperscale-storage-rocksdb"
+version.workspace = true
+edition.workspace = true
+description = "RocksDB storage implementation for production"
+
+[dependencies]
+hex.workspace = true
+hyperscale-jmt.workspace = true
+hyperscale-storage.workspace = true
+hyperscale-metrics.workspace = true
+hyperscale-types.workspace = true
+radix-common.workspace = true
+radix-substate-store-interface.workspace = true
+rocksdb.workspace = true
+sbor.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+hyperscale-storage = { workspace = true, features = ["test-utils"] }
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,22 @@
+[package]
+name = "hyperscale-execution"
+version.workspace = true
+edition.workspace = true
+description = "Execution state machine"
+
+[dependencies]
+hyperscale-core.workspace = true
+hyperscale-engine.workspace = true
+hyperscale-metrics.workspace = true
+hyperscale-network.workspace = true
+hyperscale-storage.workspace = true
+hyperscale-types.workspace = true
+papaya.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+hyperscale-test-helpers.workspace = true
+proptest.workspace = true
+
+[lints]
+workspace = true

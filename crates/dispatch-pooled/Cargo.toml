@@ -1,0 +1,17 @@
+[package]
+name = "hyperscale-dispatch-pooled"
+version.workspace = true
+edition.workspace = true
+description = "Rayon thread pool dispatch for production"
+
+[dependencies]
+core_affinity.workspace = true
+hyperscale-dispatch.workspace = true
+hyperscale-metrics.workspace = true
+rayon.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt"] }
+tracing.workspace = true
+
+[lints]
+workspace = true

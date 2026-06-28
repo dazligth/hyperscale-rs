@@ -1,0 +1,184 @@
+# Hyperscale Validator Configuration
+#
+# Copy this file to validator.toml and customize for your deployment.
+#
+# Usage:
+#   hyperscale-validator --config validator.toml
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Node Identity
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[node]
+# Unique validator ID (must match genesis configuration)
+validator_id = 0
+
+# Shard group this validator participates in
+shard = 0
+
+# Total number of shards in the network
+num_shards = 1
+
+# Path to the signing key file (32-byte seed)
+# If not specified, a key will be generated
+key_path = "./keys/validator.key"
+
+# Directory for RocksDB storage
+data_dir = "./data"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Network Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[network]
+# Listen address (multiaddr format)
+# QUIC transport for low-latency, multiplexed connections
+listen_addr = "/ip4/0.0.0.0/udp/9000/quic-v1"
+
+# Bootstrap peers to connect to on startup
+# Format: /ip4/<addr>/udp/<port>/quic-v1/p2p/<peer_id>
+bootstrap_peers = [
+    # "/ip4/10.0.0.1/udp/9000/quic-v1/p2p/12D3KooW...",
+]
+
+# Maximum message size (bytes)
+max_message_size = 65536
+
+# Gossipsub heartbeat interval (milliseconds)
+gossipsub_heartbeat_ms = 100
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Thread Pool Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[threads]
+# Shard consensus pool: liveness-critical work (block votes, QC verification,
+# state root, proposal building). Kept small and dedicated so a long
+# execution batch can't queue ahead of consensus traffic. (0 = auto.)
+consensus_threads = 0
+
+# Throughput pool: general crypto verification (provisions, execution
+# votes, cert aggregation), transaction signature validation, and Radix
+# Engine execution share this pool with work-stealing. (0 = auto.)
+throughput_threads = 0
+
+# Tokio runtime worker threads for async I/O (network, timers, RPC) (0 = auto-detect)
+io_threads = 0
+
+# Pin threads to specific CPU cores for better cache locality
+# Only effective on Linux
+pin_cores = false
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Storage Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[storage]
+# RocksDB background compaction jobs
+max_background_jobs = 4
+
+# Write buffer size (MB)
+write_buffer_mb = 128
+
+# Maximum number of write buffers (memtables) to keep in memory
+max_write_buffer_number = 3
+
+# Block cache size (MB) - 0 to disable
+block_cache_mb = 512
+
+# Compression algorithm: none, snappy, zlib, lz4, lz4hc, zstd
+compression = "lz4"
+
+# Bloom filter bits per key (0 to disable)
+# Higher values = better read performance, more memory
+bloom_filter_bits = 10.0
+
+# Bytes per sync (MB) - triggers fsync after this many bytes written (0 to disable)
+bytes_per_sync_mb = 1
+
+# Number of old log files to keep
+keep_log_file_num = 10
+
+# Number of block heights of JMT history to retain before garbage collection.
+# Stale JMT nodes and their associations are kept for this many heights
+# before being eligible for deletion. This enables historical queries within
+# this window. Set to 0 for immediate deletion (no history retention).
+jmt_history_length = 256
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Mempool Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[mempool]
+# Maximum pending transactions before RPC backpressure kicks in.
+# When the number of Pending transactions exceeds this limit, new RPC submissions
+# are rejected. This prevents unbounded mempool growth when arrival rate exceeds
+# processing capacity. Gossip-arrived transactions are not gated by this limit —
+# only the public RPC entry point is. Set to roughly a few blocks worth.
+max_pending = 8192
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Provisions Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[provisions]
+# Minimum time a verified provision batch must sit in the proposal queue before
+# it becomes eligible for block inclusion. Gives shard peers time to receive
+# and verify the same batch via gossip, so they don't have to fetch it later.
+# Durations are parsed as toml tables: `{ secs = 0, nanos = 500_000_000 }`.
+min_dwell_time = { secs = 0, nanos = 500_000_000 }
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Metrics Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[metrics]
+# Enable Prometheus metrics endpoint
+enabled = true
+
+# Address to listen for metrics scraping
+listen_addr = "0.0.0.0:9090"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Telemetry Configuration (OpenTelemetry)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[telemetry]
+# Enable OpenTelemetry tracing
+enabled = false
+
+# OTLP collector endpoint
+# otlp_endpoint = "http://localhost:4317"
+
+# Service name for traces
+service_name = "hyperscale-validator"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Genesis Configuration
+#
+# Define the validator set for the network.
+# For development/testing, you can leave this empty for single-validator mode.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[genesis]
+# Example validator set for a 4-validator network:
+#
+# [[genesis.validators]]
+# id = 0
+# public_key = "0123456789abcdef..." # 64 hex chars (32 bytes Ed25519)
+# voting_power = 1
+#
+# [[genesis.validators]]
+# id = 1
+# public_key = "fedcba9876543210..."
+# voting_power = 1
+#
+# [[genesis.validators]]
+# id = 2
+# public_key = "abcdef0123456789..."
+# voting_power = 1
+#
+# [[genesis.validators]]
+# id = 3
+# public_key = "9876543210abcdef..."
+# voting_power = 1

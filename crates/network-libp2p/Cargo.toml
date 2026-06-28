@@ -1,0 +1,47 @@
+[package]
+name = "hyperscale-network-libp2p"
+version.workspace = true
+edition.workspace = true
+description = "Production libp2p network transport"
+
+[features]
+default = []
+
+[dependencies]
+hyperscale-metrics.workspace = true
+hyperscale-network.workspace = true
+hyperscale-types.workspace = true
+
+arc-swap.workspace = true
+
+# Networking - libp2p with QUIC transport
+libp2p.workspace = true
+libp2p-stream.workspace = true
+futures.workspace = true
+bytes.workspace = true
+
+# Serialization
+sbor.workspace = true
+serde.workspace = true
+
+# CLI (for config enums)
+clap.workspace = true
+
+
+# Async runtime
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+
+# Lock-free concurrent data structures
+dashmap.workspace = true
+rand.workspace = true
+
+[dev-dependencies]
+hyperscale-test-helpers = { workspace = true, features = ["fixtures"] }
+hyperscale-types = { workspace = true, features = ["test-utils"] }
+serial_test = "3.5.0"
+tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,469 @@
+name: CI
+
+on:
+  push:
+    branches: [ "**" ]
+    tags: [ "v*" ]
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+    branches: [ "main" ]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  check:
+    name: Cargo Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+      - name: Cargo Check
+        run: cargo check
+
+  test:
+    name: Test Suite
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'pull_request' || 
+      startsWith(github.ref, 'refs/tags/') || 
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Free Disk Space
+        run: |
+          echo "Before cleanup:"
+          df -h /
+          # Remove large pre-installed toolchains we don't need
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force || true
+          echo "After cleanup:"
+          df -h /
+          
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+      
+      - name: Install lld
+        run: sudo apt-get update && sudo apt-get install -y lld
+      - name: Cargo Test
+        env:
+          RUSTFLAGS: "-C link-arg=-fuse-ld=lld -C debuginfo=0"
+        run: cargo test --features hyperscale-simulation/ci
+      - name: Cargo Clippy
+        run: cargo clippy --no-deps -- -D warnings
+
+  build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs: test
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - linux/amd64
+          - linux/arm64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Calculate Version
+        id: version
+        run: |
+          if [[ $GITHUB_REF == refs/tags/* ]]; then
+            echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+          else
+            echo "VERSION=main-$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+          fi
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3.0.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3.0.0
+
+      - name: Log into registry ${{ env.REGISTRY }}
+        uses: docker/login-action@v3.0.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5.0.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v5.0.0
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            HYPERSCALE_VERSION=${{ env.VERSION }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ strategy.job-index }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    runs-on: ubuntu-latest
+    needs: build
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: read
+      packages: write
+      id-token: write # required for cosign
+    steps:
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3.5.0
+        with:
+          cosign-release: 'v2.2.4'
+
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3.0.0
+
+      - name: Log into registry ${{ env.REGISTRY }}
+        uses: docker/login-action@v3.0.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5.0.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
+
+      - name: Inspect image
+        id: inspect
+        run: |
+          FIRST_TAG=$(echo "${{ steps.meta.outputs.tags }}" | head -n 1)
+          docker buildx imagetools inspect ${FIRST_TAG}
+          DIGEST=$(docker buildx imagetools inspect ${FIRST_TAG} | grep "^Digest:" | awk '{print $2}')
+          echo "digest=$DIGEST" >> $GITHUB_OUTPUT
+
+      - name: Sign the published Docker image
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.inspect.outputs.digest }}
+        run: |
+          images=""
+          for tag in ${TAGS}; do
+            images+="${tag}@${DIGEST} "
+          done
+          cosign sign --yes ${images}
+
+  release-binaries:
+    name: Release Binaries
+    runs-on: ${{ matrix.os }}
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            name: linux-amd64
+          - target: aarch64-apple-darwin
+            os: macos-14
+            name: macos-arm64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            name: windows-amd64
+    steps:
+      - name: Enable Long Paths (Windows)
+        if: matrix.os == 'windows-latest'
+        run: git config --system core.longpaths true
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install LLVM and Clang (Windows)
+        if: matrix.os == 'windows-latest'
+        run: choco install llvm -y
+
+      - name: Install Protoc (Windows)
+        if: matrix.os == 'windows-latest'
+        run: choco install protoc -y
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Set LIBCLANG_PATH (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $GITHUB_ENV
+
+      - uses: swatinem/rust-cache@v2
+
+      - name: Build Binaries
+        shell: bash
+        env:
+          HYPERSCALE_VERSION: ${{ github.ref_name }}
+        run: |
+          cargo build --release --target ${{ matrix.target }} \
+            --bin hyperscale-validator \
+            --bin hyperscale-keygen \
+            --bin hyperscale-spammer
+
+      - name: Archive Binaries
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            EXT=".exe"
+            7z a -tzip hyperscale-${{ matrix.name }}.zip hyperscale-validator$EXT hyperscale-keygen$EXT hyperscale-spammer$EXT
+          else
+            EXT=""
+            zip hyperscale-${{ matrix.name }}.zip hyperscale-validator$EXT hyperscale-keygen$EXT hyperscale-spammer$EXT
+          fi
+          mv hyperscale-${{ matrix.name }}.zip ../../../
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v1
+        with:
+          files: hyperscale-${{ matrix.name }}.zip
+
+  notify-release:
+    runs-on: ubuntu-latest
+    needs: release-binaries
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      
+      - name: Send Release Notification
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+          COMMIT_SHA: ${{ github.sha }}
+          COMMIT_AUTHOR: ${{ github.event.head_commit.author.name }}
+          COMMIT_TIMESTAMP: ${{ github.event.head_commit.timestamp }}
+        run: |
+          escape_html() {
+            local s="$1"
+            s="${s//&/&amp;}"
+            s="${s//</&lt;}"
+            s="${s//>/&gt;}"
+            s="${s//\"/&quot;}"
+            echo "$s"
+          }
+
+          get_gh_name() {
+            local login="$1"
+            gh api "users/$login" --jq '.name // .login' 2>/dev/null || echo "$login"
+          }
+
+          # Get tagger/author info
+          # If it's a pushing of a tag, the 'sender' or head commit author is relevant
+          AUTHOR_LOGIN="${{ github.event.sender.login }}"
+          FRIENDLY_NAME=$(get_gh_name "$AUTHOR_LOGIN")
+          SAFE_FRIENDLY_NAME=$(escape_html "$FRIENDLY_NAME")
+          SAFE_TAG_NAME=$(escape_html "$TAG_NAME")
+          
+          RELEASE_URL="https://github.com/${{ github.repository }}/releases/tag/$TAG_NAME"
+
+          TEXT="📦 <b>New Release:</b> $SAFE_TAG_NAME"
+          TEXT+=$'\n'
+          TEXT+=$'\n'"<b>Author:</b> $SAFE_FRIENDLY_NAME"
+          TEXT+=$'\n'"<b>Date:</b> $COMMIT_TIMESTAMP"
+          TEXT+=$'\n'
+          TEXT+=$'\n'"<a href=\"$RELEASE_URL\">View on GitHub</a>"
+
+          jq -n \
+            --arg chat_id "$CHANNEL_ID" \
+            --arg text "$TEXT" \
+            '{"chat_id": $chat_id, "text": $text, "parse_mode": "HTML", "disable_web_page_preview": true}' > payload.json
+          
+          curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
+            -H 'Content-Type: application/json' \
+            -d @payload.json
+
+  notify:
+    runs-on: ubuntu-latest
+    # permission for gh api
+    permissions:
+      contents: read 
+    if: >
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'pull_request' && (github.event.action == 'opened' || (github.event.action == 'closed' && github.event.pull_request.merged == true)))
+    steps:
+      - name: Send message to Telegram
+        continue-on-error: true
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+          PR_MERGED: ${{ github.event.pull_request.merged }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_USER_LOGIN: ${{ github.event.pull_request.user.login }}
+          PR_MERGER_LOGIN: ${{ github.event.pull_request.merged_by.login }}
+          PR_CREATED_AT: ${{ github.event.pull_request.created_at }}
+          PR_MERGED_AT: ${{ github.event.pull_request.merged_at }}
+          PR_CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+          PR_ADDITIONS: ${{ github.event.pull_request.additions }}
+          PR_DELETIONS: ${{ github.event.pull_request.deletions }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+          COMMIT_AUTHOR: ${{ github.event.head_commit.author.name }}
+          COMMIT_URL: ${{ github.event.head_commit.url }}
+          COMMIT_TIMESTAMP: ${{ github.event.head_commit.timestamp }}
+          # Using toJson for arrays is correct
+          COMMIT_ADDED: ${{ toJson(github.event.head_commit.added) }}
+          COMMIT_REMOVED: ${{ toJson(github.event.head_commit.removed) }}
+          COMMIT_MODIFIED: ${{ toJson(github.event.head_commit.modified) }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          escape_html() {
+            local s="$1"
+            # escape HTML characters for Telegram
+            s="${s//&/&amp;}"
+            s="${s//</&lt;}"
+            s="${s//>/&gt;}"
+            s="${s//\"/&quot;}"
+            echo "$s"
+          }
+
+          get_gh_name() {
+            local login="$1"
+            # silence errors, fallback to login
+            gh api "users/$login" --jq '.name // .login' 2>/dev/null || echo "$login"
+          }
+
+          # sanitize inputs that might contain special chars
+          SAFE_PR_TITLE=$(escape_html "$PR_TITLE")
+          SAFE_COMMIT_MSG=$(escape_html "$COMMIT_MSG")
+          SAFE_COMMIT_AUTHOR=$(escape_html "$COMMIT_AUTHOR")
+
+          if [ "$EVENT_NAME" == "pull_request" ]; then
+            if [ "$EVENT_ACTION" == "closed" ] && [ "$PR_MERGED" == "true" ]; then
+              FRIENDLY_NAME=$(get_gh_name "$PR_MERGER_LOGIN")
+              SAFE_FRIENDLY_NAME=$(escape_html "$FRIENDLY_NAME")
+              
+              TEXT="🚀 <b>PR Merged:</b> $SAFE_PR_TITLE"
+              TEXT+=$'\n'
+              TEXT+=$'\n'"<b>By:</b> $SAFE_FRIENDLY_NAME"
+              TEXT+=$'\n'"<b>Date:</b> $PR_MERGED_AT"
+              TEXT+=$'\n'"<b>Diff:</b> $PR_CHANGED_FILES file(s) (+$PR_ADDITIONS -$PR_DELETIONS)"
+              TEXT+=$'\n'
+              TEXT+=$'\n'"<a href=\"$PR_URL\">View on GitHub</a>"
+            else
+              FRIENDLY_NAME=$(get_gh_name "$PR_USER_LOGIN")
+              SAFE_FRIENDLY_NAME=$(escape_html "$FRIENDLY_NAME")
+
+              TEXT="🔨 <b>New PR:</b> $SAFE_PR_TITLE"
+              TEXT+=$'\n'
+              TEXT+=$'\n'"<b>Author:</b> $SAFE_FRIENDLY_NAME"
+              TEXT+=$'\n'"<b>Date:</b> $PR_CREATED_AT"
+              TEXT+=$'\n'"<b>Diff:</b> $PR_CHANGED_FILES file(s) (+$PR_ADDITIONS -$PR_DELETIONS)"
+              TEXT+=$'\n'
+              TEXT+=$'\n'"<a href=\"$PR_URL\">View on GitHub</a>"
+            fi
+          else
+            # Push event
+
+            # commenting this out for now, otherwise PRs from forks get no notifications
+            
+            # if [[ "$COMMIT_MSG" == "Merge pull request"* ]] || [[ "$COMMIT_MSG" == "Merge branch"* ]]; then
+            #   echo "Merge commit detected, skipping."
+            #   exit 0
+            # fi
+            
+            # fetch detailed stats and file count for the commit
+            STATS_JSON=$(gh api "repos/${{ github.repository }}/commits/$COMMIT_SHA" \
+              --jq '{files: (.files | length), additions: .stats.additions, deletions: .stats.deletions}' \
+              2>/dev/null || echo "")
+            
+            if [ -n "$STATS_JSON" ]; then
+              TOTAL_CHANGED=$(echo "$STATS_JSON" | jq '.files')
+              COMMIT_ADDITIONS=$(echo "$STATS_JSON" | jq '.additions')
+              COMMIT_DELETIONS=$(echo "$STATS_JSON" | jq '.deletions')
+            else
+              # fallback to payload data if API fails
+              ADDED_LEN=$(echo "$COMMIT_ADDED" | jq 'length' 2>/dev/null || echo 0)
+              REMOVED_LEN=$(echo "$COMMIT_REMOVED" | jq 'length' 2>/dev/null || echo 0)
+              MODIFIED_LEN=$(echo "$COMMIT_MODIFIED" | jq 'length' 2>/dev/null || echo 0)
+              TOTAL_CHANGED=$((ADDED_LEN + REMOVED_LEN + MODIFIED_LEN))
+              COMMIT_ADDITIONS="?"
+              COMMIT_DELETIONS="?"
+            fi
+
+            TEXT="✨ <b>New Commit:</b> $SAFE_COMMIT_MSG"
+            TEXT+=$'\n'
+            TEXT+=$'\n'"<b>Author:</b> $SAFE_COMMIT_AUTHOR"
+            TEXT+=$'\n'"<b>Date:</b> $COMMIT_TIMESTAMP"
+            TEXT+=$'\n'"<b>Diff:</b> $TOTAL_CHANGED file(s) (+$COMMIT_ADDITIONS -$COMMIT_DELETIONS)"
+            TEXT+=$'\n'
+            TEXT+=$'\n'"<a href=\"$COMMIT_URL\">View on GitHub</a>"
+          fi
+
+          # safely create the payload for TG
+          jq -n \
+            --arg chat_id "$CHANNEL_ID" \
+            --arg text "$TEXT" \
+            '{"chat_id": $chat_id, "text": $text, "parse_mode": "HTML", "disable_web_page_preview": true}' > payload.json
+          
+          curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
+            -H 'Content-Type: application/json' \
+            -d @payload.json

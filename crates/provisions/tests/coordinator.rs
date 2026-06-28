@@ -1,0 +1,259 @@
+//! Public-API contract tests for `ProvisionCoordinator`.
+//!
+//! These tests see only the crate's public surface
+//! (`use hyperscale_provisions::...`), so any regression in the documented
+//! API is caught here rather than by inline tests that can reach into
+//! private fields.
+
+use std::sync::Arc;
+
+use hyperscale_provisions::{ProvisionConfig, ProvisionCoordinator, ProvisionMemoryStats};
+use hyperscale_test_helpers::TestCommittee;
+use hyperscale_types::{
+    BeaconWitnessLeafCount, BeaconWitnessRoot, Block, BlockHash, BlockHeader, BlockHeight,
+    BoundedVec, CertificateRoot, CertifiedBlock, CertifiedBlockHeader, ChainOrigin, Hash,
+    InFlightCount, LocalReceiptRoot, LocalTimestamp, ProposerTimestamp, ProvisionHash,
+    ProvisionsRoot, QuorumCertificate, Round, ShardId, SignerBitfield, StateRoot, TopologySnapshot,
+    TransactionRoot, ValidatorId, Verified, WaveId, WeightedTimestamp, zero_bls_signature,
+};
+
+const TEST_BLOCK_INTERVAL_MS: u64 = 500;
+
+fn fresh_coordinator() -> ProvisionCoordinator {
+    ProvisionCoordinator::new(ShardId::leaf(1, 0))
+}
+
+fn fresh_coordinator_with_topology() -> (ProvisionCoordinator, TopologySnapshot) {
+    let topology = TestCommittee::new(4, 42).topology_snapshot(2);
+    (fresh_coordinator(), topology)
+}
+
+fn make_block(height: BlockHeight) -> CertifiedBlock {
+    let header = BlockHeader::new(
+        ShardId::leaf(1, 0),
+        height,
+        BlockHash::from_raw(Hash::from_bytes(&[0u8; 32])),
+        QuorumCertificate::genesis(ShardId::leaf(1, 0), ChainOrigin::ROOT),
+        ValidatorId::new(0),
+        ProposerTimestamp::ZERO,
+        Round::INITIAL,
+        false,
+        StateRoot::ZERO,
+        TransactionRoot::ZERO,
+        CertificateRoot::ZERO,
+        LocalReceiptRoot::ZERO,
+        ProvisionsRoot::ZERO,
+        Vec::new(),
+        std::collections::BTreeMap::new(),
+        InFlightCount::ZERO,
+        BeaconWitnessRoot::ZERO,
+        BeaconWitnessLeafCount::ZERO,
+        BeaconWitnessLeafCount::ZERO,
+        None,
+        None,
+    );
+    let block = Block::Live {
+        header,
+        transactions: Arc::new(BoundedVec::new()),
+        certificates: Arc::new(BoundedVec::new()),
+        provisions: Arc::new(BoundedVec::new()),
+        ready_signals: Arc::new(BoundedVec::new()),
+        reshape_trigger: None,
+    };
+    let qc = {
+        let __qc = QuorumCertificate::genesis(ShardId::leaf(1, 0), ChainOrigin::ROOT);
+        QuorumCertificate::new(
+            block.hash(),
+            __qc.shard_id(),
+            __qc.height(),
+            __qc.parent_block_hash(),
+            __qc.round(),
+            __qc.signers().clone(),
+            __qc.aggregated_signature(),
+            WeightedTimestamp::from_millis(height.inner() * TEST_BLOCK_INTERVAL_MS),
+        )
+    };
+    CertifiedBlock::new_unchecked(block, qc)
+}
+
+/// Build a remote certified header whose only wave targets `local_shard`,
+/// so a `ProvisionCoordinator` running on `local_shard` will register an
+/// expectation on receipt.
+fn make_remote_header_targeting(
+    source_shard: ShardId,
+    height: BlockHeight,
+    local_shard: ShardId,
+) -> Arc<Verified<CertifiedBlockHeader>> {
+    let waves = vec![WaveId::new(
+        source_shard,
+        height,
+        std::collections::BTreeSet::from([local_shard]),
+    )];
+    let header = BlockHeader::new(
+        source_shard,
+        height,
+        BlockHash::from_raw(Hash::from_bytes(b"parent")),
+        QuorumCertificate::genesis(ShardId::leaf(1, 0), ChainOrigin::ROOT),
+        ValidatorId::new(0),
+        ProposerTimestamp::from_millis(1000 + height.inner()),
+        Round::INITIAL,
+        false,
+        StateRoot::ZERO,
+        TransactionRoot::ZERO,
+        CertificateRoot::ZERO,
+        LocalReceiptRoot::ZERO,
+        ProvisionsRoot::ZERO,
+        waves,
+        std::collections::BTreeMap::new(),
+        InFlightCount::ZERO,
+        BeaconWitnessRoot::ZERO,
+        BeaconWitnessLeafCount::ZERO,
+        BeaconWitnessLeafCount::ZERO,
+        None,
+        None,
+    );
+    let header_hash = header.hash();
+    let qc = QuorumCertificate::new(
+        header_hash,
+        source_shard,
+        height,
+        BlockHash::ZERO,
+        Round::INITIAL,
+        SignerBitfield::empty(),
+        zero_bls_signature(),
+        WeightedTimestamp::ZERO,
+    );
+    Arc::new(Verified::new_unchecked_for_test(CertifiedBlockHeader::new(
+        header, qc,
+    )))
+}
+
+#[test]
+fn fresh_coordinator_reports_no_state() {
+    let coord = fresh_coordinator();
+    assert_eq!(coord.verified_remote_header_count(), 0);
+    assert!(
+        coord
+            .get_remote_header(ShardId::leaf(1, 1), BlockHeight::new(1))
+            .is_none()
+    );
+    assert!(
+        coord
+            .get_provisions_by_hash(ProvisionHash::from_raw(Hash::from_bytes(b"any")))
+            .is_none()
+    );
+    assert!(coord.queued_provisions(LocalTimestamp::ZERO).is_empty());
+    assert!(coord.store().is_empty());
+}
+
+/// Destructures every field of `ProvisionMemoryStats`, so adding a field
+/// without updating this test (and the assertions on its initial value)
+/// triggers a compile error. Keeps the memory-stats surface from silently
+/// drifting.
+#[test]
+fn memory_stats_destructures_all_fields_for_fresh_coordinator() {
+    let coord = fresh_coordinator();
+    let ProvisionMemoryStats {
+        verified_remote_headers,
+        pending_provisions,
+        verified_provisions,
+        expected_provisions,
+        provisions_by_hash,
+        queued_provisions,
+    } = coord.memory_stats();
+
+    assert_eq!(verified_remote_headers, 0);
+    assert_eq!(pending_provisions, 0);
+    assert_eq!(verified_provisions, 0);
+    assert_eq!(expected_provisions, 0);
+    assert_eq!(provisions_by_hash, 0);
+    assert_eq!(queued_provisions, 0);
+}
+
+#[test]
+fn with_config_honours_dwell_time_setting() {
+    let config = ProvisionConfig {
+        min_dwell_time: std::time::Duration::from_millis(750),
+    };
+    let coord = ProvisionCoordinator::with_config(ShardId::leaf(1, 0), config);
+    // No queued provisions yet — but the constructor must accept the config
+    // without panicking, and the queue must be live.
+    assert!(coord.queued_provisions(LocalTimestamp::ZERO).is_empty());
+}
+
+#[test]
+fn on_block_committed_empty_block_yields_no_actions() {
+    let (mut coord, _) = fresh_coordinator_with_topology();
+    let actions = coord.on_block_committed(&make_block(BlockHeight::new(1)));
+    assert!(actions.is_empty());
+}
+
+#[test]
+fn flush_expected_provisions_with_no_expectations_yields_no_actions() {
+    let (mut coord, _) = fresh_coordinator_with_topology();
+    let actions = coord.flush_expected_provisions();
+    assert!(actions.is_empty());
+}
+
+#[test]
+fn on_verified_remote_header_for_own_shard_is_no_op() {
+    let (mut coord, _topology) = fresh_coordinator_with_topology();
+    let local = ShardId::leaf(1, 0);
+    // Header from our own shard must not register an expectation.
+    let own_header = make_remote_header_targeting(local, BlockHeight::new(5), local);
+    let actions = coord.on_verified_remote_header(&own_header);
+    assert!(actions.is_empty());
+    assert_eq!(coord.memory_stats().expected_provisions, 0);
+    assert_eq!(coord.verified_remote_header_count(), 0);
+}
+
+#[test]
+fn on_verified_remote_header_targeting_local_shard_registers_expectation() {
+    let (mut coord, _topology) = fresh_coordinator_with_topology();
+    let local = ShardId::leaf(1, 0);
+    let remote = ShardId::leaf(1, u64::from(local == ShardId::leaf(1, 0)));
+    let header = make_remote_header_targeting(remote, BlockHeight::new(5), local);
+    coord.on_verified_remote_header(&header);
+
+    let stats = coord.memory_stats();
+    assert_eq!(
+        stats.expected_provisions, 1,
+        "expectation must register when the remote wave targets us"
+    );
+    assert_eq!(
+        stats.verified_remote_headers, 1,
+        "header must be retained while the expectation is outstanding"
+    );
+    let stored = coord
+        .get_remote_header(remote, BlockHeight::new(5))
+        .expect("present");
+    assert!(Arc::ptr_eq(&stored, &header));
+}
+
+#[test]
+fn first_commit_retro_stamps_pre_genesis_expectations() {
+    // Regression: an expectation registered before the first local commit
+    // must have its discovered_at retro-stamped on commit, otherwise the
+    // immediate timeout sweep would fire (entry's discovered_at is ZERO,
+    // committed_ts is suddenly ~now, age reports ~57 years).
+    let (mut coord, _topology) = fresh_coordinator_with_topology();
+    let local = ShardId::leaf(1, 0);
+    let remote = ShardId::leaf(1, u64::from(local == ShardId::leaf(1, 0)));
+    let header = make_remote_header_targeting(remote, BlockHeight::new(5), local);
+    coord.on_verified_remote_header(&header);
+
+    // First commit must NOT trigger a fallback fetch storm.
+    let actions = coord.on_block_committed(&make_block(BlockHeight::new(1)));
+    assert!(
+        actions.is_empty(),
+        "first commit must retro-stamp before timeout sweep so no fallback fires"
+    );
+    assert_eq!(coord.memory_stats().expected_provisions, 1);
+}
+
+#[test]
+fn debug_impl_runs_without_panicking() {
+    let coord = fresh_coordinator();
+    let s = format!("{coord:?}");
+    assert!(s.contains("ProvisionCoordinator"));
+}

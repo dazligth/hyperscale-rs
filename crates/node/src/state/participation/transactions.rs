@@ -1,0 +1,183 @@
+//! Transaction-flow dispatch arms.
+//!
+//! Three `ProtocolEvent` variants drive the transaction pipeline:
+//! - `TransactionValidated` — gossip-delivered tx that passed async validation
+//!   → mempool admission;
+//! - `TransactionsReceived` — fetch-delivered batch → mempool admission;
+//! - `TransactionsAdmitted` — mempool emits this after admission; shard consensus's
+//!   pending-block subscriber consumes it and we latch a proposal-retry.
+//!
+//! Raw gossip arrivals enter `NodeHost` as `ShardScopedInput::TransactionGossipReceived`
+//! and never reach the state machine; the validated form does.
+
+use std::sync::Arc;
+
+use hyperscale_core::{Action, ProtocolEvent};
+use hyperscale_types::{RoutableTransaction, TopologySchedule, Verified};
+
+use super::ShardParticipation;
+
+impl ShardParticipation {
+    /// Dispatch a transaction-category `ProtocolEvent`.
+    pub(in crate::state) fn handle_transaction(
+        &mut self,
+        sched: &TopologySchedule,
+        event: ProtocolEvent,
+    ) -> Vec<Action> {
+        match event {
+            ProtocolEvent::TransactionValidated {
+                tx,
+                submitted_locally,
+            } => self.on_transaction_validated(sched, tx, submitted_locally),
+            ProtocolEvent::TransactionsReceived { transactions } => {
+                self.on_transactions_fetched(sched, transactions)
+            }
+            ProtocolEvent::TransactionsAdmitted { txs } => {
+                let actions = self.shard_coordinator.on_transactions_admitted(sched, &txs);
+                self.shard_coordinator.queue_ready_proposal();
+                actions
+            }
+            _ => unreachable!("non-transaction event routed to handle_transaction"),
+        }
+    }
+
+    /// Hand a validated gossip transaction to the canonical mempool. Mempool
+    /// emits `Continuation(TransactionsAdmitted)` for whatever it admits;
+    /// that arm latches the proposal-retry — no need to do it optimistically
+    /// here.
+    fn on_transaction_validated(
+        &mut self,
+        sched: &TopologySchedule,
+        tx: Arc<Verified<RoutableTransaction>>,
+        submitted_locally: bool,
+    ) -> Vec<Action> {
+        if !sched.head().involves_shard(self.local_shard, &tx) {
+            return vec![];
+        }
+
+        self.mempool_coordinator.on_transaction_gossip(
+            sched.head(),
+            tx,
+            submitted_locally,
+            self.now,
+        )
+    }
+
+    /// Admit a batch of fetch-delivered transactions through mempool. The
+    /// batch already passed the io-loop's validation pipeline upstream
+    /// (`handle_fetched_txs_for_validation`); invalid-signature txs were
+    /// dropped before reaching this arm. Mempool emits
+    /// `Continuation(TransactionsAdmitted)` for the admitted subset; the
+    /// admission arm latches the proposal-retry.
+    fn on_transactions_fetched(
+        &mut self,
+        sched: &TopologySchedule,
+        txs: Vec<Arc<Verified<RoutableTransaction>>>,
+    ) -> Vec<Action> {
+        if txs.is_empty() {
+            return vec![];
+        }
+        self.mempool_coordinator
+            .on_fetched_transactions(sched.head(), txs, self.now)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use hyperscale_core::{ProtocolEvent, StateMachine};
+    use hyperscale_types::test_utils::{test_transaction, test_transaction_with_nodes};
+    use hyperscale_types::{LocalTimestamp, Verified};
+
+    use crate::state::test_support::TestNode;
+
+    /// Validated gossip transactions are gated by the local-shard filter
+    /// before reaching mempool. A tx with empty reads/writes never
+    /// involves any shard, so the local-shard predicate rejects it and
+    /// the mempool stays empty.
+    #[test]
+    fn transaction_validated_drops_tx_with_no_local_shard_involvement() {
+        let TestNode { mut node, .. } = TestNode::new();
+
+        let tx = Arc::new(Verified::new_unchecked_for_test(
+            test_transaction_with_nodes(
+                b"empty-shards-xyz",
+                /* read_nodes */ vec![],
+                /* write_nodes */ vec![],
+            ),
+        ));
+
+        let actions = node.handle(
+            LocalTimestamp::ZERO,
+            ProtocolEvent::TransactionValidated {
+                tx,
+                submitted_locally: false,
+            },
+        );
+
+        assert!(actions.is_empty());
+        assert_eq!(
+            node.mempool_coordinator().len(),
+            0,
+            "non-local tx must not enter the mempool",
+        );
+    }
+
+    /// Counterpart to the rejection test: a tx that touches a local node
+    /// must reach the mempool (with `num_shards = 1` every node maps to
+    /// `ShardId::ROOT`).
+    #[test]
+    fn transaction_validated_routes_local_shard_tx_to_mempool() {
+        let TestNode { mut node, .. } = TestNode::new();
+        let tx = Arc::new(Verified::new_unchecked_for_test(test_transaction(
+            /* seed */ 1,
+        )));
+
+        let _ = node.handle(
+            LocalTimestamp::ZERO,
+            ProtocolEvent::TransactionValidated {
+                tx,
+                submitted_locally: true,
+            },
+        );
+
+        assert_eq!(
+            node.mempool_coordinator().len(),
+            1,
+            "local-shard tx must be admitted to the mempool",
+        );
+    }
+
+    /// `TransactionsReceived` is the fetch-delivery counterpart to
+    /// `TransactionValidated` — txs arrive from a peer we asked, so the
+    /// gossip-side validation pipeline is skipped and the orchestrator
+    /// hands the batch directly to mempool's `on_fetched_transactions`.
+    /// Distinct mempool method, distinct admission flags (gossip path
+    /// passes `submitted_locally`; this path always treats them as
+    /// remote). Bug surface: dropping the call entirely, or routing
+    /// fetch txs through the gossip path and inheriting its validation.
+    #[test]
+    fn transactions_received_admits_fetched_batch_to_mempool() {
+        let TestNode { mut node, .. } = TestNode::new();
+        let txs = vec![
+            Arc::new(Verified::new_unchecked_for_test(test_transaction(
+                /* seed */ 1,
+            ))),
+            Arc::new(Verified::new_unchecked_for_test(test_transaction(
+                /* seed */ 2,
+            ))),
+        ];
+
+        let _ = node.handle(
+            LocalTimestamp::ZERO,
+            ProtocolEvent::TransactionsReceived { transactions: txs },
+        );
+
+        assert_eq!(
+            node.mempool_coordinator().len(),
+            2,
+            "fetched txs must be admitted via the fetch path",
+        );
+    }
+}

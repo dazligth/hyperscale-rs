@@ -1,0 +1,1523 @@
+//! Prometheus metrics backend for Hyperscale.
+//!
+//! Implements [`hyperscale_metrics::MetricsRecorder`] using native Prometheus
+//! counters, gauges, and histograms.
+//!
+//! # Usage
+//!
+//! Call [`install()`] once at startup before any metrics are recorded:
+//! ```ignore
+//! hyperscale_metrics_prometheus::install();
+//! ```
+// Metrics values are display readouts; precision loss on usize/u64 → f64 is irrelevant.
+#![allow(clippy::cast_precision_loss)]
+
+use hyperscale_metrics::{ChannelDepths, MemoryMetrics, MetricsRecorder, set_global_recorder};
+use prometheus::{
+    Counter, CounterVec, Gauge, GaugeVec, Histogram, HistogramVec, gather, register_counter,
+    register_counter_vec, register_gauge, register_gauge_vec, register_histogram,
+    register_histogram_vec,
+};
+
+/// Domain-specific Prometheus metrics for production monitoring.
+// Field names like `blocks_committed` and section comments serve as docs;
+// individual field doc-comments would just restate the names.
+#[allow(missing_docs)]
+pub struct Metrics {
+    // === Consensus ===
+    /// Per-shard count of blocks committed.
+    pub blocks_committed: CounterVec,
+    pub block_commit_latency: HistogramVec,
+    /// Per-shard chain height. Each hosted shard maintains its own height.
+    pub block_height: GaugeVec,
+    /// Per-vnode current shard round.
+    pub round: GaugeVec,
+    /// Per-vnode self-originated view changes (leader-activity timer fired).
+    pub view_changes: GaugeVec,
+    /// Per-vnode view syncs (rounds caught up to from peers).
+    pub view_syncs: GaugeVec,
+    pub build_info: GaugeVec,
+
+    // === Transactions ===
+    pub transactions_finalized: HistogramVec,
+    /// Per-vnode mempool size.
+    pub mempool_size: GaugeVec,
+
+    // === Backpressure ===
+    /// Per-vnode in-flight transaction count.
+    pub in_flight: GaugeVec,
+    /// Per-vnode backpressure flag (0 or 1).
+    pub backpressure_active: GaugeVec,
+    /// Per-vnode count of TXs with commitment proofs in last proposal.
+    pub txs_with_commitment_proof: GaugeVec,
+
+    // === Infrastructure ===
+    pub network_messages_sent: Counter,
+    pub network_messages_received: Counter,
+    pub signature_verification_latency: HistogramVec,
+    pub execution_latency: Histogram,
+    // === Thread Pools ===
+    pub consensus_pool_queue_depth: Gauge,
+    pub throughput_pool_queue_depth: Gauge,
+    pub pool_task_duration: HistogramVec,
+
+    // === Event Channel Depths ===
+    pub callback_channel_depth: Gauge,
+    pub consensus_channel_depth: Gauge,
+    pub validated_tx_channel_depth: Gauge,
+    pub rpc_tx_channel_depth: Gauge,
+    pub status_channel_depth: Gauge,
+    pub sync_request_channel_depth: Gauge,
+    pub tx_request_channel_depth: Gauge,
+    pub cert_request_channel_depth: Gauge,
+
+    // === Transaction Ingress ===
+    pub tx_ingress_rejected_syncing: Counter,
+    pub tx_ingress_rejected_pending_limit: Counter,
+
+    // === Storage ===
+    pub rocksdb_read_latency: Histogram,
+    pub rocksdb_write_latency: Histogram,
+    pub storage_operation_latency: HistogramVec,
+    pub storage_batch_size: Histogram,
+    pub storage_certificates_persisted: Counter,
+    pub storage_blocks_persisted: Counter,
+    pub storage_transactions_persisted: Counter,
+
+    // === Network ===
+    pub libp2p_peers_connected: Gauge,
+    pub libp2p_bandwidth_in_bytes: Counter,
+    pub libp2p_bandwidth_out_bytes: Counter,
+
+    // === Sync ===
+    //
+    // Per-scope status keyed by (`kind`, `shard`). `kind` is `block` or
+    // `remote_header`; `shard` is the hosted shard's id. Filtering /
+    // response-error dimensions remain because they don't collapse into
+    // the per-`kind` fetch counters below.
+    pub sync_blocks_behind: GaugeVec,
+    pub sync_in_progress: GaugeVec,
+    pub sync_blocks_filtered: CounterVec,
+    pub sync_response_errors: CounterVec,
+    pub sync_round_started: CounterVec,
+    pub sync_round_completed: CounterVec,
+    pub sync_round_retried: CounterVec,
+    pub sync_round_in_flight: GaugeVec,
+
+    // === Fetch ===
+    pub fetch_started: CounterVec,
+    pub fetch_completed: CounterVec,
+    pub fetch_abandoned: CounterVec,
+    pub fetch_retried: CounterVec,
+    pub fetch_items_received: CounterVec,
+    pub fetch_items_sent: CounterVec,
+    pub fetch_latency: HistogramVec,
+    pub fetch_in_flight: GaugeVec,
+    pub fetch_oldest_in_flight_age_ms: GaugeVec,
+
+    // === Aborted Transactions ===
+    pub transactions_aborted: Counter,
+    pub expected_tx_dropped: Counter,
+
+    // === Lock Contention ===
+    /// Per-vnode lock contention ratio (deferred / total).
+    pub lock_contention_ratio: GaugeVec,
+
+    // === Errors ===
+    pub signature_verification_failures: Counter,
+    pub invalid_messages_received: Counter,
+    pub transactions_rejected: CounterVec,
+
+    // === Memory ===
+    pub memory_shard: GaugeVec,
+    pub memory_exec: GaugeVec,
+    pub memory_mempool: GaugeVec,
+    pub memory_remote_headers: GaugeVec,
+    pub memory_provisions: GaugeVec,
+    pub memory_node: GaugeVec,
+    pub memory_storage: GaugeVec,
+
+    // === Cross-Shard Message Delivery ===
+    pub dispatch_failures: CounterVec,
+    pub broadcast_failures: Counter,
+    pub broadcast_retry_successes: Counter,
+    pub broadcast_messages_dropped: Counter,
+    pub broadcast_retry_queue_size: Gauge,
+    pub gossipsub_publish_failures: CounterVec,
+    pub network_request_retries: CounterVec,
+    pub early_arrival_evictions: Counter,
+    pub backpressure_events: CounterVec,
+
+    // === Network class accounting ===
+    /// Per-class in-flight request slot count.
+    pub request_slots_in_flight: GaugeVec,
+    /// `acquire_slot` wait time histogram, per class.
+    pub request_slot_wait: HistogramVec,
+    /// Gossipsub validation outcomes (accept / reject / ignore).
+    pub gossipsub_validations: CounterVec,
+    /// Inbound serving stream count, per protocol.
+    pub inbound_streams_in_use: GaugeVec,
+}
+
+impl Metrics {
+    #[allow(clippy::too_many_lines)] // single registration table for every Prometheus metric
+    fn new() -> Self {
+        let latency_buckets = vec![
+            0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5,
+            3.0, 5.0, 10.0, 30.0, 60.0, 120.0,
+        ];
+
+        let build_info = register_gauge_vec!(
+            "hyperscale_build_info",
+            "Node build information",
+            &["version"]
+        )
+        .unwrap();
+
+        let version = option_env!("HYPERSCALE_VERSION").unwrap_or("localdev");
+        build_info.with_label_values(&[version]).set(1.0);
+
+        Self {
+            build_info,
+
+            // Consensus
+            blocks_committed: register_counter_vec!(
+                "hyperscale_blocks_committed_total",
+                "Total number of blocks committed, per shard",
+                &["shard"]
+            )
+            .unwrap(),
+
+            block_commit_latency: register_histogram_vec!(
+                "hyperscale_block_commit_latency_seconds",
+                "Time from proposal to commit, split by how this node learned the certifying QC",
+                &["source"],
+                latency_buckets.clone()
+            )
+            .unwrap(),
+
+            block_height: register_gauge_vec!(
+                "hyperscale_block_height",
+                "Current block height, per shard",
+                &["shard"]
+            )
+            .unwrap(),
+
+            round: register_gauge_vec!(
+                "hyperscale_round",
+                "Current shard round within current height, per (shard, validator_id)",
+                &["shard", "validator_id"]
+            )
+            .unwrap(),
+
+            view_changes: register_gauge_vec!(
+                "hyperscale_view_changes",
+                "Self-originated view changes (this validator's leader-activity timer fired)",
+                &["shard", "validator_id"]
+            )
+            .unwrap(),
+
+            view_syncs: register_gauge_vec!(
+                "hyperscale_view_syncs",
+                "Rounds advanced via sync_to_qc_round (caught up to higher round seen on peers)",
+                &["shard", "validator_id"]
+            )
+            .unwrap(),
+
+            // Transactions
+            transactions_finalized: register_histogram_vec!(
+                "hyperscale_transaction_latency_seconds",
+                "Transaction end-to-end latency",
+                &["cross_shard"],
+                latency_buckets
+            )
+            .unwrap(),
+
+            mempool_size: register_gauge_vec!(
+                "hyperscale_mempool_size",
+                "Number of pending transactions in mempool, per (shard, validator_id)",
+                &["shard", "validator_id"]
+            )
+            .unwrap(),
+
+            // Backpressure
+            in_flight: register_gauge_vec!(
+                "hyperscale_in_flight",
+                "Number of transactions holding state locks (Committed or Executed)",
+                &["shard", "validator_id"]
+            )
+            .unwrap(),
+            backpressure_active: register_gauge_vec!(
+                "hyperscale_backpressure_active",
+                "Whether backpressure limit is currently active (1) or not (0)",
+                &["shard", "validator_id"]
+            )
+            .unwrap(),
+            txs_with_commitment_proof: register_gauge_vec!(
+                "hyperscale_txs_with_commitment_proof",
+                "Number of TXs with commitment proofs in last proposal",
+                &["shard", "validator_id"]
+            )
+            .unwrap(),
+
+            // Infrastructure
+            network_messages_sent: register_counter!(
+                "hyperscale_network_messages_sent_total",
+                "Total network messages sent"
+            )
+            .unwrap(),
+
+            network_messages_received: register_counter!(
+                "hyperscale_network_messages_received_total",
+                "Total network messages received"
+            )
+            .unwrap(),
+
+            signature_verification_latency: register_histogram_vec!(
+                "hyperscale_signature_verification_latency_seconds",
+                "Signature verification latency by type",
+                &["type"],
+                vec![
+                    0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+                    30.0
+                ]
+            )
+            .unwrap(),
+
+            execution_latency: register_histogram!(
+                "hyperscale_execution_latency_seconds",
+                "Transaction execution latency",
+                vec![
+                    0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.5, 5.0, 10.0
+                ]
+            )
+            .unwrap(),
+
+            // Thread Pools
+            consensus_pool_queue_depth: register_gauge!(
+                "hyperscale_consensus_pool_queue_depth",
+                "Number of pending tasks in the consensus pool (votes, QCs, state root, proposals)"
+            )
+            .unwrap(),
+
+            throughput_pool_queue_depth: register_gauge!(
+                "hyperscale_throughput_pool_queue_depth",
+                "Number of pending tasks in the throughput pool (crypto verify, tx validation, execution)"
+            )
+            .unwrap(),
+
+            pool_task_duration: register_histogram_vec!(
+                "hyperscale_pool_task_duration_seconds",
+                "Time spent executing tasks in each dispatch pool",
+                &["pool"],
+                vec![
+                    0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+                    30.0
+                ]
+            )
+            .unwrap(),
+
+            // Event Channel Depths
+            callback_channel_depth: register_gauge!(
+                "hyperscale_callback_channel_depth",
+                "Depth of callback channel (crypto/execution results)"
+            )
+            .unwrap(),
+
+            consensus_channel_depth: register_gauge!(
+                "hyperscale_consensus_channel_depth",
+                "Depth of consensus channel (shard consensus network messages)"
+            )
+            .unwrap(),
+
+            validated_tx_channel_depth: register_gauge!(
+                "hyperscale_validated_tx_channel_depth",
+                "Depth of validated transactions channel"
+            )
+            .unwrap(),
+
+            rpc_tx_channel_depth: register_gauge!(
+                "hyperscale_rpc_tx_channel_depth",
+                "Depth of RPC transaction submission channel"
+            )
+            .unwrap(),
+
+            status_channel_depth: register_gauge!(
+                "hyperscale_status_channel_depth",
+                "Depth of status channel (transaction status updates)"
+            )
+            .unwrap(),
+
+            sync_request_channel_depth: register_gauge!(
+                "hyperscale_sync_request_channel_depth",
+                "Depth of inbound sync request channel"
+            )
+            .unwrap(),
+
+            tx_request_channel_depth: register_gauge!(
+                "hyperscale_tx_request_channel_depth",
+                "Depth of inbound transaction fetch request channel"
+            )
+            .unwrap(),
+
+            cert_request_channel_depth: register_gauge!(
+                "hyperscale_cert_request_channel_depth",
+                "Depth of inbound certificate fetch request channel"
+            )
+            .unwrap(),
+
+            // Transaction Ingress
+            tx_ingress_rejected_syncing: register_counter!(
+                "hyperscale_tx_ingress_rejected_syncing_total",
+                "Total transactions rejected because node is syncing"
+            )
+            .unwrap(),
+
+            tx_ingress_rejected_pending_limit: register_counter!(
+                "hyperscale_tx_ingress_rejected_pending_limit_total",
+                "Total transactions rejected because pending count is too high"
+            )
+            .unwrap(),
+
+            // Storage
+            rocksdb_read_latency: register_histogram!(
+                "hyperscale_rocksdb_read_latency_seconds",
+                "RocksDB read operation latency",
+                vec![0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.0]
+            )
+            .unwrap(),
+
+            rocksdb_write_latency: register_histogram!(
+                "hyperscale_rocksdb_write_latency_seconds",
+                "RocksDB write operation latency",
+                vec![0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.0]
+            )
+            .unwrap(),
+
+            storage_operation_latency: register_histogram_vec!(
+                "hyperscale_storage_operation_latency_seconds",
+                "Storage operation latency by type",
+                &["operation"],
+                vec![
+                    0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.5, 5.0, 10.0
+                ]
+            )
+            .unwrap(),
+
+            storage_batch_size: register_histogram!(
+                "hyperscale_storage_batch_size",
+                "Number of writes in atomic batches",
+                vec![
+                    1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0,
+                    10000.0
+                ]
+            )
+            .unwrap(),
+
+            storage_certificates_persisted: register_counter!(
+                "hyperscale_storage_certificates_persisted_total",
+                "Total number of wave certificates persisted"
+            )
+            .unwrap(),
+
+            storage_blocks_persisted: register_counter!(
+                "hyperscale_storage_blocks_persisted_total",
+                "Total number of blocks persisted to storage"
+            )
+            .unwrap(),
+
+            storage_transactions_persisted: register_counter!(
+                "hyperscale_storage_transactions_persisted_total",
+                "Total number of transactions persisted to storage"
+            )
+            .unwrap(),
+
+            // Network
+            libp2p_peers_connected: register_gauge!(
+                "hyperscale_libp2p_peers_connected",
+                "Number of connected libp2p peers"
+            )
+            .unwrap(),
+
+            libp2p_bandwidth_in_bytes: register_counter!(
+                "hyperscale_libp2p_bandwidth_in_bytes_total",
+                "Total bytes received via libp2p"
+            )
+            .unwrap(),
+
+            libp2p_bandwidth_out_bytes: register_counter!(
+                "hyperscale_libp2p_bandwidth_out_bytes_total",
+                "Total bytes sent via libp2p"
+            )
+            .unwrap(),
+
+            // Sync — per-scope status (`kind` = "block" or "remote_header"), per-shard.
+            sync_blocks_behind: register_gauge_vec!(
+                "hyperscale_sync_blocks_behind",
+                "Per-(scope, shard) blocks behind the latest known target",
+                &["kind", "shard"]
+            )
+            .unwrap(),
+
+            sync_in_progress: register_gauge_vec!(
+                "hyperscale_sync_in_progress",
+                "Per-(scope, shard) sync activity (0 or 1)",
+                &["kind", "shard"]
+            )
+            .unwrap(),
+
+            sync_blocks_filtered: register_counter_vec!(
+                "hyperscale_sync_blocks_filtered_total",
+                "Sync responses filtered out before delivery, by scope and reason",
+                &["kind", "reason"]
+            )
+            .unwrap(),
+
+            sync_response_errors: register_counter_vec!(
+                "hyperscale_sync_response_errors_total",
+                "Sync response errors by scope and type",
+                &["kind", "error_type"]
+            )
+            .unwrap(),
+
+            sync_round_started: register_counter_vec!(
+                "hyperscale_sync_round_started_total",
+                "Sync range round-trips started (one per network request emitted by a sync FSM)",
+                &["kind"]
+            )
+            .unwrap(),
+
+            sync_round_completed: register_counter_vec!(
+                "hyperscale_sync_round_completed_total",
+                "Sync range round-trips completed successfully",
+                &["kind"]
+            )
+            .unwrap(),
+
+            sync_round_retried: register_counter_vec!(
+                "hyperscale_sync_round_retried_total",
+                "Sync range round-trips released for retry — increments per release-for-retry, not per unrecoverable failure",
+                &["kind"]
+            )
+            .unwrap(),
+
+            sync_round_in_flight: register_gauge_vec!(
+                "hyperscale_sync_round_in_flight",
+                "Per-(scope, shard) in-flight sync range fetches",
+                &["kind", "shard"]
+            )
+            .unwrap(),
+
+            // Fetch — per-`kind` counters. Per-id bindings count in *ids*;
+            // range bindings (`block`, `remote_header`) count in *ranges*.
+            fetch_started: register_counter_vec!(
+                "hyperscale_fetch_started_total",
+                "Total fetch operations started (ids for per-id bindings, ranges for sync)",
+                &["kind"]
+            )
+            .unwrap(),
+
+            fetch_completed: register_counter_vec!(
+                "hyperscale_fetch_completed_total",
+                "Total fetch operations completed successfully (payload landed and drained the entry)",
+                &["kind"]
+            )
+            .unwrap(),
+
+            fetch_abandoned: register_counter_vec!(
+                "hyperscale_fetch_abandoned_total",
+                "Total fetch operations cancelled by Action::AbandonFetch (consumer gave up before admission)",
+                &["kind"]
+            )
+            .unwrap(),
+
+            fetch_retried: register_counter_vec!(
+                "hyperscale_fetch_retried_total",
+                "Total fetch operations released for retry — increments per release-for-retry, not per unrecoverable failure",
+                &["kind"]
+            )
+            .unwrap(),
+
+            fetch_items_received: register_counter_vec!(
+                "hyperscale_fetch_items_received_total",
+                "Total items (transactions/certificates) received via fetch",
+                &["kind"]
+            )
+            .unwrap(),
+
+            fetch_items_sent: register_counter_vec!(
+                "hyperscale_fetch_items_sent_total",
+                "Total items (transactions/certificates) sent in response to fetch requests",
+                &["kind"]
+            )
+            .unwrap(),
+
+            fetch_latency: register_histogram_vec!(
+                "hyperscale_fetch_latency_seconds",
+                "Fetch operation latency",
+                &["kind"],
+                vec![
+                    0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0
+                ]
+            )
+            .unwrap(),
+
+            fetch_in_flight: register_gauge_vec!(
+                "hyperscale_fetch_in_flight",
+                "Number of fetch requests currently in flight, per (kind, shard)",
+                &["kind", "shard"]
+            )
+            .unwrap(),
+
+            fetch_oldest_in_flight_age_ms: register_gauge_vec!(
+                "hyperscale_fetch_oldest_in_flight_age_ms",
+                "Age in ms of the longest-running in-flight fetch entry, per (kind, shard); 0 when no entry is in flight. Alert on rising past tens of seconds — admission silently dropped a response.",
+                &["kind", "shard"]
+            )
+            .unwrap(),
+
+            // Aborted Transactions
+            transactions_aborted: register_counter!(
+                "hyperscale_transactions_aborted_total",
+                "Total cross-shard transactions aborted (timeout or node-ID conflict)"
+            )
+            .unwrap(),
+
+            expected_tx_dropped: register_counter!(
+                "hyperscale_mempool_expected_tx_dropped_total",
+                "Expected cross-shard txs dropped past RETENTION_HORIZON without DA fulfilment"
+            )
+            .unwrap(),
+
+            // Lock Contention
+            lock_contention_ratio: register_gauge_vec!(
+                "hyperscale_lock_contention_ratio",
+                "Ratio of deferred transactions to total (0.0 to 1.0), per (shard, validator_id)",
+                &["shard", "validator_id"]
+            )
+            .unwrap(),
+
+            // Errors
+            signature_verification_failures: register_counter!(
+                "hyperscale_signature_verification_failures_total",
+                "Total signature verification failures"
+            )
+            .unwrap(),
+
+            invalid_messages_received: register_counter!(
+                "hyperscale_invalid_messages_received_total",
+                "Total invalid/malformed messages received"
+            )
+            .unwrap(),
+
+            transactions_rejected: register_counter_vec!(
+                "hyperscale_transactions_rejected_total",
+                "Total transactions rejected",
+                &["reason"]
+            )
+            .unwrap(),
+
+            // Memory
+            memory_shard: register_gauge_vec!(
+                "hyperscale_memory_shard_collections",
+                "shard consensus state machine collection sizes (entry count)",
+                &["collection"]
+            )
+            .unwrap(),
+
+            memory_exec: register_gauge_vec!(
+                "hyperscale_memory_exec_collections",
+                "Execution state machine collection sizes (entry count)",
+                &["collection"]
+            )
+            .unwrap(),
+
+            memory_mempool: register_gauge_vec!(
+                "hyperscale_memory_mempool_collections",
+                "Mempool collection sizes (entry count)",
+                &["collection"]
+            )
+            .unwrap(),
+
+            memory_remote_headers: register_gauge_vec!(
+                "hyperscale_memory_remote_headers_collections",
+                "Remote header coordinator collection sizes (entry count)",
+                &["collection"]
+            )
+            .unwrap(),
+
+            memory_provisions: register_gauge_vec!(
+                "hyperscale_memory_provisions_collections",
+                "Provision coordinator collection sizes (entry count)",
+                &["collection"]
+            )
+            .unwrap(),
+
+            memory_node: register_gauge_vec!(
+                "hyperscale_memory_node_collections",
+                "Node io_loop collection sizes (entry count)",
+                &["collection"]
+            )
+            .unwrap(),
+
+            memory_storage: register_gauge_vec!(
+                "hyperscale_memory_storage",
+                "Storage cache memory usage",
+                &["cache"]
+            )
+            .unwrap(),
+
+            // Cross-Shard Message Delivery
+            dispatch_failures: register_counter_vec!(
+                "hyperscale_dispatch_failures_total",
+                "Failures to dispatch cross-shard messages (channel closed)",
+                &["message_type"]
+            )
+            .unwrap(),
+
+            broadcast_failures: register_counter!(
+                "hyperscale_broadcast_failures_total",
+                "Cross-shard message batches that failed initial broadcast"
+            )
+            .unwrap(),
+
+            broadcast_retry_successes: register_counter!(
+                "hyperscale_broadcast_retry_successes_total",
+                "Cross-shard message batches successfully delivered after retry"
+            )
+            .unwrap(),
+
+            broadcast_messages_dropped: register_counter!(
+                "hyperscale_broadcast_messages_dropped_total",
+                "Cross-shard message batches dropped after max retries (CRITICAL)"
+            )
+            .unwrap(),
+
+            broadcast_retry_queue_size: register_gauge!(
+                "hyperscale_broadcast_retry_queue_size",
+                "Current size of the broadcast retry queue"
+            )
+            .unwrap(),
+
+            gossipsub_publish_failures: register_counter_vec!(
+                "hyperscale_gossipsub_publish_failures_total",
+                "Gossipsub publish failures by topic type",
+                &["topic_type"]
+            )
+            .unwrap(),
+
+            network_request_retries: register_counter_vec!(
+                "hyperscale_network_request_retries_total",
+                "Network request retries due to timeout (likely packet loss)",
+                &["request_type"]
+            )
+            .unwrap(),
+
+            early_arrival_evictions: register_counter!(
+                "hyperscale_early_arrival_evictions_total",
+                "Early arrival buffer entries evicted due to size limit"
+            )
+            .unwrap(),
+
+            backpressure_events: register_counter_vec!(
+                "hyperscale_backpressure_events_total",
+                "Backpressure events by source",
+                &["source"]
+            )
+            .unwrap(),
+
+            request_slots_in_flight: register_gauge_vec!(
+                "hyperscale_request_slots_in_flight",
+                "In-flight request slots, broken down by message class",
+                &["class"]
+            )
+            .unwrap(),
+
+            request_slot_wait: register_histogram_vec!(
+                "hyperscale_request_slot_wait_seconds",
+                "Time spent inside acquire_slot before admission",
+                &["class"],
+                vec![
+                    0.000_1, 0.000_5, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5,
+                    5.0, 10.0,
+                ]
+            )
+            .unwrap(),
+
+            gossipsub_validations: register_counter_vec!(
+                "hyperscale_gossipsub_validations_total",
+                "Gossipsub validation outcomes (accept / reject / ignore)",
+                &["outcome"]
+            )
+            .unwrap(),
+
+            inbound_streams_in_use: register_gauge_vec!(
+                "hyperscale_inbound_streams_in_use",
+                "Inbound serving streams in flight, per protocol",
+                &["protocol"]
+            )
+            .unwrap(),
+        }
+    }
+}
+
+/// Prometheus-backed metrics recorder.
+pub struct PrometheusRecorder {
+    metrics: Metrics,
+}
+
+impl PrometheusRecorder {
+    fn new() -> Self {
+        Self {
+            metrics: Metrics::new(),
+        }
+    }
+}
+
+impl MetricsRecorder for PrometheusRecorder {
+    // ── Storage ──────────────────────────────────────────────────────
+
+    fn record_storage_read(&self, latency_secs: f64) {
+        self.metrics.rocksdb_read_latency.observe(latency_secs);
+    }
+
+    fn record_storage_write(&self, latency_secs: f64) {
+        self.metrics.rocksdb_write_latency.observe(latency_secs);
+    }
+
+    fn record_storage_operation(&self, operation: &str, latency_secs: f64) {
+        self.metrics
+            .storage_operation_latency
+            .with_label_values(&[operation])
+            .observe(latency_secs);
+    }
+
+    fn record_storage_batch_size(&self, size: usize) {
+        self.metrics.storage_batch_size.observe(size as f64);
+    }
+
+    fn record_block_persisted(&self) {
+        self.metrics.storage_blocks_persisted.inc();
+    }
+
+    fn record_certificate_persisted(&self) {
+        self.metrics.storage_certificates_persisted.inc();
+    }
+
+    fn record_transactions_persisted(&self, count: usize) {
+        self.metrics
+            .storage_transactions_persisted
+            .inc_by(count as f64);
+    }
+
+    // ── Consensus ────────────────────────────────────────────────────
+
+    fn record_block_committed(&self, shard: u64, commit_latency_secs: f64, source: &str) {
+        self.metrics
+            .blocks_committed
+            .with_label_values(&[&shard.to_string()])
+            .inc();
+        self.metrics
+            .block_commit_latency
+            .with_label_values(&[source])
+            .observe(commit_latency_secs);
+        // `block_height` is set via the explicit per-shard `set_block_height`
+        // setter at the same call site.
+    }
+
+    fn record_transaction_finalized(&self, latency_secs: f64, cross_shard: bool) {
+        let label = if cross_shard { "true" } else { "false" };
+        self.metrics
+            .transactions_finalized
+            .with_label_values(&[label])
+            .observe(latency_secs);
+    }
+
+    fn set_block_height(&self, shard: u64, height: u64) {
+        self.metrics
+            .block_height
+            .with_label_values(&[&shard.to_string()])
+            .set(height as f64);
+    }
+
+    fn set_shard_round(&self, shard: u64, validator_id: u64, round: u64) {
+        self.metrics
+            .round
+            .with_label_values(&[&shard.to_string(), &validator_id.to_string()])
+            .set(round as f64);
+    }
+
+    fn set_view_changes(&self, shard: u64, validator_id: u64, count: u64) {
+        self.metrics
+            .view_changes
+            .with_label_values(&[&shard.to_string(), &validator_id.to_string()])
+            .set(count as f64);
+    }
+
+    fn set_view_syncs(&self, shard: u64, validator_id: u64, count: u64) {
+        self.metrics
+            .view_syncs
+            .with_label_values(&[&shard.to_string(), &validator_id.to_string()])
+            .set(count as f64);
+    }
+
+    fn set_mempool_size(&self, shard: u64, validator_id: u64, size: usize) {
+        self.metrics
+            .mempool_size
+            .with_label_values(&[&shard.to_string(), &validator_id.to_string()])
+            .set(size as f64);
+    }
+
+    fn set_in_flight(&self, shard: u64, validator_id: u64, count: usize) {
+        self.metrics
+            .in_flight
+            .with_label_values(&[&shard.to_string(), &validator_id.to_string()])
+            .set(count as f64);
+    }
+
+    fn set_backpressure_active(&self, shard: u64, validator_id: u64, active: bool) {
+        self.metrics
+            .backpressure_active
+            .with_label_values(&[&shard.to_string(), &validator_id.to_string()])
+            .set(if active { 1.0 } else { 0.0 });
+    }
+
+    fn set_txs_with_commitment_proof(&self, shard: u64, validator_id: u64, count: usize) {
+        self.metrics
+            .txs_with_commitment_proof
+            .with_label_values(&[&shard.to_string(), &validator_id.to_string()])
+            .set(count as f64);
+    }
+
+    // ── Infrastructure ───────────────────────────────────────────────
+
+    fn set_pool_queue_depths(&self, consensus: usize, throughput: usize) {
+        self.metrics
+            .consensus_pool_queue_depth
+            .set(consensus as f64);
+        self.metrics
+            .throughput_pool_queue_depth
+            .set(throughput as f64);
+    }
+
+    fn record_pool_task_completed(&self, pool: &str, latency_secs: f64) {
+        self.metrics
+            .pool_task_duration
+            .with_label_values(&[pool])
+            .observe(latency_secs);
+    }
+
+    fn set_channel_depths(&self, depths: &ChannelDepths) {
+        self.metrics
+            .callback_channel_depth
+            .set(depths.callback as f64);
+        self.metrics
+            .consensus_channel_depth
+            .set(depths.consensus as f64);
+        self.metrics
+            .validated_tx_channel_depth
+            .set(depths.validated_tx as f64);
+        self.metrics.rpc_tx_channel_depth.set(depths.rpc_tx as f64);
+        self.metrics.status_channel_depth.set(depths.status as f64);
+        self.metrics
+            .sync_request_channel_depth
+            .set(depths.sync_request as f64);
+        self.metrics
+            .tx_request_channel_depth
+            .set(depths.tx_request as f64);
+        self.metrics
+            .cert_request_channel_depth
+            .set(depths.cert_request as f64);
+    }
+
+    fn record_execution_latency(&self, latency_secs: f64) {
+        self.metrics.execution_latency.observe(latency_secs);
+    }
+
+    fn record_signature_verification_latency(&self, sig_type: &str, latency_secs: f64) {
+        self.metrics
+            .signature_verification_latency
+            .with_label_values(&[sig_type])
+            .observe(latency_secs);
+    }
+
+    fn record_signature_verification_failure(&self) {
+        self.metrics.signature_verification_failures.inc();
+    }
+
+    // ── Network ──────────────────────────────────────────────────────
+
+    fn record_network_message_sent(&self) {
+        self.metrics.network_messages_sent.inc();
+    }
+
+    fn record_network_message_received(&self) {
+        self.metrics.network_messages_received.inc();
+    }
+
+    fn set_libp2p_peers(&self, count: usize) {
+        self.metrics.libp2p_peers_connected.set(count as f64);
+    }
+
+    fn record_libp2p_bandwidth(&self, bytes_in: u64, bytes_out: u64) {
+        self.metrics
+            .libp2p_bandwidth_in_bytes
+            .inc_by(bytes_in as f64);
+        self.metrics
+            .libp2p_bandwidth_out_bytes
+            .inc_by(bytes_out as f64);
+    }
+
+    fn record_gossipsub_publish_failure(&self, topic: &str) {
+        let topic_type = topic.rsplit('/').next().unwrap_or("unknown");
+        self.metrics
+            .gossipsub_publish_failures
+            .with_label_values(&[topic_type])
+            .inc();
+    }
+
+    fn record_request_retry(&self, request_type: &str) {
+        self.metrics
+            .network_request_retries
+            .with_label_values(&[request_type])
+            .inc();
+    }
+
+    fn increment_dispatch_failures(&self, message_type: &str) {
+        self.metrics
+            .dispatch_failures
+            .with_label_values(&[message_type])
+            .inc();
+    }
+
+    fn record_broadcast_failure(&self) {
+        self.metrics.broadcast_failures.inc();
+    }
+
+    fn record_broadcast_retry_success(&self) {
+        self.metrics.broadcast_retry_successes.inc();
+    }
+
+    fn record_broadcast_message_dropped(&self) {
+        self.metrics.broadcast_messages_dropped.inc();
+    }
+
+    fn set_broadcast_retry_queue_size(&self, size: usize) {
+        self.metrics.broadcast_retry_queue_size.set(size as f64);
+    }
+
+    fn record_backpressure_event(&self, source: &str) {
+        self.metrics
+            .backpressure_events
+            .with_label_values(&[source])
+            .inc();
+    }
+
+    fn record_early_arrival_eviction(&self) {
+        self.metrics.early_arrival_evictions.inc();
+    }
+
+    fn set_request_slots_in_flight(&self, class: &str, count: usize) {
+        #[allow(clippy::cast_precision_loss)]
+        // count is bounded by RequestManagerConfig::max_concurrent (≤ 64)
+        self.metrics
+            .request_slots_in_flight
+            .with_label_values(&[class])
+            .set(count as f64);
+    }
+
+    fn record_request_slot_wait(&self, class: &str, wait_secs: f64) {
+        self.metrics
+            .request_slot_wait
+            .with_label_values(&[class])
+            .observe(wait_secs);
+    }
+
+    fn record_gossipsub_validation(&self, outcome: &str) {
+        self.metrics
+            .gossipsub_validations
+            .with_label_values(&[outcome])
+            .inc();
+    }
+
+    fn set_inbound_streams_in_use(&self, protocol: &str, count: usize) {
+        #[allow(clippy::cast_precision_loss)]
+        // count is bounded by MAX_INBOUND_CONCURRENT (= 128)
+        self.metrics
+            .inbound_streams_in_use
+            .with_label_values(&[protocol])
+            .set(count as f64);
+    }
+
+    // ── Sync ─────────────────────────────────────────────────────────
+
+    fn set_sync_blocks_behind(&self, kind: &str, shard: u64, blocks_behind: u64) {
+        self.metrics
+            .sync_blocks_behind
+            .with_label_values(&[kind, &shard.to_string()])
+            .set(blocks_behind as f64);
+    }
+
+    fn set_sync_in_progress(&self, kind: &str, shard: u64, in_progress: bool) {
+        self.metrics
+            .sync_in_progress
+            .with_label_values(&[kind, &shard.to_string()])
+            .set(if in_progress { 1.0 } else { 0.0 });
+    }
+
+    fn record_sync_block_filtered(&self, kind: &str, reason: &str) {
+        self.metrics
+            .sync_blocks_filtered
+            .with_label_values(&[kind, reason])
+            .inc();
+    }
+
+    fn record_sync_response_error(&self, kind: &str, error_type: &str) {
+        self.metrics
+            .sync_response_errors
+            .with_label_values(&[kind, error_type])
+            .inc();
+    }
+
+    fn record_sync_round_started(&self, kind: &str) {
+        self.metrics
+            .sync_round_started
+            .with_label_values(&[kind])
+            .inc();
+    }
+
+    fn record_sync_round_completed(&self, kind: &str) {
+        self.metrics
+            .sync_round_completed
+            .with_label_values(&[kind])
+            .inc();
+    }
+
+    fn record_sync_round_retried(&self, kind: &str) {
+        self.metrics
+            .sync_round_retried
+            .with_label_values(&[kind])
+            .inc();
+    }
+
+    fn set_sync_round_in_flight(&self, kind: &str, shard: u64, count: usize) {
+        self.metrics
+            .sync_round_in_flight
+            .with_label_values(&[kind, &shard.to_string()])
+            .set(count as f64);
+    }
+
+    // ── Fetch ────────────────────────────────────────────────────────
+
+    fn record_fetch_started(&self, kind: &str) {
+        self.metrics.fetch_started.with_label_values(&[kind]).inc();
+    }
+
+    fn record_fetch_completed(&self, kind: &str) {
+        self.metrics
+            .fetch_completed
+            .with_label_values(&[kind])
+            .inc();
+    }
+
+    fn record_fetch_abandoned(&self, kind: &str) {
+        self.metrics
+            .fetch_abandoned
+            .with_label_values(&[kind])
+            .inc();
+    }
+
+    fn record_fetch_retried(&self, kind: &str) {
+        self.metrics.fetch_retried.with_label_values(&[kind]).inc();
+    }
+
+    fn record_fetch_items_received(&self, kind: &str, count: usize) {
+        self.metrics
+            .fetch_items_received
+            .with_label_values(&[kind])
+            .inc_by(count as f64);
+    }
+
+    fn record_fetch_latency(&self, kind: &str, latency_secs: f64) {
+        self.metrics
+            .fetch_latency
+            .with_label_values(&[kind])
+            .observe(latency_secs);
+    }
+
+    fn set_fetch_in_flight(&self, kind: &str, shard: u64, count: usize) {
+        self.metrics
+            .fetch_in_flight
+            .with_label_values(&[kind, &shard.to_string()])
+            .set(count as f64);
+    }
+
+    fn set_fetch_oldest_in_flight_age_ms(&self, kind: &str, shard: u64, age_ms: u64) {
+        self.metrics
+            .fetch_oldest_in_flight_age_ms
+            .with_label_values(&[kind, &shard.to_string()])
+            .set(age_ms as f64);
+    }
+
+    fn record_fetch_response_sent(&self, kind: &str, count: usize) {
+        self.metrics
+            .fetch_items_sent
+            .with_label_values(&[kind])
+            .inc_by(count as f64);
+    }
+
+    // ── Transaction Ingress ──────────────────────────────────────────
+
+    fn record_tx_ingress_rejected_syncing(&self) {
+        self.metrics.tx_ingress_rejected_syncing.inc();
+    }
+
+    fn record_tx_ingress_rejected_pending_limit(&self) {
+        self.metrics.tx_ingress_rejected_pending_limit.inc();
+    }
+
+    fn record_transaction_rejected(&self, reason: &str) {
+        self.metrics
+            .transactions_rejected
+            .with_label_values(&[reason])
+            .inc();
+    }
+
+    fn record_invalid_message(&self) {
+        self.metrics.invalid_messages_received.inc();
+    }
+
+    // ── Aborted Transactions ─────────────────────────────────────────
+
+    fn record_transaction_aborted(&self) {
+        self.metrics.transactions_aborted.inc();
+    }
+
+    fn record_expected_tx_dropped(&self) {
+        self.metrics.expected_tx_dropped.inc();
+    }
+
+    // ── Lock Contention ──────────────────────────────────────────────
+
+    fn set_lock_contention(&self, shard: u64, validator_id: u64, ratio: f64) {
+        self.metrics
+            .lock_contention_ratio
+            .with_label_values(&[&shard.to_string(), &validator_id.to_string()])
+            .set(ratio);
+    }
+
+    // ── Memory ──────────────────────────────────────────────────────
+
+    #[allow(clippy::too_many_lines)] // flat dispatch over every memory-metrics field
+    fn set_memory_metrics(&self, m: &MemoryMetrics) {
+        // Shard consensus
+        self.metrics
+            .memory_shard
+            .with_label_values(&["pending_blocks"])
+            .set(m.shard_pending_blocks as f64);
+        self.metrics
+            .memory_shard
+            .with_label_values(&["vote_sets"])
+            .set(m.shard_vote_sets as f64);
+        self.metrics
+            .memory_shard
+            .with_label_values(&["pending_commits"])
+            .set(m.shard_pending_commits as f64);
+        self.metrics
+            .memory_shard
+            .with_label_values(&["pending_commits_awaiting_data"])
+            .set(m.shard_pending_commits_awaiting_data as f64);
+        self.metrics
+            .memory_shard
+            .with_label_values(&["received_votes_by_height"])
+            .set(m.shard_received_votes_by_height as f64);
+        self.metrics
+            .memory_shard
+            .with_label_values(&["committed_tx_lookup"])
+            .set(m.shard_committed_tx_lookup as f64);
+        self.metrics
+            .memory_shard
+            .with_label_values(&["committed_cert_lookup"])
+            .set(m.shard_committed_cert_lookup as f64);
+        self.metrics
+            .memory_shard
+            .with_label_values(&["committed_provision_lookup"])
+            .set(m.shard_committed_provision_lookup as f64);
+        self.metrics
+            .memory_shard
+            .with_label_values(&["pending_qc_verifications"])
+            .set(m.shard_pending_qc_verifications as f64);
+        self.metrics
+            .memory_shard
+            .with_label_values(&["verified_qcs"])
+            .set(m.shard_verified_qcs as f64);
+        self.metrics
+            .memory_shard
+            .with_label_values(&["pending_state_root_verifications"])
+            .set(m.shard_pending_state_root_verifications as f64);
+        self.metrics
+            .memory_shard
+            .with_label_values(&["buffered_synced_blocks"])
+            .set(m.shard_buffered_synced_blocks as f64);
+        self.metrics
+            .memory_shard
+            .with_label_values(&["pending_synced_block_verifications"])
+            .set(m.shard_pending_synced_block_verifications as f64);
+
+        // Execution
+        self.metrics
+            .memory_exec
+            .with_label_values(&["cache_entries"])
+            .set(m.exec_cache_entries as f64);
+        self.metrics
+            .memory_exec
+            .with_label_values(&["finalized_wave_certificates"])
+            .set(m.exec_finalized_wave_certificates as f64);
+        self.metrics
+            .memory_exec
+            .with_label_values(&["waves"])
+            .set(m.exec_waves as f64);
+        self.metrics
+            .memory_exec
+            .with_label_values(&["vote_trackers"])
+            .set(m.exec_vote_trackers as f64);
+        self.metrics
+            .memory_exec
+            .with_label_values(&["early_votes"])
+            .set(m.exec_early_votes as f64);
+        self.metrics
+            .memory_exec
+            .with_label_values(&["expected_exec_certs"])
+            .set(m.exec_expected_exec_certs as f64);
+        self.metrics
+            .memory_exec
+            .with_label_values(&["verified_provisions"])
+            .set(m.exec_verified_provisions as f64);
+        self.metrics
+            .memory_exec
+            .with_label_values(&["required_provision_shards"])
+            .set(m.exec_required_provision_shards as f64);
+        self.metrics
+            .memory_exec
+            .with_label_values(&["received_provision_shards"])
+            .set(m.exec_received_provision_shards as f64);
+        self.metrics
+            .memory_exec
+            .with_label_values(&["waves_with_ec"])
+            .set(m.exec_waves_with_ec as f64);
+        self.metrics
+            .memory_exec
+            .with_label_values(&["pending_vote_retries"])
+            .set(m.exec_pending_vote_retries as f64);
+        self.metrics
+            .memory_exec
+            .with_label_values(&["wave_assignments"])
+            .set(m.exec_wave_assignments as f64);
+        self.metrics
+            .memory_exec
+            .with_label_values(&["early_wave_attestations"])
+            .set(m.exec_early_wave_attestations as f64);
+        self.metrics
+            .memory_exec
+            .with_label_values(&["pending_routing"])
+            .set(m.exec_pending_routing as f64);
+        self.metrics
+            .memory_exec
+            .with_label_values(&["fulfilled_exec_certs"])
+            .set(m.exec_fulfilled_exec_certs as f64);
+        self.metrics
+            .memory_exec
+            .with_label_values(&["outbound_certs"])
+            .set(m.exec_outbound_certs as f64);
+
+        // Mempool
+        self.metrics
+            .memory_mempool
+            .with_label_values(&["pool"])
+            .set(m.mempool_pool as f64);
+        self.metrics
+            .memory_mempool
+            .with_label_values(&["ready"])
+            .set(m.mempool_ready as f64);
+        self.metrics
+            .memory_mempool
+            .with_label_values(&["tombstones"])
+            .set(m.mempool_tombstones as f64);
+        self.metrics
+            .memory_mempool
+            .with_label_values(&["locked_nodes"])
+            .set(m.mempool_locked_nodes as f64);
+        self.metrics
+            .memory_mempool
+            .with_label_values(&["deferred_by_nodes"])
+            .set(m.mempool_deferred_by_nodes as f64);
+        self.metrics
+            .memory_mempool
+            .with_label_values(&["txs_deferred_by_node"])
+            .set(m.mempool_txs_deferred_by_node as f64);
+        self.metrics
+            .memory_mempool
+            .with_label_values(&["ready_txs_by_node"])
+            .set(m.mempool_ready_txs_by_node as f64);
+
+        // Remote Headers
+        self.metrics
+            .memory_remote_headers
+            .with_label_values(&["pending_headers"])
+            .set(m.rh_pending_headers as f64);
+        self.metrics
+            .memory_remote_headers
+            .with_label_values(&["verified_headers"])
+            .set(m.rh_verified_headers as f64);
+        self.metrics
+            .memory_remote_headers
+            .with_label_values(&["expected_headers"])
+            .set(m.rh_expected_headers as f64);
+
+        // Provision
+        self.metrics
+            .memory_provisions
+            .with_label_values(&["verified_remote_headers"])
+            .set(m.prov_verified_remote_headers as f64);
+        self.metrics
+            .memory_provisions
+            .with_label_values(&["pending_provisions"])
+            .set(m.prov_pending_provisions as f64);
+        self.metrics
+            .memory_provisions
+            .with_label_values(&["verified_provisions"])
+            .set(m.prov_verified_provisions as f64);
+        self.metrics
+            .memory_provisions
+            .with_label_values(&["expected_provisions"])
+            .set(m.prov_expected_provisions as f64);
+        self.metrics
+            .memory_provisions
+            .with_label_values(&["provisions_by_hash"])
+            .set(m.prov_provisions_by_hash as f64);
+        self.metrics
+            .memory_provisions
+            .with_label_values(&["queued_provisions"])
+            .set(m.prov_queued_provisions as f64);
+
+        // Node (io_loop)
+        self.metrics
+            .memory_node
+            .with_label_values(&["tx_store"])
+            .set(m.node_tx_store as f64);
+        self.metrics
+            .memory_node
+            .with_label_values(&["tx_status_cache"])
+            .set(m.node_tx_status_cache as f64);
+        self.metrics
+            .memory_node
+            .with_label_values(&["finalized_wave_cache"])
+            .set(m.node_finalized_wave_cache as f64);
+        self.metrics
+            .memory_node
+            .with_label_values(&["provision_cache"])
+            .set(m.node_provision_cache as f64);
+        self.metrics
+            .memory_node
+            .with_label_values(&["exec_cert_cache"])
+            .set(m.node_exec_cert_cache as f64);
+        self.metrics
+            .memory_node
+            .with_label_values(&["prepared_commits"])
+            .set(m.node_prepared_commits as f64);
+        self.metrics
+            .memory_node
+            .with_label_values(&["pending_validation"])
+            .set(m.node_pending_validation as f64);
+        self.metrics
+            .memory_node
+            .with_label_values(&["locally_submitted"])
+            .set(m.node_locally_submitted as f64);
+        self.metrics
+            .memory_node
+            .with_label_values(&["pending_block_commits"])
+            .set(m.node_pending_block_commits as f64);
+        self.metrics
+            .memory_node
+            .with_label_values(&["validation_batch"])
+            .set(m.node_validation_batch as f64);
+        self.metrics
+            .memory_node
+            .with_label_values(&["certified_header_batch"])
+            .set(m.node_certified_header_batch as f64);
+        self.metrics
+            .memory_node
+            .with_label_values(&["sync_queued_heights"])
+            .set(m.node_block_sync_queued_heights as f64);
+        self.metrics
+            .memory_node
+            .with_label_values(&["sync_in_flight_fetches"])
+            .set(m.node_block_sync_in_flight_fetches as f64);
+        self.metrics
+            .memory_node
+            .with_label_values(&["tx_fetch_blocks"])
+            .set(m.node_tx_fetch_blocks as f64);
+        self.metrics
+            .memory_node
+            .with_label_values(&["local_provision_fetch_pending"])
+            .set(m.node_local_provision_fetch_pending as f64);
+        self.metrics
+            .memory_node
+            .with_label_values(&["finalized_wave_fetch_pending"])
+            .set(m.node_finalized_wave_fetch_pending as f64);
+        self.metrics
+            .memory_node
+            .with_label_values(&["provision_fetch_pending"])
+            .set(m.node_provision_fetch_pending as f64);
+        self.metrics
+            .memory_node
+            .with_label_values(&["exec_cert_fetch_pending"])
+            .set(m.node_exec_cert_fetch_pending as f64);
+        self.metrics
+            .memory_node
+            .with_label_values(&["remote_header_fetch_pending"])
+            .set(m.node_remote_header_fetch_pending as f64);
+
+        // Storage
+        self.metrics
+            .memory_storage
+            .with_label_values(&["rocksdb_block_cache_bytes"])
+            .set(m.rocksdb_block_cache_usage_bytes as f64);
+        self.metrics
+            .memory_storage
+            .with_label_values(&["rocksdb_memtable_bytes"])
+            .set(m.rocksdb_memtable_usage_bytes as f64);
+    }
+}
+
+/// Install the Prometheus metrics recorder as the global backend.
+///
+/// Idempotent — safe to call multiple times (e.g., in tests). Only the
+/// first call creates and registers the Prometheus metrics.
+pub fn install() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        set_global_recorder(Box::new(PrometheusRecorder::new()));
+    });
+}
+
+/// Gather and encode all registered Prometheus metrics as text format.
+///
+/// Returns `(content_type, encoded_body)` suitable for an HTTP response.
+///
+/// # Errors
+///
+/// Returns the underlying Prometheus encoding error rendered as a string
+/// if `prometheus::Encoder::encode` fails.
+pub fn encode_metrics() -> Result<(String, Vec<u8>), String> {
+    use prometheus::{Encoder, TextEncoder};
+    let encoder = TextEncoder::new();
+    let metric_families = gather();
+    let content_type = encoder.format_type().to_string();
+    let mut buffer = Vec::new();
+    encoder
+        .encode(&metric_families, &mut buffer)
+        .map_err(|e| format!("{e}"))?;
+    Ok((content_type, buffer))
+}

@@ -1,0 +1,38 @@
+[package]
+name = "hyperscale-node"
+version.workspace = true
+edition.workspace = true
+description = "Combined node state machine"
+
+[dependencies]
+hyperscale-beacon.workspace = true
+hyperscale-core.workspace = true
+hyperscale-shard.workspace = true
+hyperscale-metrics.workspace = true
+hyperscale-dispatch.workspace = true
+hyperscale-engine.workspace = true
+hyperscale-execution.workspace = true
+hyperscale-jmt.workspace = true
+hyperscale-mempool.workspace = true
+hyperscale-network.workspace = true
+hyperscale-provisions.workspace = true
+hyperscale-remote-headers.workspace = true
+hyperscale-storage.workspace = true
+hyperscale-types.workspace = true
+arc-swap.workspace = true
+crossbeam.workspace = true
+quick_cache.workspace = true
+strum.workspace = true
+tracing.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+hyperscale-dispatch-sync.workspace = true
+hyperscale-network-memory.workspace = true
+hyperscale-storage = { workspace = true, features = ["test-utils"] }
+hyperscale-storage-memory.workspace = true
+hyperscale-test-helpers.workspace = true
+hyperscale-types = { workspace = true, features = ["test-utils"] }
+
+[lints]
+workspace = true

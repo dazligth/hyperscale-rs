@@ -1,0 +1,643 @@
+//! Main simulator runner.
+//!
+//! Orchestrates workload generation, transaction submission, and metrics collection
+//! using the deterministic simulation framework.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+use hyperscale_mempool::LockContentionStats;
+use hyperscale_network_memory::{BandwidthReport, NodeIndex};
+use hyperscale_node::shard::{HostEvent, ProcessScopedInput};
+use hyperscale_simulation::SimulationRunner;
+use hyperscale_spammer::validity::{ValidityClock, range_starting_at};
+use hyperscale_spammer::{
+    AccountPool, AccountPoolError, AccountUsageStats, FundingWorkload, TransferWorkload,
+    WorkloadGenerator,
+};
+use hyperscale_types::{
+    MIN_BEACON_COMMITTEE_SIZE, RoutableTransaction, ShardId, TransactionDecision,
+    TransactionStatus, TxHash, WeightedTimestamp, uniform_shard_for_node,
+};
+use radix_common::math::Decimal;
+use radix_common::network::NetworkDefinition;
+use rand::SeedableRng;
+use rand_chacha::ChaCha8Rng;
+use tracing::{debug, info, warn};
+
+use crate::config::SimulatorConfig;
+use crate::livelock::{LivelockAnalyzer, LivelockReport};
+use crate::metrics::{MetricsCollector, SimulationReport};
+
+/// Main simulator that orchestrates workload generation and metrics collection.
+pub struct Simulator {
+    /// Underlying deterministic simulation runner.
+    runner: SimulationRunner,
+
+    /// Account pool for transaction generation.
+    accounts: AccountPool,
+
+    /// Workload generator.
+    workload: TransferWorkload,
+
+    /// Batch size for transaction generation.
+    batch_size: usize,
+
+    /// Metrics collector.
+    metrics: MetricsCollector,
+
+    /// Configuration.
+    config: SimulatorConfig,
+
+    /// RNG for workload generation.
+    rng: ChaCha8Rng,
+
+    /// Tracks in-flight transactions: `hash -> (submit_time, target_shard)`.
+    in_flight: HashMap<TxHash, (Duration, ShardId)>,
+
+    /// Simulated millisecond clock shared with workload `ValidityClock`s so
+    /// generated transactions sit inside the chain's `weighted_timestamp`
+    /// window instead of wall-clock epoch.
+    sim_now_ms: Arc<AtomicU64>,
+}
+
+impl Simulator {
+    /// Create a new simulator with the given configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SimulatorError::AccountPool`] if the requested account pool
+    /// can't be allocated (e.g. zero-shard or zero-account configuration).
+    pub fn new(config: SimulatorConfig) -> Result<Self, SimulatorError> {
+        if !matches!(config.num_shards, 1 | 2 | 4) {
+            return Err(SimulatorError::UnsupportedShardCount(config.num_shards));
+        }
+        // Genesis seats one ROOT committee of `validators_per_shard` hosted
+        // validators; the beacon committee is drawn from them, so it must clear
+        // the BFT floor. Pool extras run no host and cannot fill the gap.
+        if (config.validators_per_shard as usize) < MIN_BEACON_COMMITTEE_SIZE {
+            return Err(SimulatorError::CommitteeBelowBftFloor(
+                config.validators_per_shard,
+            ));
+        }
+        let network_config = config.to_sim_config();
+        let runner = SimulationRunner::new(&network_config, config.seed);
+
+        let accounts =
+            AccountPool::generate(u64::from(config.num_shards), config.accounts_per_shard)?;
+
+        // Workload generators must anchor validity ranges on simulated time,
+        // not wall clock — chain-side `weighted_timestamp` mirrors the
+        // simulation's millisecond counter (starting near zero), so
+        // wall-clock-anchored windows would land far in the future and the
+        // proposer would filter every tx out as expired.
+        let sim_now_ms = Arc::new(AtomicU64::new(0));
+        let validity_clock: ValidityClock = {
+            let clock = Arc::clone(&sim_now_ms);
+            Arc::new(move || {
+                let ms = clock.load(Ordering::Relaxed);
+                range_starting_at(WeightedTimestamp::from_millis(ms))
+            })
+        };
+
+        let workload = TransferWorkload::new(NetworkDefinition::simulator())
+            .with_cross_shard_ratio(config.workload.cross_shard_ratio)
+            .with_selection_mode(config.workload.selection_mode)
+            .with_validity_clock(Arc::clone(&validity_clock));
+
+        let batch_size = config.workload.batch_size;
+
+        // Workload RNG is independent from the simulation RNG.
+        let rng = ChaCha8Rng::seed_from_u64(config.seed.wrapping_add(1));
+
+        // Metrics duration is reset when the simulation actually starts.
+        let metrics = MetricsCollector::new(Duration::ZERO);
+
+        info!(
+            num_shards = config.num_shards,
+            validators_per_shard = config.validators_per_shard,
+            accounts_per_shard = config.accounts_per_shard,
+            "Simulator created"
+        );
+
+        Ok(Self {
+            runner,
+            accounts,
+            workload,
+            batch_size,
+            metrics,
+            config,
+            rng,
+            in_flight: HashMap::new(),
+            sim_now_ms,
+        })
+    }
+
+    /// Initialize the simulation (genesis + optional runtime funding).
+    ///
+    /// If the requested account count fits within the engine's genesis limit
+    /// (~8000 per shard), all accounts are funded at genesis. Otherwise a
+    /// two-phase approach is used:
+    ///
+    /// 1. **Genesis phase** — fund up to 8000 accounts per shard, giving
+    ///    funding-source accounts extra balance to cover what they'll transfer.
+    /// 2. **Runtime funding phase** — after consensus warmup, submit transfer
+    ///    transactions from genesis accounts to the remaining unfunded accounts.
+    pub fn initialize(&mut self) {
+        let balance = self.config.initial_balance;
+
+        if self.accounts.needs_runtime_funding() {
+            self.initialize_with_runtime_funding(balance);
+        } else {
+            self.initialize_genesis_only(balance);
+        }
+    }
+
+    /// Grow from the single ROOT genesis to the configured target topology via
+    /// the real split lifecycle. A no-op for a single-shard target.
+    fn grow_to_target(&mut self) {
+        if self.config.num_shards > 1 {
+            info!(
+                num_shards = self.config.num_shards,
+                "Growing from ROOT to target topology"
+            );
+            self.runner.grow_to(self.config.num_shards);
+        }
+    }
+
+    /// Fast path: all accounts fit in genesis.
+    fn initialize_genesis_only(&mut self, balance: Decimal) {
+        // Genesis funds every account on ROOT; the grow then partitions them
+        // across the children by prefix.
+        let balances: Vec<_> = self
+            .accounts
+            .shards()
+            .flat_map(|shard| self.accounts.genesis_balances_for_shard(shard, balance))
+            .collect();
+
+        info!(
+            num_accounts = balances.len(),
+            initial_balance = %balance,
+            "Funding accounts at genesis"
+        );
+
+        self.runner.initialize_genesis_with_balances(&balances);
+        self.run_warmup();
+        self.grow_to_target();
+        info!("Genesis initialized with funded accounts");
+    }
+
+    /// Two-phase path: genesis for first 8000/shard, then runtime funding.
+    fn initialize_with_runtime_funding(&mut self, balance: Decimal) {
+        // Anchor funding-tx validity ranges on the simulated clock — same
+        // reasoning as the main TransferWorkload above.
+        self.sim_now_ms.store(
+            u64::try_from(self.runner.now().as_millis()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        let validity_clock: ValidityClock = {
+            let clock = Arc::clone(&self.sim_now_ms);
+            Arc::new(move || {
+                let ms = clock.load(Ordering::Relaxed);
+                range_starting_at(WeightedTimestamp::from_millis(ms))
+            })
+        };
+        let funding_workload = FundingWorkload::new(NetworkDefinition::simulator())
+            .with_validity_clock(validity_clock);
+        let plan = self.accounts.runtime_funding_plan(balance);
+
+        info!(
+            funding_txs = plan.len(),
+            "Accounts exceed genesis limit, using two-phase funding"
+        );
+
+        // Phase 1: Genesis with capped accounts (funders get extra balance).
+        let balances: Vec<_> = self
+            .accounts
+            .shards()
+            .flat_map(|shard| {
+                self.accounts
+                    .genesis_balances_capped(shard, balance, funding_workload.fee())
+            })
+            .collect();
+
+        info!(
+            genesis_accounts = balances.len(),
+            initial_balance = %balance,
+            "Funding genesis accounts (capped)"
+        );
+
+        self.runner.initialize_genesis_with_balances(&balances);
+        self.run_warmup();
+
+        // Grow to the target topology before runtime funding so the surplus
+        // funding transactions route across the grown shards.
+        self.grow_to_target();
+
+        // Phase 2: Fund remaining accounts via transactions.
+        let txs_by_shard = funding_workload.generate_funding_transactions(&self.accounts, &plan);
+        self.submit_funding_transactions(txs_by_shard);
+
+        info!("Two-phase funding complete");
+    }
+
+    /// Run a warmup period to let consensus establish.
+    fn run_warmup(&mut self) {
+        let warmup_duration = Duration::from_millis(900);
+        info!(
+            warmup_ms = warmup_duration.as_millis(),
+            "Running warmup period for consensus to establish"
+        );
+        self.runner.run_until(self.runner.now() + warmup_duration);
+    }
+
+    /// Submit funding transactions in batches and wait for completion.
+    fn submit_funding_transactions(
+        &mut self,
+        txs_by_shard: HashMap<ShardId, Vec<RoutableTransaction>>,
+    ) {
+        let batch_size = 500;
+        let mut total_submitted = 0u64;
+        let mut total_completed = 0u64;
+        let mut total_failed = 0u64;
+
+        // Flatten into (shard, tx) pairs so we can batch across shards.
+        // Sort by shard for deterministic submission order.
+        let mut shards: Vec<_> = txs_by_shard.into_iter().collect();
+        shards.sort_by_key(|(shard, _)| *shard);
+        let all_txs: Vec<_> = shards
+            .into_iter()
+            .flat_map(|(shard, txs)| txs.into_iter().map(move |tx| (shard, tx)))
+            .collect();
+
+        for chunk in all_txs.chunks(batch_size) {
+            let mut pending: HashMap<TxHash, ShardId> = HashMap::new();
+
+            for (shard, tx) in chunk {
+                let hash = tx.hash();
+                let tx = Arc::new(tx.clone());
+                let shard_nodes = self.nodes_for_shard(*shard);
+                for node_idx in shard_nodes {
+                    self.runner.schedule_initial_event(
+                        node_idx,
+                        Duration::ZERO,
+                        HostEvent::process(ProcessScopedInput::SubmitTransaction {
+                            tx: Arc::clone(&tx),
+                        }),
+                    );
+                }
+                pending.insert(hash, *shard);
+                total_submitted += 1;
+            }
+
+            // 30s timeout guards against an unbounded loop if any tx never finalizes.
+            let deadline = self.runner.now() + Duration::from_secs(30);
+            let step = Duration::from_millis(100);
+
+            while !pending.is_empty() && self.runner.now() < deadline {
+                self.runner.run_until(self.runner.now() + step);
+
+                let hashes: Vec<TxHash> = pending.keys().copied().collect();
+                for hash in hashes {
+                    if let Some(&shard) = pending.get(&hash) {
+                        let node_idx = self.get_node_for_shard(shard);
+                        if let Some(status) = self.runner.tx_status(node_idx, &hash)
+                            && status.is_final()
+                        {
+                            pending.remove(&hash);
+                            if status == TransactionStatus::Completed(TransactionDecision::Accept) {
+                                total_completed += 1;
+                            } else {
+                                total_failed += 1;
+                                warn!(?hash, %status, "Funding transaction failed");
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !pending.is_empty() {
+                warn!(
+                    remaining = pending.len(),
+                    "Some funding transactions did not complete within timeout"
+                );
+                total_failed += pending.len() as u64;
+            }
+        }
+
+        info!(
+            total_submitted,
+            total_completed, total_failed, "Runtime funding transactions processed"
+        );
+    }
+
+    /// Run the simulation for the specified duration.
+    ///
+    /// Returns a report with throughput and latency metrics.
+    pub fn run_for(&mut self, duration: Duration) -> SimulationReport {
+        let start_time = self.runner.now();
+        self.metrics = MetricsCollector::new(start_time);
+
+        let batch_interval = self.config.workload.batch_interval;
+        let submission_end_time = start_time + duration;
+
+        info!(
+            duration_secs = duration.as_secs(),
+            batch_interval_ms = batch_interval.as_millis(),
+            batch_size = self.config.workload.batch_size,
+            "Starting simulation"
+        );
+
+        let mut last_progress_time = start_time;
+        let progress_interval = Duration::from_secs(5);
+
+        while self.runner.now() < submission_end_time {
+            let current_time = self.runner.now();
+            self.sim_now_ms.store(
+                u64::try_from(current_time.as_millis()).unwrap_or(u64::MAX),
+                Ordering::Relaxed,
+            );
+            let batch =
+                self.workload
+                    .generate_batch(&self.accounts, self.batch_size, &mut self.rng);
+
+            for tx in batch {
+                let hash = tx.hash();
+                let target_shard = self.get_target_shard(&tx);
+                let tx = Arc::new(tx);
+
+                // Submit to ALL validators in the shard to ensure the proposer has the tx.
+                // This mirrors real-world behavior where clients submit to multiple validators.
+                // Without this, transactions may miss the next block because gossip hasn't
+                // propagated to the proposer yet when their proposal timer fires.
+                let shard_nodes = self.nodes_for_shard(target_shard);
+                for node_idx in shard_nodes {
+                    self.runner.schedule_initial_event(
+                        node_idx,
+                        Duration::ZERO,
+                        HostEvent::process(ProcessScopedInput::SubmitTransaction {
+                            tx: Arc::clone(&tx),
+                        }),
+                    );
+                }
+
+                self.in_flight.insert(hash, (current_time, target_shard));
+                self.metrics.record_submission();
+            }
+
+            // The event priority system processes Client events last, so a 1µs
+            // advance is needed to drain the just-submitted txs into mempools
+            // before any proposal timer fires this batch.
+            self.runner
+                .run_until(self.runner.now() + Duration::from_micros(1));
+
+            let next_time = self.runner.now() + batch_interval;
+            self.runner.run_until(next_time);
+
+            self.check_completions();
+
+            if self
+                .runner
+                .now()
+                .checked_sub(last_progress_time)
+                .unwrap_or_default()
+                >= progress_interval
+            {
+                self.log_progress(start_time, submission_end_time);
+                last_progress_time = self.runner.now();
+            }
+        }
+
+        let end_time = self.runner.now();
+        self.metrics.set_submission_end_time(end_time);
+        self.metrics
+            .set_in_flight_at_end(self.in_flight.len() as u64);
+        info!(
+            total_time_secs = end_time
+                .checked_sub(start_time)
+                .unwrap_or_default()
+                .as_secs_f64(),
+            "Simulation complete"
+        );
+
+        // Generate and return report
+        let report = std::mem::replace(&mut self.metrics, MetricsCollector::new(Duration::ZERO))
+            .finalize(end_time);
+
+        report.print_summary();
+        report
+    }
+
+    /// Check for completed transactions and record metrics.
+    fn check_completions(&mut self) {
+        let current_time = self.runner.now();
+
+        // We need to check the transaction status cache for each in-flight transaction
+        // Using tx_status() which captures all emitted statuses, even after eviction
+        let hashes: Vec<TxHash> = self.in_flight.keys().copied().collect();
+
+        for hash in hashes {
+            if let Some((submit_time, shard)) = self.in_flight.get(&hash).copied() {
+                // Check status from the status cache (survives eviction from mempool)
+                let node_idx = self.get_node_for_shard(shard);
+                if let Some(status) = self.runner.tx_status(node_idx, &hash) {
+                    // Only remove from in_flight when reaching a terminal state
+                    if status.is_final() {
+                        self.in_flight.remove(&hash);
+
+                        match status {
+                            TransactionStatus::Completed(TransactionDecision::Accept) => {
+                                // Transaction fully executed - record completion and latency
+                                let latency = current_time.saturating_sub(submit_time);
+                                self.metrics.record_completion(latency);
+                                debug!(
+                                    ?hash,
+                                    latency_ms = latency.as_millis(),
+                                    "Transaction completed"
+                                );
+                            }
+                            TransactionStatus::Completed(
+                                TransactionDecision::Reject | TransactionDecision::Aborted,
+                            ) => {
+                                // Transaction was rejected or aborted
+                                self.metrics.record_rejection();
+                                debug!(?hash, %status, "Transaction rejected/aborted");
+                            }
+                            _ => unreachable!("Transaction status is not final: {:?}", status),
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Determine the target shard for a transaction.
+    fn get_target_shard(&self, tx: &RoutableTransaction) -> ShardId {
+        tx.declared_writes().first().map_or_else(
+            || ShardId::leaf(self.config.num_shards.trailing_zeros(), 0),
+            |node_id| uniform_shard_for_node(node_id, u64::from(self.config.num_shards)),
+        )
+    }
+
+    /// A host that currently serves `shard`, for status reads. The grow
+    /// shuffle scatters committee members across hosts, so this queries the
+    /// live topology rather than assuming a contiguous layout. Falls back to
+    /// host 0 only before genesis seats any shard.
+    fn get_node_for_shard(&self, shard: ShardId) -> NodeIndex {
+        (0..self.runner.num_hosts())
+            .find(|&node| self.runner.hosts_shard(node, shard).is_some())
+            .unwrap_or(0)
+    }
+
+    /// Every host that currently serves `shard`. Submitting to all of them
+    /// ensures the proposer holds the tx before its proposal timer fires.
+    fn nodes_for_shard(&self, shard: ShardId) -> Vec<NodeIndex> {
+        (0..self.runner.num_hosts())
+            .filter(|&node| self.runner.hosts_shard(node, shard).is_some())
+            .collect()
+    }
+
+    /// Log progress during simulation.
+    fn log_progress(&mut self, start_time: Duration, end_time: Duration) {
+        let (submitted, completed, rejected) = self.metrics.current_stats();
+        let elapsed = self
+            .runner
+            .now()
+            .checked_sub(start_time)
+            .unwrap_or_default();
+        let remaining = end_time.saturating_sub(self.runner.now());
+
+        #[allow(clippy::cast_precision_loss)] // headline TPS metric for human-readable logging
+        let tps = if elapsed.as_secs_f64() > 0.0 {
+            completed as f64 / elapsed.as_secs_f64()
+        } else {
+            0.0
+        };
+
+        // Aggregate lock contention stats from all shards
+        let lock_stats = self.aggregate_lock_contention();
+
+        // Take a sample
+        self.metrics
+            .sample(self.runner.now(), self.in_flight.len() as u64, lock_stats);
+
+        info!(
+            elapsed_secs = elapsed.as_secs(),
+            remaining_secs = remaining.as_secs(),
+            submitted,
+            completed,
+            rejected,
+            in_flight = self.in_flight.len(),
+            tps = format!("{:.2}", tps),
+            "Simulation progress"
+        );
+    }
+
+    /// Aggregate lock contention stats across the live leaf shards.
+    ///
+    /// Sums stats from one vnode per leaf (they all see the same mempool).
+    fn aggregate_lock_contention(&self) -> LockContentionStats {
+        let mut total = LockContentionStats::default();
+
+        let depth = self.config.num_shards.trailing_zeros();
+        for shard_idx in 0..self.config.num_shards {
+            let shard = ShardId::leaf(depth, u64::from(shard_idx));
+            if let Some(node) = self.runner.shard_vnodes(shard).first() {
+                let stats = node.mempool_coordinator().lock_contention_stats();
+                total.locked_nodes += stats.locked_nodes;
+                total.pending_count += stats.pending_count;
+                total.pending_deferred += stats.pending_deferred;
+            }
+        }
+
+        total
+    }
+
+    /// Get the underlying simulation runner (for advanced use).
+    #[must_use]
+    pub const fn runner(&self) -> &SimulationRunner {
+        &self.runner
+    }
+
+    /// Get mutable access to the simulation runner.
+    pub const fn runner_mut(&mut self) -> &mut SimulationRunner {
+        &mut self.runner
+    }
+
+    /// Get account usage statistics.
+    #[must_use]
+    pub fn account_usage_stats(&self) -> AccountUsageStats {
+        self.accounts.usage_stats()
+    }
+
+    /// Analyze stuck transactions and potential livelocks.
+    ///
+    /// Returns a report of all incomplete transactions, grouped by status
+    /// and shard, with potential cycle detection.
+    #[must_use]
+    pub fn analyze_livelocks(&self) -> LivelockReport {
+        let analyzer =
+            LivelockAnalyzer::from_runner(&self.runner, u64::from(self.config.num_shards));
+        analyzer.analyze()
+    }
+
+    /// Enable network traffic analysis for bandwidth estimation.
+    ///
+    /// Call this before `run_for()` to collect network traffic statistics.
+    /// After the simulation, call `traffic_report()` to get the bandwidth report.
+    pub fn enable_traffic_analysis(&mut self) {
+        self.runner.enable_traffic_analysis();
+    }
+
+    /// Check if traffic analysis is enabled.
+    #[must_use]
+    pub const fn has_traffic_analysis(&self) -> bool {
+        self.runner.has_traffic_analysis()
+    }
+
+    /// Get a network traffic bandwidth report.
+    ///
+    /// Returns `None` if traffic analysis is not enabled.
+    /// Call `enable_traffic_analysis()` before `run_for()` to collect data.
+    #[must_use]
+    pub fn traffic_report(&self) -> Option<BandwidthReport> {
+        self.runner.traffic_report()
+    }
+}
+
+/// Errors that can occur during simulation.
+#[derive(Debug, thiserror::Error)]
+pub enum SimulatorError {
+    /// The account pool could not be constructed.
+    #[error("Account pool error: {0}")]
+    AccountPool(#[from] AccountPoolError),
+    /// The requested shard count is not a grow target the simulator supports.
+    /// Genesis is single-shard and grows by splitting, which the harness caps
+    /// at four shards (the host-less pool ceiling), so the target must be 1, 2
+    /// or 4.
+    #[error("unsupported num_shards {0}: must be 1, 2, or 4 (genesis grows by splitting)")]
+    UnsupportedShardCount(u32),
+    /// `validators_per_shard` is below the BFT floor. Single-shard genesis
+    /// seats one ROOT committee of that many hosted validators, and the beacon
+    /// committee drawn from them must clear [`MIN_BEACON_COMMITTEE_SIZE`].
+    #[error("validators_per_shard {0} is below the BFT floor of {MIN_BEACON_COMMITTEE_SIZE}")]
+    CommitteeBelowBftFloor(u32),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::WorkloadConfig;
+
+    #[test]
+    fn test_simulator_creation() {
+        let config = SimulatorConfig::new(1, 4)
+            .with_accounts_per_shard(20)
+            .with_workload(WorkloadConfig::transfers_only().with_batch_size(5));
+
+        let simulator = Simulator::new(config);
+        assert!(simulator.is_ok());
+    }
+}

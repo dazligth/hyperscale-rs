@@ -1,0 +1,389 @@
+//! Request manager with intelligent retry and peer selection.
+//!
+//! The key insight: under packet loss, a failed request doesn't mean the peer
+//! is bad—it means the network dropped packets. Retrying the SAME peer first
+//! is often correct because packet loss is probabilistic.
+//!
+//! # Design Philosophy
+//!
+//! This module implements **request-centric** retry logic, in contrast to the
+//! traditional **peer-centric** approach:
+//!
+//! - **Peer-centric**: Timeout → blame peer → cooldown → try next peer
+//! - **Request-centric**: Timeout → retry same peer → rotate after threshold
+//!
+//! The request-centric approach works better under packet loss because:
+//! 1. Packet loss is probabilistic—the peer that timed out might succeed on retry
+//! 2. Rotating too quickly exhausts all peers and triggers "desperation mode"
+//! 3. Weighted selection ensures unhealthy peers still get occasional chances
+//!
+//! # Example
+//!
+//! ```ignore
+//! let manager = RequestManager::new(adapter.clone(), RequestManagerConfig::default());
+//!
+//! // Send a request with automatic retry
+//! match manager.request(&peers, None, "block.request".into(), "block.request", sbor_bytes, MessageClass::Recovery).await {
+//!     Ok((peer, response)) => { /* success */ }
+//!     Err(RequestError::Exhausted { attempts }) => { /* all retries failed */ }
+//!     Err(RequestError::NoPeers) => { /* no peers available */ }
+//! }
+//! ```
+
+mod concurrency;
+pub mod peer_health;
+mod retry;
+mod stream;
+mod timeout;
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+
+use bytes::Bytes;
+use hyperscale_types::{MessageClass, ShardId};
+use libp2p::PeerId;
+use peer_health::{PeerHealthConfig, PeerHealthTracker};
+use thiserror::Error;
+
+use crate::adapter::NetworkError;
+use crate::request_pool::RequestPool;
+
+/// Maximum timeout for stream operations.
+const MAX_STREAM_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Warm-path floor: minimum timeout once we have RTT data for a peer.
+///
+/// Absorbs jitter and short transport stalls (QUIC retransmit, brief GC, etc.)
+/// Small enough that a dead peer is detected quickly on fast links — on a
+/// 5 ms-RTT LAN the adaptive multiplier gives 25 ms, which is too tight for
+/// real jitter, so we floor at 300 ms.
+const MIN_STREAM_TIMEOUT_WARM: Duration = Duration::from_millis(300);
+
+/// Cold-start floor: timeout used when we have no RTT data for a peer yet.
+///
+/// Wide enough to tolerate the actual round-trip of a WAN peer on the very
+/// first request. The RTT EMA only updates on success, so if this is tight
+/// we can enter a self-reinforcing trap: every request times out, nothing
+/// ever records a successful RTT, the timeout stays tight. One successful
+/// request is enough to drop into the warm path.
+const MIN_STREAM_TIMEOUT_COLD: Duration = Duration::from_secs(2);
+
+/// Multiplier for RTT to compute stream timeout.
+/// Timeout = RTT * multiplier, clamped to `[MIN_WARM, MAX]`.
+const STREAM_TIMEOUT_RTT_MULTIPLIER: f64 = 5.0;
+
+/// Errors from request operations.
+#[derive(Debug, Error)]
+pub enum RequestError {
+    /// All retry attempts exhausted.
+    #[error("request exhausted after {attempts} attempts")]
+    Exhausted { attempts: u32 },
+
+    /// No peers available to send to.
+    #[error("no peers available")]
+    NoPeers,
+
+    /// Network-level error (non-retryable).
+    #[error("network error: {0}")]
+    Network(#[from] NetworkError),
+
+    /// Network is shutting down.
+    #[error("network shutdown")]
+    Shutdown,
+}
+
+/// Whether a class should use the relaxed retry/backoff regime.
+///
+/// `Recovery` and `Bulk` are the sheddable classes; all others get tight
+/// retries with shorter backoff to absorb packet loss without falling
+/// behind on the shard consensus or cross-shard hot paths.
+#[must_use]
+pub const fn uses_relaxed_retry(class: MessageClass) -> bool {
+    matches!(class, MessageClass::Recovery | MessageClass::Bulk)
+}
+
+/// Whether a class is in the cross-shard reservation tier.
+///
+/// `CrossShardProgress` traffic (provisions / EC fallback fetches) is
+/// bounded by `config.cross_shard_max_concurrent` so a cross-shard fetch
+/// storm during topology churn cannot starve the shard consensus hot path
+/// (`Consensus`, `BlockCompletion`).
+#[must_use]
+pub const fn is_cross_shard(class: MessageClass) -> bool {
+    matches!(class, MessageClass::CrossShardProgress)
+}
+
+#[cfg(test)]
+mod retry_regime_tests {
+    use hyperscale_types::MessageClass;
+
+    use super::uses_relaxed_retry;
+
+    #[test]
+    fn consensus_uses_tight_retry() {
+        assert!(!uses_relaxed_retry(MessageClass::Consensus));
+    }
+
+    #[test]
+    fn block_completion_uses_tight_retry() {
+        assert!(!uses_relaxed_retry(MessageClass::BlockCompletion));
+    }
+
+    #[test]
+    fn cross_shard_progress_uses_tight_retry() {
+        assert!(!uses_relaxed_retry(MessageClass::CrossShardProgress));
+    }
+
+    #[test]
+    fn recovery_uses_relaxed_retry() {
+        assert!(uses_relaxed_retry(MessageClass::Recovery));
+    }
+
+    #[test]
+    fn bulk_uses_relaxed_retry() {
+        assert!(uses_relaxed_retry(MessageClass::Bulk));
+    }
+}
+
+/// Configuration for the request manager.
+#[derive(Debug, Clone)]
+pub struct RequestManagerConfig {
+    /// Maximum total concurrent requests across all peers.
+    pub max_concurrent: usize,
+
+    /// Maximum concurrent requests per peer.
+    pub max_per_peer: u32,
+
+    /// Number of retries to the same peer before rotating. Sized so that a
+    /// single request's `max_total_attempts` budget covers every candidate
+    /// peer — with 7 peers and 15 attempts, rotating every 2 attempts tries
+    /// all of them before exhaustion.
+    pub retries_before_rotation: u32,
+
+    /// Maximum total retry attempts before giving up.
+    pub max_total_attempts: u32,
+
+    /// Initial backoff delay between retries.
+    pub initial_backoff: Duration,
+
+    /// Maximum backoff delay.
+    pub max_backoff: Duration,
+
+    /// Backoff multiplier (exponential backoff).
+    pub backoff_multiplier: f64,
+
+    /// Cap on concurrent in-flight requests in the *sheddable* classes
+    /// (`Recovery` + `Bulk`). Counted as a subset of `max_concurrent` —
+    /// prevents a flood of catchup / DA-backfill fetches from filling the
+    /// global pool and starving the hot path.
+    pub sheddable_max_concurrent: usize,
+
+    /// Cap on concurrent in-flight requests in the `CrossShardProgress`
+    /// class. Counted as a subset of `max_concurrent` — prevents a
+    /// cross-shard fetch storm (provisions / EC fallback during topology
+    /// churn) from filling the global pool and starving the shard consensus hot path
+    /// (`Consensus`, `BlockCompletion`). The hot path is therefore
+    /// guaranteed `max_concurrent - cross_shard_max_concurrent -
+    /// sheddable_max_concurrent` slots regardless of cross-shard or
+    /// sheddable load.
+    pub cross_shard_max_concurrent: usize,
+}
+
+impl Default for RequestManagerConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent: 128,
+            max_per_peer: 16,
+            retries_before_rotation: 2,
+            max_total_attempts: 15,
+            initial_backoff: Duration::from_millis(100),
+            max_backoff: Duration::from_millis(500), // Cap backoff to match stream timeout
+            backoff_multiplier: 1.5,
+            // 32/128 leaves 96 slots for hot-path + cross-shard classes
+            // under any sheddable load — sized to absorb catchup / DA
+            // bursts without blocking pending-block or cross-shard fetches.
+            sheddable_max_concurrent: 32,
+            // 48/128 paired with sheddable_max=32 reserves
+            // 48 = 128 - 48 - 32 slots for the shard consensus hot path. Sized so a
+            // burst of cross-shard fallback fetches can run in parallel
+            // rather than serialising on a tight cap.
+            cross_shard_max_concurrent: 48,
+        }
+    }
+}
+
+/// Request manager with intelligent retry and peer selection.
+///
+/// Provides:
+/// - Request-centric retry logic (same peer first, then rotate)
+/// - Weighted peer selection based on health metrics
+/// - Per-class admission caps (sheddable / cross-shard subset reservations)
+/// - Exponential backoff between retries
+///
+/// Actual stream I/O is delegated to a shared
+/// [`RequestStreamPool`](crate::request_pool::RequestStreamPool), which
+/// maintains one persistent stream per peer.
+pub struct RequestManager {
+    pool: Arc<dyn RequestPool>,
+    config: RequestManagerConfig,
+    /// Peer health tracker (uses `DashMap` internally, no external lock needed).
+    health: PeerHealthTracker,
+    /// Current in-flight request count.
+    in_flight: AtomicUsize,
+    /// Subset of `in_flight` whose class is `Recovery` or `Bulk`. Capped
+    /// independently by `config.sheddable_max_concurrent` so catchup /
+    /// DA-backfill bursts can't starve the hot-path classes.
+    sheddable_in_flight: AtomicUsize,
+    /// Subset of `in_flight` whose class is `CrossShardProgress`. Capped
+    /// independently by `config.cross_shard_max_concurrent` so cross-shard
+    /// fetch storms can't starve the shard consensus hot path.
+    cross_shard_in_flight: AtomicUsize,
+    /// Per-class in-flight counters used to drive the
+    /// `request_slots_in_flight{class}` gauge. Indexed by class
+    /// discriminant (0..=4). Sum equals `in_flight`.
+    per_class_in_flight: [AtomicUsize; 5],
+}
+
+impl RequestManager {
+    /// Create a new request manager.
+    ///
+    /// `pool` is taken as a trait object so tests can substitute a
+    /// deterministic mock; production callers pass `Arc<RequestStreamPool>`,
+    /// which coerces automatically.
+    #[must_use]
+    pub fn new(pool: Arc<dyn RequestPool>, config: RequestManagerConfig) -> Self {
+        Self {
+            pool,
+            health: PeerHealthTracker::new(PeerHealthConfig {
+                max_in_flight_per_peer: config.max_per_peer,
+                ..Default::default()
+            }),
+            in_flight: AtomicUsize::new(0),
+            sheddable_in_flight: AtomicUsize::new(0),
+            cross_shard_in_flight: AtomicUsize::new(0),
+            per_class_in_flight: [
+                AtomicUsize::new(0),
+                AtomicUsize::new(0),
+                AtomicUsize::new(0),
+                AtomicUsize::new(0),
+                AtomicUsize::new(0),
+            ],
+            config,
+        }
+    }
+
+    /// Map a `MessageClass` onto the index used by `per_class_in_flight`.
+    /// Mirrors the enum discriminant order in `crates/types/src/network.rs`.
+    #[inline]
+    pub(super) const fn class_index(class: MessageClass) -> usize {
+        match class {
+            MessageClass::Consensus => 0,
+            MessageClass::BlockCompletion => 1,
+            MessageClass::CrossShardProgress => 2,
+            MessageClass::Recovery => 3,
+            MessageClass::Bulk => 4,
+        }
+    }
+
+    /// Send a request with automatic retry and peer failover.
+    ///
+    /// # Arguments
+    ///
+    /// * `peers` - Candidate peer list (from topology/committee)
+    /// * `preferred_peer` - If provided and in the list, try this peer first
+    /// * `request_desc` - Description for logging (e.g., "block.request")
+    /// * `type_id` - Message type identifier for the typed frame header
+    /// * `sbor_data` - SBOR-encoded request payload (compressed by transport)
+    /// * `class` - Message class (drives timeout and retry aggressiveness)
+    ///
+    /// # Returns
+    ///
+    /// The responding peer's ID and the response payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RequestError`] when retries are exhausted, the request times out,
+    /// or no peer in `peers` is reachable.
+    #[allow(clippy::too_many_arguments)] // single retry/peer-rotation entry point
+    pub async fn request(
+        &self,
+        peers: &[PeerId],
+        preferred_peer: Option<PeerId>,
+        shard: ShardId,
+        request_desc: String,
+        type_id: &'static str,
+        sbor_data: Vec<u8>,
+        class: MessageClass,
+    ) -> Result<(PeerId, Bytes), RequestError> {
+        self.acquire_slot(class).await?;
+
+        let result = self
+            .request_inner(
+                peers,
+                preferred_peer,
+                shard,
+                &request_desc,
+                type_id,
+                &sbor_data,
+                class,
+            )
+            .await;
+
+        self.release_slot(class);
+
+        result
+    }
+
+    /// Get the peer health tracker for external monitoring.
+    pub const fn health_tracker(&self) -> &PeerHealthTracker {
+        &self.health
+    }
+
+    /// Get current statistics for monitoring.
+    pub fn stats(&self) -> RequestManagerStats {
+        RequestManagerStats {
+            in_flight: self.in_flight.load(Ordering::Relaxed),
+            max_concurrent: self.config.max_concurrent,
+            global_success_rate: self.health.global_success_rate(),
+            health_stats: self.health.stats(),
+        }
+    }
+
+    /// Cleanup stale peer health data.
+    pub fn cleanup_stale(&self) {
+        self.health.cleanup_stale();
+    }
+}
+
+/// Statistics from the request manager.
+#[derive(Debug, Clone)]
+pub struct RequestManagerStats {
+    /// Requests currently in flight.
+    pub in_flight: usize,
+    /// Maximum configured concurrency.
+    pub max_concurrent: usize,
+    /// Global success rate across all peers.
+    pub global_success_rate: f64,
+    /// Detailed peer health statistics.
+    pub health_stats: peer_health::PeerHealthStats,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Note: Full integration tests require a mock adapter.
+    // These tests verify the configuration and basic logic.
+
+    #[test]
+    fn test_default_config() {
+        let config = RequestManagerConfig::default();
+        assert_eq!(config.max_concurrent, 128);
+        assert_eq!(config.retries_before_rotation, 2);
+        assert_eq!(config.max_total_attempts, 15);
+        assert_eq!(config.initial_backoff, Duration::from_millis(100));
+        assert_eq!(config.max_backoff, Duration::from_millis(500));
+        assert!((config.backoff_multiplier - 1.5).abs() < f64::EPSILON);
+    }
+}

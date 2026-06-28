@@ -1,0 +1,36 @@
+[package]
+name = "hyperscale-storage"
+version.workspace = true
+edition.workspace = true
+description = "Storage traits, JMT state tree, and shared types"
+
+[dependencies]
+# Internal crates
+hyperscale-jmt.workspace = true
+hyperscale-types.workspace = true
+
+# Hashing
+blake3.workspace = true
+
+# Parallelism
+rayon.workspace = true
+
+# Radix dependencies (for SubstateDatabase, DatabaseUpdates, etc.)
+radix-common.workspace = true
+radix-substate-store-interface.workspace = true
+
+# Key encoding
+indexmap.workspace = true
+
+# Error derive
+thiserror.workspace = true
+
+[features]
+test-utils = ["hyperscale-types/test-utils"]
+
+[dev-dependencies]
+hyperscale-dispatch-sync.workspace = true
+hyperscale-types = { workspace = true, features = ["test-utils"] }
+
+[lints]
+workspace = true

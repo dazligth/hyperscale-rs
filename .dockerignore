@@ -1,0 +1,10 @@
+target/
+.git/
+.gitignore
+Dockerfile
+scripts/docker-compose.generated.yml
+scripts/monitoring/
+.hyperscale-nonces.json
+docker-cluster-data/
+distributed-cluster-data/
+cluster-data/

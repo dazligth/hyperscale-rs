@@ -1,0 +1,54 @@
+[package]
+name = "hyperscale-spammer"
+version.workspace = true
+edition.workspace = true
+description = "Transaction spammer for Hyperscale network"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "hyperscale-spammer"
+path = "src/bin/spammer.rs"
+
+[dependencies]
+# Workspace dependencies
+hyperscale-types.workspace = true
+
+# Radix dependencies
+radix-common.workspace = true
+radix-transactions.workspace = true
+sbor.workspace = true
+
+# Async runtime
+tokio.workspace = true
+tokio-util = { version = "0.7.18", features = ["rt"] }
+
+# HTTP client
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls"] }
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+
+# CLI
+clap.workspace = true
+humantime = "2.3.0"
+
+# Utils
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+hdrhistogram.workspace = true
+dashmap.workspace = true
+parking_lot.workspace = true
+futures.workspace = true
+
+[dev-dependencies]
+tokio-test = "0.4.5"
+
+[lints]
+workspace = true

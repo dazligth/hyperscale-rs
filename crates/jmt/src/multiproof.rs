@@ -1,0 +1,1337 @@
+//! Batched multiproofs.
+//!
+//! A multiproof authenticates a batch of keys against a single root hash.
+//! It exploits path sharing: sibling hashes are emitted only when they
+//! cannot be reconstructed from hashes already in the batch.
+//!
+//! # Wire shape
+//!
+//! The proof contains:
+//! - One [`ProofClaim`] per claimed key describing how the lookup
+//!   terminated (found leaf, empty slot, or divergent leaf) plus the
+//!   value hash if present.
+//! - A flat list of sibling hashes, ordered for linear consumption by
+//!   the verifier (depth-first, bucket-0-first traversal).
+//!
+//! # Construction
+//!
+//! 1. Sort claims by key (so paths are visited in deterministic order).
+//! 2. Recursively walk down. At each internal node, iterate buckets
+//!    `0..ARITY`:
+//!    - Bucket contains claimed keys → recurse; collect claims/siblings.
+//!    - Bucket has no claimed keys → emit the bucket's child hash as
+//!      a sibling.
+//! 3. At leaves, emit one [`ProofClaim`] per claimed key.
+//!
+//! # Verification
+//!
+//! Walk the same structure bottom-up, rehashing computed subtree roots
+//! together with the supplied siblings until a single root hash is
+//! derived. Compare against the signed root.
+//!
+//! # Wire format
+//!
+//! A multiproof serializes to a canonical byte sequence with a one-byte
+//! version prefix so decoders can cleanly reject future formats.
+//!
+//! ```text
+//! byte 0       : version (u8) = 0x01
+//! bytes 1..3   : root_depth_bits (u16 big-endian) — depth the tree is rooted at
+//! next 4 bytes : claim_count (u32 big-endian)
+//! then         : claim_count × claim
+//! next 4 bytes : sibling_count (u32 big-endian)
+//! then         : sibling_count × hash (32 bytes each)
+//! ```
+//!
+//! A claim has the layout:
+//!
+//! ```text
+//! 32 bytes : key
+//! 2 bytes  : depth_bits (u16 big-endian)
+//! 1 byte   : termination discriminator
+//! ...      : termination-specific body:
+//!              0x01 Leaf          → 32 bytes value_hash
+//!              0x02 EmptySubtree  → (no additional data)
+//!              0x03 LeafMismatch  → 32 bytes stored_key ||
+//!                                   32 bytes stored_value_hash
+//! ```
+//!
+//! Invariants enforced by the decoder:
+//! - `version` must equal `0x01` (other values yield `UnsupportedVersion`).
+//! - The buffer must be fully consumed (`TrailingBytes` otherwise).
+//! - Every length claimed in a count prefix must fit in the buffer
+//!   (`Truncated` otherwise).
+//! - The termination discriminator must be one of the three defined
+//!   values (`InvalidTermination` otherwise).
+//!
+//! The decoder does NOT cross-check the structural validity of the
+//! decoded proof against a root or key set. Use [`Tree::verify`] for that.
+
+use crate::hasher::{EMPTY_HASH, Hash, Hasher};
+use crate::node::{Key, MAX_DEPTH_BITS, Node, NodeKey, ValueHash, bits_at};
+use crate::storage::TreeReader;
+use crate::tree::Tree;
+
+/// A batched proof covering multiple keys against a single root.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MultiProof {
+    /// Bit-depth at which the proven tree is rooted. Zero for a
+    /// whole-keyspace tree; a prefix length for a subtree-rooted tree (e.g. a
+    /// shard state tree rooted at its prefix). Verification reconstructs the
+    /// root starting from this depth, so the proof is self-describing.
+    pub root_depth_bits: u16,
+
+    /// Per-claim termination metadata, in sorted-key order.
+    pub claims: Vec<ProofClaim>,
+
+    /// Sibling hashes, in depth-first left-to-right consumption order.
+    pub siblings: Vec<Hash>,
+}
+
+/// One key's outcome inside a [`MultiProof`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProofClaim {
+    /// The 32-byte key the claim is about.
+    pub key: Key,
+    /// `Some` iff the lookup hit a leaf whose key matches.
+    pub value_hash: Option<ValueHash>,
+    /// Depth (in bits) at which the lookup terminated.
+    pub depth_bits: u16,
+    /// How the lookup ended (leaf, empty slot, or divergent leaf).
+    pub termination: ClaimTermination,
+}
+
+/// How a single-key lookup ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ClaimTermination {
+    /// Reached a leaf whose key matched.
+    Leaf,
+    /// Reached an empty child slot — the key is absent.
+    EmptySubtree,
+    /// Reached a leaf whose key differs — still a valid non-inclusion
+    /// proof. Carries the stored leaf's data so the verifier can
+    /// reconstruct its hash.
+    LeafMismatch {
+        /// Key actually stored at the divergent leaf.
+        stored_key: Key,
+        /// Value hash actually stored at the divergent leaf.
+        stored_value_hash: ValueHash,
+    },
+}
+
+/// Errors produced during proof construction or verification.
+#[derive(Debug, thiserror::Error)]
+pub enum ProofError {
+    /// The supplied root key is not present in storage.
+    #[error("root key not found in store")]
+    RootMissing,
+
+    /// A node referenced by the walk could not be loaded from storage.
+    #[error("node at {key:?} referenced but missing")]
+    MissingNode {
+        /// Key of the node that could not be loaded.
+        key: NodeKey,
+    },
+
+    /// The proof reconstructs to a hash that disagrees with the expected root.
+    #[error("computed root does not match expected root")]
+    RootMismatch,
+
+    /// The proof is internally inconsistent (structurally invalid).
+    #[error("malformed proof: {0}")]
+    Malformed(&'static str),
+
+    /// The verifier expected a claim the proof does not contain.
+    #[error("claim for key not present in proof")]
+    MissingClaim,
+
+    /// A claim's stored value disagrees with the verifier's expected value.
+    #[error("claim asserts a value the proof does not support")]
+    ValueMismatch,
+
+    /// A range proof's sibling subtree overlaps the claimed-complete key
+    /// span — the range omits leaves it claims to cover.
+    #[error("range proof omits leaves inside its claimed span")]
+    RangeIncomplete,
+}
+
+impl<H: Hasher, const ARITY_BITS: u8> Tree<H, ARITY_BITS> {
+    /// Build a multiproof covering `keys` against the given root.
+    ///
+    /// Keys are internally sorted and deduplicated. The resulting proof
+    /// authenticates each distinct key's value hash (or non-existence).
+    /// An empty `keys` slice yields an empty proof.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProofError::RootMissing`] if `root_key` does not resolve
+    /// in `store`, or [`ProofError::MissingNode`] if a referenced child
+    /// node has been pruned underneath the walk.
+    pub fn prove<S>(store: &S, root_key: &NodeKey, keys: &[Key]) -> Result<MultiProof, ProofError>
+    where
+        S: TreeReader,
+    {
+        let mut sorted: Vec<Key> = keys.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+
+        let mut claims = Vec::with_capacity(sorted.len());
+        let mut siblings = Vec::new();
+
+        if sorted.is_empty() {
+            return Ok(MultiProof {
+                root_depth_bits: root_key.path.len(),
+                claims,
+                siblings,
+            });
+        }
+
+        // The caller provided a root key — it must resolve to a node in
+        // the store. If not, either the version was never committed or
+        // was pruned; in both cases we cannot meaningfully prove against
+        // it, and emitting all-EmptySubtree claims would silently pass
+        // off a "not available" as "tree is empty".
+        if store.get_node(root_key).is_none() {
+            return Err(ProofError::RootMissing);
+        }
+
+        let claim_refs: Vec<&Key> = sorted.iter().collect();
+        let mut current_key = root_key.clone();
+        prove_rec::<S, H, ARITY_BITS>(
+            store,
+            &mut current_key,
+            &claim_refs,
+            &mut claims,
+            &mut siblings,
+        )?;
+
+        Ok(MultiProof {
+            root_depth_bits: root_key.path.len(),
+            claims,
+            siblings,
+        })
+    }
+
+    /// Verify a multiproof against an expected root.
+    ///
+    /// `expected_claims` is the application-level assertion: for each
+    /// key the caller asserts what value (or absence) it expects. The
+    /// verifier checks both that the proof is self-consistent against
+    /// `expected_root` and that the proved results match the caller's
+    /// assertions.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProofError::MissingClaim`] when `expected_claims`
+    /// names a key the proof does not authenticate;
+    /// [`ProofError::ValueMismatch`] when a claim disagrees with the
+    /// expected value; [`ProofError::Malformed`] when the proof is
+    /// structurally invalid; and [`ProofError::RootMismatch`] when the
+    /// reconstructed root differs from `expected_root`.
+    pub fn verify(
+        proof: &MultiProof,
+        expected_root: Hash,
+        expected_claims: &[(Key, Option<ValueHash>)],
+    ) -> Result<(), ProofError> {
+        // Cross-check each expected claim against the proof. Both are
+        // keyed by 32-byte keys; sort expected and walk together with
+        // proof.claims (which is sorted by prove()).
+        let mut expected: Vec<(Key, Option<ValueHash>)> = expected_claims.to_vec();
+        expected.sort_by_key(|(k, _)| *k);
+        expected.dedup_by_key(|(k, _)| *k);
+
+        // Walk sorted expected claims against sorted proof claims.
+        // Proof claims are allowed to be a superset (e.g. the caller
+        // might check only some of the batch), but expected must be a
+        // subset.
+        let mut p = 0usize;
+        for (exp_key, exp_val) in &expected {
+            while p < proof.claims.len() && proof.claims[p].key < *exp_key {
+                p += 1;
+            }
+            if p >= proof.claims.len() || proof.claims[p].key != *exp_key {
+                return Err(ProofError::MissingClaim);
+            }
+            let c = &proof.claims[p];
+            match (exp_val, &c.termination) {
+                (Some(v), ClaimTermination::Leaf) => {
+                    if c.value_hash.as_ref() != Some(v) {
+                        return Err(ProofError::ValueMismatch);
+                    }
+                }
+                (None, ClaimTermination::EmptySubtree | ClaimTermination::LeafMismatch { .. }) => {}
+                _ => return Err(ProofError::ValueMismatch),
+            }
+            p += 1;
+        }
+
+        if proof.claims.is_empty() {
+            // Nothing to authenticate; conventionally accept only if
+            // the caller also expected nothing AND the expected root is
+            // EMPTY_HASH. Otherwise the proof is insufficient.
+            return if expected.is_empty() && expected_root == EMPTY_HASH {
+                Ok(())
+            } else {
+                Err(ProofError::Malformed("empty proof with non-empty claims"))
+            };
+        }
+
+        check_claim_grid::<ARITY_BITS>(&proof.claims, proof.root_depth_bits)?;
+
+        // Reconstruct root by walking the claim topology, starting at the depth
+        // the tree is rooted at (zero for a whole-keyspace tree).
+        let (computed, consumed) =
+            verify_rec::<H, ARITY_BITS>(&proof.claims, proof.root_depth_bits, &proof.siblings)?;
+
+        if consumed != proof.siblings.len() {
+            return Err(ProofError::Malformed("trailing siblings"));
+        }
+
+        if computed != expected_root {
+            return Err(ProofError::RootMismatch);
+        }
+
+        Ok(())
+    }
+}
+
+// ============================================================
+// Internal helpers
+// ============================================================
+
+/// Bound every claim onto the arity grid the reconstruction walks, at
+/// or below the proof root, and the root itself onto the grid.
+///
+/// A claim off the grid never matches the recursion depth, so the
+/// bucket split would keep descending and `bits_at` would index a key
+/// byte past its end; bounding the whole claim set up front keeps the
+/// walk (and `siblings_needed`) from ever descending past the tree
+/// height on a peer-supplied proof.
+pub(crate) fn check_claim_grid<const ARITY_BITS: u8>(
+    claims: &[ProofClaim],
+    root_depth_bits: u16,
+) -> Result<(), ProofError> {
+    for claim in claims {
+        if claim.depth_bits > MAX_DEPTH_BITS
+            || !claim.depth_bits.is_multiple_of(u16::from(ARITY_BITS))
+        {
+            return Err(ProofError::Malformed("claim depth off the arity grid"));
+        }
+        // A claim terminating above the proof's root never matches the
+        // recursion depth either.
+        if claim.depth_bits < root_depth_bits {
+            return Err(ProofError::Malformed("claim depth above the proof root"));
+        }
+    }
+    if root_depth_bits > MAX_DEPTH_BITS || !root_depth_bits.is_multiple_of(u16::from(ARITY_BITS)) {
+        return Err(ProofError::Malformed("root depth off the arity grid"));
+    }
+    Ok(())
+}
+
+/// Resolve a co-terminal claim group: when every claim pinpoints
+/// `depth` they all describe one terminal node — several claims may
+/// share it (a leaf claim plus boundary anchors terminating at the
+/// same divergent leaf or empty slot) and must agree on what it is.
+/// `Ok(None)` means no claim terminates here and the walk descends;
+/// mixed depths at one subtree are malformed.
+pub(crate) fn terminal_group<H: Hasher>(
+    claims: &[ProofClaim],
+    depth: u16,
+) -> Result<Option<Hash>, ProofError> {
+    debug_assert!(!claims.is_empty());
+    let all_terminal = claims.iter().all(|c| c.depth_bits == depth);
+    let any_terminal = claims.iter().any(|c| c.depth_bits == depth);
+    if any_terminal && !all_terminal {
+        return Err(ProofError::Malformed(
+            "mixed termination depths at same subtree",
+        ));
+    }
+    if !all_terminal {
+        return Ok(None);
+    }
+    let hash = termination_hash::<H>(&claims[0]);
+    if claims[1..].iter().any(|c| termination_hash::<H>(c) != hash) {
+        return Err(ProofError::Malformed(
+            "inconsistent claims at one terminal node",
+        ));
+    }
+    Ok(Some(hash))
+}
+
+pub(crate) fn termination_hash<H: Hasher>(claim: &ProofClaim) -> Hash {
+    match &claim.termination {
+        ClaimTermination::Leaf => {
+            // value_hash must be Some for Leaf; validated at construction.
+            let vh = claim
+                .value_hash
+                .unwrap_or_else(|| panic!("Leaf claim missing value_hash"));
+            H::hash_leaf(&claim.key, &vh)
+        }
+        ClaimTermination::EmptySubtree => EMPTY_HASH,
+        ClaimTermination::LeafMismatch {
+            stored_key,
+            stored_value_hash,
+        } => H::hash_leaf(stored_key, stored_value_hash),
+    }
+}
+
+fn prove_rec<S, H, const ARITY_BITS: u8>(
+    store: &S,
+    node_key: &mut NodeKey,
+    claim_keys: &[&Key],
+    claims_out: &mut Vec<ProofClaim>,
+    siblings_out: &mut Vec<Hash>,
+) -> Result<(), ProofError>
+where
+    S: TreeReader,
+    H: Hasher,
+{
+    let node = store
+        .get_node(node_key)
+        .ok_or_else(|| ProofError::MissingNode {
+            key: node_key.clone(),
+        })?;
+    let depth = node_key.path.len();
+
+    match &*node {
+        Node::Leaf(leaf) => {
+            // All claimed keys routed to this leaf terminate here.
+            for key in claim_keys {
+                let (termination, value_hash) = if **key == leaf.key {
+                    (ClaimTermination::Leaf, Some(leaf.value_hash))
+                } else {
+                    (
+                        ClaimTermination::LeafMismatch {
+                            stored_key: leaf.key,
+                            stored_value_hash: leaf.value_hash,
+                        },
+                        None,
+                    )
+                };
+                claims_out.push(ProofClaim {
+                    key: **key,
+                    value_hash,
+                    depth_bits: depth,
+                    termination,
+                });
+            }
+            Ok(())
+        }
+        Node::Internal(internal) => {
+            let arity = 1usize << ARITY_BITS as usize;
+            let mut pos = 0usize;
+            for bucket in 0..arity {
+                let start = pos;
+                while pos < claim_keys.len()
+                    && bits_at(claim_keys[pos], depth, ARITY_BITS) as usize == bucket
+                {
+                    pos += 1;
+                }
+                let claimed_here = pos > start;
+                let child = internal.children.get(bucket).and_then(|c| c.as_ref());
+
+                if claimed_here {
+                    let bucket_byte = u8::try_from(bucket).unwrap_or(u8::MAX);
+                    if let Some(child) = child {
+                        // Mutate the path in place, recurse, then truncate
+                        // back to the parent depth so the next bucket's
+                        // descent starts from the same point.
+                        let saved_version = node_key.version;
+                        node_key.version = child.version;
+                        node_key.path.push_bits(bucket_byte, ARITY_BITS);
+                        let result = prove_rec::<S, H, ARITY_BITS>(
+                            store,
+                            node_key,
+                            &claim_keys[start..pos],
+                            claims_out,
+                            siblings_out,
+                        );
+                        node_key.path.truncate(depth);
+                        node_key.version = saved_version;
+                        result?;
+                    } else {
+                        // Claimed path hits empty slot — emit non-inclusion.
+                        for key in &claim_keys[start..pos] {
+                            claims_out.push(ProofClaim {
+                                key: **key,
+                                value_hash: None,
+                                depth_bits: depth + u16::from(ARITY_BITS),
+                                termination: ClaimTermination::EmptySubtree,
+                            });
+                        }
+                    }
+                } else {
+                    // Unclaimed bucket → emit sibling for verifier.
+                    let sibling_hash = child.map_or(EMPTY_HASH, |c| c.hash);
+                    siblings_out.push(sibling_hash);
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Reconstruct the subtree hash for `claims` and report how many
+/// siblings were consumed from the front of `siblings`.
+///
+/// The returned `usize` lets callers slice `siblings` for sibling
+/// subtrees independently — required for parallel reconstruction.
+fn verify_rec<H, const ARITY_BITS: u8>(
+    claims: &[ProofClaim],
+    depth: u16,
+    siblings: &[Hash],
+) -> Result<(Hash, usize), ProofError>
+where
+    H: Hasher,
+{
+    debug_assert!(!claims.is_empty());
+
+    if let Some(hash) = terminal_group::<H>(claims, depth)? {
+        return Ok((hash, 0));
+    }
+
+    // Non-terminal: split claims by bucket at this depth.
+    let arity = 1usize << ARITY_BITS as usize;
+    let child_depth = depth + u16::from(ARITY_BITS);
+    let mut bucket_ranges: Vec<std::ops::Range<usize>> = Vec::with_capacity(arity);
+    let mut pos = 0usize;
+    for bucket in 0..arity {
+        let start = pos;
+        while pos < claims.len() && bits_at(&claims[pos].key, depth, ARITY_BITS) as usize == bucket
+        {
+            pos += 1;
+        }
+        bucket_ranges.push(start..pos);
+    }
+    if pos != claims.len() {
+        return Err(ProofError::Malformed("claims not covered by bucket split"));
+    }
+
+    // Above the threshold, pre-compute sibling offsets and recurse on
+    // buckets in parallel. Below it, fall through to the sequential
+    // cursor walk — avoiding both the offset pre-pass and rayon spawn
+    // overhead on small subtrees.
+    #[cfg(feature = "parallel")]
+    if claims.len() >= 32 {
+        use rayon::prelude::*;
+
+        // Pre-compute each bucket's sibling consumption so subtrees can
+        // be verified independently. The global sibling order is
+        // preserved because buckets are walked in index order.
+        let mut bucket_offsets: Vec<usize> = Vec::with_capacity(arity + 1);
+        bucket_offsets.push(0);
+        for r in &bucket_ranges {
+            let needed = if r.is_empty() {
+                1
+            } else {
+                siblings_needed::<ARITY_BITS>(&claims[r.clone()], child_depth)
+            };
+            bucket_offsets.push(bucket_offsets.last().unwrap() + needed);
+        }
+        let total_consumed = *bucket_offsets.last().unwrap();
+        if siblings.len() < total_consumed {
+            return Err(ProofError::Malformed(
+                "not enough siblings to reconstruct internal node",
+            ));
+        }
+
+        let children: Vec<Hash> = (0..arity)
+            .into_par_iter()
+            .map(|bucket| -> Result<Hash, ProofError> {
+                let r = &bucket_ranges[bucket];
+                let sib = &siblings[bucket_offsets[bucket]..bucket_offsets[bucket + 1]];
+                if r.is_empty() {
+                    Ok(sib[0])
+                } else {
+                    verify_rec::<H, ARITY_BITS>(&claims[r.clone()], child_depth, sib)
+                        .map(|(h, _)| h)
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        return Ok((H::hash_internal(&children), total_consumed));
+    }
+
+    // Sequential: walk buckets with a running cursor over `siblings`.
+    let mut consumed = 0usize;
+    let mut children: Vec<Hash> = vec![EMPTY_HASH; arity];
+    for (bucket, child) in children.iter_mut().enumerate() {
+        let r = &bucket_ranges[bucket];
+        if r.is_empty() {
+            *child = *siblings.get(consumed).ok_or(ProofError::Malformed(
+                "not enough siblings to reconstruct internal node",
+            ))?;
+            consumed += 1;
+        } else {
+            let (h, used) = verify_rec::<H, ARITY_BITS>(
+                &claims[r.clone()],
+                child_depth,
+                &siblings[consumed..],
+            )?;
+            *child = h;
+            consumed += used;
+        }
+    }
+    Ok((H::hash_internal(&children), consumed))
+}
+
+/// Count the siblings a non-empty subtree consumes when verified.
+#[cfg(feature = "parallel")]
+fn siblings_needed<const ARITY_BITS: u8>(claims: &[ProofClaim], depth: u16) -> usize {
+    debug_assert!(!claims.is_empty());
+    if claims.iter().all(|c| c.depth_bits == depth) {
+        return 0;
+    }
+    let arity = 1usize << ARITY_BITS as usize;
+    let mut total = 0usize;
+    let mut pos = 0usize;
+    for bucket in 0..arity {
+        let start = pos;
+        while pos < claims.len() && bits_at(&claims[pos].key, depth, ARITY_BITS) as usize == bucket
+        {
+            pos += 1;
+        }
+        if pos > start {
+            total +=
+                siblings_needed::<ARITY_BITS>(&claims[start..pos], depth + u16::from(ARITY_BITS));
+        } else {
+            total += 1;
+        }
+    }
+    total
+}
+
+const WIRE_VERSION: u8 = 0x01;
+const TERM_LEAF: u8 = 0x01;
+const TERM_EMPTY: u8 = 0x02;
+const TERM_LEAF_MISMATCH: u8 = 0x03;
+
+/// Cap on claims accepted from a single peer-supplied multiproof.
+///
+/// Bounds attacker-controlled `claim_count` (a `u32` read from the wire,
+/// up to 4 G) before it reaches `Vec::with_capacity`. A claim is ~80
+/// bytes; without this cap a peer crafting a tiny request can force a
+/// multi-GB pre-allocation. Real provision proofs cover at most a few
+/// thousand keys; `10_000` leaves comfortable headroom.
+const MAX_PROOF_CLAIMS: usize = 10_000;
+
+/// Cap on sibling hashes in a single multiproof.
+///
+/// Each claim contributes O(log N) siblings on its key path (≤ 256 in
+/// the worst case, far fewer in practice once shared prefixes dedup).
+/// `100_000` is ~10× the claim cap and bounds the pre-allocation at a
+/// few MB.
+const MAX_PROOF_SIBLINGS: usize = 100_000;
+
+/// Errors produced by [`MultiProof::decode`].
+#[derive(Debug, thiserror::Error)]
+pub enum DecodeError {
+    /// Wire-format version byte is not [`WIRE_VERSION`].
+    #[error("unsupported proof format version {0:#04x}")]
+    UnsupportedVersion(u8),
+
+    /// Buffer ended before the decode could finish.
+    #[error("buffer truncated — not enough bytes to decode")]
+    Truncated,
+
+    /// Decode succeeded but bytes remain past the structured payload.
+    #[error("trailing bytes after successful decode")]
+    TrailingBytes,
+
+    /// A claim's termination discriminator is not one of the defined values.
+    #[error("unknown termination discriminator {0:#04x}")]
+    InvalidTermination(u8),
+
+    /// A length prefix exceeded the configured maximum.
+    #[error("length prefix {actual} exceeds maximum {max}")]
+    LengthOverLimit {
+        /// The configured maximum.
+        max: usize,
+        /// The length the wire claimed.
+        actual: usize,
+    },
+
+    /// A claim names a termination depth past the tree's bit height.
+    #[error("claim depth {depth_bits} exceeds maximum {max}")]
+    DepthOutOfRange {
+        /// The tree's maximum depth in bits.
+        max: u16,
+        /// The depth the wire claimed.
+        depth_bits: u16,
+    },
+}
+
+impl MultiProof {
+    /// Encode this proof to the canonical wire format.
+    ///
+    /// See the module-level wire format documentation for the exact
+    /// layout. The output is deterministic: the same `MultiProof`
+    /// always produces the same bytes.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(self.encoded_size_hint());
+        buf.push(WIRE_VERSION);
+        buf.extend_from_slice(&self.root_depth_bits.to_be_bytes());
+        buf.extend_from_slice(
+            &u32::try_from(self.claims.len())
+                .unwrap_or(u32::MAX)
+                .to_be_bytes(),
+        );
+        for claim in &self.claims {
+            encode_claim(claim, &mut buf);
+        }
+        buf.extend_from_slice(
+            &u32::try_from(self.siblings.len())
+                .unwrap_or(u32::MAX)
+                .to_be_bytes(),
+        );
+        for sib in &self.siblings {
+            buf.extend_from_slice(sib);
+        }
+        buf
+    }
+
+    /// Decode a proof from the canonical wire format.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DecodeError`] if the version byte is unrecognized, the
+    /// buffer is truncated mid-claim, a claim carries an unknown
+    /// termination discriminator, or unexpected trailing bytes follow
+    /// the structured payload.
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut r = ByteReader::new(bytes);
+        let version = r.u8()?;
+        if version != WIRE_VERSION {
+            return Err(DecodeError::UnsupportedVersion(version));
+        }
+        let root_depth_bits = r.u16_be()?;
+        let claim_count = r.u32_be()? as usize;
+        if claim_count > MAX_PROOF_CLAIMS {
+            return Err(DecodeError::LengthOverLimit {
+                max: MAX_PROOF_CLAIMS,
+                actual: claim_count,
+            });
+        }
+        let mut claims = Vec::with_capacity(claim_count);
+        for _ in 0..claim_count {
+            claims.push(decode_claim(&mut r)?);
+        }
+        let sibling_count = r.u32_be()? as usize;
+        if sibling_count > MAX_PROOF_SIBLINGS {
+            return Err(DecodeError::LengthOverLimit {
+                max: MAX_PROOF_SIBLINGS,
+                actual: sibling_count,
+            });
+        }
+        let mut siblings = Vec::with_capacity(sibling_count);
+        for _ in 0..sibling_count {
+            siblings.push(r.bytes32()?);
+        }
+        if !r.is_empty() {
+            return Err(DecodeError::TrailingBytes);
+        }
+        Ok(Self {
+            root_depth_bits,
+            claims,
+            siblings,
+        })
+    }
+
+    fn encoded_size_hint(&self) -> usize {
+        let claims_bytes: usize = self
+            .claims
+            .iter()
+            .map(|c| {
+                32 + 2
+                    + 1
+                    + match c.termination {
+                        ClaimTermination::Leaf => 32,
+                        ClaimTermination::EmptySubtree => 0,
+                        ClaimTermination::LeafMismatch { .. } => 64,
+                    }
+            })
+            .sum();
+        1 + 2 + 4 + claims_bytes + 4 + self.siblings.len() * 32
+    }
+}
+
+fn encode_claim(claim: &ProofClaim, buf: &mut Vec<u8>) {
+    buf.extend_from_slice(&claim.key);
+    buf.extend_from_slice(&claim.depth_bits.to_be_bytes());
+    match &claim.termination {
+        ClaimTermination::Leaf => {
+            buf.push(TERM_LEAF);
+            // Leaf claims carry their value_hash out-of-band in
+            // `claim.value_hash` — a debug-time invariant we check
+            // rather than fall back on silently.
+            let vh = claim
+                .value_hash
+                .expect("invariant: Leaf claim must carry value_hash");
+            buf.extend_from_slice(&vh);
+        }
+        ClaimTermination::EmptySubtree => {
+            buf.push(TERM_EMPTY);
+        }
+        ClaimTermination::LeafMismatch {
+            stored_key,
+            stored_value_hash,
+        } => {
+            buf.push(TERM_LEAF_MISMATCH);
+            buf.extend_from_slice(stored_key);
+            buf.extend_from_slice(stored_value_hash);
+        }
+    }
+}
+
+fn decode_claim(r: &mut ByteReader) -> Result<ProofClaim, DecodeError> {
+    let key = r.bytes32()?;
+    let depth_bits = r.u16_be()?;
+    if depth_bits > MAX_DEPTH_BITS {
+        return Err(DecodeError::DepthOutOfRange {
+            max: MAX_DEPTH_BITS,
+            depth_bits,
+        });
+    }
+    let disc = r.u8()?;
+    let (termination, value_hash) = match disc {
+        TERM_LEAF => {
+            let vh = r.bytes32()?;
+            (ClaimTermination::Leaf, Some(vh))
+        }
+        TERM_EMPTY => (ClaimTermination::EmptySubtree, None),
+        TERM_LEAF_MISMATCH => {
+            let sk = r.bytes32()?;
+            let svh = r.bytes32()?;
+            (
+                ClaimTermination::LeafMismatch {
+                    stored_key: sk,
+                    stored_value_hash: svh,
+                },
+                None,
+            )
+        }
+        other => return Err(DecodeError::InvalidTermination(other)),
+    };
+    Ok(ProofClaim {
+        key,
+        value_hash,
+        depth_bits,
+        termination,
+    })
+}
+
+/// Minimal byte reader with explicit truncation signaling.
+struct ByteReader<'a> {
+    bytes: &'a [u8],
+}
+
+impl<'a> ByteReader<'a> {
+    const fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes }
+    }
+
+    fn u8(&mut self) -> Result<u8, DecodeError> {
+        if self.bytes.is_empty() {
+            return Err(DecodeError::Truncated);
+        }
+        let b = self.bytes[0];
+        self.bytes = &self.bytes[1..];
+        Ok(b)
+    }
+
+    fn u16_be(&mut self) -> Result<u16, DecodeError> {
+        if self.bytes.len() < 2 {
+            return Err(DecodeError::Truncated);
+        }
+        let n = u16::from_be_bytes([self.bytes[0], self.bytes[1]]);
+        self.bytes = &self.bytes[2..];
+        Ok(n)
+    }
+
+    fn u32_be(&mut self) -> Result<u32, DecodeError> {
+        if self.bytes.len() < 4 {
+            return Err(DecodeError::Truncated);
+        }
+        let n = u32::from_be_bytes([self.bytes[0], self.bytes[1], self.bytes[2], self.bytes[3]]);
+        self.bytes = &self.bytes[4..];
+        Ok(n)
+    }
+
+    fn bytes32(&mut self) -> Result<[u8; 32], DecodeError> {
+        if self.bytes.len() < 32 {
+            return Err(DecodeError::Truncated);
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&self.bytes[..32]);
+        self.bytes = &self.bytes[32..];
+        Ok(arr)
+    }
+
+    const fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::hasher::Blake3Hasher;
+    use crate::node::{LeafValue, NibblePath};
+    use crate::storage::MemoryStore;
+    use crate::test_utils::{build_store, k, v};
+    use crate::tree::Tree;
+
+    type Jmt = Tree<Blake3Hasher, 1>;
+
+    /// Co-terminal claims must agree on the terminal node's content.
+    /// The reconstruction hashes one claim of the group; without the
+    /// consistency check a prover could attach a co-terminal claim
+    /// with arbitrary content to an otherwise valid proof.
+    #[test]
+    fn inconsistent_co_terminal_claims_rejected() {
+        let entries: Vec<(Key, ValueHash)> = (0u8..4).map(|i| (k(i), v(i))).collect();
+        let (store, root, root_hash) = build_store(&entries);
+
+        // X routes to leaf k(0) and diverges there: co-terminal with it.
+        let mut x = k(0);
+        x[31] = 1;
+        let mut proof = Jmt::prove(&store, &root, &[k(0), x]).unwrap();
+        assert_eq!(proof.claims.len(), 2);
+        assert_eq!(proof.claims[0].key, k(0));
+        assert_eq!(proof.claims[0].depth_bits, proof.claims[1].depth_bits);
+
+        // Tamper the mismatch claim's stored leaf content.
+        if let ClaimTermination::LeafMismatch {
+            stored_value_hash, ..
+        } = &mut proof.claims[1].termination
+        {
+            *stored_value_hash = [0xEE; 32];
+        } else {
+            panic!("second claim should be a LeafMismatch");
+        }
+
+        let err = Jmt::verify(&proof, root_hash, &[(k(0), Some(v(0)))]).unwrap_err();
+        assert!(matches!(err, ProofError::Malformed(_)));
+
+        // The untampered group still verifies.
+        let clean = Jmt::prove(&store, &root, &[k(0), x]).unwrap();
+        Jmt::verify(&clean, root_hash, &[(k(0), Some(v(0)))]).unwrap();
+    }
+
+    #[test]
+    fn prove_and_verify_single_inclusion() {
+        let (store, root, root_hash) = build_store(&[(k(1), v(10)), (k(2), v(20))]);
+        let proof = Jmt::prove(&store, &root, &[k(1)]).unwrap();
+        Jmt::verify(&proof, root_hash, &[(k(1), Some(v(10)))]).unwrap();
+    }
+
+    #[test]
+    fn prove_and_verify_batch_inclusion() {
+        let entries: Vec<(Key, ValueHash)> = (0u8..8).map(|i| (k(i), v(i * 10))).collect();
+        let (store, root, root_hash) = build_store(&entries);
+
+        let keys: Vec<Key> = entries.iter().map(|(k, _)| *k).collect();
+        let proof = Jmt::prove(&store, &root, &keys).unwrap();
+        let expected: Vec<(Key, Option<ValueHash>)> =
+            entries.iter().map(|(k, v)| (*k, Some(*v))).collect();
+        Jmt::verify(&proof, root_hash, &expected).unwrap();
+    }
+
+    #[test]
+    fn prove_and_verify_rooted_at_prefix() {
+        // A tree rooted at a non-empty prefix (its keys all share that prefix)
+        // must still prove and verify — its root sits at the prefix depth, which
+        // is exactly what a prefix-rooted shard state tree relies on.
+        let mut prefix = NibblePath::empty();
+        prefix.push_bits(0b1010, 4); // 4-bit prefix 0xA
+
+        let entries: Vec<(Key, ValueHash)> = (0u8..6)
+            .map(|i| {
+                let mut key = [0u8; 32];
+                key[0] = 0xA0 | i; // top nibble 0xA matches the prefix
+                key[1] = i; // diverge below the prefix
+                (key, v(i.wrapping_mul(7)))
+            })
+            .collect();
+
+        let mut store = MemoryStore::new();
+        let updates: BTreeMap<Key, Option<LeafValue>> = entries
+            .iter()
+            .map(|(k, val)| (*k, Some(LeafValue::new(*val, 1))))
+            .collect();
+        let res = Jmt::apply_updates_at(&store, None, 1, &prefix, &updates).unwrap();
+        store.apply(&res);
+
+        let root_key = store.get_root_key(1).unwrap();
+        assert_eq!(
+            root_key.path, prefix,
+            "root sits at the prefix, not depth 0"
+        );
+
+        let keys: Vec<Key> = entries.iter().map(|(k, _)| *k).collect();
+        let proof = Jmt::prove(&store, &root_key, &keys).unwrap();
+        let expected: Vec<(Key, Option<ValueHash>)> =
+            entries.iter().map(|(k, val)| (*k, Some(*val))).collect();
+        Jmt::verify(&proof, res.root_hash, &expected).unwrap();
+
+        // Tampered value still fails against the prefix-rooted root.
+        let bad = Jmt::verify(&proof, res.root_hash, &[(entries[0].0, Some(v(255)))]).unwrap_err();
+        assert!(matches!(bad, ProofError::ValueMismatch));
+    }
+
+    #[test]
+    fn prove_and_verify_non_inclusion() {
+        let (store, root, root_hash) = build_store(&[(k(1), v(10)), (k(2), v(20))]);
+        // k(99) isn't in the tree.
+        let proof = Jmt::prove(&store, &root, &[k(99)]).unwrap();
+        Jmt::verify(&proof, root_hash, &[(k(99), None)]).unwrap();
+    }
+
+    #[test]
+    fn verify_rejects_wrong_value() {
+        let (store, root, root_hash) = build_store(&[(k(1), v(10))]);
+        let proof = Jmt::prove(&store, &root, &[k(1)]).unwrap();
+        let err = Jmt::verify(&proof, root_hash, &[(k(1), Some(v(99)))]).unwrap_err();
+        assert!(matches!(err, ProofError::ValueMismatch));
+    }
+
+    #[test]
+    fn verify_rejects_wrong_root() {
+        let (store, root, _root_hash) = build_store(&[(k(1), v(10))]);
+        let proof = Jmt::prove(&store, &root, &[k(1)]).unwrap();
+        let err = Jmt::verify(&proof, [0xAA; 32], &[(k(1), Some(v(10)))]).unwrap_err();
+        assert!(matches!(err, ProofError::RootMismatch));
+    }
+
+    #[test]
+    fn verify_rejects_tampered_sibling() {
+        let (store, root, root_hash) =
+            build_store(&[(k(1), v(10)), (k(2), v(20)), (k(3), v(30)), (k(4), v(40))]);
+        let mut proof = Jmt::prove(&store, &root, &[k(1)]).unwrap();
+        if let Some(sib) = proof.siblings.first_mut() {
+            sib[0] ^= 0xFF;
+        }
+        let err = Jmt::verify(&proof, root_hash, &[(k(1), Some(v(10)))]).unwrap_err();
+        assert!(matches!(err, ProofError::RootMismatch));
+    }
+
+    #[test]
+    fn mixed_inclusion_and_non_inclusion() {
+        let (store, root, root_hash) = build_store(&[(k(1), v(10)), (k(2), v(20)), (k(3), v(30))]);
+        let proof = Jmt::prove(&store, &root, &[k(1), k(99), k(3)]).unwrap();
+        Jmt::verify(
+            &proof,
+            root_hash,
+            &[(k(1), Some(v(10))), (k(3), Some(v(30))), (k(99), None)],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn prove_against_empty_tree_errors() {
+        // Proving against a non-existent root now returns RootMissing,
+        // so callers can distinguish "unavailable" from "genuinely empty".
+        let store = MemoryStore::new();
+        let root = NodeKey::root(1);
+        let err = Jmt::prove(&store, &root, &[k(1)]).unwrap_err();
+        assert!(matches!(err, ProofError::RootMissing));
+    }
+
+    #[test]
+    fn deep_prefix_divergence_proof() {
+        // Two keys sharing a long prefix — exercises binary chain.
+        let mut k1 = [0u8; 32];
+        let mut k2 = [0u8; 32];
+        for i in 0..20 {
+            k1[i] = 0xAB;
+            k2[i] = 0xAB;
+        }
+        k1[20] = 0x00;
+        k2[20] = 0xFF;
+
+        let (store, root, root_hash) = build_store(&[(k1, v(1)), (k2, v(2))]);
+        let proof = Jmt::prove(&store, &root, &[k1]).unwrap();
+        Jmt::verify(&proof, root_hash, &[(k1, Some(v(1)))]).unwrap();
+    }
+
+    #[test]
+    fn larger_batch_roundtrip() {
+        let mut entries: Vec<(Key, ValueHash)> = Vec::new();
+        for i in 0u8..128 {
+            let mut key = [0u8; 32];
+            key[0] = i.wrapping_mul(17);
+            key[15] = i.wrapping_mul(31);
+            entries.push((key, [i; 32]));
+        }
+        let (store, root, root_hash) = build_store(&entries);
+        let keys: Vec<Key> = entries.iter().map(|(k, _)| *k).collect();
+        let proof = Jmt::prove(&store, &root, &keys).unwrap();
+        let expected: Vec<(Key, Option<ValueHash>)> =
+            entries.iter().map(|(k, v)| (*k, Some(*v))).collect();
+        Jmt::verify(&proof, root_hash, &expected).unwrap();
+
+        // Also try a subset of keys.
+        let subset: Vec<Key> = keys.iter().take(10).copied().collect();
+        let sub_proof = Jmt::prove(&store, &root, &subset).unwrap();
+        let sub_expected: Vec<(Key, Option<ValueHash>)> = entries
+            .iter()
+            .take(10)
+            .map(|(k, v)| (*k, Some(*v)))
+            .collect();
+        Jmt::verify(&sub_proof, root_hash, &sub_expected).unwrap();
+    }
+
+    #[test]
+    fn radix4_proofs_roundtrip() {
+        type Jmt4 = Tree<Blake3Hasher, 2>;
+        let mut store = MemoryStore::new();
+        let entries: Vec<(Key, ValueHash)> = (0u8..16).map(|i| (k(i), v(i * 3))).collect();
+        let updates: BTreeMap<Key, Option<LeafValue>> = entries
+            .iter()
+            .map(|(k, v)| (*k, Some(LeafValue::new(*v, 1))))
+            .collect();
+        let res = Jmt4::apply_updates(&store, None, 1, &updates).unwrap();
+        store.apply(&res);
+        let root = store.get_root_key(1).unwrap();
+
+        let keys: Vec<Key> = entries.iter().map(|(k, _)| *k).collect();
+        let proof = Jmt4::prove(&store, &root, &keys).unwrap();
+        let expected: Vec<(Key, Option<ValueHash>)> =
+            entries.iter().map(|(k, v)| (*k, Some(*v))).collect();
+        Jmt4::verify(&proof, res.root_hash, &expected).unwrap();
+    }
+
+    // ========================================================
+    // Wire format tests
+    // ========================================================
+
+    #[test]
+    fn encode_decode_empty_proof() {
+        let proof = MultiProof {
+            root_depth_bits: 0,
+            claims: vec![],
+            siblings: vec![],
+        };
+        let bytes = proof.encode();
+        // version (1) + root_depth_bits (2) + claim_count (4) + sibling_count (4) = 11 bytes
+        assert_eq!(bytes.len(), 11);
+        assert_eq!(bytes[0], WIRE_VERSION);
+        let decoded = MultiProof::decode(&bytes).unwrap();
+        assert_eq!(proof, decoded);
+    }
+
+    #[test]
+    fn encode_decode_inclusion_roundtrip() {
+        let (store, root, root_hash) =
+            build_store(&[(k(1), v(10)), (k(2), v(20)), (k(3), v(30)), (k(4), v(40))]);
+        let proof = Jmt::prove(&store, &root, &[k(1), k(3)]).unwrap();
+
+        let bytes = proof.encode();
+        let decoded = MultiProof::decode(&bytes).unwrap();
+        assert_eq!(proof, decoded);
+
+        // Re-verify after roundtrip to confirm no semantic change.
+        Jmt::verify(
+            &decoded,
+            root_hash,
+            &[(k(1), Some(v(10))), (k(3), Some(v(30)))],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn encode_decode_non_inclusion_roundtrip() {
+        let (store, root, root_hash) = build_store(&[(k(1), v(10)), (k(2), v(20))]);
+        let proof = Jmt::prove(&store, &root, &[k(99)]).unwrap();
+
+        let bytes = proof.encode();
+        let decoded = MultiProof::decode(&bytes).unwrap();
+        assert_eq!(proof, decoded);
+
+        Jmt::verify(&decoded, root_hash, &[(k(99), None)]).unwrap();
+    }
+
+    #[test]
+    fn encode_decode_leaf_mismatch_roundtrip() {
+        // Construct a scenario where a claim terminates as LeafMismatch.
+        // A key that shares a prefix with an existing key but diverges
+        // will terminate at the existing leaf (mismatch).
+        let (store, root, root_hash) = build_store(&[(k(1), v(10))]);
+        // k(1) is at the root (single-entry tree → root IS the leaf).
+        // A non-matching key hits a LeafMismatch termination.
+        let other = k(2);
+        let proof = Jmt::prove(&store, &root, &[other]).unwrap();
+        assert!(matches!(
+            proof.claims[0].termination,
+            ClaimTermination::LeafMismatch { .. }
+        ));
+
+        let bytes = proof.encode();
+        let decoded = MultiProof::decode(&bytes).unwrap();
+        assert_eq!(proof, decoded);
+
+        Jmt::verify(&decoded, root_hash, &[(other, None)]).unwrap();
+    }
+
+    #[test]
+    fn decode_rejects_unsupported_version() {
+        let bytes = vec![0xFF, 0, 0, 0, 0, 0, 0, 0, 0];
+        let err = MultiProof::decode(&bytes).unwrap_err();
+        assert!(matches!(err, DecodeError::UnsupportedVersion(0xFF)));
+    }
+
+    #[test]
+    fn decode_rejects_truncated_header() {
+        // Version byte only — no root_depth_bits.
+        let bytes = vec![WIRE_VERSION];
+        let err = MultiProof::decode(&bytes).unwrap_err();
+        assert!(matches!(err, DecodeError::Truncated));
+    }
+
+    #[test]
+    fn decode_rejects_truncated_claims() {
+        // Version + claim_count=1, then a partial claim.
+        let mut bytes = vec![WIRE_VERSION];
+        bytes.extend_from_slice(&0u16.to_be_bytes()); // root_depth_bits
+        bytes.extend_from_slice(&1u32.to_be_bytes());
+        bytes.extend_from_slice(&[0u8; 10]); // only 10 bytes of a claim
+        let err = MultiProof::decode(&bytes).unwrap_err();
+        assert!(matches!(err, DecodeError::Truncated));
+    }
+
+    #[test]
+    fn decode_rejects_trailing_bytes() {
+        let (store, root, _) = build_store(&[(k(1), v(10)), (k(2), v(20))]);
+        let proof = Jmt::prove(&store, &root, &[k(1)]).unwrap();
+        let mut bytes = proof.encode();
+        bytes.push(0x00);
+        let err = MultiProof::decode(&bytes).unwrap_err();
+        assert!(matches!(err, DecodeError::TrailingBytes));
+    }
+
+    #[test]
+    fn decode_rejects_invalid_termination_discriminator() {
+        // Construct a minimal proof: version + claim_count=1 + key + depth
+        // + invalid discriminator.
+        let mut bytes = vec![WIRE_VERSION];
+        bytes.extend_from_slice(&0u16.to_be_bytes()); // root_depth_bits
+        bytes.extend_from_slice(&1u32.to_be_bytes());
+        bytes.extend_from_slice(&[0u8; 32]); // key
+        bytes.extend_from_slice(&0u16.to_be_bytes()); // depth
+        bytes.push(0xAA); // invalid discriminator
+        let err = MultiProof::decode(&bytes).unwrap_err();
+        assert!(matches!(err, DecodeError::InvalidTermination(0xAA)));
+    }
+
+    #[test]
+    fn decode_rejects_oversized_claim_count() {
+        // The exact attack: tiny payload, large claim_count claim.
+        // Without the cap, this triggers a multi-GB Vec::with_capacity.
+        let mut bytes = vec![WIRE_VERSION];
+        bytes.extend_from_slice(&0u16.to_be_bytes()); // root_depth_bits
+        bytes.extend_from_slice(&u32::MAX.to_be_bytes());
+        let err = MultiProof::decode(&bytes).unwrap_err();
+        assert!(matches!(
+            err,
+            DecodeError::LengthOverLimit {
+                max: MAX_PROOF_CLAIMS,
+                actual,
+            } if actual == u32::MAX as usize
+        ));
+    }
+
+    #[test]
+    fn decode_rejects_oversized_sibling_count() {
+        // claim_count=0, then huge sibling_count.
+        let mut bytes = vec![WIRE_VERSION];
+        bytes.extend_from_slice(&0u16.to_be_bytes()); // root_depth_bits
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        bytes.extend_from_slice(&u32::MAX.to_be_bytes());
+        let err = MultiProof::decode(&bytes).unwrap_err();
+        assert!(matches!(
+            err,
+            DecodeError::LengthOverLimit {
+                max: MAX_PROOF_SIBLINGS,
+                actual,
+            } if actual == u32::MAX as usize
+        ));
+    }
+
+    #[test]
+    fn decode_rejects_oversized_depth() {
+        // A claim depth past the 256-bit key space. Left unbounded, this
+        // drives `verify_rec` to index a key byte past its end and panic.
+        let mut bytes = vec![WIRE_VERSION];
+        bytes.extend_from_slice(&0u16.to_be_bytes()); // root_depth_bits
+        bytes.extend_from_slice(&1u32.to_be_bytes());
+        bytes.extend_from_slice(&[0u8; 32]); // key
+        bytes.extend_from_slice(&300u16.to_be_bytes()); // depth past 256
+        bytes.push(TERM_EMPTY);
+        let err = MultiProof::decode(&bytes).unwrap_err();
+        assert!(matches!(
+            err,
+            DecodeError::DepthOutOfRange {
+                max: MAX_DEPTH_BITS,
+                depth_bits: 300,
+            }
+        ));
+    }
+
+    #[test]
+    fn verify_rejects_depth_off_arity_grid() {
+        // Radix-4 walk steps two bits per level, so a claim terminating
+        // on an odd depth never lands on the recursion grid. The verifier
+        // must reject it rather than descend past the key on the bucket
+        // split below.
+        type Jmt4 = Tree<Blake3Hasher, 2>;
+        let proof = MultiProof {
+            root_depth_bits: 0,
+            claims: vec![ProofClaim {
+                key: k(1),
+                value_hash: Some(v(10)),
+                depth_bits: 255,
+                termination: ClaimTermination::Leaf,
+            }],
+            siblings: vec![EMPTY_HASH; MAX_DEPTH_BITS as usize],
+        };
+        let err = Jmt4::verify(&proof, [0u8; 32], &[]).unwrap_err();
+        assert!(matches!(err, ProofError::Malformed(_)));
+    }
+
+    /// A claim terminating above the proof's root depth must be rejected,
+    /// not descended through — with enough siblings supplied, the
+    /// recursion never reaches a terminal depth and walks past the
+    /// 256-bit key space, indexing out of bounds on a peer-supplied proof.
+    #[test]
+    fn verify_rejects_claim_above_proof_root() {
+        let proof = MultiProof {
+            root_depth_bits: 1,
+            claims: vec![ProofClaim {
+                key: k(1),
+                value_hash: None,
+                depth_bits: 0,
+                termination: ClaimTermination::EmptySubtree,
+            }],
+            siblings: vec![EMPTY_HASH; MAX_DEPTH_BITS as usize],
+        };
+        let err = Jmt::verify(&proof, [0u8; 32], &[]).unwrap_err();
+        assert!(matches!(
+            err,
+            ProofError::Malformed("claim depth above the proof root")
+        ));
+    }
+
+    #[test]
+    fn encoded_proof_is_deterministic() {
+        // Same proof encodes byte-for-byte identically on repeat calls.
+        let (store, root, _) = build_store(&[(k(1), v(10)), (k(2), v(20)), (k(3), v(30))]);
+        let proof = Jmt::prove(&store, &root, &[k(1), k(2)]).unwrap();
+        let a = proof.encode();
+        let b = proof.encode();
+        assert_eq!(a, b);
+    }
+}

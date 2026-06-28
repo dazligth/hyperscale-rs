@@ -1,0 +1,114 @@
+//! `SubstateStore` implementation for `SimShardStorage`.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use hyperscale_jmt::{NibblePath, Node as JmtNode, NodeKey as JmtNodeKey, TreeReader};
+use hyperscale_storage::lock_recover::read_or_recover;
+use hyperscale_storage::tree::proofs::generate_proof;
+use hyperscale_storage::{DbSortKey, SubstateStore, VersionedStore};
+use hyperscale_types::{BlockHeight, MerkleInclusionProof, NodeId, StateRoot};
+
+use super::core::SimShardStorage;
+use super::snapshot::SimSnapshot;
+
+impl SubstateStore for SimShardStorage {
+    type Snapshot<'a> = SimSnapshot;
+
+    fn snapshot(&self) -> Self::Snapshot<'_> {
+        // Default height = current committed tip. Equivalent to reading
+        // latest state but uniform snapshot type across all call sites.
+        self.snapshot_at(self.jmt_height())
+    }
+
+    fn jmt_height(&self) -> BlockHeight {
+        read_or_recover(&self.state).current_block_height
+    }
+
+    fn state_root(&self) -> StateRoot {
+        read_or_recover(&self.state).current_root_hash
+    }
+
+    fn list_substates_for_node_at_height(
+        &self,
+        node_id: &NodeId,
+        block_height: BlockHeight,
+    ) -> Option<Vec<(u8, DbSortKey, Vec<u8>)>> {
+        let current_version = read_or_recover(&self.state).current_block_height.inner();
+        if block_height.inner() > current_version {
+            return None;
+        }
+        let floor = current_version.saturating_sub(self.jmt_history_length);
+        if block_height.inner() < floor {
+            // Below retention — historical state no longer recoverable.
+            // External API: return None (network-supplied heights may
+            // legitimately fall out of range; `snapshot_at` would panic,
+            // so don't delegate for this case).
+            return None;
+        }
+        Some(
+            self.snapshot_at(block_height)
+                .list_raw_values_for_node(node_id),
+        )
+    }
+
+    fn generate_merkle_proofs(
+        &self,
+        storage_keys: &[Vec<u8>],
+        owner_map: &HashMap<NodeId, NodeId>,
+        block_height: BlockHeight,
+    ) -> Option<MerkleInclusionProof> {
+        let s = read_or_recover(&self.state);
+        generate_proof(&s.tree_store, storage_keys, owner_map, block_height)
+    }
+}
+
+impl VersionedStore for SimShardStorage {
+    fn snapshot_at(&self, height: BlockHeight) -> Self::Snapshot<'_> {
+        // Retention invariant: see `RocksDbShardStorage::snapshot_at` for the
+        // full reasoning. Below the floor we can't serve historical
+        // reads; hitting this is a DA-assumption bug in the caller.
+        let guard = read_or_recover(&self.state);
+        let current_version = guard.current_block_height.inner();
+        let floor = current_version.saturating_sub(self.jmt_history_length);
+        assert!(
+            height.inner() >= floor,
+            "snapshot_at({height}) below retention floor {floor} \
+             (current_version={current_version}, jmt_history_length={}) — \
+             Shard consensus + DA invariant broken; caller must anchor within retention",
+            self.jmt_history_length,
+        );
+        // Clone state + state-history for snapshot isolation. Memory
+        // snapshots are point-in-time copies — they don't observe later
+        // mutations of the backing store.
+        SimSnapshot {
+            current_state: guard.current_state.clone(),
+            state_history: guard.state_history.clone(),
+            version: height.inner(),
+            current_version,
+        }
+    }
+
+    fn substate_bytes_at(&self, height: BlockHeight) -> Option<u64> {
+        read_or_recover(&self.state)
+            .substate_bytes
+            .get(&height.inner())
+            .copied()
+    }
+}
+
+impl TreeReader for SimShardStorage {
+    fn get_node(&self, key: &JmtNodeKey) -> Option<Arc<JmtNode>> {
+        read_or_recover(&self.state).tree_store.get_node(key)
+    }
+
+    fn get_root_key(&self, version: u64) -> Option<JmtNodeKey> {
+        read_or_recover(&self.state)
+            .tree_store
+            .get_root_key(version)
+    }
+
+    fn root_path(&self) -> NibblePath {
+        read_or_recover(&self.state).tree_store.root_path()
+    }
+}
